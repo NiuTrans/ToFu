@@ -95,6 +95,7 @@ def test_battery_covers_every_branch_helper():
         'timer_create',         # _renderTimerWaitingRow
         'awaiting_stdin',       # _renderStdinBlock
         'aborted',              # _renderAbortedRow
+        'error-failed-tool',    # _renderErrorRow
         'run_command',          # _renderSearchingRow + _renderCmdDoneBlock
         'browser_execute_js',   # _renderBrowserExecJsBlock
         'web_search',           # _renderSearchRows (+ searching orbit)

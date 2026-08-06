@@ -23,8 +23,8 @@ import html as _html
 import re
 
 from lib.log import get_logger
-from lib.slides.pptd import (Deck, Page, resolve_color, resolve_media,
-                             table_style, text_style)
+from lib.slides.pptd import (Deck, Page, cell_content, resolve_color,
+                             resolve_media, table_style, text_style)
 
 logger = get_logger(__name__)
 
@@ -338,7 +338,9 @@ def _line_div(el: dict, deck: Deck, theme: dict, idx: int) -> str:
         try:
             px, py = tok.split(',')
             pts.append((float(px), float(py)))
-        except ValueError:
+        except ValueError as e:
+            logger.debug('[Slides] skipping unparseable point %r: %s',
+                         tok, e)
             continue
     border = el.get('border') or {}
     color = _css_color(border.get('color'), theme, '#000')
@@ -489,6 +491,7 @@ def _cell_style(cell: dict, row: int, col: int, rows: int, cols: int,
         rows_cat.append(tstyle['lastRowStyle'])
     for c in (rows_cat + cat if row_over else cat + rows_cat):
         out.update({k: v for k, v in c.items() if v is not None})
+    cell = cell_content(cell)
     ref = cell.get('textStyle')
     if isinstance(ref, str) and ref.startswith('$'):
         named = ((theme or {}).get('textStyles') or {}).get(ref[1:], {})
@@ -560,11 +563,28 @@ def _table_div(el: dict, deck: Deck, theme: dict) -> str:
                     css.append(f'border:{float(border.get("width", 1))}px '
                                f'{border.get("style", "solid")} '
                                f'{_css_color(border.get("color"), theme, "#000")}')
+                elif isinstance(border, list):
+                    # BorderSpec per-side array: [tb, lr] or [t, r, b, l].
+                    sides = border
+                    if len(sides) == 2:
+                        sides = [sides[0], sides[1], sides[0], sides[1]]
+                    for side_name, side_val in zip(
+                            ('top', 'right', 'bottom', 'left'), sides):
+                        if isinstance(side_val, dict):
+                            css.append(
+                                f'border-{side_name}:'
+                                f'{float(side_val.get("width", 1))}px '
+                                f'{side_val.get("style", "solid")} '
+                                f'{_css_color(side_val.get("color"), theme, "#000")}')
+            cc = cell_content(cell)
+            align = cc.get('align')
+            if isinstance(align, list) and align:
+                css.append(f'text-align:{align[0]}')
             rs = int(cell.get('rowSpan') or 1)
             cs = int(cell.get('colSpan') or 1)
             span = (f' rowspan="{rs}"' if rs > 1 else '') + \
                    (f' colspan="{cs}"' if cs > 1 else '')
-            text = _rich_html(str(cell.get('text') or ''), theme)
+            text = _rich_html(str(cc.get('text') or ''), theme)
             tds.append(f'<td{span} style="{";".join(css)}">{text}</td>')
         html_rows.append(f'<tr>{"".join(tds)}</tr>')
     colgroup = ''.join(f'<col style="width:{float(c) * 100:.2f}%"/>'
@@ -578,11 +598,176 @@ def _table_div(el: dict, deck: Deck, theme: dict) -> str:
             f'<colgroup>{colgroup}</colgroup>{"".join(html_rows)}</table></div>')
 
 
+# ── Chart (parametric SVG, v1 subset) ─────────────────────
+
+def _chart_palette(theme: dict) -> list:
+    from lib.slides.pptd import resolve_color as _rc
+    return [_rc('$primary', theme, '#16283C'), _rc('$accent', theme, '#C0652B'),
+            _rc('$muted', theme, '#6B7280'), _rc('$ink', theme, '#1B2430')]
+
+
+def _chart_div(el: dict, deck: Deck, theme: dict) -> str:
+    x, y, w, h = [float(v) for v in el['bounds']]
+    ctype = str(el.get('chartType') or 'column')
+    data = el.get('data') or {}
+    cats = [str(c) for c in (data.get('categories') or [])]
+    series = [s for s in (data.get('series') or []) if isinstance(s, dict)]
+    opts = el.get('options') or {}
+    pal = _chart_palette(theme)
+    ink = _css_color('$ink', theme, '#1B2430')
+    muted = _css_color('$muted', theme, '#6B7280')
+    hair = _css_color('$hairline', theme, '#D8D5CE')
+    if not cats or not series:
+        return ''
+    colors = []
+    for i, s in enumerate(series):
+        c = s.get('color')
+        colors.append(_css_color(c, theme) if c else pal[i % len(pal)])
+    legend = bool(opts.get('legend', len(series) > 1))
+    labels = bool(opts.get('dataLabels', False))
+    fs_cat = max(10.0, h * 0.042)
+    fs_val = max(9.0, h * 0.036)
+    top_pad = 30.0 if legend else 12.0
+    svg = [f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}">']
+    if legend:
+        lx = w - 8
+        for i, s in reversed(list(enumerate(series))):
+            name = _html.escape(str(s.get('name') or f'S{i + 1}'))
+            tw = len(name) * fs_cat * 0.62 + 26
+            lx -= tw
+            svg.append(
+                f'<rect x="{lx:.1f}" y="8" width="12" height="12" '
+                f'fill="{colors[i]}"/>'
+                f'<text x="{lx + 17:.1f}" y="18" font-size="{fs_cat:.0f}" '
+                f'fill="{muted}">{name}</text>')
+            lx -= 18
+    if ctype == 'pie':
+        import math
+        vals = [float(v) for v in (series[0].get('values') or [])]
+        total = sum(vals) or 1.0
+        cx = h * 0.42
+        cy = top_pad + (h - top_pad) / 2 - 6
+        r = min(h - top_pad, h) * 0.36
+        a0 = -math.pi / 2
+        for i, v in enumerate(vals):
+            frac = v / total
+            a1 = a0 + frac * 2 * math.pi
+            large = 1 if frac > 0.5 else 0
+            x0, y0 = cx + r * math.cos(a0), cy + r * math.sin(a0)
+            x1, y1 = cx + r * math.cos(a1), cy + r * math.sin(a1)
+            col = pal[i % len(pal)]
+            svg.append(
+                f'<path d="M{cx:.1f},{cy:.1f} L{x0:.1f},{y0:.1f} '
+                f'A{r:.1f},{r:.1f} 0 {large} 1 {x1:.1f},{y1:.1f} Z" '
+                f'fill="{col}"/>')
+            a0 = a1
+        ly = top_pad + 6
+        for i, c in enumerate(cats):
+            col = pal[i % len(pal)]
+            pct = vals[i] / total * 100 if i < len(vals) else 0
+            svg.append(
+                f'<rect x="{h * 0.82:.0f}" y="{ly:.0f}" width="12" '
+                f'height="12" fill="{col}"/>'
+                f'<text x="{h * 0.82 + 18:.0f}" y="{ly + 11:.0f}" '
+                f'font-size="{fs_cat:.0f}" fill="{ink}">'
+                f'{_html.escape(c)} · {pct:.0f}%</text>')
+            ly += fs_cat * 1.9
+    else:
+        all_vals = [float(v) for s in series for v in (s.get('values') or [])]
+        vmax = max(all_vals) if all_vals else 1.0
+        vmax = vmax * 1.12 if vmax > 0 else 1.0
+        plot_top = top_pad
+        plot_bot = h - fs_cat * 2.2
+        plot_h = max(10.0, plot_bot - plot_top)
+        n = len(cats)
+        slot = w / n
+        svg.append(f'<line x1="0" y1="{plot_bot:.1f}" x2="{w}" '
+                   f'y2="{plot_bot:.1f}" stroke="{hair}" stroke-width="1"/>')
+        if ctype == 'line':
+            for si, s in enumerate(series):
+                vals = [float(v) for v in (s.get('values') or [])]
+                pts = []
+                for i, v in enumerate(vals):
+                    px = slot * (i + 0.5)
+                    py = plot_bot - (v / vmax) * plot_h
+                    pts.append((px, py))
+                d = 'M' + ' L'.join(f'{px:.1f},{py:.1f}' for px, py in pts)
+                svg.append(f'<path d="{d}" fill="none" stroke="{colors[si]}" '
+                           f'stroke-width="2.5"/>')
+                for i, (px, py) in enumerate(pts):
+                    svg.append(f'<circle cx="{px:.1f}" cy="{py:.1f}" r="3.5" '
+                               f'fill="{colors[si]}"/>')
+                    if labels:
+                        svg.append(
+                            f'<text x="{px:.1f}" y="{py - 8:.1f}" '
+                            f'font-size="{fs_val:.0f}" fill="{ink}" '
+                            f'text-anchor="middle">'
+                            f'{_fmt_num(vals[i])}</text>')
+        else:
+            horizontal = ctype == 'bar'
+            ns = len(series)
+            for i, c in enumerate(cats):
+                for si, s in enumerate(series):
+                    vals = [float(v) for v in (s.get('values') or [])]
+                    v = vals[i] if i < len(vals) else 0.0
+                    if horizontal:
+                        bh = min(26.0, slot * 0.72 / ns)
+                        y0 = slot * i + slot * 0.14 + bh * ns * 0 + si * bh
+                        bw = (v / vmax) * (w - 90)
+                        svg.append(
+                            f'<rect x="0" y="{y0:.1f}" width="{bw:.1f}" '
+                            f'height="{bh - 3:.1f}" fill="{colors[si]}"/>')
+                        if labels:
+                            svg.append(
+                                f'<text x="{bw + 6:.1f}" y="{y0 + bh - 6:.1f}" '
+                                f'font-size="{fs_val:.0f}" fill="{ink}">'
+                                f'{_fmt_num(v)}</text>')
+                    else:
+                        bw = min(46.0, slot * 0.62 / ns)
+                        gx = slot * i + (slot - bw * ns) / 2
+                        bh = (v / vmax) * plot_h
+                        svg.append(
+                            f'<rect x="{gx + si * bw:.1f}" '
+                            f'y="{plot_bot - bh:.1f}" width="{bw - 3:.1f}" '
+                            f'height="{bh:.1f}" fill="{colors[si]}"/>')
+                        if labels:
+                            svg.append(
+                                f'<text x="{gx + si * bw + (bw - 3) / 2:.1f}" '
+                                f'y="{plot_bot - bh - 6:.1f}" '
+                                f'font-size="{fs_val:.0f}" fill="{ink}" '
+                                f'text-anchor="middle">{_fmt_num(v)}</text>')
+                label = _html.escape(c)
+                if horizontal:
+                    pass  # category labels drawn below for column only
+                else:
+                    svg.append(
+                        f'<text x="{slot * (i + 0.5):.1f}" '
+                        f'y="{h - fs_cat * 0.7:.1f}" font-size="{fs_cat:.0f}" '
+                        f'fill="{muted}" text-anchor="middle">{label}</text>')
+            if horizontal:
+                for i, c in enumerate(cats):
+                    svg.append(
+                        f'<text x="{w - 4:.1f}" '
+                        f'y="{slot * i + slot * 0.14:.0f}" '
+                        f'font-size="{fs_cat:.0f}" fill="{muted}" '
+                        f'text-anchor="end">{_html.escape(c)}</text>')
+    svg.append('</svg>')
+    style = f'left:{x}px;top:{y}px;width:{w}px;height:{h}px;'
+    return f'<div class="el chart" style="{style}">{"".join(svg)}</div>'
+
+
+def _fmt_num(v: float) -> str:
+    return f'{v:g}'
+
+
 # ── Fonts & page assembly ─────────────────────────────────
 
 def collect_families(deck: Deck) -> set:
     """Every fontFamily the deck references (for @font-face staging)."""
-    fams: set = set()
+    from lib.slides.pptd import DEFAULT_TEXT_STYLE
+    # The renderer/exporter fall back to DEFAULT_TEXT_STYLE's family for any
+    # run that names none (e.g. the DJI golden deck) — stage/embed it too.
+    fams: set = {DEFAULT_TEXT_STYLE['fontFamily']}
     pat = re.compile(r"font-family:\s*'?([A-Za-z0-9 _-]+?)'?\s*(?:;|$)")
 
     def _add(v):
@@ -657,6 +842,8 @@ def render_page_html(deck: Deck, page: Page, *, page_index: int = 0) -> str:
                 parts.append(_icon_div(el, deck, theme))
             elif etype == 'table':
                 parts.append(_table_div(el, deck, theme))
+            elif etype == 'chart':
+                parts.append(_chart_div(el, deck, theme))
         except Exception as e:
             logger.warning('[Slides] page %d element %s render failed: %s',
                            page_index + 1, el.get('elementId'), e)

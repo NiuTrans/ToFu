@@ -144,10 +144,52 @@ PRODUCE_SLIDES_TOOL = {
     },
 }
 
+EDIT_SLIDES_TOOL_NAME = 'edit_slides'
+
+EDIT_SLIDES_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "edit_slides",
+        "description": (
+            "Edit ONE page of a deck created by produce_slides, in plain "
+            "language — e.g. '第 3 页标题改成…', 'make page 2 dark', '给第 "
+            "5 页加一个柱状图'. The page is re-authored from its CURRENT "
+            "layout (everything else stays), re-validated, re-rendered and "
+            "the PPTX is re-exported. Use this for follow-up edits to a "
+            "deck instead of regenerating the whole thing."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "The produce_slides job id."
+                },
+                "page": {
+                    "type": "integer",
+                    "description": "1-based page number to edit."
+                },
+                "instruction": {
+                    "type": "string",
+                    "description": "What to change on that page, in the "
+                                   "user's words."
+                },
+                "lang": {
+                    "type": "string",
+                    "enum": ["zh", "en"],
+                    "description": "Edit language (default zh)."
+                }
+            },
+            "required": ["task_id", "page", "instruction"],
+        },
+    },
+}
+
 __all__ = ['PRODUCE_VIDEO_TOOL', 'PRODUCE_VIDEO_TOOL_NAME',
            'PRODUCE_REPORT_TOOL', 'PRODUCE_REPORT_TOOL_NAME',
            'PRODUCE_RESEARCH_TOOL', 'PRODUCE_RESEARCH_TOOL_NAME',
            'PRODUCE_SLIDES_TOOL', 'PRODUCE_SLIDES_TOOL_NAME',
+           'EDIT_SLIDES_TOOL', 'EDIT_SLIDES_TOOL_NAME',
            'PRODUCE_TOOL_NAMES']
 
 PRODUCE_REPORT_TOOL_NAME = 'produce_report'
@@ -252,4 +294,5 @@ PRODUCE_TOOL_NAMES = frozenset({
     PRODUCE_REPORT_TOOL_NAME,
     PRODUCE_RESEARCH_TOOL_NAME,
     PRODUCE_SLIDES_TOOL_NAME,
+    EDIT_SLIDES_TOOL_NAME,
 })

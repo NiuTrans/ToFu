@@ -18,7 +18,8 @@ logger = get_logger(__name__)
 from lib.tasks_pkg.executor import _build_simple_meta, _finalize_tool_round
 from lib.tasks_pkg.executor import tool_registry
 from lib.tools.motion_video import MOTION_VIDEO_TOOL_NAMES
-from lib.tools.produce import (PRODUCE_REPORT_TOOL_NAME,
+from lib.tools.produce import (EDIT_SLIDES_TOOL_NAME,
+                               PRODUCE_REPORT_TOOL_NAME,
                                PRODUCE_RESEARCH_TOOL_NAME,
                                PRODUCE_SLIDES_TOOL_NAME,
                                PRODUCE_VIDEO_TOOL_NAME)
@@ -394,6 +395,77 @@ def _handle_produce_slides(task, tc, fn_name, tc_id, fn_args, rn,
     tool_content = _fmt(result)
     meta = _build_simple_meta(
         fn_name, tool_content, source='Produce', title='slides',
+        snippet=tool_content.split('\n', 1)[0][:120] if tool_content else '',
+        badge=badge)
+    _finalize_tool_round(task, rn, round_entry, [meta])
+    return tc_id, tool_content, False
+
+
+@tool_registry.tool_set(
+    {EDIT_SLIDES_TOOL_NAME},
+    category='video',
+    description='Plain-language single-page edit of a produced deck')
+def _handle_edit_slides(task, tc, fn_name, tc_id, fn_args, rn,
+                        round_entry, cfg, project_path,
+                        project_enabled, all_tools=None):
+    """Handle edit_slides: re-author one page of a finished deck job.
+
+    Works on the live task AND on the disk anchor (a deck finished before a
+    restart stays editable — same P-UX4 contract as motion's file serving).
+    """
+    task_id = str(fn_args.get('task_id') or '').strip()
+    instruction = str(fn_args.get('instruction') or '').strip()
+    try:
+        page = int(fn_args.get('page') or 0)
+    except (TypeError, ValueError) as _e:
+        logger.debug('handle edit slides: bad page (%s)', _e)
+        page = 0
+    if not task_id or not instruction or page < 1:
+        result = {'ok': False,
+                  'detail': 'task_id, page (1-based) and instruction are '
+                            'required'}
+        badge = 'failed'
+    else:
+        try:
+            from lib.slides.runtime import _slides_runtime
+            job = _slides_runtime.get(task_id)
+            workdir = ''
+            if job:
+                workdir = ((job.get('result') or {}).get('workdir')
+                           or job.get('workdir') or '')
+            if not workdir:
+                import re as _re
+                if _re.fullmatch(r'[A-Za-z0-9_-]{1,64}', task_id):
+                    from lib.production.jobs import read_manifest
+                    from lib.slides.engine import slides_root
+                    cand = os.path.join(slides_root(), 'jobs', task_id)
+                    if read_manifest(cand):
+                        workdir = cand
+            deck_dir = os.path.join(workdir, 'deck') if workdir else ''
+            if not deck_dir or not os.path.isfile(
+                    os.path.join(deck_dir, 'deck.pptd')):
+                result = {'ok': False,
+                          'detail': f'no deck found for task {task_id}'}
+                badge = 'failed'
+            else:
+                from lib.slides.author import edit_page
+                lang = ('en' if str(fn_args.get('lang') or 'zh') == 'en'
+                        else 'zh')
+                res = edit_page(deck_dir, page - 1, instruction, lang=lang)
+                res['task_id'] = task_id
+                res['download'] = f'/api/v1/slides/{task_id}/file'
+                res['preview_url'] = (f'/api/v1/slides/{task_id}/pages/'
+                                      f'{page}.png')
+                result = res
+                badge = 'edited' if res.get('ok') else 'failed'
+        except Exception as e:
+            logger.error('[Produce] edit_slides failed: %s', e, exc_info=True)
+            result = {'ok': False, 'detail': str(e)}
+            badge = 'failed'
+
+    tool_content = _fmt(result)
+    meta = _build_simple_meta(
+        fn_name, tool_content, source='Produce', title='edit slides',
         snippet=tool_content.split('\n', 1)[0][:120] if tool_content else '',
         badge=badge)
     _finalize_tool_round(task, rn, round_entry, [meta])

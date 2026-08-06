@@ -8,14 +8,14 @@ registry + the per-facet tables — nothing here is hand-maintained.
 Third-party plugin tools vary per deployment and are listed in the
 diagnostic section at the end, which `--check` ignores.
 
-Built-in tools: **84**
+Built-in tools: **86**
 
 ## Gaps
 
 | gap | count | meaning |
 |---|---|---|
 | write tool with no approval enricher | 0 | the approval dialog renders a bare tool name — the user approves blind, which the approval module itself calls "worse than not prompting at all" |
-| no UI label | 70 | the raw tool name is shown in the activity line |
+| no UI label | 72 | the raw tool name is shown in the activity line |
 | no reachable handler | 0 | schema advertised to the model but nothing executes it |
 | description cannot disambiguate | 4 | the model cannot tell this tool apart from its neighbours and picks the wrong one |
 | confusable tool pairs | 2 | two same-category tools open with near-identical sentences, so the model picks the wrong one |
@@ -110,6 +110,7 @@ Confusable same-category tool pairs (first-sentence overlap >= 0.5):
 | spawn_agents | swarm | swarm | SET |  |  |  |  |  |  |  |  |  | ✓ |
 | store_artifact | swarm | swarm | SET |  |  |  |  |  |  |  |  |  |  |
 | todo_write | task | todo | EXACT |  |  |  |  |  |  |  |  |  | ✓ |
+| edit_slides | video | produce | SET |  |  |  |  |  |  |  |  |  | ✓ |
 | motion_video_check | video | motion_video | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
 | motion_video_concat | video | motion_video | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
 | motion_video_env_check | video | motion_video | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
@@ -120,6 +121,7 @@ Confusable same-category tool pairs (first-sentence overlap >= 0.5):
 | motion_video_storyboard_check | video | motion_video | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
 | produce_report | video | produce | SET |  |  |  |  |  |  |  |  |  | ✓ |
 | produce_research | video | produce | SET |  |  |  |  |  |  |  |  |  | ✓ |
+| produce_slides | video | produce | SET |  |  |  |  |  |  |  |  |  | ✓ |
 | produce_video | video | produce | SET |  |  |  |  |  |  |  |  |  | ✓ |
 
 ## Plugin tools (diagnostic — NOT pinned by --check)

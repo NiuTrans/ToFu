@@ -398,3 +398,113 @@ class TestRuntimeContract:
         assert PRODUCE_SLIDES_TOOL['function']['name'] == 'produce_slides'
         assert 'topic' in PRODUCE_SLIDES_TOOL['function']['parameters'][
             'required']
+
+
+# ── P4: native chart / font embedding / import round-trip ──
+
+_CHART_PAGE = '''pageType: content
+background: {type: solid, color: "$bg"}
+elements:
+  - elementId: c
+    elementType: chart
+    bounds: [80, 120, 600, 360]
+    chartType: bar
+    data:
+      categories: ["Q1", "Q2", "Q3"]
+      series:
+        - name: "营收"
+          values: [10, 20, 15]
+'''
+
+
+class TestP4:
+    def test_chart_is_native_ooxml(self, tmp_path):
+        """A chart element must export as a real OOXML chart part (selectable
+        in PowerPoint), not a flattened image."""
+        pytest.importorskip('pptx')
+        import zipfile
+        from lib.slides.export_pptx import export_pptx
+        deck = parse_deck(_write_deck(tmp_path, [_CHART_PAGE]))
+        out = str(tmp_path / 'out.pptx')
+        export_pptx(deck, out)
+        with zipfile.ZipFile(out) as z:
+            charts = [n for n in z.namelist()
+                      if n.startswith('ppt/charts/chart')]
+            assert charts, 'no native chart part written'
+            xml = z.read(charts[0]).decode()
+        assert '<c:barChart>' in xml
+        assert '营收' in xml and 'Q2' in xml
+
+    def test_font_embedding_structure(self, tmp_path):
+        """Embedded fonts: fntdata parts + rels + embeddedFontLst placed after
+        notesSz (CT_Presentation order), at most one regular and one bold
+        slot, and the bytes are glyf-outline TTFs (PowerPoint rejects CFF)."""
+        pytest.importorskip('pptx')
+        from lib.design_sys import fonts as _fonts
+        if not _fonts.ensure_font('misans', 400):
+            pytest.skip('misans not staged locally')
+        import re
+        import zipfile
+        from lib.slides.export_pptx import export_pptx
+        deck = parse_deck(_write_deck(tmp_path, [_COVER]))
+        out = str(tmp_path / 'out.pptx')
+        summary = export_pptx(deck, out)
+        assert summary['embeddedFonts'] >= 1
+        with zipfile.ZipFile(out) as z:
+            assert z.testzip() is None
+            parts = [n for n in z.namelist() if n.startswith('ppt/fonts/')]
+            assert parts
+            pres = z.read('ppt/presentation.xml').decode()
+            rels = z.read('ppt/_rels/presentation.xml.rels').decode()
+            ct = z.read('[Content_Types].xml').decode()
+            blobs = {n: z.read(n) for n in parts}
+        assert 'embedTrueTypeFonts="1"' in pres
+        assert 'Extension="fntdata"' in ct
+        assert '/relationships/font' in rels
+        assert pres.index('<p:embeddedFontLst>') > pres.index('<p:notesSz')
+        lst = re.search(r'<p:embeddedFontLst>.*?</p:embeddedFontLst>',
+                        pres, re.DOTALL).group(0)
+        assert lst.count('<p:regular ') <= 1 and lst.count('<p:bold ') <= 1
+        # python-pptx must still open the re-zipped package
+        from pptx import Presentation
+        assert len(Presentation(out).slides) == 1
+        # embedded bytes are TrueType-outline sfnt
+        from fontTools.ttLib import TTFont
+        import io
+        for n, blob in blobs.items():
+            f = TTFont(io.BytesIO(blob))
+            assert 'glyf' in f, f'{n} is not a glyf-outline font'
+
+    def test_import_round_trip_table_text(self, tmp_path):
+        """Export → import: table cell text must survive the loop (the DJI
+        golden deck page-17 regression — empty cells on first pass)."""
+        pytest.importorskip('pptx')
+        import glob
+        import yaml
+        from lib.slides.export_pptx import export_pptx
+        from lib.slides.import_pptx import import_pptx
+        deck = parse_deck(_write_deck(tmp_path, [_TABLE_PAGE]))
+        out = str(tmp_path / 'out.pptx')
+        export_pptx(deck, out)
+        import_pptx(out, str(tmp_path / 'reimport'))
+        found = []
+        for p in glob.glob(str(tmp_path / 'reimport' / 'pages' / '*.page')):
+            d = yaml.safe_load(open(p, encoding='utf-8'))
+            for el in d.get('elements') or []:
+                if el.get('elementType') == 'table':
+                    for row in el.get('rows') or []:
+                        found.append([
+                            (c.get('text') if isinstance(c, dict) else c)
+                            for c in row])
+        assert ['指标', '2025'] in found
+        assert ['利润', '15.8'] in found
+
+    def test_edit_slides_tool_schema(self):
+        from lib.tools.produce import (EDIT_SLIDES_TOOL,
+                                       EDIT_SLIDES_TOOL_NAME,
+                                       PRODUCE_TOOL_NAMES)
+        assert EDIT_SLIDES_TOOL_NAME in PRODUCE_TOOL_NAMES
+        fn = EDIT_SLIDES_TOOL['function']
+        assert fn['name'] == 'edit_slides'
+        assert set(fn['parameters']['required']) >= {'task_id', 'page',
+                                                     'instruction'}

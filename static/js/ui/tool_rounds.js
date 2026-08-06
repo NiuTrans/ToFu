@@ -126,6 +126,7 @@ const _MOTION_TOOL_FAMILY = [
   "produce_report",
   "produce_research",
   "produce_slides",
+  "edit_slides",
 ];
 function _isRoundMotion(round) {
   return _MOTION_TOOL_FAMILY.includes(round.toolName);
@@ -166,6 +167,7 @@ const _TOOL_DISPLAY = {
   produce_report:   { icon: "", label: "Report",  color: "#f472b6" },
   produce_research: { icon: "", label: "Research", color: "#f472b6" },
   produce_slides:   { icon: "", label: "Slides",   color: "#38bdf8" },
+  edit_slides:      { icon: "", label: "Edit Slide", color: "#38bdf8" },
   todo_write: { icon: "", label: "Checklist", color: "#34d399" },
 };
 function _getToolDisplay(round) {
@@ -246,6 +248,7 @@ function _getRoundIcon(round) {
       produce_report: "mv_report",
       produce_research: "mv_research",
       produce_slides: "mv_report",
+      edit_slides: "mv_report",
     };
     return m[round.toolName] || "mv_render";
   }
@@ -1373,6 +1376,15 @@ function _renderUnifiedToolLine(round, isSearching) {
   const abortedHtml = _renderAbortedRow(round, ctx);
   if (abortedHtml) return abortedHtml;
 
+  // ★ Failed — the tool RAN but never produced a result: it raised, or the
+  //   parallel-pool ceiling cancelled it ('Tool execution timed out: …'). The
+  //   backend stamps status='error' (2026-08-06 silent-timeout incident: a
+  //   timed-out get_conversation rendered as a clean done card, failure
+  //   visible only in the raw debug panel). Probe BEFORE the searching/done
+  //   renderers so a failed round can never wear a ✓ done badge.
+  const errorHtml = _renderErrorRow(round, ctx);
+  if (errorHtml) return errorHtml;
+
   const searchingHtml = _renderSearchingRow(round, ctx);
   if (searchingHtml) return searchingHtml;
 
@@ -1699,6 +1711,36 @@ function _renderAbortedRow(round, ctx) {
          ${rootPill}
          <span class="ptool-text">${cmdText}</span>
          <span class="ptool-badge ptool-badge-interrupted">interrupted</span>
+       </div>`;
+}
+
+/* ── Failed tool round (2026-08-06 silent-timeout incident) ──
+ * The tool RAN but never produced a result: it raised inside the executor
+ * ('Tool execution error: …') or the parallel-pool ceiling cancelled it
+ * ('Tool execution timed out: …'). Before this branch existed, both lanes
+ * shipped tool_complete with NO status, the reducer promoted the round to
+ * 'done', and the row rendered as a clean success — the failure was visible
+ * only in the raw debug panel. The backend now stamps status='error' and
+ * ships it on the wire; we render a static error affordance (NO spinner, NO
+ * ✓ done) with the one-line failure reason inline, mirroring the
+ * _renderAbortedRow discipline. The reason is round.toolContent's first
+ * line — the same sentinel string the MODEL receives, so the human and the
+ * model read the same verdict. */
+function _renderErrorRow(round, ctx) {
+  const { svg, td, meta, rootPill } = ctx;
+  if (round.status !== "error") return "";
+  const _t = (typeof t === "function") ? t : (k, d) => d;
+  const cmdText = escapeHtml(round.query || meta.title || td.label || round.toolName || "");
+  const reason = (typeof round.toolContent === "string" ? round.toolContent : "")
+    .split("\n")[0].trim();
+  const short = escapeHtml(reason.length > 140 ? reason.slice(0, 140) + "…" : reason);
+  const tip = escapeHtml(reason || _t("tool.failedTip", "The tool failed — it did not complete successfully."));
+  return `<div class="ptool-line ptool-error" data-rn="${round.roundNum}" title="${tip}">
+         <span class="ptool-icon">${svg}</span>
+         ${rootPill}
+         <span class="ptool-text">${cmdText}</span>
+         <span class="ptool-badge ptool-badge-err">${escapeHtml(_t("tool.failed", "failed"))}</span>
+         ${short ? `<span class="ptool-error-reason">${short}</span>` : ""}
        </div>`;
 }
 

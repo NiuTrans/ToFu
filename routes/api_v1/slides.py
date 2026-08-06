@@ -71,7 +71,9 @@ def serve_deck_file(task_id):
         deck_dir = os.path.join(workdir, 'deck')
         try:
             found = [f for f in os.listdir(deck_dir) if f.endswith('.pptx')]
-        except OSError:
+        except OSError as e:
+            logger.debug('[Slides.v1] deck dir listing failed for %s: %s',
+                         deck_dir, e)
             found = []
         if found:
             path = os.path.join(deck_dir, found[0])

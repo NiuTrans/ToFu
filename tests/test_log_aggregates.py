@@ -289,7 +289,11 @@ class TestFlush(_DbBase):
         la.flush_once(store=self._store_with('fresh thing', n=1,
                                              ts_sec=new_ms / 1000))
         assert len(self._rows()) == 2
-        monkeypatch.setattr(la, '_last_sweep_at', 0.0)  # 强制本窗清扫
+        # 强制本窗清扫:不能写 0.0——_last_sweep_at 比的是
+        # time.monotonic()(开机时长),新 CI VM 开机不足 1h 时
+        # monotonic()-0.0 < 3600,强制静默失效(stale 存活,2==1 方向)。
+        monkeypatch.setattr(la, '_last_sweep_at',
+                            time.monotonic() - 2 * la._TTL_SWEEP_INTERVAL_SEC)
         la.flush_once(store=la.AggregateStore(), now_ms=new_ms)
         rows = self._rows()
         assert len(rows) == 1 and rows[0]['template'].startswith('fresh thing')

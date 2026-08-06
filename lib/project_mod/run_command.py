@@ -65,6 +65,7 @@ from lib.project_mod.command_analysis import (  # noqa: F401
     _split_pipeline,
     _unbounded_recursive_scan_target,
 )
+from lib.project_mod.grep_redirect import plan_grep_redirect
 
 logger = get_logger(__name__)
 
@@ -115,6 +116,17 @@ def _get_cmd_env(cwd=None):
         env.update(exec_env_overlay(project_path=cwd))
     except Exception as _env_e:
         logger.debug('[run_command] skill env overlay skipped: %s', _env_e)
+
+    # General credential-vault overlay: non-skill entries (github_token →
+    # GITHUB_TOKEN, pypi_token → PYPI_TOKEN, …) so agent commands can
+    # reference $VAR without the value ever entering the conversation. The
+    # model discovers these via the <credential_vault> prompt block. Same
+    # never-raises contract; the child env is never logged.
+    try:
+        from lib.credentials_vault import exec_env_overlay as _vault_env_overlay
+        env.update(_vault_env_overlay())
+    except Exception as _vault_env_e:
+        logger.debug('[run_command] vault env overlay skipped: %s', _vault_env_e)
 
     # ── Block user-site-packages (~/.local/) writes & reads ──
     env['PYTHONNOUSERSITE'] = '1'
@@ -652,42 +664,73 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
                     f"`timeout` to run_command; or (3) wrap the scan with "
                     f"coreutils `timeout <secs>`.")
 
-    # ★ Filesystem-grep redirect guard (2026-08-04). The tool description has
-    #   advised grep_search-over-grep for months, yet grep-via-run_command
-    #   kept recurring — measured: a two-grep pipeline sat RUNNING 17m04s in
-    #   a FUSE bad window with zero output and no timeout to end it. Advice
-    #   is not enforcement: refuse grep-family segments that read the
-    #   FILESYSTEM (file/dir operands or -r) and translate the call to
-    #   grep_search. Stream filters (`pytest 2>&1 | grep PASS`,
-    #   `ps aux | grep python`), rg, git grep and timeout-wrapped shapes all
-    #   stay legal. TOFU_RUN_GREP_GUARD=0 opts out.
+    # ★ Filesystem-grep TRANSPARENT REDIRECT (2026-08-06, owner ruling:
+    #   "redirect as correctly as possible; refuse+teach only as the
+    #   fallback"). The 2026-08-04 refuse-first guard taught the model to
+    #   avoid even LEGAL stream-filter greps when it misfired. Now a
+    #   filesystem-grep segment is executed in-process by the GNU-faithful
+    #   engine in lib/project_mod/grep_redirect.py (BRE/ERE translation,
+    #   IGNORE_DIRS descent pruning identical to the hardening layer,
+    #   internal deadline), its output persisted to temp files, and the
+    #   EXEC command spliced so the pipeline continues from those files —
+    #   the model believes it ran run_command. Refuse+teach survives only
+    #   for shapes that cannot be translated honestly (-P, command
+    #   substitution in arguments, grep targets writable by an earlier
+    #   segment of the same command, deadline exceeded). Stream filters
+    #   (`ps aux | grep python`) were never intercepted and still are not.
+    #   TOFU_RUN_GREP_GUARD=0 disables the layer; TOFU_GREP_REDIRECT=0
+    #   reverts to refuse-always.
+    _grep_spliced = None
     if os.environ.get('TOFU_RUN_GREP_GUARD', '1') != '0':
-        _gseg = _grep_filesystem_segment(command)
-        if _gseg is not None:
-            # WARNING, not ERROR (owner 2026-08-05): a policy nudge for the
-            # agent to re-route, not an application failure — 127 ERRORs in
-            # 2.5 days was pure teaching-loop noise burying real errors.
-            logger.warning('[run_command] BLOCKED filesystem grep (cwd=%s): %.200s',
-                           base, command)
-            return (
-                'Error: Command intercepted: this `grep` reads the filesystem, '
-                'which belongs to the dedicated `grep_search` tool, not '
-                f'run_command. Refused segment: `{_gseg[:150]}`\n'
-                'Translate:\n'
-                "  - `grep -rn 'X' lib/`   -> grep_search(pattern='X', path='lib')\n"
-                "  - `grep -n 'X' f.py`    -> grep_search(pattern='X', path='f.py')\n"
-                "  - `grep -c 'X' dir/`    -> grep_search(pattern='X', path='dir', count_only=True)\n"
-                "  - `... | head -20`      -> grep_search(..., max_results=20) "
-                '(never pipe to head)\n'
-                'grep_search is 5x+ faster on this network filesystem '
-                '(ripgrep; .gitignore- and junk-dir-aware), caps runaway '
-                "output via max_results, and won't wedge for minutes in a "
-                'FUSE bad window (measured: a `grep -rn ... | head` pipeline '
-                'ran 17m+ with zero output). Filtering ANOTHER command\'s '
-                'output through grep stays allowed '
-                '(`pytest 2>&1 | grep PASS`, `ps aux | grep python`) — only '
-                'grep with file/dir operands or `-r` is intercepted. '
-                'Escape hatch: TOFU_RUN_GREP_GUARD=0.')
+        _plan = None
+        if os.environ.get('TOFU_GREP_REDIRECT', '1') != '0':
+            try:
+                _plan = plan_grep_redirect(command, base)
+            except Exception as _gr_e:
+                logger.error('[run_command] grep redirect planning failed: %s',
+                             _gr_e, exc_info=True)
+                _plan = None
+        if _plan is not None and _plan.rewritten is not None:
+            logger.info('[run_command] executed %d filesystem grep(s) via the '
+                        'internal engine (%.2fs) and spliced the pipeline '
+                        '(cwd=%s): %.200s', _plan.n_redirected, _plan.elapsed,
+                        base, command)
+            _grep_spliced = _plan.rewritten
+        else:
+            _gseg = (_plan.refused_segment if _plan is not None else None) \
+                or _grep_filesystem_segment(command)
+            if _gseg is not None:
+                # WARNING, not ERROR (owner 2026-08-05): a policy nudge for
+                # the agent to re-route, not an application failure.
+                logger.warning('[run_command] BLOCKED filesystem grep '
+                               '(cwd=%s, reason=%s): %.200s',
+                               base,
+                               getattr(_plan, 'refusal_reason', None),
+                               command)
+                _why = ''
+                if _plan is not None and _plan.refusal_reason:
+                    _why = ('\nAutomatic in-process execution was not '
+                            f'possible here: {_plan.refusal_reason}.')
+                return (
+                    'Error: Command intercepted: this `grep` reads the '
+                    'filesystem, which belongs to the dedicated `grep_search` '
+                    f'tool, not run_command. Refused segment: `{_gseg[:150]}`'
+                    + _why + '\n'
+                    'Translate:\n'
+                    "  - `grep -rn 'X' lib/`   -> grep_search(pattern='X', path='lib')\n"
+                    "  - `grep -n 'X' f.py`    -> grep_search(pattern='X', path='f.py')\n"
+                    "  - `grep -c 'X' dir/`    -> grep_search(pattern='X', path='dir', count_only=True)\n"
+                    "  - `... | head -20`      -> grep_search(..., max_results=20) "
+                    '(never pipe to head)\n'
+                    'grep_search is 5x+ faster on this network filesystem '
+                    '(ripgrep; .gitignore- and junk-dir-aware), caps runaway '
+                    "output via max_results, and won't wedge for minutes in a "
+                    'FUSE bad window (measured: a `grep -rn ... | head` pipeline '
+                    'ran 17m+ with zero output). Filtering ANOTHER command\'s '
+                    'output through grep stays allowed '
+                    '(`pytest 2>&1 | grep PASS`, `ps aux | grep python`) — only '
+                    'grep with file/dir operands or `-r` is intercepted. '
+                    'Escape hatch: TOFU_RUN_GREP_GUARD=0.')
 
     # ★ Cross-DC timeout adjustment — multiply timeout for remote DolphinFS clusters
     try:
@@ -719,8 +762,10 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
     #   per-workspace .tofu_trash/ instead of unlinked). Applied to the
     #   EXECUTED command only — the displayed/logged `command` stays clean so
     #   the model sees its own `rm ...` echoed back, not the shim. Catastrophic
-    #   deletes are already rejected above and never reach here.
-    exec_command = _maybe_wrap_rm_with_trash(command, base)
+    #   deletes are already rejected above and never reach here. The grep
+    #   redirect splice rides the same exec-side-only seam.
+    exec_command = _maybe_wrap_rm_with_trash(
+        _grep_spliced if _grep_spliced is not None else command, base)
 
     # ★ Sticky-cwd capture (layer 2): wrap the command so its FINAL cwd is
     #   written to a dedicated temp file, preserving the exit code. Only when a

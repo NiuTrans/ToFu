@@ -29,12 +29,18 @@ WHAT IS GUARDED (results, not implementation — charter 2026-07-27)
     pending line on a cold cache, is patched in place when the resolution
     lands (the provider_faces.js hook), mirrors the pin warning on toggle,
     and surfaces the refusal with its reason.
+  * Wire section (2026-08-06): ALWAYS rendered — a single-face provider
+    gets an in-dialog provider-protocol select (openai/anthropic/responses,
+    unknown stored values preserved, writes p.protocol + re-resolves);
+    a multi-face provider gets the face pin whose options NAME the
+    protocol ('face — protocol'); the form reads as labelled sections.
   * i18n: every new key exists in both languages.
 
 NEUTERS (source-level, on mutated copies — shipped files untouched):
   * N1: drop the auto-note from the edit form   → no verdict line (red)
   * N2: make _poolTagValues return []           → save loses the pool (red)
   * N3: drop the provider_faces.js repaint hook → note stuck pending (red)
+  * N5: drop the provider-protocol select        → single-face has no wire control (red)
 """
 
 from __future__ import annotations
@@ -352,6 +358,76 @@ try {
     newNote.textContent.indexOf('settings.meFaceAutoDraft') >= 0);
   check('new_model_still_no_backend', window._resolveCalls === 0);
 
+  // ══ 7. Sectioned layout + pin options NAME the protocol ══
+  seedProviders();
+  seedResolutions();
+  form = openForm(0);
+  check('five_sections_render',
+    form.querySelectorAll('.stg-edit-sec').length === 5);
+  const secLabels = Array.from(form.querySelectorAll('.stg-edit-sec-label'))
+    .map((el) => el.textContent).join('|');
+  check('section_labels_stamped',
+    secLabels.indexOf('settings.meSecIdentity') >= 0 &&
+    secLabels.indexOf('settings.meSecWire') >= 0 &&
+    secLabels.indexOf('settings.meSecQuota') >= 0);
+  const pinOpts = Array.from(form.querySelectorAll('.stg-edit-face option'))
+    .map((o) => o.textContent);
+  check('pin_options_carry_protocol',
+    pinOpts.some((s) => s.indexOf('— anthropic') >= 0) &&
+    pinOpts.some((s) => s.indexOf('— openai') >= 0));
+  check('multi_face_has_no_provider_proto_select',
+    form.querySelector('.stg-edit-proto') === null);
+  check('cap_buttons_render_all_nine',
+    form.querySelectorAll('.stg-cap-btn').length === 9);
+
+  // ══ 8. Single-face provider: the wire protocol is editable in-dialog ══
+  // (The owner's 2026-08-06 complaint: "nowhere to configure OpenAI /
+  // Anthropic / Responses". Single-face = the common case; the pin select
+  // would be a non-choice, so the section leads with the protocol itself.)
+  global._stgProviders = window._stgProviders = [
+    { id: 'provSolo', brand: 'custom', enabled: true, api_keys: ['k1'],
+      base_url: 'https://solo.example.com/v1', protocol: 'openai',
+      models: [ { model_id: 'solo-model', aliases: [],
+        capabilities: ['text'], rpm: 30, cost: 0.01 } ] },
+  ];
+  global._stgFaceResolutions = window._stgFaceResolutions = {};
+  form = openForm(0);
+  const protoSel = form.querySelector('.stg-edit-proto');
+  check('single_face_proto_select_present', protoSel !== null);
+  check('single_face_proto_value', protoSel && protoSel.value === 'openai');
+  check('single_face_has_no_pin_select',
+    form.querySelector('.stg-edit-face') === null);
+  /* NOTE: no `await` below — the refresh microtasks from the open-form
+   * kick and the proto change land only at the NEXT harness await, so the
+   * cleared single-face cache still holds for the reopen assertions. */
+  window._resolveCalls = 0;
+  protoSel.value = 'anthropic';
+  _onModelProtoChange(0, protoSel);
+  check('proto_change_writes_provider',
+    _stgProviders[0].protocol === 'anthropic');
+  check('proto_change_reresolves', window._resolveCalls >= 1);
+
+  // An unknown stored protocol is PRESERVED as an option, never rewritten
+  _stgProviders[0].protocol = 'wire-vNext';
+  form = openForm(0);
+  const protoSel2 = form.querySelector('.stg-edit-proto');
+  const protoVals = protoSel2
+    ? Array.from(protoSel2.options).map((o) => o.value) : [];
+  check('unknown_protocol_preserved',
+    protoVals.indexOf('wire-vNext') >= 0 && protoSel2.value === 'wire-vNext');
+
+  /* Drain the async leftovers: section-8's proto change and the open-form
+   * kicks queued refresh continuations that repaint via the INTACT hook.
+   * Left pending, they land inside NEUTER 3's await window and resolve the
+   * note that neuter expects to stay pending — flush them here instead.
+   * Microtask ticks, NOT setTimeout: the shared harness NEUTERS setTimeout
+   * to a no-op, so a timer-based drain suspends the whole IIFE forever
+   * (measured: zero harness output, RC 0). Each await re-queues behind the
+   * pending continuations; three ticks drains the whole chain. */
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+
   // ══ NEUTER 1: drop the auto-note from the edit form → no verdict ══
   {
     const n = ME_SRC.replace(
@@ -423,6 +499,27 @@ try {
       nn.textContent.indexOf('settings.meFaceAutoResolved') >= 0);
     indirectEval(ME_SRC);   // restore
   }
+
+  // ══ NEUTER 5: drop the provider-protocol select → a single-face
+  // provider's wire section has NO protocol control (the exact "nowhere
+  // to configure the protocol" complaint this redesign answers) ══
+  {
+    const n = ME_SRC.replace('class="stg-edit-proto"',
+                             'class="stg-edit-proto-gone"');
+    check('N5_applied', n !== ME_SRC);
+    indirectEval(n);
+    global._stgProviders = window._stgProviders = [
+      { id: 'provSolo', brand: 'custom', enabled: true, api_keys: ['k1'],
+        base_url: 'https://solo.example.com/v1', protocol: 'openai',
+        models: [ { model_id: 'solo-model', aliases: [],
+          capabilities: ['text'], rpm: 30, cost: 0.01 } ] },
+    ];
+    global._stgFaceResolutions = window._stgFaceResolutions = {};
+    const f = openForm(0);
+    check('N5_proto_select_gone',
+      f.querySelector('.stg-edit-proto') === null);
+    indirectEval(ME_SRC);   // restore
+  }
 } catch (e) {
   check('harness_threw: ' + (e && e.message), false);
 } finally {
@@ -438,7 +535,10 @@ def test_model_edit_redesign():
         target_js=MODEL_EDIT_JS,
         body_js=body,
         extra_targets=[PROVIDER_FACES_JS],
-        min_pass=52,
+        # 70 check() call sites, one is the catch-block harness_threw that
+        # only fires on a crash — a green run reports exactly 69 PASS. The
+        # floor is the FULL green count so any dropped assertion goes red.
+        min_pass=69,
         label='model-edit-redesign',
     )
 

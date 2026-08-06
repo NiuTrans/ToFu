@@ -579,6 +579,32 @@ def _inject_system_contexts(messages, project_path, project_enabled,
     else:
         _ctx_suppressed('skills_index', 'no_tools')
 
+    # ★ 3.6. Credential-vault index — the model's discovery seam for
+    #   operator credentials (NAMES + env vars ONLY, never values; the
+    #   values ride the run_command child env, see
+    #   lib.credentials_vault.exec_env_overlay). Gated on has_real_tools:
+    #   without run_command there is nothing to reference them with.
+    #   Byte-stable for a fixed entry set (sorted by name), own cache
+    #   block — same rule as the skills index.
+    if has_real_tools:
+        if '</credential_vault>' in _existing:
+            _ctx_suppressed('vault_index', 'marker_present')
+        else:
+            from lib.credentials_vault import build_vault_index
+            _vault_block = build_vault_index() or ''
+            if _vault_block:
+                _vault_spliced = _wrap_system_reminder(_vault_block)
+                _append_to_system_message(
+                    messages,
+                    _vault_spliced,
+                    as_separate_block=True)
+                _existing = _system_text(messages)
+                _ctx_injected('vault_index', len(_vault_spliced))
+            else:
+                _ctx_suppressed('vault_index', 'empty_vault')
+    else:
+        _ctx_suppressed('vault_index', 'no_tools')
+
     # ★ 4. Swarm system prompt injection — gated ONLY on swarm_enabled.
     #   Decoupled from project_enabled because a bare-conversation research
     #   swarm is a valid use case (mirrors the read_files decoupling done

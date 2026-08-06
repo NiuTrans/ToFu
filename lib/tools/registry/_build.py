@@ -171,14 +171,15 @@ def _build_produce(ctx: ToolContext) -> list[dict]:
     # real source URL; without search the fact-discipline gate can't be met.
     if not (ctx.search_mode in ('single', 'multi') or ctx.search_enabled):
         return []
-    from lib.tools.produce import (PRODUCE_REPORT_TOOL, PRODUCE_RESEARCH_TOOL,
-                                   PRODUCE_SLIDES_TOOL, PRODUCE_VIDEO_TOOL)
+    from lib.tools.produce import (EDIT_SLIDES_TOOL, PRODUCE_REPORT_TOOL,
+                                   PRODUCE_RESEARCH_TOOL, PRODUCE_SLIDES_TOOL,
+                                   PRODUCE_VIDEO_TOOL)
     logger.debug('[Task %s] produce_video/produce_report/produce_research/'
                  'produce_slides tools enabled', ctx.tid)
     # Appended LAST so the existing video/report prefix stays byte-stable for
     # the prompt cache (the ordering contract in this module's docstring).
     return [PRODUCE_VIDEO_TOOL, PRODUCE_REPORT_TOOL, PRODUCE_RESEARCH_TOOL,
-            PRODUCE_SLIDES_TOOL]
+            PRODUCE_SLIDES_TOOL, EDIT_SLIDES_TOOL]
 
 
 def _build_page_preview(ctx: ToolContext) -> list[dict]:
@@ -475,7 +476,8 @@ def _register_builtins() -> None:
                  gate='挂载项目后可用'),
         ToolSpec('produce', _build_produce, phase='base',
                  provides=frozenset({'produce_video', 'produce_report',
-                                     'produce_research', 'produce_slides'}),
+                                     'produce_research', 'produce_slides',
+                                     'edit_slides'}),
                  category='video',
                  description='High-level topic → finished video / report / research',
                  gate='搜索开启后可用'),

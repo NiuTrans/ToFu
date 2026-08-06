@@ -38,7 +38,11 @@ __all__ = ['PPTDError', 'Deck', 'Page', 'parse_deck', 'validate_deck',
            'DEFAULT_TEXT_STYLE', 'ELEMENT_TYPES', 'SHAPES_KNOWN']
 
 DEFAULT_SIZE = (1280, 720)                    # 16:9, 1px = 1pt
-ELEMENT_TYPES = ('text', 'shape', 'line', 'image', 'icon', 'table')
+ELEMENT_TYPES = ('text', 'shape', 'line', 'image', 'icon', 'table',
+                 'chart')
+
+#: v1 chart element subset (bar/column/line/pie, category data).
+CHART_TYPES = ('bar', 'column', 'line', 'pie')
 
 #: Built-in shapes the renderer/exporter know (OOXML preset names; the full
 #: 177-name list is the upstream spec's — these are the ones v1 ships).
@@ -230,16 +234,67 @@ def text_style(content: dict, theme: dict) -> dict:
     return out
 
 
+def cell_content(cell) -> dict:
+    """A table cell's effective content, unifying the two real-world forms.
+
+    The spec form carries ``text``/``align``/style fields FLAT on the cell;
+    decks produced by the reference implementation nest them under
+    ``content: {text, align, ...}``. Flat fields win on conflict (they are
+    the more specific override by convention).
+    """
+    if not isinstance(cell, dict):
+        return {}
+    content = cell.get('content')
+    if isinstance(content, dict):
+        merged = dict(content)
+        merged.update({k: v for k, v in cell.items() if k != 'content'})
+        return merged
+    return dict(cell)
+
+
 def table_style(style_ref, theme: dict) -> dict:
-    """Resolve a Table.style (``$key`` or inline TableStyleConfig)."""
+    """Resolve a Table.style (``$key`` or inline TableStyleConfig), then
+    NORMALISE the ad-hoc flat form real decks carry (fontSize/bodyColor/
+    headerBold/headerColor/headerFill/firstColumnColor/border) into the
+    TableStyleConfig shape the style chain understands."""
+    raw = {}
     if isinstance(style_ref, dict):
-        return style_ref
-    if isinstance(style_ref, str):
+        raw = style_ref
+    elif isinstance(style_ref, str):
         m = _TOKEN_RE.match(style_ref.strip())
         named = ((theme or {}).get('tableStyles') or {}).get(
             m.group(1) if m else style_ref, {})
-        return named if isinstance(named, dict) else {}
-    return {}
+        raw = named if isinstance(named, dict) else {}
+    if not raw:
+        return {}
+    flat_keys = ('fontSize', 'bodyColor', 'headerBold', 'headerColor',
+                 'headerFill', 'firstColumnColor', 'border')
+    if not any(k in raw for k in flat_keys):
+        return raw
+    out: dict = {k: v for k, v in raw.items() if k not in flat_keys}
+    cell_style = dict(out.get('cellStyle') or {})
+    if raw.get('fontSize') is not None:
+        cell_style.setdefault('fontSize', raw['fontSize'])
+    if raw.get('bodyColor') is not None:
+        cell_style.setdefault('color', raw['bodyColor'])
+    if raw.get('border') is not None:
+        cell_style.setdefault('border', raw['border'])
+    if cell_style:
+        out['cellStyle'] = cell_style
+    first_row = dict(out.get('firstRowStyle') or {})
+    if raw.get('headerBold') is not None:
+        first_row.setdefault('bold', bool(raw['headerBold']))
+    if raw.get('headerColor') is not None:
+        first_row.setdefault('color', raw['headerColor'])
+    if raw.get('headerFill') is not None:
+        first_row.setdefault('fill', raw['headerFill'])
+    if first_row:
+        out['firstRowStyle'] = first_row
+    if raw.get('firstColumnColor') is not None:
+        fc = dict(out.get('firstColumnStyle') or {})
+        fc.setdefault('color', raw['firstColumnColor'])
+        out['firstColumnStyle'] = fc
+    return out
 
 
 # ── Validation (zero-LLM) ─────────────────────────────────
@@ -365,6 +420,28 @@ def validate_deck(deck: Deck) -> list:
                 if not re.match(r'^(fas|far|fab):[a-z0-9-]+$', name):
                     out.append(f'{ewhere} ({eid}): iconName must be "style:name" '
                                f'(fas:/far:/fab:), got {name!r}')
+            elif etype == 'chart':
+                ctype = str(el.get('chartType') or '')
+                if ctype not in CHART_TYPES:
+                    out.append(f'{ewhere} ({eid}): chartType must be one of '
+                               f'{CHART_TYPES}, got {ctype!r}')
+                data = el.get('data') or {}
+                cats = data.get('categories')
+                series = data.get('series')
+                if not isinstance(cats, list) or not cats:
+                    out.append(f'{ewhere} ({eid}): chart needs categories')
+                if not isinstance(series, list) or not series:
+                    out.append(f'{ewhere} ({eid}): chart needs series')
+                else:
+                    for si, s in enumerate(series):
+                        vals = (s or {}).get('values')
+                        if not isinstance(vals, list) or not vals:
+                            out.append(f'{ewhere} ({eid}): series {si} needs '
+                                       f'values')
+                        elif isinstance(cats, list) and len(vals) != len(cats):
+                            out.append(f'{ewhere} ({eid}): series {si} has '
+                                       f'{len(vals)} values for '
+                                       f'{len(cats)} categories')
             elif etype == 'table':
                 cw = el.get('columnWidths')
                 rh = el.get('rowHeights')

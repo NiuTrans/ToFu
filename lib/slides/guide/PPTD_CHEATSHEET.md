@@ -115,6 +115,24 @@ elements:
       - {text: "96.3", rowSpan: 1, colSpan: 1, fill: {type: solid, color: "$accent"}}
 ```
 
+## chart (bar/column/line/pie — native chart in the PPTX)
+
+```yaml
+- elementId: sales
+  elementType: chart
+  bounds: [80, 140, 600, 380]
+  chartType: column             # column | bar(horizontal) | line | pie
+  data:
+    categories: [Q1, Q2, Q3, Q4]
+    series:
+      - {name: 营收, values: [82, 96, 88, 104], color: "$primary"}
+      - {name: 利润, values: [12, 15, 13, 19]}   # color 缺省走主题轮转
+  options: {legend: true, dataLabels: false}    # legend 缺省:多系列才显示
+```
+
+`values` 数量必须等于 `categories` 数量。图表系列色只用主题色板
+($primary/$accent/$muted/$ink),网格线/边框已由导出器按设计纪律处理。
+
 ## Hard rules (the validator enforces these)
 
 1. `bounds` fully inside the page (bleed allowed only for background images).
@@ -123,4 +141,5 @@ elements:
    textStyles = title/body/caption/bignum, tableStyles = default.
 4. Text is a COMPLETE phrase — rewrite to fit, never truncate mid-thought.
 5. `columnWidths`/`rowHeights` sum to 1 (±0.02), one rowHeights entry per row.
-6. No charts element type — build data visuals from shapes/lines/tables.
+6. Charts use the `chart` element (bar/column/line/pie); complex
+   structural diagrams are still built from shapes/lines.

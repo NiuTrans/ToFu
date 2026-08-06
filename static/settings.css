@@ -2142,13 +2142,51 @@
 
 /* ── Credential vault (「凭证保管库」) — reuses the priv-host row/btn/input
    chrome; only the hint/note/revealed-value pieces are new. Same tofu
-   cream/gold tokens, same flat list-row language. ── */
+   cream/gold tokens, same flat list-row language. The row body is a
+   two-line stack: identity line (name + hint, name NEVER wraps mid-token —
+   it ellipsizes) above an optional note line; timestamp + actions pin
+   right. ── */
+.cred-vault-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.cred-vault-idline {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+.cred-vault-name {
+  font-weight: 800;
+  font-size: 13.5px;
+  color: var(--s-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
 .cred-vault-hint {
+  flex: none;
   font-family: 'JetBrains Mono', monospace;
   font-size: 12px;
   color: var(--s-ink-soft);
 }
-.cred-vault-note { font-size: 12px; color: var(--s-muted); }
+.cred-vault-note {
+  font-size: 12px;
+  color: var(--s-muted);
+  overflow-wrap: anywhere;
+}
+.cred-vault-time {
+  flex: none;
+  margin-left: auto;  /* stay right even when a long note wraps the row */
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--s-ink-soft);
+  white-space: nowrap;
+}
 .cred-vault-value {
   flex: 1 1 100%;
   display: flex;

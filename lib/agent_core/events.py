@@ -485,6 +485,12 @@ _SPECS: tuple[EventSpec, ...] = (
               'A tool call finished; carries the final tool message.',
               fields={'roundNum': 'round index', 'toolCallId': 'tool-call id',
                       'content': 'final tool result', 'isError': 'bool',
+                      'status': "(optional) terminal NON-SUCCESS verdict — "
+                                "'rejected' / 'aborted' / 'error' (tool raised "
+                                "or pool-timeout-cancelled, 2026-08-06 silent-"
+                                "timeout incident). ABSENT on success; the "
+                                "client must never promote a verdict-bearing "
+                                "round to 'done'",
                       **_TOOL_CLOCK_FIELDS, **_TOOL_END_CLOCK_FIELD}),
     EventSpec(EventType.TOOL_COMPACTED, _C.TOOL,
               'A prior tool result was compacted out of context to save tokens.',

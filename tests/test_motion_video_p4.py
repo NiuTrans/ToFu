@@ -298,7 +298,8 @@ def test_produce_research_reachable_and_search_gated():
     assert 'produce_research' in names
     # Appended AFTER the existing pair so the cache-stable prefix is untouched.
     assert ([n for n in names if n.startswith('produce_')]
-            == ['produce_video', 'produce_report', 'produce_research'])
+            == ['produce_video', 'produce_report', 'produce_research',
+                'produce_slides'])
     off, _ = assemble_tool_list(_ctx(project=False, search=False))
     assert 'produce_research' not in {t['function']['name'] for t in off}
 

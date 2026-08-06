@@ -46,6 +46,8 @@ def _validate_page_text(deck, page_path: str, text: str) -> list:
     try:
         data = yaml.safe_load(text)
     except yaml.YAMLError as e:
+        logger.debug('[Slides] page YAML parse failed (author will see the '
+                     'finding): %s', e)
         return [f'YAML 解析失败: {e}']
     if not isinstance(data, dict):
         return ['页面必须是 YAML mapping']
@@ -162,6 +164,121 @@ def author_page(deck, brief: dict, page_index: int, total: int, *,
                    page_index + 1, max_rounds)
     return {'ok': True, 'yaml': fallback_page(deck, brief, theme=theme),
             'mode': 'fallback', 'rounds': max_rounds, 'findings': findings}
+
+
+def edit_page(deck_dir: str, page_index: int, instruction: str, *,
+              lang: str = 'zh', model: str | None = None,
+              max_rounds: int = 2) -> dict:
+    """Chat-driven single-page edit: instruction → re-authored page → fresh
+    preview + re-exported PPTX.
+
+    The page's CURRENT yaml is the base the model edits (never a blank
+    rewrite), so an instruction like「把标题改成 X」keeps everything else.
+    Returns ``{'ok', 'mode', 'pptx_path', 'preview', 'detail'}``; never
+    raises — a failed edit leaves the on-disk page untouched.
+    """
+    from lib.slides.pptd import parse_deck
+    from lib.slides.render_png import render_page_png
+
+    deck = parse_deck(os.path.join(deck_dir, 'deck.pptd'))
+    if page_index < 0 or page_index >= len(deck.pages):
+        return {'ok': False,
+                'detail': f'page {page_index + 1} out of range '
+                          f'(deck has {len(deck.pages)} pages)'}
+    page = deck.pages[page_index]
+    page_abs = os.path.join(deck_dir, page.path)
+    try:
+        with open(page_abs, encoding='utf-8') as f:
+            current_yaml = f.read()
+    except OSError as e:
+        logger.warning('[Slides] edit_page cannot read %s: %s', page_abs, e)
+        return {'ok': False, 'detail': f'cannot read page file: {e}'}
+
+    from lib.design_sys.themes import (design_bible_text, get_theme,
+                                       theme_prompt_block)
+    # Reconstruct the theme from the deck's own tokens (the deck is the
+    # source of truth after a restart; the registry theme only feeds the
+    # bible/prohibition text).
+    theme = None
+    from lib.design_sys.themes import THEMES
+    colors = (deck.theme or {}).get('colors') or {}
+    for t in THEMES:
+        if t.colors.get('primary') == colors.get('primary'):
+            theme = t
+            break
+    if theme is None:
+        from lib.design_sys.themes import classify_scenario, default_theme_id
+        theme = get_theme(default_theme_id(classify_scenario(deck.title)))
+    theme_block = theme_prompt_block(theme)
+    bible = design_bible_text(theme.scenario, limit=2500)
+    cheatsheet = _read_cheatsheet(deck)
+
+    if lang == 'zh':
+        prompt = (
+            f'你是顶级演示设计师。这是《{deck.title}》第 {page_index + 1} 页'
+            f'的当前 PPTD 源文件:\n```yaml\n{current_yaml}\n```\n\n'
+            f'## 用户的修改指令(必须完成)\n{instruction}\n\n'
+            f'要求:在现有页面基础上修改,保持其余元素不动;输出修改后的'
+            f'完整页面 YAML(只输出 YAML)。\n\n'
+            f'{theme_block}\n\n## 设计纪律\n{bible}\n\n'
+            f'## PPTD 格式子集\n{cheatsheet}\n'
+            f'页面尺寸 {deck.width}×{deck.height} px。')
+    else:
+        prompt = (
+            f'You are a world-class presentation designer. Current PPTD '
+            f'source of page {page_index + 1} of "{deck.title}":\n'
+            f'```yaml\n{current_yaml}\n```\n\n'
+            f'## Edit instruction (must do)\n{instruction}\n\n'
+            f'Modify the existing page; keep everything else intact. Output '
+            f'the COMPLETE updated page YAML only.\n\n'
+            f'{theme_block}\n\n## Design discipline\n{bible}\n\n'
+            f'## PPTD subset\n{cheatsheet}\n'
+            f'Page geometry {deck.width}×{deck.height} px.')
+
+    messages = [{'role': 'user', 'content': prompt}]
+    findings: list = []
+    for rnd in range(1, max_rounds + 1):
+        try:
+            content, _usage = _llm(messages, max_tokens=_MAX_TOKENS,
+                                   model=model)
+        except Exception as e:
+            logger.warning('[Slides] page %d edit dispatch failed: %s',
+                           page_index + 1, e)
+            return {'ok': False, 'detail': f'LLM dispatch failed: {e}'}
+        yaml_text = _extract_yaml(content or '')
+        findings = _validate_page_text(deck, page.path, yaml_text)
+        if not findings:
+            from lib.json_store import write_text_atomic
+            write_text_atomic(page_abs, yaml_text)
+            deck = parse_deck(os.path.join(deck_dir, 'deck.pptd'))
+            preview = os.path.join(deck_dir, 'preview', 'pages',
+                                   f'{page_index + 1:02d}.png')
+            try:
+                render_page_png(deck, page_index, preview, scale=2.0)
+            except Exception as e:
+                logger.warning('[Slides] page %d preview re-render failed: '
+                               '%s', page_index + 1, e)
+            from lib.slides.export_pptx import export_pptx
+            import glob as _glob
+            existing = _glob.glob(os.path.join(deck_dir, '*.pptx'))
+            out_path = existing[0] if existing else os.path.join(
+                deck_dir, 'deck.pptx')
+            export_pptx(deck, out_path)
+            logger.info('[Slides] page %d edited in %d round(s) → %s',
+                        page_index + 1, rnd, out_path)
+            return {'ok': True, 'mode': 'edited', 'rounds': rnd,
+                    'pptx_path': out_path, 'preview': preview}
+        messages = [
+            {'role': 'user', 'content': prompt},
+            {'role': 'assistant', 'content': content},
+            {'role': 'user', 'content': (
+                '校验发现以下问题,请修复后重新输出完整页面 YAML(只输出 '
+                'YAML):\n' + '\n'.join(f'- {f}' for f in findings[:10]))},
+        ]
+    return {'ok': False,
+            'detail': 'edit failed validation after '
+                      f'{max_rounds} round(s): {findings[:2]}',
+            'findings': findings}
 
 
 def _read_cheatsheet(deck) -> str:

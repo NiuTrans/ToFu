@@ -280,5 +280,11 @@
   "name": "browser-type-searching",
   "html": "<div class=\"ptool-line ptool-active\">\n         <span class=\"ptool-icon\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><polyline points=\"4 7 4 4 20 4 20 7\"/><line x1=\"9\" y1=\"20\" x2=\"15\" y2=\"20\"/><line x1=\"12\" y1=\"4\" x2=\"12\" y2=\"20\"/></svg></span>\n         \n         <span class=\"ptool-text\">Type into current tab: 搜索</span>\n         \n         <span class=\"ptool-spinner\"></span>\n       </div>",
   "err": null
+ },
+ {
+  "i": 47,
+  "name": "error-failed-tool",
+  "html": "<div class=\"ptool-line ptool-error\" data-rn=\"48\" title=\"Tool execution timed out: get_conversation\">\n         <span class=\"ptool-icon\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M7.9 20A9 9 0 1 0 4 16.1L2 22z\"/></svg></span>\n         \n         <span class=\"ptool-text\">Open conversation msebjymx</span>\n         <span class=\"ptool-badge ptool-badge-err\">failed</span>\n         <span class=\"ptool-error-reason\">Tool execution timed out: get_conversation</span>\n       </div>",
+  "err": null
  }
 ]

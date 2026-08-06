@@ -478,7 +478,9 @@ def _sample_svg_path(d: str, vbw: float, vbh: float, *, per_curve: int = 12):
                 break
             else:
                 i += 1
-        except (ValueError, IndexError):
+        except (ValueError, IndexError) as e:
+            logger.debug('[Slides→PPTX] svg path sampling stopped at %d: %s',
+                         i, e)
             break
     return pts
 
@@ -521,7 +523,9 @@ def _add_line(slide, el: dict, deck: Deck) -> None:
         try:
             px, py = tok.split(',')
             pts.append((float(px), float(py)))
-        except ValueError:
+        except ValueError as e:
+            logger.debug('[Slides→PPTX] skipping unparseable point %r: %s',
+                         tok, e)
             continue
     if len(pts) < 2:
         return
@@ -774,10 +778,13 @@ def _add_table(slide, el: dict, deck: Deck) -> None:
                     logger.debug('[Slides→PPTX] merge (%d,%d): %s', ri, ci, e)
             st = _cell_style(cell_data, ri, ci, n_rows, n_cols, tstyle,
                              deck.theme)
+            from lib.slides.pptd import cell_content
+            cc = cell_content(cell_data)
             tf = cell.text_frame
             tf.word_wrap = True
-            content = {'text': cell_data.get('text') or '',
-                       'align': st.get('align') or ['center', 'middle']}
+            content = {'text': cc.get('text') or '',
+                       'align': cc.get('align') or st.get('align')
+                                or ['center', 'middle']}
             merged_style = dict(st)
             _fill_text_frame(tf, {**content, **{k: v for k, v in
                              merged_style.items() if k in (
@@ -853,6 +860,78 @@ def _apply_cell_borders(cell, border, theme) -> None:
             tcPr.insert(0, el)
 
 
+# ── Charts (native OOXML via python-pptx) ─────────────────
+
+_CHART_XL = {
+    'column': 'COLUMN_CLUSTERED', 'bar': 'BAR_CLUSTERED',
+    'line': 'LINE', 'pie': 'PIE',
+}
+
+
+def _add_chart(slide, el: dict, deck: Deck) -> None:
+    from pptx.chart.data import CategoryChartData
+    from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
+    from pptx.util import Emu, Pt
+    x, y, w, h = [float(v) for v in el['bounds']]
+    ctype = str(el.get('chartType') or 'column')
+    xl = getattr(XL_CHART_TYPE, _CHART_XL.get(ctype, 'COLUMN_CLUSTERED'))
+    data = el.get('data') or {}
+    cats = [str(c) for c in (data.get('categories') or [])]
+    series = [s for s in (data.get('series') or []) if isinstance(s, dict)]
+    if not cats or not series:
+        return
+    opts = el.get('options') or {}
+    chart_data = CategoryChartData()
+    chart_data.categories = cats
+    for s in series:
+        chart_data.add_series(str(s.get('name') or ''),
+                              [float(v) for v in (s.get('values') or [])])
+    gfx = slide.shapes.add_chart(xl, Emu(_emu(x)), Emu(_emu(y)),
+                                 Emu(_emu(w)), Emu(_emu(h)), chart_data)
+    chart = gfx.chart
+    chart.has_title = False
+    # Series colors: per-series override, else the theme cycle.
+    from lib.slides.render_html import _chart_palette
+    pal = _chart_palette(deck.theme)
+    for i, ser in enumerate(chart.series):
+        color = series[i].get('color') if i < len(series) else None
+        hexv = _resolve(color, deck.theme) if color else pal[i % len(pal)]
+        rgb, _a = _rgb(hexv)
+        try:
+            ser.format.fill.solid()
+            ser.format.fill.fore_color.rgb = rgb
+            ser.format.line.color.rgb = rgb
+        except Exception as e:
+            logger.debug('[Slides→PPTX] series %d color: %s', i, e)
+    show_legend = bool(opts.get('legend', len(series) > 1))
+    chart.has_legend = show_legend
+    if show_legend:
+        chart.legend.position = XL_LEGEND_POSITION.BOTTOM
+        chart.legend.include_in_layout = False
+        chart.legend.font.size = Pt(max(9.0, h * 0.036))
+    # De-default discipline: no heavy gridlines; hairline category axis only.
+    try:
+        if ctype != 'pie':
+            value_axis = chart.value_axis
+            value_axis.has_major_gridlines = False
+            value_axis.format.line.color.rgb = _rgb(
+                _resolve('$hairline', deck.theme))[0]
+            cat_axis = chart.category_axis
+            cat_axis.format.line.color.rgb = _rgb(
+                _resolve('$hairline', deck.theme))[0]
+            for axis in (value_axis, cat_axis):
+                axis.tick_labels.font.size = Pt(max(9.0, h * 0.04))
+    except Exception as e:
+        logger.debug('[Slides→PPTX] axis styling: %s', e)
+    if opts.get('dataLabels'):
+        try:
+            plot = chart.plots[0]
+            plot.has_data_labels = True
+            plot.data_labels.font.size = Pt(max(9.0, h * 0.036))
+        except Exception as e:
+            logger.debug('[Slides→PPTX] data labels: %s', e)
+
+
 # ── Slide assembly ────────────────────────────────────────
 
 def _set_background(slide, page: Page, deck: Deck) -> None:
@@ -890,12 +969,15 @@ def _set_background(slide, page: Page, deck: Deck) -> None:
 
 
 def export_pptx(deck: Deck, out_path: str, *, transition: str = 'fade',
-                embed_fonts: bool = False) -> dict:
+                embed_fonts: bool = True) -> dict:
     """Write the deck to a PPTX. Returns a summary dict.
 
-    ``embed_fonts`` is accepted for forward-compat and currently a no-op
-    (fntdata embedding is a P4 item — the file names the REAL family names,
-    so a machine with the faces installed renders them natively).
+    ``embed_fonts`` writes the deck's used typefaces as fntdata parts so the
+    file renders with the intended faces on machines that lack them. Only
+    TrueType-outline faces embed (woff2 is decompressed via fonttools when
+    available); everything else is skipped with a log — the file always
+    names the real family names regardless, so a machine with the faces
+    installed renders them natively either way.
     """
     from pptx import Presentation
     from pptx.util import Emu
@@ -925,6 +1007,8 @@ def export_pptx(deck: Deck, out_path: str, *, transition: str = 'fade',
                     _add_icon(slide, el, deck)
                 elif etype == 'table':
                     _add_table(slide, el, deck)
+                elif etype == 'chart':
+                    _add_chart(slide, el, deck)
             except Exception as e:
                 logger.error('[Slides→PPTX] page %d element %s failed: %s',
                              pi + 1, el.get('elementId'), e, exc_info=True)
@@ -936,12 +1020,277 @@ def export_pptx(deck: Deck, out_path: str, *, transition: str = 'fade',
     patched = 0
     if transition == 'fade':
         patched = _patch_fade_transitions(out_path)
+    embedded = 0
+    if embed_fonts:
+        try:
+            embedded = _embed_fonts(out_path, deck)
+        except Exception as e:
+            # Embedding is a polish layer — a failure here must never cost
+            # the deck itself (the file names real family names, so machines
+            # with the faces installed still render them).
+            logger.warning('[Slides→PPTX] font embedding failed, shipping '
+                           'unembedded: %s', e, exc_info=True)
     summary = _verify(out_path)
     summary.update({'output': out_path, 'slides': len(deck.pages),
-                    'fadeTransitions': patched})
+                    'fadeTransitions': patched, 'embeddedFonts': embedded})
     logger.info('[Slides→PPTX] %s: %d slides, %d fade transitions, %d bytes',
                 out_path, len(deck.pages), patched, summary['bytes'])
     return summary
+
+
+# ── Font embedding (fntdata) ──────────────────────────────
+
+#: fsType bits that FORBID embedding (0x0002 = restricted license).
+_FSTYPE_RESTRICTED = 0x0002
+
+
+def _glyphs_to_quadratic(glyphs, *, max_err: float = 1.0) -> dict:
+    from fontTools.pens.cu2quPen import Cu2QuPen
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+    out = {}
+    for name in glyphs.keys():
+        glyph = glyphs[name]
+        pen = TTGlyphPen(glyphs)
+        cu2qu = Cu2QuPen(pen, max_err, reverse_direction=True)
+        glyph.draw(cu2qu)
+        out[name] = pen.glyph()
+    return out
+
+
+def _otf_to_ttf(font) -> None:
+    """In-place CFF→TrueType conversion (fonttools otf2ttf recipe).
+
+    cu2qu approximates the cubic CFF outlines with quadratic splines at
+    1.0 max_err — visually lossless for screen type, and it turns the
+    flagship CFF faces (MiSans et al.) into embeddable glyf fonts.
+    """
+    from fontTools.ttLib import newTable
+    assert font.sfntVersion == 'OTTO' and 'CFF ' in font
+    glyph_order = font.getGlyphOrder()
+    font['loca'] = newTable('loca')
+    font['glyf'] = glyf = newTable('glyf')
+    glyf.glyphOrder = glyph_order
+    glyf.glyphs = _glyphs_to_quadratic(font.getGlyphSet())
+    del font['CFF ']
+    if 'VORG' in font:
+        del font['VORG']
+    glyf.compile(font)
+    hmtx = font['hmtx']
+    for name, glyph in glyf.glyphs.items():
+        if hasattr(glyph, 'xMin'):
+            hmtx[name] = (hmtx[name][0], glyph.xMin)
+    post = font['post']
+    post.formatType = 2.0
+    post.extraNames = []
+    post.mapping = {}
+    post.glyphOrder = glyph_order
+    maxp = font['maxp']
+    maxp.tableVersion = 0x00010000
+    maxp.maxZones = 1
+    maxp.maxTwilightPoints = 0
+    maxp.maxStorage = 0
+    maxp.maxFunctionDefs = 0
+    maxp.maxInstructionDefs = 0
+    maxp.maxStackElements = 0
+    maxp.maxSizeOfInstructions = 0
+    maxp.maxComponentElements = max(
+        (len(g.components) if hasattr(g, 'components') else 0)
+        for g in glyf.glyphs.values())
+    maxp.compile(font)
+    font['head'].glyphDataFormat = 0
+    font.sfntVersion = '\x00\x01\x00\x00'
+
+
+def _converted_glyf_ttf(font_id: str, weight: int, data: bytes) -> bytes:
+    """CFF source bytes → glyf TTF bytes, cached in the design store.
+
+    A 29k-glyph CJK face converts once (tens of seconds) and the result is
+    content-addressed forever after.
+    """
+    from fontTools.ttLib import TTFont
+    from lib.design_sys._store import store_root
+    cache_dir = os.path.join(store_root(), 'fonts', font_id)
+    cache = os.path.join(cache_dir, f'w{weight}-glyf.ttf')
+    if os.path.isfile(cache):
+        with open(cache, 'rb') as f:
+            return f.read()
+    import io as _io
+    font = TTFont(_io.BytesIO(data))
+    _otf_to_ttf(font)
+    buf = _io.BytesIO()
+    font.save(buf)
+    out = buf.getvalue()
+    os.makedirs(cache_dir, exist_ok=True)
+    tmp = cache + '.tmp'
+    with open(tmp, 'wb') as f:
+        f.write(out)
+    os.replace(tmp, cache)
+    logger.info('[Slides→PPTX] converted %s w%d CFF→glyf TTF (%d bytes, '
+                'cached)', font_id, weight, len(out))
+    return out
+
+
+def _font_file_for_embedding(font_id: str, weight: int) -> tuple:
+    """(bytes, ok) for one registry face/weight — TrueType outlines only.
+
+    PowerPoint's embedded-font reader wants sfnt bytes with a glyf table:
+    TTF passes through, woff2 is decompressed via fonttools (an optional
+    dependency, auto-installed once when missing), CFF-only OTF is skipped
+    (PowerPoint rejects CFF fntdata on several versions — a skip is honest,
+    a corrupted file is not).
+    """
+    from lib.design_sys import fonts as _fonts
+    path = _fonts.ensure_font(font_id, weight)
+    if not path:
+        return b'', False
+    with open(path, 'rb') as f:
+        data = f.read()
+    if path.lower().endswith('.ttf'):
+        return data, True
+    try:
+        from fontTools.ttLib import TTFont
+    except ImportError:
+        try:
+            import subprocess
+            import sys as _sys
+            subprocess.run([_sys.executable, '-m', 'pip', 'install', '--user',
+                            'fonttools', 'brotli'],
+                           capture_output=True, timeout=300, check=False)
+            from fontTools.ttLib import TTFont
+        except Exception as e:
+            logger.warning('[Slides→PPTX] fonttools unavailable, embedding '
+                           'skipped for %s: %s', font_id, e)
+            return b'', False
+    try:
+        import io as _io
+        font = TTFont(_io.BytesIO(data))
+        if int(font['OS/2'].fsType) & _FSTYPE_RESTRICTED:
+            logger.info('[Slides→PPTX] %s fsType is restricted — skipped',
+                        font_id)
+            return b'', False
+        if 'glyf' not in font:
+            # CFF-outline face (MiSans et al.): convert to TrueType outlines
+            # via cu2qu (visually lossless at 1.0 max_err; cached after the
+            # one-time conversion).
+            return _converted_glyf_ttf(font_id, weight, data), True
+        font.flavor = None
+        buf = _io.BytesIO()
+        font.save(buf)
+        return buf.getvalue(), True
+    except Exception as e:
+        logger.warning('[Slides→PPTX] font conversion failed for %s: %s',
+                       font_id, e)
+        return b'', False
+
+
+def _embed_fonts(pptx_path: str, deck: Deck) -> int:
+    """Embed the deck's used typefaces as fntdata parts. Returns count.
+
+    OOXML wiring: fntdata content-type default + presentation rels +
+    ``embedTrueTypeFonts`` attr + ``<p:embeddedFontLst>`` inserted directly
+    after ``<p:notesSz>`` (CT_Presentation child order — PowerPoint ignores
+    a misplaced list the same way it ignores a misplaced transition).
+    """
+    from lib.design_sys import fonts as _fonts
+    from lib.slides.render_html import collect_families
+    wanted = collect_families(deck)
+    by_family = {f.family: f for f in _fonts.FONT_REGISTRY}
+    embeds: list = []                    # [(family, {weight: bytes})]
+    for fam in sorted(wanted):
+        face = by_family.get(fam)
+        if face is None:
+            continue
+        weights: dict = {}
+        for src in face.sources:
+            data, ok = _font_file_for_embedding(face.id, src.weight)
+            if ok:
+                weights[src.weight] = data
+        if weights:
+            embeds.append((fam, weights))
+    if not embeds:
+        return 0
+
+    with zipfile.ZipFile(pptx_path, 'r') as z:
+        items = {i.filename: z.read(i.filename)
+                 for i in z.infolist()}
+        order = [i for i in z.infolist()]
+
+    ct = items['[Content_Types].xml'].decode('utf-8')
+    if 'fntdata' not in ct:
+        ct = ct.replace('</Types>',
+                        '<Default Extension="fntdata" ContentType="'
+                        'application/x-fontdata"/></Types>')
+        items['[Content_Types].xml'] = ct.encode('utf-8')
+
+    rels_name = 'ppt/_rels/presentation.xml.rels'
+    rels = items[rels_name].decode('utf-8')
+    import re as _re
+    existing_ids = [int(m) for m in _re.findall(r'Id="rId(\d+)"', rels)]
+    next_id = max(existing_ids or [0]) + 1
+    pres_name = 'ppt/presentation.xml'
+    pres = items[pres_name].decode('utf-8')
+
+    font_entries = []
+    new_rels = []
+    for fi, (fam, weights) in enumerate(embeds, 1):
+        # PowerPoint's embed model has exactly four slots (regular / bold /
+        # italic / boldItalic). Pick the weight nearest 400 as regular and
+        # the nearest 700 as bold — at most one each.
+        ws = sorted(weights)
+        regular = min(ws, key=lambda w: abs(w - 400))
+        bolds = [w for w in ws if w != regular]
+        picks = [('regular', regular)]
+        if bolds:
+            picks.append(('bold', min(bolds, key=lambda w: abs(w - 700))))
+        slots = []
+        for tag, weight in picks:
+            rid = f'rId{next_id}'
+            next_id += 1
+            part = f'ppt/fonts/font{next_id}.fntdata'
+            items[part] = weights[weight]
+            new_rels.append(
+                f'<Relationship Id="{rid}" Type="http://schemas.'
+                f'openxmlformats.org/officeDocument/2006/relationships/font"'
+                f' Target="fonts/font{next_id}.fntdata"/>')
+            slots.append((tag, rid))
+        slot_xml = ''.join(
+            f'<p:{tag} r:id="{rid}"/>'
+            for tag, rid in slots)
+        fam_esc = fam.replace('&', '&amp;').replace('<', '&lt;') \
+                     .replace('>', '&gt;').replace('"', '&quot;')
+        font_entries.append(
+            f'<p:embeddedFont><p:font typeface="{fam_esc}"/>'
+            f'{slot_xml}</p:embeddedFont>')
+
+    rels = rels.replace('</Relationships>', ''.join(new_rels)
+                        + '</Relationships>')
+    items[rels_name] = rels.encode('utf-8')
+
+    if 'embedTrueTypeFonts' not in pres:
+        pres = pres.replace('<p:presentation ',
+                            '<p:presentation embedTrueTypeFonts="1" ', 1)
+    lst = ('<p:embeddedFontLst>' + ''.join(font_entries)
+           + '</p:embeddedFontLst>')
+    if '<p:notesSz' in pres:
+        pres = _re.sub(r'(<p:notesSz[^>]*/>)', r'\1' + lst, pres, count=1)
+    else:
+        pres = pres.replace('</p:presentation>',
+                            lst + '</p:presentation>')
+    items[pres_name] = pres.encode('utf-8')
+
+    tmp = pptx_path + '.tmp'
+    with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as z:
+        written = set()
+        for info in order:
+            z.writestr(info, items[info.filename])
+            written.add(info.filename)
+        for name, data in items.items():
+            if name not in written:
+                z.writestr(name, data)
+    os.replace(tmp, pptx_path)
+    logger.info('[Slides→PPTX] embedded %d typeface(s): %s', len(embeds),
+                ', '.join(f for f, _ in embeds))
+    return len(embeds)
 
 
 # ── Transitions + verification ────────────────────────────

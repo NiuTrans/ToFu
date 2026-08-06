@@ -549,6 +549,12 @@ def _tool_display_produce(fn_name, fn_args, tc_id, tc_args_str):
         display = f'Produce slides: {topic[:80]}' if topic else 'Produce slides'
         if style:
             display += f' ({style[:30]})'
+    elif fn_name == 'edit_slides':
+        page = args.get('page')
+        instr = (args.get('instruction') or '').strip()
+        display = f'Edit slide {page}' if page else 'Edit a slide'
+        if instr:
+            display += f': {instr[:60]}'
     elif fn_name == 'produce_research':
         direction = (args.get('direction') or '').strip()
         display = (f'Research ideas: {direction[:80]}' if direction

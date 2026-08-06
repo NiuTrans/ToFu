@@ -66,12 +66,14 @@ function _credentialRowHtml(row) {
 
   return String(safeHtml`
     <div class="priv-host-row cred-vault-row" id="credVaultRow_${raw(_credVaultDomId(name))}">
-      <div class="priv-host-main">
-        <span class="priv-host-name">${name}</span>
-        <span class="cred-vault-hint">${hint}</span>
-        ${note ? String(safeHtml`<span class="cred-vault-note">${note}</span>`) : ''}
-        <span class="priv-host-state">${updated}</span>
+      <div class="cred-vault-main">
+        <div class="cred-vault-idline">
+          <span class="cred-vault-name">${name}</span>
+          <span class="cred-vault-hint">${hint}</span>
+        </div>
+        ${note ? safeHtml`<div class="cred-vault-note">${note}</div>` : ''}
       </div>
+      <span class="cred-vault-time">${updated}</span>
       <div class="priv-host-actions">
         <button class="priv-host-btn" onclick="_credentialReveal('${raw(name)}')">${t('settings.credVaultReveal') || '查看'}</button>
         <button class="priv-host-btn danger" onclick="_credentialRemove('${raw(name)}')">${t('settings.credVaultDelete') || '删除'}</button>

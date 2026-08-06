@@ -1113,6 +1113,7 @@ const _MOTION_HEAD_I18N = {
   produce_report:                ["motionHead.produceReport", "Started a research report"],
   produce_research:              ["motionHead.produceResearch", "Started a research survey"],
   produce_slides:                ["motionHead.produceSlides", "Started a slide-deck job"],
+  edit_slides:                   ["motionHead.editSlides", "Edited one page of a deck"],
 };
 const _MOTION_PURPOSE_I18N = {
   motion_video_env_check:        ["motionWhy.envCheck", "Confirms Node / HyperFrames / ffmpeg / headless Chrome are all present before any render work starts."],
@@ -1127,6 +1128,7 @@ const _MOTION_PURPOSE_I18N = {
   produce_report:                ["motionWhy.produceReport", "One sentence → a cited long-form report, published as a markdown artifact when it finishes."],
   produce_research:              ["motionWhy.produceResearch", "Harvests the recent literature, then proposes and scores genuinely-novel research ideas against it."],
   produce_slides:                ["motionWhy.produceSlides", "One sentence → a designer-quality editable PPTX: scenario theme + bound palette/typefaces + per-page layout + visual QA. Downloads when done."],
+  edit_slides:                   ["motionWhy.editSlides", "Re-authors ONE page of a produced deck from your plain-language instruction, then re-renders the preview and re-exports the PPTX."],
 };
 
 /* The motion handler's meta.title is the bare stage name ("check" / "render")

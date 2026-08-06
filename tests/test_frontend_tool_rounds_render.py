@@ -316,6 +316,54 @@ check('empty_rounds_blank', renderToolRoundsHTML([], false) === '' &&
   check('browser_press_key_glyph', keyHtml.includes('width="20" height="12"'));
 }
 
+// ── 12. failed tool round (2026-08-06 silent-timeout incident) ──
+// A tool that RAN but never produced a result (raised / pool-ceiling
+// cancelled) used to ship tool_complete with NO status → reducer promoted it
+// to 'done' → the row rendered as a clean success; the failure was visible
+// only in the raw debug panel. The backend now stamps status='error' and the
+// row must render a static failure affordance with the reason INLINE.
+{
+  const html = renderToolRoundsHTML([
+    { roundNum: 1, toolName: 'get_conversation', status: 'error',
+      query: 'Open conversation msebjymx',
+      toolContent: 'Tool execution timed out: get_conversation' },
+  ], false);
+  const d = frag(html);
+  check('error_line_class', !!d.querySelector('.ptool-error'));
+  check('error_badge_err', !!d.querySelector('.ptool-badge-err'));
+  check('error_reason_inline',
+    html.includes('Tool execution timed out: get_conversation'));
+  // The cardinal symptoms of the incident: no done badge, no spinner, no
+  // perpetual-searching panel.
+  check('error_no_done_badge', !html.includes('✓ done'));
+  check('error_no_spinner', !d.querySelector('.ptool-spinner'));
+  check('error_not_active_panel', !d.querySelector('.ptool-panel-active'));
+}
+
+// ── 12b. an error round with NO toolContent still renders the badge ──
+{
+  const html = renderToolRoundsHTML([
+    { roundNum: 1, toolName: 'grep_search', status: 'error', query: 'grep foo' },
+  ], false);
+  const d = frag(html);
+  check('error_no_content_badge', !!d.querySelector('.ptool-badge-err'));
+  check('error_no_content_no_done', !html.includes('✓ done'));
+}
+
+// ── 12c. a failed sibling inside a parallel batch leaves the done one alone ──
+{
+  const html = renderToolRoundsHTML([
+    { roundNum: 1, llmRound: 1, toolName: 'grep_search', status: 'error',
+      query: 'bad one', toolContent: 'Tool execution error: boom' },
+    { roundNum: 2, llmRound: 1, toolName: 'read_files', status: 'done',
+      query: 'good one', results: [{ title: 'ok' }] },
+  ], false);
+  const d = frag(html);
+  check('error_batch_error_row', !!d.querySelector('.ptool-error'));
+  check('error_batch_done_kept', html.includes('good one'));
+  check('error_batch_reason', html.includes('Tool execution error: boom'));
+}
+
 report();
 """
 
@@ -325,6 +373,6 @@ def test_tool_rounds_render_characterization():
         target_js=os.path.join(JS_DIR, 'ui', 'tool_rounds.js'),
         body_js=_BODY,
         extra_targets=[os.path.join(JS_DIR, 'ui', 'streaming_swarm_panel.js')],
-        min_pass=51,
+        min_pass=62,
         label='tool_rounds render',
     )

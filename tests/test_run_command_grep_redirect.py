@@ -17,22 +17,26 @@ whose stdin is fed by a pipe (``pytest 2>&1 | grep PASS``,
 ``git grep`` and coreutils-``timeout``-wrapped greps also stay legal.
 
 Pinned here:
-  1. classifier matrix — filesystem greps refused; stream filters / rg /
-     git grep / timeout-wrapped / heredoc shapes allowed;
+  1. classifier matrix — filesystem greps detected; stream filters / rg /
+     git grep / timeout-wrapped / heredoc shapes pass through;
   2. redirection stripping — ``2>/dev/null`` must not fake a file operand;
   3. shell structure (2026-08-06 incident): subshell parens, command
      substitution and newlines are command BOUNDARIES, not word chars —
      the closer in ``( producer | grep -E 'pat' )`` must not become a
      phantom file operand (stream filter misrefused), and the opener in
      ``( grep -rn x lib/ )`` must not mask the command word (evasion);
-  4. end-to-end through ``tool_run_command`` — refused BEFORE any
-     subprocess (Popen tripwire); allowed shapes actually execute;
-  5. the kill switch TOFU_RUN_GREP_GUARD=0.
+  4. end-to-end through ``tool_run_command`` (owner ruling 2026-08-06):
+     filesystem greps are EXECUTED by the in-process GNU-faithful engine
+     (lib/project_mod/grep_redirect.py) and the pipeline spliced around
+     temp files — refuse+teach only when translation is impossible;
+  5. the kill switches TOFU_RUN_GREP_GUARD=0 / TOFU_GREP_REDIRECT=0.
 
 Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/test_run_command_grep_redirect.py -v
 """
 
 from __future__ import annotations
+
+import os
 
 import pytest
 
@@ -47,6 +51,10 @@ def ws(tmp_path):
     base = tmp_path / 'chatui'
     (base / 'lib').mkdir(parents=True)
     (base / 'lib' / 'a.py').write_text('x = 1\n', encoding='utf-8')
+    (base / 'static').mkdir(parents=True)
+    (base / 'static' / 'styles.css').write_text(
+        ':root { --cream: #f5f0e6; --gold: #c9a227; }\n'
+        'body { color: var(--cream); }\n', encoding='utf-8')
     return str(base)
 
 
@@ -127,24 +135,59 @@ class TestGrepRedirectAllowedShapes:
 
 @pytest.mark.unit
 class TestGrepRedirectEndToEnd:
-    def test_incident_shape_refused_before_any_spawn(self, ws, monkeypatch):
-        """The exact incident command must be refused BEFORE a subprocess
-        exists — the Popen tripwire proves it."""
-        def _tripwire(*_a, **_kw):
-            raise RuntimeError('subprocess spawned for a refused command')
-        monkeypatch.setattr('subprocess.Popen', _tripwire)
+    def test_incident_shape_executes_via_internal_engine(self, ws):
+        """Owner ruling 2026-08-06: the exact 17-minute incident command is
+        now EXECUTED by the in-process engine — no refusal, pipeline
+        continues, matches come back."""
         result = tool_run_command(
             ws, "grep -n 'cream' static/styles.css | head -30; "
                 "echo ---; grep -rn 'cream' static/*.css 2>/dev/null | head -20")
-        assert 'Command intercepted' in result
-        # The error is ACTIONABLE: it must teach the grep_search translation.
-        assert 'grep_search' in result
-        assert 'max_results' in result
+        assert 'Command intercepted' not in result
+        assert '--cream: #f5f0e6' in result   # the match line, with line no
+        assert '1::root { --cream' in result
+        assert '---' in result
 
-    def test_recursive_grep_refused(self, ws, monkeypatch):
-        def _tripwire(*_a, **_kw):
-            raise RuntimeError('subprocess spawned for a refused command')
-        monkeypatch.setattr('subprocess.Popen', _tripwire)
+    def test_recursive_grep_executes(self, ws):
+        result = tool_run_command(ws, 'grep -rn "x = 1" lib/')
+        assert 'Command intercepted' not in result
+        assert 'lib/a.py:1:x = 1' in result
+
+    def test_pipeline_continuation_wc(self, ws):
+        result = tool_run_command(ws, 'grep -n "x = 1" lib/a.py | wc -l')
+        assert 'Command intercepted' not in result
+        assert '1' in result
+
+    def test_grep_then_cat_into_file(self, ws):
+        """The owner's canonical shape: grep X, then cat into a file."""
+        result = tool_run_command(
+            ws, 'grep "x = 1" lib/a.py | cat > found.txt; cat found.txt')
+        assert 'Command intercepted' not in result
+        assert 'x = 1' in result
+        with open(os.path.join(ws, 'found.txt')) as f:
+            assert f.read() == 'x = 1\n'
+
+    def test_quiet_grep_exit_code_chain(self, ws):
+        result = tool_run_command(
+            ws, 'grep -q "x = 1" lib/a.py && echo FOUND; '
+                'grep -q zzz lib/a.py || echo MISSING')
+        assert 'FOUND' in result and 'MISSING' in result
+
+    def test_refusal_fallback_with_reason(self, ws):
+        """Untranslatable shapes still refuse+teach — and now SAY why."""
+        result = tool_run_command(ws, "grep -P 'x+' lib/a.py")
+        assert 'Command intercepted' in result
+        assert 'unsupported grep flag -P' in result
+        assert 'grep_search' in result
+
+    def test_refusal_when_earlier_segment_writes(self, ws):
+        """Plan-time execution would read STALE bytes — honest refusal."""
+        result = tool_run_command(
+            ws, "printf 'y = 2\\n' > lib/new.py; grep -rn 'y = 2' lib/")
+        assert 'Command intercepted' in result
+        assert 'not provably read-only' in result
+
+    def test_redirect_kill_switch_restores_refusal(self, ws, monkeypatch):
+        monkeypatch.setenv('TOFU_GREP_REDIRECT', '0')
         result = tool_run_command(ws, 'grep -rn "x = 1" lib/')
         assert 'Command intercepted' in result
 

@@ -120,7 +120,9 @@ class _Parser(HTMLParser):
                     else:
                         try:
                             p.line_height = float(value)
-                        except ValueError:
+                        except ValueError as e:
+                            logger.debug('[Slides] bad line-height %r: %s',
+                                         value, e)
                             pass
                 elif name == 'margin-top' and value.endswith('px'):
                     p.margin_top = float(value[:-2] or 0)

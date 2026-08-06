@@ -98,6 +98,32 @@ const flush = async () => { for (let i = 0; i < 6; i++) await new Promise((r) =>
     check('name_shown', html().indexOf('github_pat') !== -1);
     check('hint_shown', html().indexOf('ghp_…3V8') !== -1);
     check('note_shown', html().indexOf('主账号 token') !== -1);
+    // THE rendering rule: the note must land as a real element, not as
+    // escaped literal markup (the 2026-08-06 bug: String() around the
+    // nested safeHtml stripped its raw brand → the outer template escaped
+    // the whole span and users saw '<span class=...>' as text).
+    check('note_rendered_as_element',
+      html().indexOf('<div class="cred-vault-note">主账号 token</div>') !== -1);
+    check('note_not_literal_markup',
+      html().indexOf('&lt;span') === -1 && html().indexOf('&lt;div') === -1);
+    check('layout_classes',
+      html().indexOf('cred-vault-main') !== -1 &&
+      html().indexOf('cred-vault-idline') !== -1 &&
+      html().indexOf('cred-vault-time') !== -1);
+    // The note is user-typed text — it must be ESCAPED (a stored
+    // '<img onerror=…>' note renders as text, never as live markup).
+    window.__CREDS = [Object.assign(JSON.parse(JSON.stringify(ROW)),
+      { note: '<img src=x onerror=alert(1)> & "quoted"' })];
+    _renderCredentialsVault();
+    await flush();
+    check('note_html_escaped',
+      html().indexOf('<img src=x') === -1 && html().indexOf('&lt;img') !== -1);
+    // …while a plain-text note stays readable (no double-escaping).
+    window.__CREDS = [JSON.parse(JSON.stringify(ROW))];
+    _renderCredentialsVault();
+    await flush();
+    check('note_roundtrip_clean',
+      html().indexOf('<div class="cred-vault-note">主账号 token</div>') !== -1);
     // THE privacy rule: the value is not in the list payload and therefore
     // never in the DOM until 查看 is clicked.
     check('no_value_in_list_dom', html().indexOf('ghp_secretvalue123') === -1);
@@ -183,6 +209,6 @@ def test_credentials_vault_frontend():
         target_js=os.path.join(JS_DIR, 'settings', 'credentials_vault.js'),
         extra_targets=[os.path.join(JS_DIR, 'core', 'safe_html.js')],
         body_js=_BODY,
-        expect_pass=23,
+        expect_pass=28,
         label='credentials-vault',
     )

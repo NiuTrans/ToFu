@@ -1,0 +1,313 @@
+"""tests/test_tool_exec_failure_verdict.py — 2026-08-06 silent-timeout incident.
+
+THE INCIDENT
+------------
+A ``get_conversation`` call exceeded the parallel-pool ceiling
+(``TOOL_PARALLEL_TIMEOUT``). The pipeline recorded
+``'Tool execution timed out: get_conversation'`` as the tool message — and
+settled the round with NO terminal verdict. The wire ``tool_complete``
+carried no ``status``, so the client reducer promoted the round to
+``'done'`` and the chat timeline rendered a perfectly successful tool card
+(token badge and all); the failure was visible only in the raw debug panel.
+Owner verdict: "后端执行失败了,前端却显示的好像成功了——这里有显示逻辑 bug".
+
+ROOT CAUSE
+----------
+``tool_results[tc_id] = (content, is_search)`` encodes failure ONLY in the
+content string; the second tuple slot is ``is_search``, not a success flag.
+The rejected/aborted lanes learned to ship a terminal verdict with the settle
+(pt_ac380e3d), but the FAILURE lanes (raise / pool-timeout / abort-during-
+pool / unknown-tool fallback) never did.
+
+THE FIX
+-------
+A per-round verdict map ``tool_verdicts[tc_id] -> 'error' | 'aborted'`` is
+populated at every failure lane, and the post-phase settle passes it as
+``terminal_status`` — stamped on the round AND shipped on the wire, where the
+reducer's terminal-verdict contract (pinned by
+tests/test_tool_settle_all_lanes.py::test_client_never_overwrites_a_terminal_verdict)
+keeps it from ever being promoted to 'done'.
+
+This suite pins the BACKEND half: every failure lane must stamp + ship the
+verdict, and the success hot path must stay silent (no status key at all).
+
+Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest \
+        tests/test_tool_exec_failure_verdict.py -v
+"""
+
+from __future__ import annotations
+
+import inspect
+import os
+import re
+import threading
+import time
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Harness — REAL pipeline + real round constructor, scripted executor.
+#  Mirrors tests/test_tool_settle_all_lanes.py (kept self-contained per
+#  repo convention: each suite carries its own harness).
+# ═══════════════════════════════════════════════════════════════════
+
+def _mk_task(**over):
+    t = {
+        'id': 'verdict-task-1',
+        'convId': 'cv-verdict-1',
+        'status': 'running',
+        'aborted': False,
+        'model': 'test-model',
+        'events': [],
+        'events_lock': threading.Lock(),
+        '_dispatch_heartbeat': 0.0,
+        '_t_last_event': 0.0,
+        '_attended': False,
+    }
+    t.update(over)
+    return t
+
+
+def _mk_tc(tc_id: str, fn_name: str, seq: int, *, args=None):
+    """Build a parsed_tcs 7-tuple through the REAL round constructor."""
+    from lib.tasks_pkg.tool_display import _build_tool_round_entry
+    _n, round_entry, _ev = _build_tool_round_entry(
+        fn_name, args or {}, tc_id, '{}', seq, False)
+    tc = {'id': tc_id, 'type': 'function',
+          'function': {'name': fn_name, 'arguments': '{}'}}
+    return (tc, fn_name, tc_id, dict(args or {}), round_entry['roundNum'],
+            round_entry, None)
+
+
+class _Recorder:
+    def __init__(self):
+        self.events: list[dict] = []
+        self._lock = threading.Lock()
+
+    def __call__(self, task, event):
+        with self._lock:
+            self.events.append(dict(event))
+
+    def find(self, tc_id: str, etype: str):
+        for e in self.events:
+            if e.get('toolCallId') == tc_id and e.get('type') == etype:
+                return e
+        return None
+
+
+@pytest.fixture()
+def rec(monkeypatch):
+    r = _Recorder()
+    from lib.tasks_pkg import tool_dispatch as facade
+    from lib.tasks_pkg.executor import _finalize as exec_finalize
+    from lib.tasks_pkg.tool_dispatch import _pipeline
+    monkeypatch.setattr(_pipeline, 'append_event', r, raising=False)
+    monkeypatch.setattr(facade, 'append_event', r, raising=False)
+    monkeypatch.setattr(exec_finalize, 'append_event', r, raising=False)
+    return r
+
+
+@pytest.fixture()
+def scripted_tools(monkeypatch):
+    """Scripted executor: {fn_name: ('ok', sleep_s, text) | ('raise', exc)
+    | ('abort_flip', sleep_s, text)}."""
+    script: dict[str, tuple] = {}
+
+    def _fake(task, tc, fn_name, tc_id, fn_args, rn, round_entry,
+              cfg, project_path, project_enabled, all_tools=None):
+        spec = script.get(fn_name, ('ok', 0.0, 'ok'))
+        mode = spec[0]
+        if mode == 'raise':
+            raise spec[1]
+        _sleep, text = spec[1], spec[2]
+        if _sleep:
+            time.sleep(_sleep)
+        if mode == 'abort_flip':
+            task['aborted'] = True
+        from lib.tasks_pkg.executor._finalize import _finalize_tool_round
+        _finalize_tool_round(
+            task, rn, round_entry,
+            [{'toolName': fn_name, 'title': fn_name, 'snippet': text[:60],
+              'source': 'Test', 'fetched': True, 'fetchedChars': len(text)}])
+        return tc_id, text, False
+
+    from lib.tasks_pkg.tool_dispatch import _heartbeat, _pipeline
+    monkeypatch.setattr(_heartbeat, '_execute_tool_one', _fake, raising=False)
+    monkeypatch.setattr(_pipeline, '_execute_tool_one', _fake, raising=False)
+    return script
+
+
+def _run(task, tcs, cfg=None, messages=None):
+    from lib.tasks_pkg.tool_dispatch import execute_tool_pipeline
+    messages = messages if messages is not None else []
+    timed_out = execute_tool_pipeline(
+        task, tcs, cfg=cfg or {'autoApply': True}, project_path=None,
+        project_enabled=False, tool_list=[], messages=messages,
+        all_search_results_text=[], round_num=0, model='test-model')
+    return messages, timed_out
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Face 1 — the reported incident: pool-timeout lane ships 'error'
+# ═══════════════════════════════════════════════════════════════════
+
+def test_timeout_lane_stamps_and_ships_error(rec, scripted_tools, monkeypatch):
+    """★ THE INCIDENT FACE. A tool cancelled by the pool ceiling must render
+    as FAILED — never as the clean 'done' card the owner screenshotted."""
+    monkeypatch.setenv('TOOL_PARALLEL_TIMEOUT', '1')
+    scripted_tools['get_conversation'] = ('ok', 2.5, 'SLOW BODY')
+    scripted_tools['grep_search'] = ('ok', 0.0, 'FAST BODY')
+
+    task = _mk_task()
+    slow = _mk_tc('tc-slow', 'get_conversation', 1)
+    fast = _mk_tc('tc-fast', 'grep_search', 2)
+    messages, timed_out = _run(task, [slow, fast])
+
+    assert timed_out is True, 'the pipeline must report the timeout upward'
+
+    # The verdict is STAMPED on the round (cold/poll lane ships rounds whole)
+    # and SHIPPED on the tool_complete wire event (live lane).
+    assert slow[5]['status'] == 'error', (
+        'a pool-timeout round must be stamped status=error; got %r — without '
+        'it the poll/cold lane renders the failure as a success card'
+        % (slow[5]['status'],))
+    ev = rec.find('tc-slow', 'tool_complete')
+    assert ev is not None, 'the timed-out tool must still settle (spinner off)'
+    assert ev.get('status') == 'error', (
+        "tool_complete for a timed-out tool must carry status='error'; "
+        'without it the client reducer promotes the round to done. Event: %r'
+        % (ev,))
+    assert 'timed out' in (ev.get('toolContent') or ''), (
+        'the failure reason must reach the card verbatim; got %r'
+        % (ev.get('toolContent'),))
+
+    # The model receives the failure string (never a fabricated success).
+    tool_msgs = [m for m in messages if m.get('role') == 'tool']
+    slow_msg = [m for m in tool_msgs if m.get('tool_call_id') == 'tc-slow']
+    assert slow_msg and slow_msg[0]['content'].startswith(
+        'Tool execution timed out:'), slow_msg
+
+    # The FAST sibling is untouched: settles done, and its wire frame stays
+    # SILENT (no status key at all — the hot path carries zero verdict noise).
+    assert fast[5]['status'] == 'done'
+    fast_ev = rec.find('tc-fast', 'tool_complete')
+    assert fast_ev is not None and 'status' not in fast_ev, (
+        'a successful tool_complete must NOT grow a status field — verdicts '
+        'are failure-only noise on the wire. Event: %r' % (fast_ev,))
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Face 2 — the raise lane ships 'error'
+# ═══════════════════════════════════════════════════════════════════
+
+def test_exception_lane_stamps_and_ships_error(rec, scripted_tools):
+    scripted_tools['fetch_url'] = ('raise', RuntimeError('boom'))
+    scripted_tools['grep_search'] = ('ok', 0.0, 'FAST BODY')
+
+    task = _mk_task()
+    bad = _mk_tc('tc-bad', 'fetch_url', 1)
+    fast = _mk_tc('tc-fast', 'grep_search', 2)
+    messages, timed_out = _run(task, [bad, fast])
+
+    assert timed_out is False
+    assert bad[5]['status'] == 'error', (
+        'a raised tool must be stamped status=error; got %r'
+        % (bad[5]['status'],))
+    ev = rec.find('tc-bad', 'tool_complete')
+    assert ev is not None and ev.get('status') == 'error', (
+        "tool_complete for a raised tool must carry status='error'. Event: %r"
+        % (ev,))
+    tool_msgs = [m for m in messages if m.get('role') == 'tool']
+    bad_msg = [m for m in tool_msgs if m.get('tool_call_id') == 'tc-bad']
+    assert bad_msg and bad_msg[0]['content'].startswith(
+        'Tool execution error:'), bad_msg
+
+    assert fast[5]['status'] == 'done'
+    assert 'status' not in rec.find('tc-fast', 'tool_complete')
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Face 3 — abort DURING the pool ships 'aborted' (same hole, other lane)
+# ═══════════════════════════════════════════════════════════════════
+
+def test_in_pool_abort_lane_ships_aborted(rec, scripted_tools):
+    """A sibling's completion flips task['aborted'] mid-pool; the remaining
+    pending futures are cancelled with 'Task aborted by user.' — a lane that
+    ALSO settled silently before this fix."""
+    scripted_tools['read_files'] = ('abort_flip', 0.0, 'FAST BODY')
+    scripted_tools['web_search'] = ('ok', 1.5, 'SLOW BODY')
+
+    task = _mk_task()
+    fast = _mk_tc('tc-fast', 'read_files', 1)
+    slow = _mk_tc('tc-slow', 'web_search', 2)
+    _run(task, [fast, slow])
+
+    assert slow[5]['status'] == 'aborted', (
+        'a pool-cancelled-by-abort round must be stamped aborted; got %r'
+        % (slow[5]['status'],))
+    ev = rec.find('tc-slow', 'tool_complete')
+    assert ev is not None and ev.get('status') == 'aborted', (
+        "tool_complete for an abort-cancelled tool must carry "
+        "status='aborted'. Event: %r" % (ev,))
+
+
+def test_pre_pool_abort_lane_ships_aborted(rec, scripted_tools):
+    """Abort flipped by a SERIAL WRITE tool (which runs before the pool) is
+    caught by the pre-pool abort check — the third failure lane."""
+    scripted_tools['write_file'] = ('abort_flip', 0.0, 'WROTE')
+    scripted_tools['read_files'] = ('ok', 0.0, 'READ')
+
+    task = _mk_task()
+    wr = _mk_tc('tc-wr', 'write_file', 1)
+    rd = _mk_tc('tc-rd', 'read_files', 2)
+    _run(task, [wr, rd])
+
+    assert wr[5]['status'] == 'done', (
+        'the serial write itself completed before flipping abort; got %r'
+        % (wr[5]['status'],))
+    assert rd[5]['status'] == 'aborted', (
+        'the parallel tool skipped by the pre-pool abort check must be '
+        'stamped aborted; got %r' % (rd[5]['status'],))
+    ev = rec.find('tc-rd', 'tool_complete')
+    assert ev is not None and ev.get('status') == 'aborted', (
+        "the pre-pool abort lane must ship status='aborted'. Event: %r"
+        % (ev,))
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Face 4 — enumerate, don't trust a hand-written list (drift guard)
+# ═══════════════════════════════════════════════════════════════════
+
+def test_every_failure_sentinel_has_a_verdict():
+    """Guard the guard: every ``tool_results[…] = (failure sentinel, …)``
+    write inside ``execute_tool_pipeline`` MUST be paired with a
+    ``tool_verdicts[…]`` write within the next couple of lines. A future lane
+    that records a failure string without a verdict fails this test — the
+    exact defect class of the incident, caught at review time instead of in
+    the owner's screenshot."""
+    from lib.tasks_pkg.tool_dispatch import _pipeline
+
+    src = inspect.getsource(_pipeline.execute_tool_pipeline)
+    lines = src.splitlines()
+    sentinel = re.compile(
+        r"tool_results\[.+\]\s*=\s*\(\s*(?:f?'Tool execution (?:error|timed out)"
+        r"|'Task aborted by user\.'|f?'Unknown tool:)")
+    # A failure sentinel reaches its verdict through ONE of two channels:
+    # the verdict map (lanes settled in the post-phase) or an immediate
+    # ``_settle_tool_result(… terminal_status=…)`` (early-settle lanes).
+    # Either satisfies the contract; neither is the incident.
+    missing = []
+    for i, ln in enumerate(lines):
+        if sentinel.search(ln):
+            window = '\n'.join(lines[i:i + 14])
+            if 'tool_verdicts[' not in window and 'terminal_status=' not in window:
+                missing.append((i + 1, ln.strip()))
+    assert not missing, (
+        'failure-sentinel writes without a paired verdict (map or immediate '
+        'terminal_status settle):\n  '
+        + '\n  '.join('L%d %s' % (n, s) for n, s in missing)
+        + '\nEvery failure lane must record a terminal verdict — that is the '
+          'whole fix. See suite docstring.')

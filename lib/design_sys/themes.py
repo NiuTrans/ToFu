@@ -22,8 +22,7 @@ Two consumers, one contract:
 from __future__ import annotations
 
 import os
-import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from lib.log import get_logger
 

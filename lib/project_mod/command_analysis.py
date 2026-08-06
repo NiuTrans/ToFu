@@ -533,56 +533,53 @@ def _split_pipeline(cmd):
     (a stream filter misread as a filesystem read), and the opener in
     ``( grep -rn x lib/ )`` masks the command word entirely (evasion).
     """
-    segments = []
-    current = []
+    return [cmd[s:e].strip() for s, e in _split_pipeline_spans(cmd)]
+
+
+def _split_pipeline_spans(cmd):
+    """Span-returning twin of :func:`_split_pipeline`: list of (start, end)
+    offsets into *cmd* for each non-empty segment (separators excluded,
+    surrounding whitespace included). The grep-redirect splicer rewrites
+    segments in place through these spans."""
+    spans = []
+    start = 0
     in_single = False
     in_double = False
     i = 0
     n = len(cmd)
     while i < n:
         c = cmd[i]
-        # Track quote state
         if c == "'" and not in_double:
             in_single = not in_single
-            current.append(c)
             i += 1
         elif c == '"' and not in_single:
             in_double = not in_double
-            current.append(c)
             i += 1
         elif c == '\\' and i + 1 < n and (in_double or not in_single):
-            # Escaped character — consume both
-            current.append(c)
-            current.append(cmd[i + 1])
             i += 2
         elif not in_single and not in_double:
-            # Check for ;, &&, ||, |, newline, ( ) (pipeline/chain separators)
             if c in ';\n()':
-                segments.append(''.join(current).strip())
-                current = []
+                spans.append((start, i))
                 i += 1
+                start = i
             elif c == '&' and i + 1 < n and cmd[i + 1] == '&':
-                segments.append(''.join(current).strip())
-                current = []
+                spans.append((start, i))
                 i += 2
+                start = i
             elif c == '|' and i + 1 < n and cmd[i + 1] == '|':
-                segments.append(''.join(current).strip())
-                current = []
+                spans.append((start, i))
                 i += 2
+                start = i
             elif c == '|':
-                segments.append(''.join(current).strip())
-                current = []
+                spans.append((start, i))
                 i += 1
+                start = i
             else:
-                current.append(c)
                 i += 1
         else:
-            current.append(c)
             i += 1
-    tail = ''.join(current).strip()
-    if tail:
-        segments.append(tail)
-    return segments
+    spans.append((start, n))
+    return [(s, e) for s, e in spans if cmd[s:e].strip()]
 
 
 # ── Commands whose file arguments are WRITE targets ──────────────────

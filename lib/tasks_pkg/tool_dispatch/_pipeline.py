@@ -80,7 +80,9 @@ def _settle_tool_result(
 
     ``terminal_status`` (pt_ac380e3d) carries a NON-SUCCESS verdict for the
     lanes where the tool never actually ran — ``rejected`` (hallucinated call,
-    pre-hook block, user pressed Reject) or ``aborted`` (user pressed Stop).
+    pre-hook block, user pressed Reject) or ``aborted`` (user pressed Stop) —
+    and, since 2026-08-06, ``error`` for the lanes where it ran but FAILED
+    (raised, or cancelled by the parallel-pool timeout ceiling).
     Settling those lanes promptly is the whole point of this extension, but a
     settle that reported success would be far worse than the latency it
     removes: a write the user REFUSED would render as applied. So the verdict is
@@ -352,6 +354,17 @@ def execute_tool_pipeline(
     if auto_apply is None:
         auto_apply = not _attended
     tool_results = {}  # tc_id → (tool_content, is_search)
+    # ★ Failure VERDICTS (2026-08-06 'silent timeout' incident, conv
+    #   msh9fzvo6gmuvh). A lane that failed the tool records ONLY an error
+    #   string in tool_results — the tuple's second slot is is_search, NOT a
+    #   success flag — so the post-phase settle shipped tool_complete with NO
+    #   status, and the client promoted the round to 'done': a get_conversation
+    #   that TIMED OUT rendered as a perfectly successful card, the failure
+    #   visible only in the raw debug panel. Every failure lane MUST record a
+    #   terminal verdict here ('error' / 'aborted'); the post-phase settle
+    #   passes it as terminal_status so it is stamped on the round AND shipped
+    #   on the wire, exactly like the rejected/aborted lanes (pt_ac380e3d).
+    tool_verdicts: dict[str, str] = {}  # tc_id → 'error' | 'aborted'
     _pipeline_timed_out = False
     # Per-task write/idempotent partitions (base UNION custom env flags).
     _write_tools, _idempotent_tools = _task_partitions(task)
@@ -783,6 +796,7 @@ def execute_tool_pipeline(
             logger.info('[Task %s] Skipping %d parallel tools — task aborted', tid, len(parallel_items))
             for tc, fn_name, tc_id, fn_args, rn, round_entry, _pe in parallel_items:
                 tool_results[tc_id] = ('Task aborted by user.', False)
+                tool_verdicts[tc_id] = 'aborted'
             parallel_items = []  # skip the pool entirely
 
     if parallel_items:
@@ -825,6 +839,7 @@ def execute_tool_pipeline(
                                 pending_fut.cancel()
                                 if pending_id not in tool_results:
                                     tool_results[pending_id] = ('Task aborted by user.', False)
+                                    tool_verdicts[pending_id] = 'aborted'
                         break
                     fut_tc_id, fut_fn_name = futures[fut]
                     try:
@@ -928,6 +943,7 @@ def execute_tool_pipeline(
                                 tid, task.get('convId', ''), fut_fn_name, fut_tc_id, round_num, model, exc_info=True)
 
                         tool_results[fut_tc_id] = (f'Tool execution error: {e}', False)
+                        tool_verdicts[fut_tc_id] = 'error'
             except TimeoutError:
                 _timed_out = True
                 _pipeline_timed_out = True
@@ -955,9 +971,15 @@ def execute_tool_pipeline(
                                     '[Task %s] conv=%s Tool %s (tc_id=%s) completed with error after timeout: %s',
                                     tid, task.get('convId', ''), fut_fn_name, fut_tc_id, e)
                                 tool_results[fut_tc_id] = (f'Tool execution error: {e}', False)
+                                tool_verdicts[fut_tc_id] = 'error'
                     else:
                         fut.cancel()
                         tool_results[fut_tc_id] = (f'Tool execution timed out: {fut_fn_name}', False)
+                        tool_verdicts[fut_tc_id] = 'error'
+                        # 'error', not 'aborted': the user did not stop this
+                        # tool — the pool ceiling did. The content sentinel
+                        # carries the 'timed out' wording onto the rendered
+                        # row's reason span.
         finally:
             # Stop the heartbeat ticker first so it can't emit after the round
             # settles (it checks round status, but stop the loop deterministically).
@@ -987,6 +1009,7 @@ def execute_tool_pipeline(
                 tid, task.get('convId', '') if task else '',
                 fn_name, tc_id, round_num)
             tool_content, is_search = (f'Unknown tool: {fn_name}', False)
+            tool_verdicts[tc_id] = 'error'
         if is_search:
             all_search_results_text.append(tool_content)
 
@@ -1038,7 +1061,8 @@ def execute_tool_pipeline(
             tool_content = _settle_tool_result(
                 task, fn_name, tc_id, fn_args, rn, round_entry, tool_content,
                 idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
-                round_num=round_num)
+                round_num=round_num,
+                terminal_status=tool_verdicts.get(tc_id))
 
             # Collect for aggregate budget check
             _round_results_for_budget.append((tc_id, tool_content, fn_name))

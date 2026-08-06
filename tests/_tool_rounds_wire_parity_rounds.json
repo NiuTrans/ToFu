@@ -710,5 +710,14 @@
   "query": "Type into current tab: 搜索",
   "results": [],
   "roundNum": 47
+ },
+ {
+  "_name": "error-failed-tool",
+  "status": "error",
+  "toolName": "get_conversation",
+  "query": "Open conversation msebjymx",
+  "toolContent": "Tool execution timed out: get_conversation",
+  "results": [],
+  "roundNum": 48
  }
 ]

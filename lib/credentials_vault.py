@@ -37,6 +37,17 @@ Public API
   delete_entry(name)                → bool
   list_entries()                    → list[dict]     (metadata only)
   bootstrap_from_legacy(secrets_dir) → list[str]     (names imported)
+
+Model-facing seam (the agent must be able to DISCOVER and USE stored
+credentials without ever seeing them):
+
+  exec_env_overlay()   → {ENV_VAR: plaintext} for run_command subprocess
+                         injection — the model references ``$GITHUB_TOKEN``
+                         in a command, the value rides the child env only
+  build_vault_index()  → the ``<credential_vault>`` system-prompt block
+                         (NAMES + env vars + notes ONLY — never values),
+                         spliced by system_context/_inject.py so the model
+                         always knows which credentials exist
 """
 
 from __future__ import annotations
@@ -61,6 +72,9 @@ __all__ = [
     'list_entries',
     'bootstrap_from_legacy',
     'normalize_name',
+    'env_var_name',
+    'exec_env_overlay',
+    'build_vault_index',
 ]
 
 # config_path() returns str; the vault uses Path methods (.exists etc.), and
@@ -259,6 +273,104 @@ def list_entries() -> list[dict]:
     with _lock:
         entries = _read_store()['entries']
         return [_meta(n, r) for n, r in sorted(entries.items())]
+
+
+# ── Model-facing seam: discovery index + subprocess env overlay ──────────
+# The agent must be able to DISCOVER which credentials exist and USE them
+# in run_command shells — without a value ever entering the prompt, chat,
+# or logs. Two channels, both derived from the one store:
+#   • build_vault_index() — the <credential_vault> system-prompt block:
+#     NAMES + env vars + notes ONLY (byte-stable, sorted, cache-safe).
+#   • exec_env_overlay()  — {ENV_VAR: plaintext} merged into the run_command
+#     child env, so `curl -H "Authorization: Bearer $GITHUB_TOKEN"` works
+#     while the value never crosses the conversation.
+# Skill-scoped entries (``skill.*``) are owned by lib.skills.env and are
+# excluded from both channels (its overlay maps them with exact env names).
+
+_ENV_VAR_SANITIZE_RE = re.compile(r'[^A-Z0-9]+')
+_WS_RE = re.compile(r'\s+')
+SKILL_ENTRY_PREFIX = 'skill.'
+
+
+def env_var_name(entry: str) -> str:
+    """Map a vault entry name to its subprocess environment variable
+    (``github_token`` → ``GITHUB_TOKEN``, ``npm-token`` → ``NPM_TOKEN``)."""
+    return _ENV_VAR_SANITIZE_RE.sub('_', str(entry or '').upper()).strip('_')
+
+
+def exec_env_overlay() -> dict[str, str]:
+    """Plaintext values of every GENERAL (non-skill) entry, keyed by env var.
+
+    Never raises — env resolution sits on the subprocess hot path, so any
+    vault trouble (corrupt key, unreadable store) degrades to ``{}`` and the
+    vault's own error log carries the cause. The returned dict is a secret
+    bag: callers merge it into a child env and must NEVER log it.
+    """
+    try:
+        overlay: dict[str, str] = {}
+        for meta in list_entries():
+            name = meta.get('name') or ''
+            if name.startswith(SKILL_ENTRY_PREFIX):
+                continue
+            var = env_var_name(name)
+            if not var:
+                continue
+            if var in overlay:
+                logger.warning('[Vault] env var collision on %s — entry %s '
+                               'skipped (rename one entry)', var, name)
+                continue
+            value = get_entry(name)
+            if value is not None:
+                overlay[var] = value
+        return overlay
+    except Exception as e:
+        logger.warning('[Vault] exec env overlay failed: %s', e)
+        return {}
+
+
+def build_vault_index() -> str:
+    """The ``<credential_vault>`` system-prompt block — the model's discovery
+    seam. NAMES + env vars + notes ONLY; values and hints never ride the
+    prompt. Byte-stable for a fixed entry set (sorted by name, whitespace
+    collapsed) so prompt caching survives; changes only on user-driven CRUD.
+    ``''`` when the vault holds no general entries (or on failure) — the
+    caller then splices nothing."""
+    try:
+        rows = [m for m in list_entries()
+                if not (m.get('name') or '').startswith(SKILL_ENTRY_PREFIX)]
+    except Exception as e:
+        logger.warning('[Vault] index build failed: %s', e)
+        return ''
+    if not rows:
+        return ''
+    lines = [
+        '<credential_vault>',
+        'The user stores machine credentials (API tokens, PATs, …) in an '
+        'encrypted vault on this server. The entries below exist — NAMES '
+        'ONLY; the values are never shown to you. Every value is injected '
+        'into the environment of each run_command shell as the variable '
+        'named after `→`, so use it by REFERENCE (e.g. '
+        '`curl -H "Authorization: Bearer $VAR" …`; tools like `gh`, `pip`, '
+        '`twine` read their standard variables natively).',
+        '',
+    ]
+    for m in rows:
+        name = m.get('name') or ''
+        note = _WS_RE.sub(' ', str(m.get('note') or '')).strip()
+        line = f'- {name} → ${env_var_name(name)}'
+        if note:
+            line += f' ({note})'
+        lines.append(line)
+    lines += [
+        '',
+        'NEVER print, echo, copy, or write a credential value into chat, '
+        'files, command output, or logs — if a command would expose one '
+        '(e.g. `echo $VAR`, `env`, `printenv`), do not run it. If a '
+        'credential you need is missing, tell the user to add it in '
+        'Settings → Advanced → 凭证保管库.',
+        '</credential_vault>',
+    ]
+    return '\n'.join(lines)
 
 
 def bootstrap_from_legacy(secrets_dir: Path) -> list[str]:

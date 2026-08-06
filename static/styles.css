@@ -9800,6 +9800,24 @@ html:not([data-theme="tofu"]) .scene-switch-btn{display:none}
   border: 1px solid rgba(245, 158, 11, 0.22);
 }
 
+/* ── Failed tool round — the tool RAN but never produced a result (raised,
+      or cancelled by the parallel-pool timeout ceiling); backend stamps
+      status='error'. Warm red tint (vs. the amber 'interrupted') so a failure
+      reads differently from a user Stop at a glance. ── */
+.ptool-error {
+  background: rgba(220, 38, 38, 0.05);
+  border-color: rgba(220, 38, 38, 0.18);
+}
+.ptool-error-reason {
+  color: var(--error-text, #f87171);
+  font-size: 11px;
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
 /* ═══════════════════════════════════════════
    ★ Scanning live-progress animation
    ═══════════════════════════════════════════ */
@@ -23191,6 +23209,8 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .stg-face-chip.refused{
   font-size:11px;
   line-height:1.5;
 }
+.stg-face-warn-ic{ margin-right:3px; }
+.stg-face-warn-ic svg{ vertical-align:-0.15em; }
 [data-theme="dark"] .stg-face-warn,
 html:not([data-theme="light"]):not([data-theme="tofu"]) .stg-face-warn{
   background:rgba(251,191,36,0.10);

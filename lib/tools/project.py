@@ -364,7 +364,17 @@ PROJECT_TOOL_RUN_COMMAND = {
             "  • Editing files → use **apply_diff / insert_content / write_file**\n"
             "Reaching for `cat` / `grep` / `find` / `sed` / `awk` is almost always a smell — there is a dedicated tool that's faster, safer, and easier for the user to review.\n"
             "**Pipelines do NOT excuse this** — `grep -rn 'foo' lib/ | head -20` is the WORST case: on a FUSE-mounted or large tree, the recursive `grep -rn` walks every untracked dir (caches, .project_sessions, vendor) and can take >120s, while `grep_search(pattern='foo', path='lib', max_results=20)` finishes in <1s. Use grep_search and pass `max_results` instead of piping to `head`.\n\n"
-            "**Enforced:** `grep`/`egrep`/`fgrep` with file/dir operands (or `-r`) is REFUSED by a guard — the error shows the exact grep_search translation. Grepping another command's STREAM stays allowed (`make 2>&1 | grep error`, `ps aux | grep python`)."
+            "**Enforced:** a `grep`/`egrep`/`fgrep` reading the filesystem "
+            "(file/dir operands or `-r`) is executed TRANSPARENTLY by an "
+            "in-process GNU-compatible engine (FUSE-safe, junk-dir aware) and "
+            "the pipeline continues from its real output — you get GNU-format "
+            "results without wedging on the network filesystem. Only shapes "
+            "that cannot be translated honestly (e.g. `-P`, command "
+            "substitution in arguments, or a target written by an earlier "
+            "part of the same command) are refused, with the reason and the "
+            "grep_search translation. Grepping another command's STREAM was "
+            "never intercepted (`make 2>&1 | grep error`, `ps aux | grep "
+            "python`)."
         ),
         "parameters": {
             "type": "object",

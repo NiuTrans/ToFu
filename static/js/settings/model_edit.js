@@ -105,48 +105,144 @@ function _editModel(provIdx, modelIdx) {
   var _ovrIn = (m.pricing && m.pricing.input != null) ? m.pricing.input : '';
   var _ovrOut = (m.pricing && m.pricing.output != null) ? m.pricing.output : '';
   var _hasOvr = (_ovrIn !== '' && _ovrOut !== '');
-  /* Layout contract (redesign 2026-08-01): the Model ID is the identity of
-   * the whole form — it gets the full first row in monospace (a truncated,
-   * half-width input is how "claude-opus" used to hide the real id). The
-   * four numeric fields sit in a UNIFORM 2-column grid below it, so the
-   * price section is aligned instead of the old 1fr/auto/auto jumble. */
+
+  /* ── Sectioned layout (redesign 2026-08-06) ──
+   * The old flat wall of fields read as one undifferentiated list — the
+   * owner's "no UI/UX soul" complaint. Sections give the eye a rhythm:
+   * identity → wire → limits/pricing → capabilities → aliases → footer.
+   * Every load-bearing hook (class names, save selectors, the 5-field
+   * stg-edit-grid contract) is preserved — only the chrome around it grew. */
   var html = '<div class="stg-edit-form" data-prov="' + provIdx + '" data-model="' + modelIdx + '">';
-  html += '<div class="stg-edit-grid">' +
-    '<div class="stg-field stg-field-wide"><label>' + escapeHtml(t('settings.meModelId')) + '</label>' +
-      '<input type="text" class="stg-edit-mid" value="' + escapeHtml(m.model_id || '') + '" placeholder="' + escapeHtml(t('settings.meModelIdPlaceholder')) + '" spellcheck="false" autocomplete="off" oninput="_onModelIdDraftInput(this)"></div>' +
-    '<div class="stg-field"><label>' + escapeHtml(t('settings.meRpm')) + '</label>' +
-      '<input type="number" class="stg-edit-rpm" value="' + (m.rpm || 30) + '" min="1"></div>' +
-    '<div class="stg-field"><label>' + escapeHtml(t('settings.meCost')) + ' <span class="stg-hint">' + escapeHtml(t('settings.meCostHint')) + '</span>' +
-      '<span class="stg-hint stg-edit-cost-derived" style="display:' + (_hasOvr ? '' : 'none') + '">' + escapeHtml(t('settings.meCostDerived')) + '</span></label>' +
-      '<input type="number" class="stg-edit-cost" value="' + (m.cost || 0.01) + '" step="0.001" min="0"' + (_hasOvr ? ' readonly' : '') + '></div>' +
-    '<div class="stg-field"><label>' + escapeHtml(t('settings.meInputPrice')) + ' <span class="stg-hint">' + escapeHtml(t('settings.mePriceHint')) + '</span></label>' +
-      '<input type="number" class="stg-edit-pin" value="' + _ovrIn + '" step="0.01" min="0" placeholder="' + (_eff.input != null ? _eff.input : '—') + '" oninput="_onModelPriceInput(this)"></div>' +
-    '<div class="stg-field"><label>' + escapeHtml(t('settings.meOutputPrice')) + ' <span class="stg-hint">' + escapeHtml(t('settings.mePriceHint')) + '</span></label>' +
-      '<input type="number" class="stg-edit-pout" value="' + _ovrOut + '" step="0.01" min="0" placeholder="' + (_eff.output != null ? _eff.output : '—') + '" oninput="_onModelPriceInput(this)"></div>' +
+
+  /* §1 身份 — the Model ID is the identity of the whole form: full-width
+   * monospace, the one field a truncated render must never hide. */
+  html += '<div class="stg-edit-sec">' +
+    '<div class="stg-edit-sec-label">' + escapeHtml(t('settings.meSecIdentity')) + '</div>' +
+    '<div class="stg-edit-grid">' +
+      '<div class="stg-field stg-field-wide"><label>' + escapeHtml(t('settings.meModelId')) + '</label>' +
+        '<input type="text" class="stg-edit-mid" value="' + escapeHtml(m.model_id || '') + '" placeholder="' + escapeHtml(t('settings.meModelIdPlaceholder')) + '" spellcheck="false" autocomplete="off" oninput="_onModelIdDraftInput(this)"></div>' +
+    '</div>' +
   '</div>';
 
-  html += '<div class="stg-field"><label>' + escapeHtml(t('settings.meCapabilities')) + '</label><div class="stg-cap-toggles">';
+  /* §2 协议线 — THE section the owner asked for: which wire protocol this
+   * model actually speaks. Always rendered now (was: only when >1 face).
+   * The verdict line + pin warning are built ONCE here, not per branch —
+   * the redesign suite's N1 neuter rewrites the _faceAutoNoteHTML call
+   * site, and two copies would leave one branch rendering a verdict the
+   * neuter already removed. */
+  if (typeof _faceNamesFor === 'function') {
+    var _names = _faceNamesFor(provIdx);
+    var _cur = (m.face || '');
+    /* Protocol of each face, for pin-option labels. 'default' reads the
+     * provider's own protocol; a named face reads faces[name].protocol.
+     * The stored value is shown verbatim when this build doesn't know it
+     * (same preserve-unknown rule as _renderFaceRow). */
+    var _faceProto = function (nm) {
+      if (nm === 'default') return p.protocol || 'openai';
+      var f = (p.faces && p.faces[nm]) || {};
+      return f.protocol || 'openai';
+    };
+    var _noteHtml = '<div class="stg-face-auto-note"' + (_cur ? ' style="display:none"' : '') + '>' +
+        _faceAutoNoteHTML(provIdx, m) + '</div>';
+    var _warnIco = (typeof Icon === 'function') ? Icon('alertTriangle', 12) : '';
+    var _warnHtml = '<div class="stg-face-warn"' + (_cur ? '' : ' style="display:none"') + '>' +
+        '<span class="stg-face-warn-ic">' + _warnIco + '</span>' +
+        escapeHtml(t('settings.meFacePinWarn')) + '</div>';
+    html += '<div class="stg-edit-sec">' +
+      '<div class="stg-edit-sec-label">' + escapeHtml(t('settings.meSecWire')) + '</div>';
+    if (_names.length <= 1) {
+      /* Single-face provider: a face pin is a non-choice (only the default
+       * face exists), so the section leads with what the owner asked for —
+       * the wire protocol itself, editable at provider level without
+       * hunting the provider card. Unknown stored values are appended as
+       * options, never silently rewritten. The verdict line under it shows
+       * the resolved endpoint and surfaces a refusal with its reason. */
+      var _provProto = p.protocol || 'openai';
+      var _pOpts = ['openai', 'anthropic', 'responses'];
+      if (_provProto && _pOpts.indexOf(_provProto) < 0) _pOpts.push(_provProto);
+      html += '<div class="stg-field"><label>' + escapeHtml(t('settings.meProvProto')) +
+          ' <span class="stg-hint">' + escapeHtml(t('settings.meProvProtoHint')) + '</span></label>' +
+          '<select class="stg-edit-proto" onchange="_onModelProtoChange(' + provIdx + ', this)">';
+      for (var _poi = 0; _poi < _pOpts.length; _poi++) {
+        html += '<option value="' + _pOpts[_poi] + '"' +
+          (_provProto === _pOpts[_poi] ? ' selected' : '') + '>' + _pOpts[_poi] + '</option>';
+      }
+      html += '</select></div>' + _noteHtml;
+    } else {
+      /* Multi-face: pin a specific wire face; options name the protocol so
+       * the choice is never a blind name. Auto stays the recommended default. */
+      html += '<div class="stg-field"><label>' + escapeHtml(t('settings.meFace')) +
+        ' <span class="stg-hint">' + escapeHtml(t('settings.meFaceHint')) + '</span></label>' +
+        '<select class="stg-edit-face" onchange="_onFacePinChange(this)">' +
+        '<option value=""' + (_cur === '' ? ' selected' : '') + '>' +
+          escapeHtml(t('settings.meFaceAuto')) + '</option>';
+      for (var fi2 = 0; fi2 < _names.length; fi2++) {
+        var _lbl2 = (_names[fi2] === 'default')
+          ? t('settings.meFaceDefaultFace') : _names[fi2];
+        html += '<option value="' + escapeHtml(_names[fi2]) + '"' +
+          (_cur === _names[fi2] ? ' selected' : '') + '>' +
+          escapeHtml(_lbl2) + ' — ' + escapeHtml(_faceProto(_names[fi2])) + '</option>';
+      }
+      html += '</select>' + _noteHtml + _warnHtml + '</div>';
+    }
+    html += '</div>';
+    /* Cache miss on a fresh form: ask the backend, the note patches itself
+     * when the resolution lands. Both branches show the note, so both
+     * need the kick. */
+    if (!_cur && m.model_id &&
+        typeof _faceResolutionFor === 'function' &&
+        !_faceResolutionFor(provIdx, m.model_id) &&
+        typeof _refreshFaceResolutions === 'function') {
+      _refreshFaceResolutions(provIdx);
+    }
+  }
+
+  /* §3 配额与定价 — RPM / cost / input / output as a uniform 2×2. The
+   * redesign suite counts .stg-edit-grid > .stg-field across BOTH grids:
+   * §1's wide Model ID + these four = exactly 5, only the first wide. */
+  html += '<div class="stg-edit-sec">' +
+    '<div class="stg-edit-sec-label">' + escapeHtml(t('settings.meSecQuota')) + '</div>' +
+    '<div class="stg-edit-grid">' +
+      '<div class="stg-field"><label>' + escapeHtml(t('settings.meRpm')) + '</label>' +
+        '<input type="number" class="stg-edit-rpm" value="' + (m.rpm || 30) + '" min="1"></div>' +
+      '<div class="stg-field"><label>' + escapeHtml(t('settings.meCost')) + ' <span class="stg-hint">' + escapeHtml(t('settings.meCostHint')) + '</span>' +
+        '<span class="stg-hint stg-edit-cost-derived" style="display:' + (_hasOvr ? '' : 'none') + '">' + escapeHtml(t('settings.meCostDerived')) + '</span></label>' +
+        '<input type="number" class="stg-edit-cost" value="' + (m.cost || 0.01) + '" step="0.001" min="0"' + (_hasOvr ? ' readonly' : '') + '></div>' +
+      '<div class="stg-field"><label>' + escapeHtml(t('settings.meInputPrice')) + ' <span class="stg-hint">' + escapeHtml(t('settings.mePriceHint')) + '</span></label>' +
+        '<input type="number" class="stg-edit-pin" value="' + _ovrIn + '" step="0.01" min="0" placeholder="' + (_eff.input != null ? _eff.input : '—') + '" oninput="_onModelPriceInput(this)"></div>' +
+      '<div class="stg-field"><label>' + escapeHtml(t('settings.meOutputPrice')) + ' <span class="stg-hint">' + escapeHtml(t('settings.mePriceHint')) + '</span></label>' +
+        '<input type="number" class="stg-edit-pout" value="' + _ovrOut + '" step="0.01" min="0" placeholder="' + (_eff.output != null ? _eff.output : '—') + '" oninput="_onModelPriceInput(this)"></div>' +
+    '</div>' +
+  '</div>';
+
+  /* §4 能力 — one toggle per capability; active = gold. Icons from the
+   * central SVG registry (§3.4), never emoji; the typeof guard keeps the
+   * jsdom harness (which never loads icons.js) on the plain-text path. */
+  var _capIcons = { text: 'messageSquare', vision: 'eye', video: 'play',
+    thinking: 'brain', cheap: 'zap', image_gen: 'image', embedding: 'package',
+    transcription: 'languages', audio_chat: 'messageCircle' };
+  html += '<div class="stg-edit-sec">' +
+    '<div class="stg-edit-sec-label">' + escapeHtml(t('settings.meCapabilities')) + '</div>' +
+    '<div class="stg-cap-toggles">';
   for (var ci = 0; ci < allCaps.length; ci++) {
     var cap = allCaps[ci];
     var active = (m.capabilities || []).indexOf(cap) >= 0;
-    html += '<button type="button" class="stg-cap-btn' + (active ? ' active' : '') + '" data-cap="' + cap + '" onclick="this.classList.toggle(\'active\')">' + cap + '</button>';
+    var _ico = (typeof Icon === 'function' && _capIcons[cap]) ? Icon(_capIcons[cap], 11) : '';
+    html += '<button type="button" class="stg-cap-btn' + (active ? ' active' : '') + '" data-cap="' + cap + '" onclick="this.classList.toggle(\'active\')">' +
+      (_ico ? '<span class="stg-cap-ico">' + _ico + '</span>' : '') + cap + '</button>';
   }
   html += '</div></div>';
 
-  /* Wire pool / aliases as a TAG EDITOR (redesign 2026-08-01). The old
-   * comma-separated text input made a typo silently MERGE two ids into one
-   * garbage id ("aws.opus,vertex.opus" typed without the space was fine,
-   * but "aws.opus vertex.opus" became one unroutable name). Chips make one
-   * id = one visual unit: Enter commits, × removes, pasted commas still
-   * split as a convenience — but commas are never the storage format. */
+  /* §5 别名 / 请求名池 — tag editor (one id = one chip). */
   var _field = _poolField(m);
   var _isPool = (_field === 'request_ids');
   var _poolVals = m[_field] || [];
-  html += '<div class="stg-field"><label>' +
-    escapeHtml(t(_isPool ? 'settings.meRequestIds' : 'settings.meAliases')) +
-    ' <span class="stg-hint">' +
-    escapeHtml(t(_isPool ? 'settings.meRequestIdsHint' : 'settings.meAliasesHint')) +
-    '</span></label>' +
+  html += '<div class="stg-edit-sec">' +
+    '<div class="stg-edit-sec-label">' +
+      escapeHtml(t(_isPool ? 'settings.meRequestIds' : 'settings.meAliases')) +
+      ' <span class="stg-hint">' +
+      escapeHtml(t(_isPool ? 'settings.meRequestIdsHint' : 'settings.meAliasesHint')) +
+      '</span></div>' +
     '<div class="stg-tag-editor" data-pool-field="' + _field + '">';
   for (var _ti = 0; _ti < _poolVals.length; _ti++) {
     html += _poolTagChipHTML(_poolVals[_ti]);
@@ -159,55 +255,15 @@ function _editModel(provIdx, modelIdx) {
     ' onblur="_poolTagCommit(this)">' +
   '</div></div>';
 
-  html += '<div class="stg-toggle-row"><span>' + escapeHtml(t('settings.meThinkingDefault')) + '</span>' +
-    '<label class="stg-toggle"><input type="checkbox" class="stg-edit-think"' + (m.thinking_default ? ' checked' : '') + '>' +
-    '<span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span></label></div>';
-
-  /* ── Wire-face pin ──
-   * '' (auto) lets the backend family rule decide — that is what keeps a
-   * future opus-6 correct the day it is added, so it stays the default.
-   * A pin is the escape hatch AND the only way to force a Claude model
-   * onto a non-Anthropic wire, which drops thinking-block signatures; the
-   * warning under the select says so rather than leaving it to the log.
-   * Options come from _faceNamesFor (backend-derived), never hand-listed. */
-  if (typeof _faceNamesFor === 'function') {
-    var _names = _faceNamesFor(provIdx);
-    if (_names.length > 1) {
-      var _cur = (m.face || '');
-      html += '<div class="stg-field"><label>' + escapeHtml(t('settings.meFace')) +
-        ' <span class="stg-hint">' + escapeHtml(t('settings.meFaceHint')) + '</span></label>' +
-        '<select class="stg-edit-face" onchange="_onFacePinChange(this)">' +
-        '<option value=""' + (_cur === '' ? ' selected' : '') + '>' +
-          escapeHtml(t('settings.meFaceAuto')) + '</option>';
-      for (var fi = 0; fi < _names.length; fi++) {
-        html += '<option value="' + escapeHtml(_names[fi]) + '"' +
-          (_cur === _names[fi] ? ' selected' : '') + '>' + escapeHtml(_names[fi]) + '</option>';
-      }
-      html += '</select>' +
-        /* The auto-verdict line: with the pin on 'automatic' the user must
-         * still see WHICH face the family rule actually picked — the whole
-         * point of automatic is trust, and trust needs the answer visible.
-         * Rendered from the resolution cache; _repaintFaceAutoNote patches
-         * it in place when a cold cache lands (never a guess). */
-        '<div class="stg-face-auto-note"' + (_cur ? ' style="display:none"' : '') + '>' +
-          _faceAutoNoteHTML(provIdx, m) + '</div>' +
-        '<div class="stg-face-warn"' + (_cur ? '' : ' style="display:none"') + '>' +
-        escapeHtml(t('settings.meFacePinWarn')) + '</div></div>';
-      /* Cache miss on a fresh form: ask the backend, the note patches
-       * itself when the resolution lands. Guarded so a single-face card
-       * (no select rendered) never triggers a redundant round-trip. */
-      if (!_cur && m.model_id &&
-          typeof _faceResolutionFor === 'function' &&
-          !_faceResolutionFor(provIdx, m.model_id) &&
-          typeof _refreshFaceResolutions === 'function') {
-        _refreshFaceResolutions(provIdx);
-      }
-    }
-  }
-
-  html += '<div class="stg-edit-actions">' +
-    '<button class="stg-btn-secondary" onclick="this.closest(\'.stg-edit-form\').remove()">' + escapeHtml(t('settings.cancel')) + '</button>' +
-    '<button class="stg-btn-primary" onclick="_saveModelEdit(' + provIdx + ',' + modelIdx + ')">' + escapeHtml(t('settings.apply')) + '</button>' +
+  /* Footer: thinking default + actions. */
+  html += '<div class="stg-edit-foot">' +
+    '<div class="stg-toggle-row"><span>' + escapeHtml(t('settings.meThinkingDefault')) + '</span>' +
+      '<label class="stg-toggle"><input type="checkbox" class="stg-edit-think"' + (m.thinking_default ? ' checked' : '') + '>' +
+      '<span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span></label></div>' +
+    '<div class="stg-edit-actions">' +
+      '<button class="stg-btn-secondary" onclick="this.closest(\'.stg-edit-form\').remove()">' + escapeHtml(t('settings.cancel')) + '</button>' +
+      '<button class="stg-btn-primary" onclick="_saveModelEdit(' + provIdx + ',' + modelIdx + ')">' + escapeHtml(t('settings.apply')) + '</button>' +
+    '</div>' +
   '</div>';
   html += '</div>';
 
@@ -253,6 +309,17 @@ function _onModelPriceInput(el) {
   }
   var hintEl = form.querySelector('.stg-edit-cost-derived');
   if (hintEl) hintEl.style.display = both ? '' : 'none';
+}
+
+/** Live: the provider-level wire protocol select (single-face branch).
+ *  Writes p.protocol directly (same seam as the provider card's own
+ *  select), then re-resolves faces so the card pill and the verdict note
+ *  follow. The whole form re-renders on save, so no label can go stale. */
+function _onModelProtoChange(provIdx, el) {
+  var p = _stgProviders[provIdx];
+  if (!p) return;
+  p.protocol = String(el.value || '').trim() || 'openai';
+  if (typeof _refreshFaceResolutions === 'function') _refreshFaceResolutions(provIdx);
 }
 
 /** Live: pinning a face away from 'auto' shows the signature-drop warning.
