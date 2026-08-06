@@ -64,20 +64,38 @@ def _isolate_store(monkeypatch, tmp_path):
 
 
 def _patch_models(monkeypatch, replies):
-    """Disable MT + result-cache; smart_chat returns successive `replies`.
-    state['i'] counts REAL LLM dispatches."""
+    """Disable MT + result-cache; the LLM seams return successive `replies`.
+    state['i'] counts REAL LLM dispatches.
+
+    BOTH dispatch paths are stubbed: the engine picks dispatch_stream when a
+    progress_cb is present and smart_chat otherwise, and on the CI runner the
+    pick differed from the dev box (smart_chat alone was stubbed → a REAL
+    401-burning dispatch ran for 31s — 4dcea38 3.12 leg). An offline suite
+    must make a live call IMPOSSIBLE, not merely unlikely."""
     monkeypatch.setattr('lib.mt_provider.is_mt_configured', lambda: False)
     monkeypatch.setattr(engine.translate_cache, 'get', lambda *a, **k: None)
     monkeypatch.setattr(engine.translate_cache, 'put', lambda *a, **k: None)
     state = {'i': 0}
 
-    def _fake_smart_chat(messages=None, **kw):
+    def _next():
         i = min(state['i'], len(replies) - 1)
         state['i'] += 1
-        return replies[i], {'finish_reason': 'stop',
-                            '_dispatch': {'model': f'm{i}', 'key': 'k1'}}
+        return replies[i]
+
+    def _fake_smart_chat(messages=None, **kw):
+        return _next(), {'finish_reason': 'stop',
+                         '_dispatch': {'model': 'm0', 'key': 'k1'}}
+
+    def _fake_dispatch_stream(messages, on_content=None, **kw):
+        reply = _next()
+        if on_content:
+            on_content(reply)
+        return ({'role': 'assistant', 'content': reply}, 'stop',
+                {'finish_reason': 'stop',
+                 '_dispatch': {'model': 'm0', 'key': 'k1'}})
 
     monkeypatch.setattr('lib.llm_dispatch.smart_chat', _fake_smart_chat)
+    monkeypatch.setattr('lib.llm_dispatch.dispatch_stream', _fake_dispatch_stream)
     return state
 
 
