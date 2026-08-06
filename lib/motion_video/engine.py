@@ -452,6 +452,81 @@ def _commit_scene_html(index_path: str, html: str, scene: dict,
     return html
 
 
+def _visual_qa_round(task: dict, sc: dict, scene_dir: str,
+                     index_path: str, html: str, *, width: int, height: int,
+                     duration: float, scene_index: int, total_scenes: int,
+                     theme=None) -> str:
+    """One screenshot → VLM-checklist → author-repair round for a scene.
+
+    Returns the html that should stand on disk afterwards (the repair when it
+    survived the no-regression commit, else the original). NEVER raises: QA
+    is an enhancement layer, and an outage here must not touch the film.
+
+    Skips (all logged, all silent to the film): template fallbacks (already
+    reported on the quality axis), missing playwright/Chromium, no
+    vision-capable slot, VLM dispatch failure, unparseable replies.
+    """
+    try:
+        from lib.motion_video._template import matches_template
+        if matches_template(html, sc, width=width, height=height,
+                            duration=duration, scene_index=scene_index,
+                            total_scenes=total_scenes, theme=theme):
+            return html
+        from lib.design_sys import visual_qa as vqa
+        avail = task.get('_visual_qa_available')
+        if avail is None:
+            avail = vqa.visual_qa_available()
+            task['_visual_qa_available'] = avail
+            if not avail[0]:
+                logger.info('[MotionVideo] visual QA skipped for the whole '
+                            'film: %s', avail[1])
+        if not avail[0]:
+            return html
+        from lib.motion_video._scene_author import author_scene, save_draft
+        shot_dir = os.path.join(scene_dir, '.tofu-draft')
+        os.makedirs(shot_dir, exist_ok=True)
+        shot = os.path.join(shot_dir, 'qa-frame.png')
+        vqa.screenshot_composition(scene_dir, shot, width=width,
+                                   height=height)
+        res = vqa.qa_frame(shot, theme=theme, label=sc.get('id'),
+                           subject='视频帧',
+                           model=task.get('qa_model') or '')
+        if not res.get('ok'):
+            _emit(task, {'type': 'scene_visual_qa', 'scene_id': sc.get('id'),
+                         'ran': False,
+                         'reason': res.get('reason') or res.get('skipped')})
+            return html
+        actionable = [f for f in res.get('findings') or []
+                      if f.get('severity') in ('blocker', 'major')]
+        _emit(task, {'type': 'scene_visual_qa', 'scene_id': sc.get('id'),
+                     'ran': True, 'findings': len(res.get('findings') or []),
+                     'actionable': len(actionable)})
+        if not actionable:
+            return html
+        logger.info('[MotionVideo] %s visual QA: %d actionable finding(s) — '
+                    'entering one author repair round',
+                    sc.get('id'), len(actionable))
+        save_draft(scene_dir, html)   # the repair resumes FROM this frame
+        repair = author_scene(
+            sc, scene_dir, width=width, height=height, duration=duration,
+            scene_index=scene_index, total_scenes=total_scenes,
+            max_rounds=2, token_budget=45000,
+            model=task.get('model') or None,
+            abort_event=task.get('abort_event'), theme=theme,
+            extra_findings=[vqa.findings_text(actionable)],
+            transient_attempts=1)
+        if repair.get('mode') != 'authored':
+            return html
+        return _commit_scene_html(index_path, repair['html'], sc, scene_dir,
+                                  width=width, height=height,
+                                  duration=duration, scene_index=scene_index,
+                                  total_scenes=total_scenes, theme=theme)
+    except Exception as e:
+        logger.warning('[MotionVideo] %s visual QA round failed (%s) — '
+                       'keeping the composition as-is', sc.get('id'), e)
+        return html
+
+
 def run_motion_task(task: dict) -> None:
     """Worker entry — drives the full pipeline for one motion task."""
     from lib import motion_video as mv
@@ -694,7 +769,16 @@ def run_motion_task(task: dict) -> None:
             html = _commit_scene_html(index_path, html, sc, scene_dir,
                                       width=width, height=height,
                                       duration=dur, scene_index=i,
-                                      total_scenes=total)
+                                      total_scenes=total, theme=theme)
+            # ── Visual QA round (design-system P2): a VLM looks at the
+            # settled frame with the designer checklist; actionable findings
+            # go back to the author for ONE repair round. Never blocks the
+            # film: unavailable infra / no vision model → silent skip.
+            if authoring and not _aborted(task):
+                html = _visual_qa_round(
+                    task, sc, scene_dir, index_path, html,
+                    width=width, height=height, duration=dur,
+                    scene_index=i, total_scenes=total, theme=theme)
             # ONE fill measurement per scene, shared by the gate verdict and
             # the persisted telemetry. Measuring twice would double the browser
             # boots AND allow the two to disagree about one composition.
@@ -719,7 +803,7 @@ def run_motion_task(task: dict) -> None:
             # would report one defect twice.
             scene_mode = ('template' if matches_template(
                 html, sc, width=width, height=height, duration=dur,
-                scene_index=i, total_scenes=total) else 'authored')
+                scene_index=i, total_scenes=total, theme=theme) else 'authored')
             try:
                 from lib.motion_video._quality import (asset_floor_findings,
                                                        scene_telemetry)

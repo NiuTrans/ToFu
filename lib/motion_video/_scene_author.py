@@ -697,6 +697,7 @@ def author_scene(scene: dict, scene_dir: str, *, width: int, height: int,
                  model: str | None = None,
                  abort_event=None,
                  theme=None,
+                 extra_findings: list | None = None,
                  transient_attempts: int = _TRANSIENT_ATTEMPTS) -> dict:
     """Author one scene's composition with a bounded agent loop.
 
@@ -749,7 +750,8 @@ def author_scene(scene: dict, scene_dir: str, *, width: int, height: int,
                 'html': render_scene_html(scene, width=width, height=height,
                                           duration=duration,
                                           scene_index=scene_index,
-                                          total_scenes=total_scenes)}
+                                          total_scenes=total_scenes,
+                                          theme=theme)}
 
     abort = (AbortSignal.from_event(abort_event) if abort_event is not None
              else AbortSignal.never())
@@ -759,7 +761,15 @@ def author_scene(scene: dict, scene_dir: str, *, width: int, height: int,
     # Resume from a draft left by an earlier attempt / an earlier process:
     # continuing a repair is strictly better than restarting from a blank page.
     resumed = load_draft(scene_dir, duration)
-    if resumed:
+    if resumed and extra_findings:
+        # A visual-QA repair call: the draft passes the PROGRAMMATIC gates
+        # (that is why it is on disk), so the zero-spend rescue below would
+        # adopt it in 0 rounds and the aesthetic findings would never reach
+        # a repair loop. Their presence must force the loop.
+        logger.info('[SceneAuthor] %s draft enters QA repair (%d aesthetic '
+                    'finding(s)) — skipping the zero-spend adoption',
+                    scene.get('id'), len(extra_findings))
+    elif resumed:
         logger.info('[SceneAuthor] %s resuming from a %d-char draft',
                     scene.get('id'), len(resumed))
         # ZERO-SPEND RESCUE. A draft only survives on disk because the previous
@@ -803,7 +813,8 @@ def author_scene(scene: dict, scene_dir: str, *, width: int, height: int,
             scene, scene_dir, width=width, height=height, duration=duration,
             scene_index=scene_index, total_scenes=total_scenes,
             max_rounds=max_rounds, token_budget=token_budget, model=model,
-            abort=abort, abort_event=abort_event, seed_html=resumed)
+            abort=abort, abort_event=abort_event, seed_html=resumed,
+            theme=theme, extra_findings=extra_findings)
         total_tokens += res['tokens']
 
         if res['outcome'] == 'authored':
@@ -854,7 +865,8 @@ def author_scene(scene: dict, scene_dir: str, *, width: int, height: int,
 def _author_once(scene: dict, scene_dir: str, *, width: int, height: int,
                  duration: float, scene_index: int, total_scenes: int,
                  max_rounds: int, token_budget: int, model: str | None,
-                 abort, abort_event, seed_html: str = '') -> dict:
+                 abort, abort_event, seed_html: str = '', theme=None,
+                 extra_findings: list | None = None) -> dict:
     """ONE attempt of the author loop.
 
     Returns ``{'outcome', 'html', 'rounds', 'tokens', 'detail'}`` where
@@ -931,16 +943,30 @@ def _author_once(scene: dict, scene_dir: str, *, width: int, height: int,
         # verdict, so the attempt continues the repair rather than restarting.
         pending = _full_gate(seed_html, scene_dir, abort_event=abort_event,
                              scene=scene, advisory=True)
+        qa_notes = [str(f) for f in (extra_findings or []) if str(f).strip()]
+        if qa_notes:
+            prompt += (
+                '\n## Visual design review (a senior designer looked at the '
+                'RENDERED frame and filed these — they are the point of this '
+                'round)\n'
+                + '\n'.join(f'- {e}' for e in qa_notes[:8]) + '\n')
         prompt += (
             '\n## Work in progress (resume this, do not start over)\n'
-            'A previous attempt was interrupted by an infrastructure fault. '
-            'Its composition is below. Continue from it: call '
-            'write_composition with an IMPROVED full document, then '
-            'composition_check.\n'
+            'A previous attempt produced the composition below. Improve it '
+            'from there: call write_composition with an IMPROVED full '
+            'document, then composition_check.\n'
             + ('Outstanding gate findings:\n'
                + '\n'.join(f'- {e}' for e in pending[:8]) + '\n'
-               if pending else 'It passed the static gate as written.\n')
+               if pending else 'It passes the programmatic gates as written '
+                               '— the design review above is what to fix.\n')
             + f'```html\n{seed_html[:20000]}\n```\n')
+    elif extra_findings:
+        prompt += (
+            '\n## Visual design review findings (fix these in your '
+            'composition)\n'
+            + '\n'.join(f'- {e}' for e in
+                        [str(f) for f in extra_findings if str(f).strip()][:8])
+            + '\n')
     messages = [{'role': 'user', 'content': prompt}]
 
     def _dispatch(rnd, tools):

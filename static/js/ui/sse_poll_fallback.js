@@ -31,6 +31,15 @@
  *   • 'offline' shows at most once per cooldown.
  * Pure display coalescing — the recovery LOGIC (health checks, poll resume,
  * offline-recovery polling) is untouched. */
+/* ★ Degraded-mode self-heal cadence (2026-08-06, epic pt_6cb1607e): while
+ * polling, re-probe the SSE lane this often. The surrender to poll was a
+ * verdict about the tunnel AT THAT MOMENT — tunnel flaps pass, and without a
+ * re-probe the conv would keep polling full snapshots for the rest of the
+ * turn even after the tunnel heals (measured: 8 surrenders today, each one
+ * permanent until this). window-overridable for the test harness. */
+const _SSE_REPROBE_INTERVAL_MS = (typeof window !== 'undefined' && window._SSE_REPROBE_INTERVAL_MS != null)
+  ? window._SSE_REPROBE_INTERVAL_MS : 30000;
+
 function _connToast(phase, icon, title, msg, dur) {
   if (typeof showToast !== 'function') return;
   const st = (window._connToastState = window._connToastState || { phase: 'ok', at: 0 });
@@ -70,6 +79,32 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
     const _startConv = conversations.find(c => c.id === convId);
     if (_startConv) _startConv._epPollTurnCount = 0;
   }
+  /* ★ Degraded-mode handoff (2026-08-06, epic pt_6cb1607e): the SSE lane is
+   * down BY DELIBERATION — the resume budget was spent against a flapping
+   * tunnel. The stall watch's "not even heartbeat frames arrived" premise
+   * only holds ON the SSE lane: heartbeat self-ticks are only ever emitted
+   * onto SSE, so once we surrender, the watch measures a silence that is
+   * STRUCTURAL, not a freeze — and 300s later it raises 「已停滞 · 疑似卡死」
+   * against a healthy, actively-polling turn (measured: every surrender
+   * fired the banner; the Stop affordance nearly killed a live 60-round
+   * task). Poll responses are the liveness proof now — clear the watch. If
+   * SSE later re-attaches (the re-probe below), the feed seam re-seeds it.
+   */
+  if (typeof stallWatchClear === 'function') {
+    try { stallWatchClear(taskId); }
+    catch (e) { console.debug('[_pollFallback] stallWatchClear failed: %s', e); }
+  }
+  /* Stamped at probe COMPLETION (not start) so a flap that kills probes
+   * instantly cannot spin the probe path back-to-back. */
+  let _lastSseReprobe = Date.now();
+  /* ★ Incremental-poll echo state (2026-08-06, epic pt_688f9783): the last
+   * `fp` the server sent, echoed verbatim as `ifp` on the next request.
+   * Sections whose fingerprint still matches come back as `<section>Same`
+   * omissions — the full snapshot (968KB measured on a 60-round task) stops
+   * riding every ~2s poll. Forced back to null (next pull FULL) whenever the
+   * merge target REBINDS to a different message object: the fp describes
+   * bytes only the OLD object is guaranteed to hold. */
+  let _pollFP = null;
   console.warn(`[_pollFallback] START — conv=${convId.slice(0,8)} taskId=${taskId.slice(0,8)} preExistingContent=${_preExistingContent}chars preExistingThinking=${_preExistingThinking}chars`);
   // Poll until the task finishes, the user aborts, or server is confirmed dead.
   let _pollIter = 0;
@@ -90,9 +125,48 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
       finishStream(convId);
       return;
     }
+    /* ★ Degraded-mode self-heal: re-probe the SSE lane on a cadence. The
+     * probe goes CURSOR-LESS on purpose: poll snapshots overwrite
+     * content/thinking WHOLESALE, so resuming from the stale pre-surrender
+     * cursor would replay INCREMENTAL deltas on top of the full snapshot and
+     * double the text. A cursor-less connect gets the backend-folded `state`
+     * snapshot (verbatim text replacement — the page-reload shape) + live
+     * tail. On attach _trySSE owns the stream to done (poll yields); on
+     * failure polling resumes one interval later. */
+    if (typeof _trySSE === 'function'
+        && !stream.controller.signal.aborted
+        && (Date.now() - _lastSseReprobe) >= _SSE_REPROBE_INTERVAL_MS) {
+      console.warn(`[_pollFallback] ↻ SSE re-probe (degraded-mode self-heal) — conv=${convId.slice(0,8)} task=${taskId.slice(0,8)}`);
+      stream._lastEventId = null;
+      if (typeof _clearSseCursor === 'function') _clearSseCursor(taskId);
+      let _reprobeDone = false;
+      try {
+        _reprobeDone = await _trySSE(convId, taskId, stream, assistantMsg);
+      } catch (e) {
+        if (e && e.name === 'AbortError') {
+          if (typeof twStop === 'function') twStop(convId);
+          finishStream(convId);
+          return;
+        }
+        console.warn(`[_pollFallback] SSE re-probe threw: ${e && e.message} — resuming poll`);
+      }
+      _lastSseReprobe = Date.now();
+      if (stream.controller.signal.aborted) {
+        if (typeof twStop === 'function') twStop(convId);
+        finishStream(convId);
+        return;
+      }
+      if (_reprobeDone) {
+        console.info(`[_pollFallback] ✅ SSE re-attached and ran the turn to done — poll yields for conv=${convId.slice(0,8)}`);
+        return;
+      }
+      /* Probe failed / dropped again — fall through to this lap's poll. */
+    }
     const _pollStart = Date.now();
     try {
-      const resp = await Api.chat.poll(taskId);
+      const _pollQuery = { incr: 1 };
+      if (_pollFP) _pollQuery.ifp = JSON.stringify(_pollFP);
+      const resp = await Api.chat.poll(taskId, { query: _pollQuery });
       if (!resp || !resp.ok) {
         /* ★ 503 Service Unavailable = transient server overload (DB pool
          *   saturated during a reconnection burst). This is NOT a network
@@ -153,6 +227,9 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
       }
       _consecutiveErrors = 0; // ★ Reset on any successful response
       const data = await resp.json();
+      /* Incr-poll echo state — captured BEFORE the merge path (a rebind below
+       * may force the next pull back to full by nulling this). */
+      if (data.fp) _pollFP = data.fp;
 
       /* ★ SyncFix: discard poll responses for a superseded/aborted task so we
        *   don't resurrect old endpoint turns into conv.messages after the user
@@ -168,6 +245,35 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
             if (typeof twStop === 'function') twStop(convId);
             finishStream(convId);
             return;
+          }
+        }
+      }
+
+      /* ★ Stable-id rebind — the poll lane's answer to dispatchSSEEvent's
+       *   _rebindAssistant. A poll loop can run for the REST OF THE TURN; a
+       *   Phase-2 reload / ConvView.replaceAll in that window REPLACES
+       *   conv.messages and ghosts this closure ref — merges would land on an
+       *   object nothing renders (the frozen-bubble mechanism). Re-resolve by
+       *   _msgId (then by _taskId) at each successful poll so the merge below
+       *   always writes into the in-tree bubble. Not found → keep the ref
+       *   (current behaviour; the next reload repaints from the server). */
+      {
+        const _rbConv = conversations.find(c => c.id === convId);
+        if (_rbConv && assistantMsg) {
+          let _live = null;
+          if (assistantMsg._msgId && typeof _resolveAssistantById === 'function') {
+            _live = _resolveAssistantById(_rbConv, assistantMsg._msgId, null);
+          }
+          if (!_live && typeof _resolveAssistantByTaskId === 'function') {
+            _live = _resolveAssistantByTaskId(_rbConv, taskId);
+          }
+          if (_live && _live !== assistantMsg) {
+            console.warn(`[_pollFallback] 🔁 rebinding poll target for conv=${convId.slice(0,8)} — ` +
+              `closure ref was detached (prevLen=${(assistantMsg.content||'').length} liveLen=${(_live.content||'').length})`);
+            assistantMsg = _live;
+            /* The fp describes bytes the OLD object holds — the rebound one
+             * may be behind/ahead, so the next pull must be FULL. */
+            _pollFP = null;
           }
         }
       }
@@ -223,7 +329,10 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
       /* ★ Endpoint mode: poll returns endpointTurns with the full multi-turn
        *   structure.  Rebuild conv.messages from it instead of overwriting
        *   a single assistantMsg with the current turn's content. */
-      if (data.endpointMode && data.endpointTurns && data.endpointTurns.length > 0) {
+      if (data.endpointMode && data.endpointTurnsSame) {
+        /* incr: endpoint turns unchanged since the echo — skip the wholesale
+         * rebuild (and its replaceAll re-render churn). */
+      } else if (data.endpointMode && data.endpointTurns && data.endpointTurns.length > 0) {
         const conv = conversations.find(c => c.id === convId);
         if (conv) {
           // Find where original messages end (non-endpoint messages)
@@ -271,7 +380,9 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
          * regression then OVERWROTE anyway, silently losing what the user
          * already saw. Now we keep whichever side is longer and only log
          * suspicious shrinkage. */
-        if (data.content != null) {
+        if (data.contentSame) {
+          /* incr: server fingerprint says our content is current — keep it. */
+        } else if (data.content != null) {
           const oldLen = assistantMsg.content?.length || 0;
           const newLen = data.content.length;
           /* ★ P1b flicker guard: once the tail is SETTLED (has finishReason —
@@ -292,7 +403,9 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
               `oldContentLen=${oldLen} newContentLen=${newLen} — keeping longer accumulated content (delta cycle vs poll cycle race).`);
           }
         }
-        if (data.thinking != null) {
+        if (data.thinkingSame) {
+          /* incr: unchanged — keep the local copy. */
+        } else if (data.thinking != null) {
           const oldThinkLen = assistantMsg.thinking?.length || 0;
           const newThinkLen = data.thinking.length;
           if (newThinkLen >= oldThinkLen) {
@@ -372,7 +485,9 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
         // the equivalent merge step (~line 2246).
         delete assistantMsg._continueApiRounds;
       }
-      if (data.toolRounds) {
+      if (data.roundsSame) {
+        /* incr: rounds unchanged since the echo — keep the local copy. */
+      } else if (data.toolRounds) {
         /* ★ RENDER_CONTRACT Phase 3: route the POLL toolRounds assembly through
          *   the ONE pure reducer (projectColdSnapshot) — same projection the
          *   live fold + cold state block use, so a poll-fallback turn's rounds

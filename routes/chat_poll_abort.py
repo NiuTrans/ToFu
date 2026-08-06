@@ -24,6 +24,9 @@ from __future__ import annotations
 
 import json
 import time
+import zlib
+
+from flask import request
 
 from lib.api_response import api_not_found, api_ok
 from lib.database import DOMAIN_CHAT, get_db
@@ -237,6 +240,85 @@ def chat_interrupt_command(task_id):
     return api_ok({'interrupted': True, 'pid': pid})
 
 
+# ── Incremental-poll section trimming (2026-08-06, epic pt_688f9783) ────────
+# The degraded-mode poll loop (sse_poll_fallback.js) re-requests this endpoint
+# every ~0.3-2s for the REST OF THE TURN, and the FULL snapshot — content +
+# thinking + toolRounds with every tool result verbatim — rode every response:
+# measured 968KB per poll on a 60-round task, ~2MB/2s through the tunnel when
+# a few convs degrade at once (the 2026-08-06 four-streams-one-second flap).
+#
+# Opt-in echo-fingerprint protocol (non-incr callers are byte-identical):
+# an incr=1 response carries `fp` — per-section fingerprints; the poll loop
+# echoes them back verbatim as `ifp`; a section whose fingerprint still
+# matches is OMITTED with a `<section>Same` marker. Self-healing by
+# construction: any reset/truncation/rewrite changes the fingerprint, so the
+# next response carries the full section again — no server-side versioning,
+# no bookkeeping, one-cycle worst case. crc32 catches the same-length
+# mutation (an in-flight round's elapsed tick) that a length check cannot.
+def _incr_poll_fps(task: dict) -> dict:
+    """Per-section fingerprints of the CURRENT shippable poll sections."""
+    def _crc(s: str) -> int:
+        return zlib.crc32(s.encode('utf-8')) if s else 0
+
+    def _last_crc(rows) -> int:
+        if not rows:
+            return 0
+        try:
+            return zlib.crc32(
+                json.dumps(rows[-1], ensure_ascii=False, default=str).encode('utf-8'))
+        except Exception:
+            # Unserialisable tail → never matches an echo → always full.
+            return -1
+
+    _rounds = task.get('toolRounds') or []
+    _ep_turns = task.get('_endpoint_turns') or []
+    return {
+        'c': _crc(task.get('content') or ''),
+        't': _crc(task.get('thinking') or ''),
+        'r': [len(_rounds), _last_crc(_rounds)],
+        'e': [len(_ep_turns), _last_crc(_ep_turns)],
+    }
+
+
+def _maybe_trim_incr_poll(r: dict, task: dict) -> dict:
+    """Trim an already-built full poll payload for `?incr=1` callers.
+
+    Post-filter shape: the caller builds `r` exactly as before (the field-list
+    contract is untouched), then fat sections are dropped when the echoed
+    fingerprint matches. `fp` rides EVERY incr response so the client can
+    start (or re-start) echoing after any gap.
+    """
+    if request.args.get('incr') != '1':
+        return r
+    _ifp = None
+    _raw_ifp = request.args.get('ifp') or ''
+    if _raw_ifp:
+        try:
+            _ifp = json.loads(_raw_ifp)
+        except (ValueError, TypeError) as _ifp_err:
+            logger.debug('[Chat] incr poll — bad ifp ignored: %s', _ifp_err)
+            _ifp = None
+    _fp = _incr_poll_fps(task)
+    r['fp'] = _fp
+
+    def _same(tag) -> bool:
+        return bool(_ifp) and _ifp.get(tag) == _fp.get(tag)
+
+    if _same('c') and 'content' in r:
+        del r['content']
+        r['contentSame'] = True
+    if _same('t') and 'thinking' in r:
+        del r['thinking']
+        r['thinkingSame'] = True
+    if _same('r') and 'toolRounds' in r:
+        del r['toolRounds']
+        r['roundsSame'] = True
+    if _same('e') and 'endpointTurns' in r:
+        del r['endpointTurns']
+        r['endpointTurnsSame'] = True
+    return r
+
+
 def _live_unregistered_gate(task_id) -> bool:
     """③-2 (pt_a21cd6eb): positive proof-of-life for a registry-missing task.
 
@@ -363,7 +445,7 @@ def chat_poll(task_id):
             r['endpointIteration'] = task.get('_endpoint_iteration', 0)
             if task.get('_endpoint_stop_reason'):
                 r['endpointStopReason'] = task['_endpoint_stop_reason']
-        return api_ok(r)
+        return api_ok(_maybe_trim_incr_poll(r, task))
 
     logger.debug('[Chat] Poll %s — not in memory, checking DB', task_id[:8])
     db = get_db(DOMAIN_CHAT)

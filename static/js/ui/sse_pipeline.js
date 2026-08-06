@@ -159,8 +159,7 @@ async function _connectAutopilotKick(convId, taskId) {
  *
  *   So: re-open SSE while it keeps making PROGRESS instead of surrendering to
  *   poll on the first drop. "Progress" = the cursor advanced since the previous
- *   attempt; a reconnect that stalls (cursor unchanged → no new events) bails to
- *   poll immediately. Only genuinely-blocked SSE (never delivered a tagged event
+ *   attempt. Only genuinely-blocked SSE (never delivered a tagged event
  *   → NO cursor, or a stalled/exhausted resume) falls to poll — the correct
  *   last resort for a proxy that strips event-stream entirely.
  *
@@ -168,10 +167,42 @@ async function _connectAutopilotKick(convId, taskId) {
  *   false at once, no retry. Returns true iff a resume ran the stream to `done`
  *   (SSE owns finishStream); false → caller falls through to poll. Lets a
  *   user-stop AbortError propagate so connectToTask's single catch handles it.
+ *
+ *   ★★ 2026-08-06 amendment (epic pt_6cb1607e, measured incident 14:02:25):
+ *   the tunnel killed ALL FOUR live streams in the same second, and the old
+ *   ladder fired every retry with ZERO gap — the whole budget was spent
+ *   inside the ~3s flap window ("resume stalled … surrendering to poll" ×4
+ *   at 14:02:28) → permanent poll surrender against a tunnel that healed
+ *   seconds later. Two coupled defects, two coupled fixes: (a) attempts now
+ *   ride a 0.5→16s backoff ladder so retries land AFTER the flap passes;
+ *   (b) a stalled attempt (cursor didn't advance) no longer surrenders on
+ *   the FIRST strike — during a flap a reconnect routinely attaches a beat
+ *   before the server has anything new to replay, so one stalled reading is
+ *   noise, only K CONSECUTIVE stalls are a verdict.
  */
-const _MAX_SSE_RESUME_ATTEMPTS = 6;
+const _MAX_SSE_RESUME_ATTEMPTS = 7;
+/* Backoff ladder (ms) slept BEFORE attempts 2..N — attempt 1 stays immediate
+ * (a momentary blip deserves the fast path; only sustained failure pays the
+ * ladder). 0.5→16s exponential, ~31.5s total span: sized to outlast a real
+ * VS Code tunnel flap instead of burning the budget inside it. */
+const _SSE_RESUME_BACKOFF_MS = [500, 1000, 2000, 4000, 8000, 16000];
+/* Consecutive stalled attempts (cursor unchanged) tolerated before
+ * surrendering to poll. An advancing cursor resets the count. */
+const _SSE_RESUME_MAX_STALLED = 3;
+/* Abortable sleep for the backoff gaps — a user Stop during a 16s gap must
+ * not wait it out. Resolves early on abort; the caller re-checks the signal
+ * right after the wake. */
+function _sleepOrAbort(ms, signal) {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    if (signal && typeof signal.addEventListener === 'function') {
+      signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+    }
+  });
+}
 async function _resumeSSEWithRetry(convId, taskId, stream, assistantMsg) {
   let attempts = 0;
+  let stalled = 0;
   while (attempts < _MAX_SSE_RESUME_ATTEMPTS) {
     if (stream.controller.signal.aborted) return false;
     /* No cursor → SSE never delivered a real (id:-tagged) event this turn, so
@@ -179,6 +210,12 @@ async function _resumeSSEWithRetry(convId, taskId, stream, assistantMsg) {
      * poll — the right call when the proxy strips event-stream wholesale. */
     const cursor = stream._lastEventId;
     if (!cursor) return false;
+    if (attempts > 0) {
+      await _sleepOrAbort(
+        _SSE_RESUME_BACKOFF_MS[Math.min(attempts - 1, _SSE_RESUME_BACKOFF_MS.length - 1)],
+        stream.controller.signal);
+      if (stream.controller.signal.aborted) return false;
+    }
     attempts++;
     debugLog(
       `[connectToTask] ↻ SSE resume attempt ${attempts}/${_MAX_SSE_RESUME_ATTEMPTS} ` +
@@ -188,17 +225,24 @@ async function _resumeSSEWithRetry(convId, taskId, stream, assistantMsg) {
     const _ok = await _trySSE(convId, taskId, stream, assistantMsg);
     if (_ok) return true;                       // resumed and ran to done
     if (stream.controller.signal.aborted) return false;
-    /* The cursor did NOT advance vs the attempt we just made → the resume is
-     * stalled (reconnecting but no new events land). Stop retrying and let poll
-     * take over rather than spin. A cursor that DID advance = genuine choppy
-     * progress → loop again (still bounded by _MAX_SSE_RESUME_ATTEMPTS). */
     if (stream._lastEventId === cursor) {
+      /* Stalled: tolerate up to _SSE_RESUME_MAX_STALLED CONSECUTIVE stalls —
+       * one stalled reading during a flap is noise, not a verdict. */
+      stalled++;
+      if (stalled >= _SSE_RESUME_MAX_STALLED) {
+        debugLog(
+          `[connectToTask] SSE resume stalled ${stalled}× consecutively at cursor=${cursor} — ` +
+          `surrendering to poll for task=${taskId.slice(0,8)}`, 'warn'
+        );
+        return false;
+      }
       debugLog(
-        `[connectToTask] SSE resume stalled at cursor=${cursor} — surrendering to poll ` +
-        `for task=${taskId.slice(0,8)}`, 'warn'
+        `[connectToTask] SSE resume stalled ${stalled}/${_SSE_RESUME_MAX_STALLED} at cursor=${cursor} ` +
+        `for task=${taskId.slice(0,8)} — backing off`, 'warn'
       );
-      return false;
+      continue;
     }
+    stalled = 0;   // cursor advanced = genuine choppy progress
   }
   debugLog(
     `[connectToTask] SSE resume exhausted (${_MAX_SSE_RESUME_ATTEMPTS} attempts) ` +
