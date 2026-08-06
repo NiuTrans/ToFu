@@ -140,17 +140,10 @@ def _diag(paper_hash):
     except Exception as e:
         out.append(f'fresh-conn read failed: {type(e).__name__}: {e}')
     try:
-        from lib.database import DOMAIN_CHAT, async_fetchone
-        import asyncio as _aio
-
-        async def _q():
-            return await async_fetchone(
-                'SELECT lang FROM paper_reports WHERE paper_hash=? AND lang=?',
-                (paper_hash, 'review:neurips:en'), domain=DOMAIN_CHAT)
-        row = _aio.new_event_loop().run_until_complete(_q())
-        out.append(f'aio-path row={row!r}')
+        out.append('pool stamps=%r' % [
+            getattr(c, '_pool_path', None) for c in list(core._sqlite_pool)])
     except Exception as e:
-        out.append(f'aio-path read failed: {type(e).__name__}: {e}')
+        out.append(f'pool-stamp read failed: {e}')
     return '; '.join(out)
 
 
@@ -173,15 +166,36 @@ def test_double_encoded_review_lang_exports_ok():
     ]
 
     async def _t():
-        async with app.test_client() as client:
-            for name, langq, want in cases:
-                r = await client.get(base + langq)
-                assert r.status_code == want, \
-                    f'{name}: expected {want}, got {r.status_code} ' \
-                    f'body={(await r.get_data())[:120]!r} | {_diag(_PHASH)}'
-                if want == 200:
-                    body = (await r.get_data()).decode('utf-8', 'replace')
-                    assert body, f'{name}: empty export body'
+        # Sample core.DB_PATH at 5ms while the requests run: a leaked
+        # background thread flipping the module global mid-request is the
+        # prime suspect for the handler reading a different file than the
+        # seed wrote (CI-only 404 with the row provably present).
+        import lib.database._core as _core
+        import threading as _th
+        seen = {_core.DB_PATH}
+        stop = _th.Event()
+
+        def _sampler():
+            while not stop.is_set():
+                seen.add(_core.DB_PATH)
+                stop.wait(0.005)
+        t = _th.Thread(target=_sampler, daemon=True)
+        t.start()
+        try:
+            async with app.test_client() as client:
+                for name, langq, want in cases:
+                    r = await client.get(base + langq)
+                    assert r.status_code == want, \
+                        f'{name}: expected {want}, got {r.status_code} ' \
+                        f'body={(await r.get_data())[:120]!r} | {_diag(_PHASH)}'
+                    if want == 200:
+                        body = (await r.get_data()).decode('utf-8', 'replace')
+                        assert body, f'{name}: empty export body'
+        finally:
+            stop.set()
+            t.join(timeout=2)
+            if len(seen) > 1:
+                print(f'[paper_export_test] DB_PATH FLIPPED mid-test: {seen}')
 
     asyncio.run(_t())
     _ok('double/single/raw review lang all export 200; plain report ok; absent venue 404')
