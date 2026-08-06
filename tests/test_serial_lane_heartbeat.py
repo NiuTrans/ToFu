@@ -325,8 +325,19 @@ def test_heartbeat_stops_when_the_serial_tool_finishes(rec, slow_tools):
 
     _run(task, [_mk_tc('tc-rc', 'run_command', 0)])
 
-    live = [t for t in threading.enumerate()
-            if t.name.startswith('tool-hb-') and t.is_alive()]
+    # The stop event is set in a finally, but set() ≠ the thread has EXITED —
+    # a loaded CI runner can schedule the ticker's exit past this assert
+    # (3.10 leg, 2026-08-06). A REAL leak (stop never set) still fails: the
+    # ticker would outlive a 2s grace by minutes.
+    def _live_tickers():
+        return [t for t in threading.enumerate()
+                if t.name.startswith('tool-hb-') and t.is_alive()]
+
+    deadline = time.time() + 2.0
+    live = _live_tickers()
+    while live and time.time() < deadline:
+        time.sleep(0.05)
+        live = _live_tickers()
     assert not live, (
         'heartbeat ticker thread(s) still alive after the pipeline returned: '
         '%r — the stop event is not set in a finally' % ([t.name for t in live],))
