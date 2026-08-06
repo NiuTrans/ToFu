@@ -37,6 +37,8 @@ Architecture
 import json
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+# See _pipeline.py: futures-TimeoutError is a distinct class on 3.10.
+from concurrent.futures import TimeoutError as _FuturesTimeoutError
 
 from lib.log import get_logger
 
@@ -826,7 +828,7 @@ class StreamingToolAccumulator:
                                 '%s into dedup cache (%.1fs, %d chars%s)',
                                 self._tid, fn_name, elapsed, content_len,
                                 ', %d display_results' % len(_disp) if _disp else '')
-                except TimeoutError:
+                except (TimeoutError, _FuturesTimeoutError):
                     logger.warning('[%s] StreamingToolExec: %s timed out after '
                                    '%ds, deferring to normal pipeline',
                                    self._tid, fn_name, _wait_timeout)

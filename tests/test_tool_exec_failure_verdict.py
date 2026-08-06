@@ -281,6 +281,22 @@ def test_pre_pool_abort_lane_ships_aborted(rec, scripted_tools):
 #  Face 4 — enumerate, don't trust a hand-written list (drift guard)
 # ═══════════════════════════════════════════════════════════════════
 
+def test_timeout_except_catches_the_futures_class_too():
+    """concurrent.futures.TimeoutError is a DISTINCT class from builtin
+    TimeoutError on Python ≤ 3.10 (an alias only since 3.11) — a bare
+    ``except TimeoutError`` after ``as_completed(timeout=…)`` /
+    ``future.result(timeout=…)`` lets the pool-timeout lane ESCAPE uncaught
+    on the 3.10 CI leg (2026-08-06, rounds 3-5). Pin the dual-catch so the
+    lane is version-proof; the behavioral face above proves it on 3.10."""
+    from lib.tasks_pkg import streaming_tool_executor as ste
+    from lib.tasks_pkg.tool_dispatch import _pipeline
+    for mod in (_pipeline, ste):
+        src = inspect.getsource(mod)
+        assert '_FuturesTimeoutError' in src, (
+            f'{mod.__name__} lost the futures-TimeoutError dual-catch — on '
+            '3.10 the pool-timeout lane escapes again')
+
+
 def test_every_failure_sentinel_has_a_verdict():
     """Guard the guard: every ``tool_results[…] = (failure sentinel, …)``
     write inside ``execute_tool_pipeline`` MUST be paired with a

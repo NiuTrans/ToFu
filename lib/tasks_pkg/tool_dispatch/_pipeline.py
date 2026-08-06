@@ -11,6 +11,11 @@ from __future__ import annotations
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+# concurrent.futures.TimeoutError only became an alias of builtin
+# TimeoutError in 3.11 — on 3.10 it is a DISTINCT class, so
+# ``except TimeoutError`` does NOT catch an as_completed/fut.result timeout
+# and the pool-timeout lane never fires (3.10 CI leg, 2026-08-06).
+from concurrent.futures import TimeoutError as _FuturesTimeoutError
 from typing import Any
 
 from lib.agent_core.events import EventType, build_event, now_ms
@@ -944,7 +949,7 @@ def execute_tool_pipeline(
 
                         tool_results[fut_tc_id] = (f'Tool execution error: {e}', False)
                         tool_verdicts[fut_tc_id] = 'error'
-            except TimeoutError:
+            except (TimeoutError, _FuturesTimeoutError):
                 _timed_out = True
                 _pipeline_timed_out = True
                 _n_pending = sum(1 for f in futures if not f.done())
