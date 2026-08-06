@@ -174,6 +174,22 @@ def test_double_encoded_review_lang_exports_ok():
     _seed_report(_PHASH, _REVIEW_LANG, _REPORT_BODY)
     _seed_report(_PHASH, 'en', '# Plain report\n\nbody\n')
 
+    # CI-only-404 forensics: spy the handler's OWN DB call so the failure
+    # line shows the EXACT (phash, lang) the handler queried with and what
+    # came back. (Locally every form passes; on CI the row the fresh conn
+    # provably sees is reported missing by the handler.)
+    import routes.paper as _rp
+    _spy_log = []
+    _orig_fetch = _rp.async_fetchone
+
+    async def _spy(sql, params=None, **kw):
+        if 'paper_reports' in (sql or ''):
+            row = await _orig_fetch(sql, params, **kw)
+            _spy_log.append((params, bool(row and row[0])))
+            return row
+        return await _orig_fetch(sql, params, **kw)
+    _rp.async_fetchone = _spy
+
     base = f'/api/v1/paper/report/export?paper_hash={_PHASH}&format=md&lang='
     cases = [
         ('double-encoded review', 'review%253Aneurips%253Aen', 200),
@@ -205,7 +221,7 @@ def test_double_encoded_review_lang_exports_ok():
                     r = await client.get(base + langq)
                     assert r.status_code == want, \
                         f'{name}: expected {want}, got {r.status_code} ' \
-                        f'body={(await r.get_data())[:120]!r} | {_diag(_PHASH)}'
+                        f'body={(await r.get_data())[:120]!r} spy={_spy_log!r} | {_diag(_PHASH)}'
                     if want == 200:
                         body = (await r.get_data()).decode('utf-8', 'replace')
                         assert body, f'{name}: empty export body'
@@ -215,7 +231,10 @@ def test_double_encoded_review_lang_exports_ok():
             if len(seen) > 1:
                 print(f'[paper_export_test] DB_PATH FLIPPED mid-test: {seen}')
 
-    asyncio.run(_t())
+    try:
+        asyncio.run(_t())
+    finally:
+        _rp.async_fetchone = _orig_fetch
     _ok('double/single/raw review lang all export 200; plain report ok; absent venue 404')
 
 
