@@ -246,6 +246,10 @@ def _cleanup_seeded_convs():
         _CREATED_CONVS.clear()
 
 
+# ci_serial: these run full endpoint tasks (planner/worker/critic threads +
+# real DB writes) — under the CI parallel lane's write storms they hit
+# 'database is locked' (a84cb8e 3.10 leg) while passing on an uncontended box.
+@pytest.mark.ci_serial
 @pytest.mark.unit
 class TestEndpointFlowParity:
     def test_live_path_persists_turns(self, scripted):

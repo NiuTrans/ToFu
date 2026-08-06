@@ -919,3 +919,21 @@ BILLING_PAYMENTS = define_table(
     sa.Column('settled_at', bigint_column(), nullable=False, server_default=sa.text('0')),
     sa.Column('raw', sa.Text, nullable=False, server_default="{}"),
 )
+
+
+# log_aggregates — error.log 指纹汇总(epic pt_71eaaa8d5b8243e9,2026-08-06)。
+# 每个 (level, logger, 消息模板, 异常签名) 指纹一行:文本日志之上的去重
+# 层,文本文件仍是唯一权威源。只由 lib/log_aggregates.py 的批量 fail-open
+# flusher 写(count 用 ON CONFLICT 表达式累加);GET /api/v1/logs/aggregates
+# 只读;30 天 TTL 由同一 flusher 清扫。first_seen/last_seen 为 epoch-ms。
+LOG_AGGREGATES = define_table(
+    'log_aggregates',
+    sa.Column('fingerprint', sa.Text, primary_key=True),
+    sa.Column('level', sa.Text, nullable=False),
+    sa.Column('logger', sa.Text, nullable=False, server_default=''),
+    sa.Column('template', sa.Text, nullable=False, server_default=''),
+    sa.Column('sample', sa.Text, nullable=False, server_default=''),
+    sa.Column('count', sa.Integer, nullable=False, server_default=sa.text('0')),
+    sa.Column('first_seen', bigint_column(), nullable=False, server_default=sa.text('0')),
+    sa.Column('last_seen', bigint_column(), nullable=False, server_default=sa.text('0')),
+)

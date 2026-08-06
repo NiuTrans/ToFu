@@ -258,6 +258,13 @@ def _init_system_schema(conn):
     cur.execute('CREATE INDEX IF NOT EXISTS idx_rate_limit_lookup ON rate_limit_events(endpoint, ip, ts_ms)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_rate_limit_ts ON rate_limit_events(ts_ms)')
 
+    # ── Log fingerprint rollup (epic pt_71eaaa8d5b8243e9) ──
+    # error.log 的去重层;lib/log_aggregates.py 的 flusher 写,只读端点读。
+    from lib.database._core_schema import LOG_AGGREGATES, create_if_absent
+    create_if_absent(conn, LOG_AGGREGATES, table_exists=_table_exists)
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_log_aggregates_last_seen ON log_aggregates(last_seen)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_log_aggregates_count ON log_aggregates(count)')
+
     # ─────────────────────────────────────────────────────────────────
     #  Billing / multi-tenant tables (mirror of the SQLite block — see
     #  ``lib/database/_schema_sqlite.py`` for design notes on the

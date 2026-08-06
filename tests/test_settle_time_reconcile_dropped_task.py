@@ -53,7 +53,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import quart as _quart  # noqa: E402
 sys.modules.setdefault('flask', _quart)
 
-pytestmark = pytest.mark.unit
+# ci_serial: real sync-writes through the shared sqlite pool — hit
+# 'database is locked' under the CI parallel lane (a84cb8e 3.10 leg).
+pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
 
 
 def _seed_conv(db, conv_id, messages, settings, *, updated_at=None):

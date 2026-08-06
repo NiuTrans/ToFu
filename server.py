@@ -1345,6 +1345,23 @@ _console_handler.setFormatter(_formatter)
 _console_handler.setLevel(logging.WARNING)
 _console_handler.addFilter(_BizAndServerOnly())
 
+# ── Log fingerprint aggregation (epic pt_71eaaa8d5b8243e9) ──
+# error.log 的去重层:文本文件仍是唯一权威源,本 handler 只把每条
+# WARNING+ 记录归一成 (level, logger, 消息模板, 异常签名) 指纹在内存计数,
+# 后台 daemon flusher 每 ~15s 批量 upsert 进 log_aggregates 表——DB 失败只
+# 丢聚合、fail-open。与 error.log 共用 _BizAndServerOnly 过滤器,聚合覆盖面
+# 恒等于 error.log。挂在 QueueListener 线程上(_real_log_handlers),归一化
+# CPU 不占请求线程。TOFU_LOG_AGGREGATES=0 全关。
+from lib.log_aggregates import (
+    FingerprintHandler as _FingerprintHandler,
+    enabled as _log_agg_enabled,
+    get_default_store as _log_agg_store,
+    start_flusher as _log_agg_start_flusher,
+)
+_log_agg_handler = _FingerprintHandler(_log_agg_store())
+_log_agg_handler.setLevel(logging.WARNING)
+_log_agg_handler.addFilter(_BizAndServerOnly())
+
 # ── Non-blocking logging: QueueHandler + QueueListener ──
 # The four file handlers + the stderr StreamHandler all do SYNCHRONOUS I/O
 # under a per-handler lock. error.log lives on a FUSE/NFS mount (see
@@ -1377,6 +1394,11 @@ _real_log_handlers = [_app_handler, _access_handler, _error_handler,
 # there. Detect pytest via the env var it always sets for a collected session.
 _LOG_UNDER_PYTEST = bool(os.environ.get('PYTEST_CURRENT_TEST')) or (
     'pytest' in sys.modules)
+
+if _log_agg_enabled() and not _LOG_UNDER_PYTEST:
+    # pytest 同步模式下不挂:测试进程里聚合属噪音(测试会自建实例);
+    # 生产下它跑在 QueueListener 的 drain 线程上,emit 只做内存计数。
+    _real_log_handlers.append(_log_agg_handler)
 
 _LOG_QUEUE = None
 _log_listener = None
@@ -1420,6 +1442,8 @@ else:
     _log_listener = QueueListener(
         _LOG_QUEUE, *_real_log_handlers, respect_handler_level=True)
     _log_listener.start()
+    if _log_agg_enabled():
+        _log_agg_start_flusher()
 
     # Drain + flush the queue on interpreter exit so the tail of the log isn't
     # lost if the process stops while lines are still queued.

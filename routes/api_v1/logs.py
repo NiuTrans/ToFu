@@ -417,5 +417,52 @@ def client_logs_relay():
     return api_ok(relayed=relayed)
 
 
-__all__ = ['api_v1_logs_bp']
+@api_v1_logs_bp.route('/api/v1/logs/aggregates', methods=['GET'])
+@require_scope('chat')
+@api_meta(
+    summary='error.log fingerprint rollup, sorted by frequency',
+    description=(
+        'Read-only view over the ``log_aggregates`` table (layer ③ of the '
+        'error.log dedup design, epic pt_71eaaa8d5b8243e9). Each row is one '
+        '``(level, logger, message-template, exc-signature)`` fingerprint '
+        'with ``count`` / ``first_seen`` / ``last_seen`` (epoch-ms + ISO) '
+        'and one recent ``sample`` — the text logs stay the source of '
+        'truth; this table only answers "which warnings/errors are '
+        'spamming, and since when".\n\n'
+        'Query params: ``level`` (DEBUG|INFO|WARNING|ERROR|CRITICAL), '
+        '``sort`` (count|last_seen|level, default count), ``limit`` '
+        '(1..500, default 100), ``q`` (substring on template).'),
+    tags=['logs'],
+    scope='chat',
+)
+def log_aggregates_view():
+    from flask import request
+
+    from lib.log_aggregates import query_aggregates
+
+    level = (request.args.get('level') or '').strip().upper()
+    if level and level not in ('DEBUG', 'INFO', 'WARNING', 'ERROR',
+                               'CRITICAL'):
+        return api_bad_request('invalid level', field='level')
+    sort = (request.args.get('sort') or 'count').strip()
+    if sort not in ('count', 'last_seen', 'level'):
+        return api_bad_request('invalid sort (count|last_seen|level)',
+                               field='sort')
+    try:
+        limit = int(request.args.get('limit') or 100)
+    except (TypeError, ValueError):
+        return api_bad_request('invalid limit', field='limit')
+    limit = max(1, min(limit, 500))
+    q = (request.args.get('q') or '')[:100]
+    try:
+        result = query_aggregates(level=level, sort=sort, limit=limit, q=q)
+    except Exception as e:
+        # 聚合层是只读旁路:表可能尚未创建(老库未重启/新装首启前),绝不
+        # 因此 500 掉日志页面——返回空表并显式标记,比报错更可诊断。
+        logger.warning('[Logs.aggregates] query failed (returning empty): %s', e)
+        return api_ok(items=[], total_rows=0, total_events=0,
+                      unavailable=True)
+    return api_ok(result)
+
+
 __all__ = ['api_v1_logs_bp']
