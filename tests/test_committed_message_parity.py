@@ -47,6 +47,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import quart as _quart  # noqa: E402
 sys.modules['flask'] = _quart
 
+import pytest  # noqa: E402
+
+# ci_serial: real create_task + _sync_result_to_conversation writes through
+# the shared sqlite pool — hit 'database is locked' under the CI parallel
+# lane's write storms (4034072 3.12 leg) while passing in ~1s uncontended.
+pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
+
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
 def _ok(msg): print(' ', _color('✓', '32'), msg)
