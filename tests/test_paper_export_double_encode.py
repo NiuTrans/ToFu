@@ -102,9 +102,13 @@ _REVIEW_LANG = 'review:neurips:en'
 _REPORT_BODY = '# Test Paper\n\nThis is a stored **review** report body.\n'
 
 
+_SEED_INO = None
+
+
 def _seed_report(paper_hash, lang, report):
     """Insert a paper_reports row DIRECTLY so the export endpoint has something
     to find under the (paper_hash, lang) key."""
+    global _SEED_INO
     from lib.database._core import _pool_get, _pool_put
     from lib.database._core_schema import PAPER_REPORTS, upsert
     db = _pool_get()
@@ -115,6 +119,14 @@ def _seed_report(paper_hash, lang, report):
         }, retry=True)
     finally:
         _pool_put(db)
+    # CI-only-404 forensics: pin the file identity at seed time so a mid-test
+    # replacement (a leaked suite's tmpdir cleanup deleting+recreating the
+    # file the handler later reads) is provable from the failure line.
+    try:
+        import lib.database._core as _c
+        _SEED_INO = os.stat(_c.DB_PATH).st_ino
+    except Exception:
+        _SEED_INO = None
 
 
 def _diag(paper_hash):
@@ -123,7 +135,13 @@ def _diag(paper_hash):
     fresh-connection read-back, AND the same query through the aio facade the
     handler uses, so the next CI log says WHICH side moved."""
     import lib.database._core as core
-    out = [f'DB_PATH={core.DB_PATH!r}',
+    _ino_now = None
+    try:
+        _ino_now = os.stat(core.DB_PATH).st_ino
+    except Exception:
+        pass
+    out = [f'ino seed={_SEED_INO} now={_ino_now}',
+           f'DB_PATH={core.DB_PATH!r}',
            f'BACKEND={core._BACKEND!r}',
            f'env TOFU_DB_PATH={os.environ.get("TOFU_DB_PATH")!r}',
            f'server module={id(sys.modules.get("server")):x}']

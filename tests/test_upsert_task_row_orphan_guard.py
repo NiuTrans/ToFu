@@ -40,7 +40,10 @@ sys.modules.setdefault('flask', _quart)
 
 import pytest  # noqa: E402
 
-pytestmark = pytest.mark.unit
+# ci_serial: real upsert/commit write path through the shared sqlite pool —
+# hit 'database is locked' under the CI parallel lane's write storms
+# (c40b48a 3.12 leg) while passing in ~1s uncontended.
+pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
 
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
