@@ -434,7 +434,8 @@ def chat_send():
         # concurrent VU / send has since appended a newer user row.
         task_id, err_resp = _start_task_for_conv(
             conv_id, config, data,
-            user_msg_id=user_msg.get('_msgId') or '')
+            user_msg_id=user_msg.get('_msgId') or '',
+            abort_after_ts=_send_started_at)
         if err_resp is not None:
             if isinstance(err_resp, tuple):
                 return err_resp
@@ -591,6 +592,13 @@ def chat_regenerate():
     edited_images = data.get('editedImages')
     edited_pdf_texts = data.get('editedPdfTexts')
     settings_patch = data.get('settings')
+
+    # Snapshot the request start wall-clock BEFORE the synchronous
+    # auto-translate call (same contract as chat_send): an abort-conv landing
+    # while we translate/persist is re-checked against this ts after the new
+    # task registers, closing the "Stop during regen → task starts anyway"
+    # race.
+    _regen_started_at = time.time()
 
     try:
         db = get_thread_db(DOMAIN_CHAT)
@@ -767,7 +775,8 @@ def chat_regenerate():
         # correction on THAT bubble, not whatever happens to be last later.
         task_id, err_resp = _start_task_for_conv(
             conv_id, config, data,
-            user_msg_id=user_msg.get('_msgId') or '')
+            user_msg_id=user_msg.get('_msgId') or '',
+            abort_after_ts=_regen_started_at)
         if err_resp is not None:
             if isinstance(err_resp, tuple):
                 return err_resp

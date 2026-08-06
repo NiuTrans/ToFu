@@ -101,6 +101,9 @@ from lib.tasks_pkg.orchestrator._tool_dispatch_round import (
 from lib.tasks_pkg.orchestrator._abort_round_start import (
     handle_abort_at_round_start,
 )
+from lib.tasks_pkg.orchestrator._abort_prep import (
+    handle_abort_during_prep,
+)
 from lib.tasks_pkg.orchestrator._stream_acc_settle import (
     settle_stream_accumulator,
 )
@@ -233,6 +236,18 @@ def run_task(task: dict[str, Any]) -> None:
                         thinking_enabled=thinking_enabled)
         all_search_results_text = []
 
+        # ★ Abort-during-prep gates (2026-08-06, conv msftgnt3  incident):
+        #   aborts used to be consulted only INSIDE the round loop, so a Stop
+        #   landing during prep waited out the whole phase (measured 88s on
+        #   FUSE-slow storage) while the UI showed the turn as alive — the
+        #   "pause needs several clicks" report. One sticky-flag check per
+        #   expensive stage boundary collapses the kill latency to the
+        #   current stage; on a trip the loop below is skipped entirely and
+        #   finalize_after_loop settles the turn exactly like the round-0
+        #   abort gate does. The FIRST tripped stage owns the exit_reason.
+        _prep_aborted = handle_abort_during_prep(task, rs, stage='startup',
+                                                 tid=tid)
+
         # ── Section 2.5: tool history restoration
         #    (slice 8 → _tool_history.restore_tool_history).
         _keep_tool_history = cfg.get('keepToolHistory', True)
@@ -240,6 +255,10 @@ def run_task(task: dict[str, Any]) -> None:
         messages, original_messages, _tool_history_used = restore_tool_history(
             task=task, cfg=cfg, messages=messages, tid=tid, vu_phase=_vu_phase,
         )
+        if not _prep_aborted:
+            _prep_aborted = handle_abort_during_prep(task, rs,
+                                                     stage='tool_setup',
+                                                     tid=tid)
 
         # ── Section 3.5 (SPAWN): memory prefetch started EARLY so it
         #   overlaps Section 3 (joined by await_memory_prefetch before the
@@ -264,6 +283,10 @@ def run_task(task: dict[str, Any]) -> None:
             tid=tid, t_run_start=_t_run_start,
             vu_phase=_vu_phase,
         )
+        if not _prep_aborted:
+            _prep_aborted = handle_abort_during_prep(task, rs,
+                                                     stage='context_inject',
+                                                     tid=tid)
 
         # NOTE: Auto-prefetch disabled — the model can fetch URLs on demand
         # via the fetch_url tool call when it deems them relevant, rather than
@@ -298,6 +321,9 @@ def run_task(task: dict[str, Any]) -> None:
         #   write into a body already on the wire is worse than a missing
         #   advisory memory; no-op when nothing was spawned).
         await_memory_prefetch(task)
+        if not _prep_aborted:
+            _prep_aborted = handle_abort_during_prep(task, rs, stage='prefinal',
+                                                     tid=tid)
 
         _premature_retry_count = 0    # ★ Track retries for PREMATURE STREAM CLOSE
         _PREMATURE_RETRY_MAX = 2      # ★ Max premature-close retries (must match stream_handler)
@@ -311,7 +337,8 @@ def run_task(task: dict[str, Any]) -> None:
         #   exits immediately and the retry never actually fires.
         #   Ceiling: max_tool_rounds + 1 (base) + _premature_retry_count (bonus).
         #   Original for-loop was: range(max_tool_rounds + 1) = [0..max_tool_rounds].
-        while round_num + 1 <= max_tool_rounds + _premature_retry_count:
+        while (not _prep_aborted
+               and round_num + 1 <= max_tool_rounds + _premature_retry_count):
             round_num += 1
             # ★ Abort-at-round-start gate (slice 23 → _abort_round_start; True → break).
             if handle_abort_at_round_start(task, rs,

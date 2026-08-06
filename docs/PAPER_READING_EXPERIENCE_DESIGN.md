@@ -30,7 +30,8 @@
    主 prompt 零改动,深度成本只在读者真的点开时支付。
 4. **成本可见性是 P0 的一部分,不是附加项**:insight 默认开 = 每篇报告固定多一次
    rubric 评分 + 可能的带工具合成,这笔账必须进 finish tag 让读者看见(§3.3)。
-5. **一切默认开/关的治理**:交互面默认开 + Settings 面板用户级开关;headless/BYO
+5. **一切默认开/关的治理**:交互面默认开(owner 2026-08-06:「默认开启就行，
+   不需要设计成开关」——Settings 开关当批退役);headless/BYO
    调用面维持 fail-closed 默认关(对齐 `personal_scope` 既有先例,§3.4)。
 
 打个比方:现在的报告是**印刷精美的教科书**,本稿要把它变成**坐在旁边的导师**——
@@ -147,19 +148,23 @@ insight JSON 的每条 connection/provocation 增加可选 `anchor` 字段(模�
 ** NEUTER 判据**:摘掉 secondPasses 合并,finish tag 总额必须精确回落到本体量——
 测试证明合并是真接线而非装饰。
 
-### 3.4 开关治理:三级解析,headless fail-closed
+### 3.4 开关治理:headless fail-closed(Settings 开关已退役 2026-08-06)
 
 ```
-interactive(操作者界面):  server_config 显式值 > env TOFU_PAPER_INSIGHT > 默认 ON
+interactive(操作者界面):  env TOFU_PAPER_INSIGHT 总闸 > 默认 ON(永远默认开)
 headless / BYO:           默认 OFF(fail-closed),须显式 cfg 开启
 ```
 
-- **用户级开关**落在 server_config 的 `paper.reading_experience` 节(与
-  `cfg.search.*`/`cfg.network.*` 同款 Settings 面板模式),Settings → 新增「阅读」
-  卡片:insight / checkpoints / 默认深挖模型 三个开关;
-- headless 面:`personal_scope` 注册表新增 `paperInsightEnabled` capability
-  (与 `paperTermfillEnabled` 同模式,`lib/agent_core/personal_scope.py:162`),
-  每个 headless cfg-builder 显式 stamp,未 stamp = False;
+- **用户级开关已退役**:owner 2026-08-06 指令「这两个默认开启就行，不需要设计成
+  开关」——`settings_panels/general.html` 的两枚 toggle、其前端接线与
+  server_config `paper.reading_experience` 读写分支当批全删;引擎侧
+  `insight_enabled` / `checkpoints_enabled` 收敛为三级链(cfg 显式戳 > env > 默认
+  ON)。已存的 `paper.reading_experience` 配置节从此不被读取(无效，无副作用)。
+  费用可关诉求由两处吸收:报告底部 finish tag 的费用分解(§3.3,每一遍花多少
+  透明可见)与 headless 面 cfg 门(headless 仍然 fail-closed)。
+- headless 面:`personal_scope` 注册表的 `paperInsightEnabled` /
+  `paperCheckpointsEnabled` capability 不动,每个 headless cfg-builder 显式
+  stamp,未 stamp = False;
 - **rubric 闸门不受开关影响,始终生效**——开关管「要不要这个功能」,闸门管
   「这篇报告需不需要补」(baseline>4.0 的报告自动只花一次评分钱)。
 
@@ -209,7 +214,6 @@ headless / BYO:           默认 OFF(fail-closed),须显式 cfg 开启
 | `/api/v1/paper/deepen/poll/<task_id>` | GET | 走 `_task_routes.register_task_routes` 通用工厂(与 qa 同款) |
 | `/api/v1/paper/notes` | GET/POST | 按 `paper_hash+lang` 列出 / 新建批注 |
 | `/api/v1/paper/notes/<id>` | PATCH/DELETE | 改 / 删 |
-| server_config `paper.reading_experience` | (复用现有 config 读写面) | §3.4 用户级开关 |
 
 批注锚:`{heading_idx, char_offset, quote}` 三元组——heading_idx+offset 定址,
 quote 兜底(报告重新生成后按 quote 模糊重锚,失败则标「孤儿批注」仍可见)。
@@ -218,8 +222,8 @@ quote 兜底(报告重新生成后按 quote 模糊重锚,失败则标「孤儿�
 
 ```
 报告流完成 → _build_report_meta → upsert 行 → done 事件(现行,不变)
-  → insight 钩子(可关) → 合并 secondPasses.insight
-  → checkpoints 钩子(P2,可关) → 合并 secondPasses.checkpoints
+  → insight 钩子 → 合并 secondPasses.insight
+  → checkpoints 钩子(P2) → 合并 secondPasses.checkpoints
   → upsert 同一行(仅 meta 字段) → 发 report_meta 事件(前端徽章热更新)
 ```
 
@@ -236,7 +240,7 @@ quote 兜底(报告重新生成后按 quote 模糊重锚,失败则标「孤儿�
 
 | 新模块 | 职责 | 关键机制 |
 |---|---|---|
-| `paper/reading_xp.js` | 体验轨:insight 锚定卡(按锚插到对应节标题后)+ 文库连接可点卡 + 节末检查翻卡(P2)+ 读完回收卡 + **速览模式**(零 LLM:每节留首段+全部可扫读元素——callout/表格/列表/代码/图/公式,只折叠长段落散文,工具栏切换) | 锚卡数据来自 insight 行 meta;回收卡在滚动进度 100% 时显现,内容=thesis+3 要点+连接+1 开放问题;速览折叠是纯 DOM 操作(2026-08-02 修正:v1 把表格/列表也折叠,表格密集报告整章空白——只收长散文) |
+| `paper/reading_xp.js` | 体验轨:insight 锚定卡(按锚插到对应节标题后)+ 文库连接可点卡 + 节末检查翻卡(P2)+ 读完回收卡 + **速览模式**(零 LLM:每节留首段+要点 callout+图,折叠其余;无内容节保底留首块) | 锚卡数据来自 insight 行 meta;回收卡在滚动进度 100% 时显现,内容=thesis+3 要点+连接+1 开放问题;速览折叠是纯 DOM 操作 |
 | `paper/deepen.js` | 节标题旁「再深一层」钮 + 公式块「逐步推导」钮 + 结果抽屉 | start/poll 走 §4.2 路由 + `paperAttachPush` 双通道(qa.js 同款);抽屉缓存在内存,重开报告从 `deep:` 键读 |
 | `paper/notes.js` | 选中→「记一笔」popover→页边标记;批注面板列表;「就这条批注问 AI」送 QA | 复用 `_handlePaperTextSelection` 的选区捕获(report 分支已存在);CRUD 走 §4.2 |
 | `paper/focus_mode.js` | 专注模式:非当前段降透明度,j/k 逐段移动,Esc 退出 | 纯 DOM/CSS;与阅读位置记忆共存(段索引即锚) |

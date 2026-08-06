@@ -48,6 +48,7 @@ so:
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any
 
 from lib.api_response import api_error
@@ -62,7 +63,8 @@ logger = get_logger(__name__)
 
 def _start_task_for_conv(conv_id: str, config: dict[str, Any],
                           data: dict[str, Any] | None = None,
-                          *, user_msg_id: str = ''):
+                          *, user_msg_id: str = '',
+                          abort_after_ts: float | None = None):
     """Build API messages from DB and start a task. Returns (taskId, error_response).
 
     Automatically routes to endpoint mode (planner → worker → critic loop)
@@ -117,6 +119,26 @@ def _start_task_for_conv(conv_id: str, config: dict[str, Any],
         task['_userMsgId'] = user_msg_id
     task_id = task['id']
     _cfg_model = config.get('model', '?')
+
+    # ★ Send/regen abort-race closer (2026-08-06, conv msftgnt3 incident):
+    #   /api/chat/abort-conv sweeps the task registry AND sets a per-conv
+    #   marker, but a send/regenerate still inside its synchronous
+    #   translate/persist stretch has NO registered task yet — the sweep
+    #   finds nothing, and classify_send_intent's one-shot marker check has
+    #   already passed. The task then spawns and starts generating seconds
+    #   AFTER the user's Stop (the "resumes by itself" half of the report).
+    #   Re-check the marker now that the task EXISTS: stamping the abort
+    #   pre-spawn lets the prep-phase gates unwind it before any LLM call.
+    if abort_after_ts is not None:
+        from routes.chat_state import _was_aborted_after
+        if _was_aborted_after(conv_id, abort_after_ts):
+            task['aborted'] = True
+            task['_abort_timestamp'] = time.time()
+            task['_abort_reason'] = 'send_abort_race'
+            logger.info('[Chat] Task %s conv=%s — abort marker predates task '
+                        'registration; spawning pre-aborted (unwinds at the '
+                        'prep gate before any LLM call)',
+                        task_id[:8], conv_id[:8])
 
     # ★ A user-SELECTED orchestration flow (Mode dropdown) is mutually
     #   exclusive with the endpoint/autopilot toggles — the flow IS the

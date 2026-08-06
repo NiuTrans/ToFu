@@ -156,18 +156,19 @@ global.conversations = [conv];
 global.activeConvId = 'conv-1';
 
 const calls = { removeBubble: 0, apply: [], saved: 0, nav: 0, abortConv: [],
-                connectToTask: 0, pendingSync: 0, sync: [] };
+                connectToTask: 0, pendingSync: 0, sync: [], order: [] };
 global._removeTranslatingBubble = () => { calls.removeBubble++; };
 global.window.ConvView = { apply(convId, idx, msg) { calls.apply.push(idx); } };
 global.saveConversations = () => { calls.saved++; };
 global.syncConversationToServer = (c, opts) => {
   calls.sync.push(opts || null);
+  calls.order.push('sync');
   return Promise.resolve(scenario === 'rescue-fail' ? false : true);
 };
 global.markConvPendingSync = () => { calls.pendingSync++; };
 global.buildTurnNav = () => { calls.nav++; };
 global.connectToTask = () => { calls.connectToTask++; };
-global.Api = { chat: { abortConv: (id) => { calls.abortConv.push(id); return Promise.resolve({}); } } };
+global.Api = { chat: { abortConv: (id) => { calls.abortConv.push(id); calls.order.push('abortConv'); return Promise.resolve({}); } } };
 global.document = { getElementById(id) { return id === 'msg-0' ? { _stub: true } : null; } };
 
 // updateSendButton deps (eval defines it; unused here but keep globals sane)
@@ -202,6 +203,13 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
   check('message_kept_editable', conv.messages.length === 1 && conv.messages[0] === userMsg);
   check('conversations_saved', calls.saved >= 1);
   check('backend_told_to_abort', calls.abortConv.join(',') === 'conv-1');
+  /* ★ Ordering (2026-08-06): abortConv MUST fire BEFORE the rescue sync —
+   *   awaiting the conversation PUT first widened the server-side race
+   *   window (task started after the user's Stop; conv msftgnt3 incident). */
+  check('abortConv_before_rescue_sync',
+        calls.order.indexOf('abortConv') !== -1 &&
+        (calls.order.indexOf('sync') === -1 ||
+         calls.order.indexOf('abortConv') < calls.order.indexOf('sync')));
   check('no_task_started', calls.connectToTask === 0);
   check('nav_rebuilt', calls.nav >= 1);
   if (scenario === 'rescue-fail') {

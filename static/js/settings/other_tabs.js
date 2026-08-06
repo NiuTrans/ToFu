@@ -101,32 +101,6 @@ function _wireSearchPipelinePreview() {
 }
 
 // ══════════════════════════════════════════════════════
-//  Paper reading-experience toggles (General tab → 功能模块)
-// ══════════════════════════════════════════════════════
-
-/** Populate the paper reading-experience toggles from cfg.paper. Values are
- *  the EFFECTIVE resolution (server_config → env → default ON), so the
- *  checkboxes reflect what the reader will actually do; saving writes the
- *  explicit server_config section. */
-function _populatePaperXpTab(cfg) {
-  var rx = (cfg && cfg.paper && cfg.paper.reading_experience) || {};
-  var insCb = document.getElementById('settingPaperInsightEnabled');
-  if (insCb) insCb.checked = (rx.insight !== false);   // default ON
-  var cpCb = document.getElementById('settingPaperCheckpointsEnabled');
-  if (cpCb) cpCb.checked = (rx.checkpoints !== false); // default ON
-}
-
-/** Collect the toggle states into the save payload (merged server-side). */
-function _collectPaperXpConfig() {
-  var insCb = document.getElementById('settingPaperInsightEnabled');
-  var cpCb = document.getElementById('settingPaperCheckpointsEnabled');
-  return { reading_experience: {
-    insight: insCb ? insCb.checked : true,
-    checkpoints: cpCb ? cpCb.checked : true,
-  } };
-}
-
-// ══════════════════════════════════════════════════════
 //  Network tab (proxy bypass)
 // ══════════════════════════════════════════════════════
 

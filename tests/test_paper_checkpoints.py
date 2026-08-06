@@ -3,7 +3,8 @@
 
 Proves fully offline:
 
-  1. checkpoints_enabled four-level chain (cfg > server_config > env > ON);
+  1. checkpoints_enabled three-level chain (cfg > env kill switch > ON;
+     the Settings-toggle level was retired 2026-08-06);
   2. personal_scope registration (headless fail-closed);
   3. run_report_checkpoints — strict-JSON parse, deterministic anchor
      resolution (resolved kept / unresolved DROPPED), usage surfaced,
@@ -60,30 +61,19 @@ _CARDS = {'checkpoints': [
 
 
 # ── 1/2. enable chain + registry ─────────────────────────────────────────
-def _with_saved(saved, fn):
-    import lib as _lib
-    orig = getattr(_lib, '_SAVED_CONFIG', {})
-    _lib._SAVED_CONFIG = saved
-    try:
-        return fn()
-    finally:
-        _lib._SAVED_CONFIG = orig
-
-
 def test_enable_chain():
     os.environ.pop('TOFU_PAPER_CHECKPOINTS', None)
-    assert _with_saved({}, lambda: ce.checkpoints_enabled()) is True, 'default must be ON'
+    assert ce.checkpoints_enabled() is True, 'default must be ON'
     os.environ['TOFU_PAPER_CHECKPOINTS'] = '0'
     try:
-        assert _with_saved({}, lambda: ce.checkpoints_enabled()) is False, 'env=0 must disable'
-        assert _with_saved({'paper': {'reading_experience': {'checkpoints': True}}},
-                           lambda: ce.checkpoints_enabled()) is True, \
-            'server_config must beat env'
-        assert ce.checkpoints_enabled({'paperCheckpointsEnabled': False}) is False, \
-            'cfg stamp must win'
+        assert ce.checkpoints_enabled() is False, 'env=0 must disable'
+        assert ce.checkpoints_enabled({'paperCheckpointsEnabled': True}) is True, \
+            'cfg opt-in must beat env'
     finally:
         os.environ.pop('TOFU_PAPER_CHECKPOINTS', None)
-    _ok('checkpoints_enabled: cfg > server_config > env > 默认 ON')
+    assert ce.checkpoints_enabled({'paperCheckpointsEnabled': False}) is False, \
+        'cfg stamp must win'
+    _ok('checkpoints_enabled: cfg > env kill switch > 默认 ON')
 
 
 def test_personal_scope_registration():

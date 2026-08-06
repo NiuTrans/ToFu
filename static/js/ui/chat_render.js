@@ -1617,12 +1617,16 @@ function renderMessage(msg, idx) {
    *   FULL conversation (heavy fields refilled by _msgId) and repaints. Only
    *   when this turn actually had tool rounds and none are currently present. */
   /*   Count REAL rounds only: getToolRoundsFromMsg rebuilds display-only
-   *   inject rows (swarm / peer / user-steer) from the underscore sidecars
-   *   whenever `toolRounds` is empty, so a trimmed turn that also received
-   *   injects arrives here with rounds.length > 0 and no real history — the
-   *   affordance is the ONLY way back to it. */
+   *   inject rows (swarm / peer / user-steer / stall-nudge) from the
+   *   underscore sidecars whenever `toolRounds` is empty, so a trimmed turn
+   *   that also received injects arrives here with rounds.length > 0 and no
+   *   real history — the affordance is the ONLY way back to it. The
+   *   `_stallNudge` half matters: that lane was added after this filter and
+   *   a trimmed stall turn rendered its chip as the lone "1 tool" while the
+   *   real rounds stayed unreachable (conv msg0cop6qf64ee, 32 trimmed). */
   const _realRounds = rounds.filter(
-    (r) => r && !r._inboxInject && !r._peerInject && !r._userSteerInject);
+    (r) => r && !r._inboxInject && !r._peerInject && !r._userSteerInject
+        && !r._stallNudge);
   if (!_segTimelineRendered && _realRounds.length === 0 && msg && msg._trimmed
       && msg._trimmedToolRoundCount > 0) {
     const _n = msg._trimmedToolRoundCount;

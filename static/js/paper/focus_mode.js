@@ -17,6 +17,8 @@ function _focusBlocks(article) {
       // Skip layout furniture, keep content blocks (xp cards ARE content).
       if (kids[i].classList.contains('paper-report-finish-tag')) continue;
       if (kids[i].classList.contains('paper-read-time')) continue;
+      // Skim-collapsed blocks leave the j/k flow while skim is on.
+      if (kids[i].classList.contains('xp-skim-hidden')) continue;
       out.push(kids[i]);
     }
   }
@@ -71,6 +73,13 @@ function _paperFocusModeToggle() {
   if (_paperFocus.on) {
     _paperFocus.blocks = _focusBlocks(article);
     _paperFocus.current = _focusIndexNearViewport(article, _paperFocus.blocks);
+    // The bare document title is furniture, not reading content — landing the
+    // spotlight on it reads as "everything just went gray" (owner report).
+    // Start on the first real content block instead.
+    if (_paperFocus.blocks.length > 1 && _paperFocus.current >= 0
+        && (_paperFocus.blocks[_paperFocus.current].tagName || '') === 'H1') {
+      _paperFocus.current += 1;
+    }
   } else {
     _paperFocus.current = -1;
     for (var j = 0; j < _paperFocus.blocks.length; j++) {
@@ -78,7 +87,14 @@ function _paperFocusModeToggle() {
     }
   }
   _focusSetContainer(_paperFocus.on);
-  if (_paperFocus.on) _focusPaint();
+  if (_paperFocus.on) {
+    _focusPaint();
+    // Discoverability: the mode is keyboard-driven — say so once per entry.
+    if (typeof showToast === 'function') {
+      showToast((typeof t === 'function') ? t('paper.focusHint')
+                                          : 'j/k 移动 · Esc 退出');
+    }
+  }
 }
 
 function _focusStep(dir) {

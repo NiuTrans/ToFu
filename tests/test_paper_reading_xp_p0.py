@@ -9,8 +9,8 @@ Proves fully offline:
      / zh headings, model nominations never trusted blindly;
   3. resolve_insight_anchors — items get anchor_idx; unresolved → None
      (end-section fallback); legacy string provocations untouched;
-  4. insight_enabled four-level chain — cfg explicit > server_config > env >
-     default ON (the owner-approved 2026-08-02 default flip);
+  4. insight_enabled three-level chain — cfg explicit > env kill switch >
+     default ON (the Settings-toggle level was retired 2026-08-06);
   5. usage plumbing — synthesis _usage popped before grounding; rubric +
      synthesis usage summed in run_report_insight;
   6. _persist_insight v2 meta — items/usage/baseline ride the row;
@@ -128,50 +128,28 @@ def test_resolve_insight_anchors_items():
     _ok('resolve_insight_anchors: resolved/fallback/untouched三种形态 + stats 正确')
 
 
-# ── 4. insight_enabled four-level chain ──────────────────────────────────
-def _with_saved_config(saved, fn):
-    import lib as _lib
-    orig = getattr(_lib, '_SAVED_CONFIG', {})
-    _lib._SAVED_CONFIG = saved
-    try:
-        return fn()
-    finally:
-        _lib._SAVED_CONFIG = orig
-
-
-def test_enable_chain_four_levels():
+# ── 4. insight_enabled three-level chain (Settings toggle retired 2026-08-06) ──
+def test_enable_chain_three_levels():
     os.environ.pop('TOFU_PAPER_INSIGHT', None)
-    # level 4: nothing set anywhere → default ON (owner-approved flip).
-    _with_saved_config({}, lambda: None)
-    assert _with_saved_config({}, lambda: ie.insight_enabled()) is True, \
-        'interactive default must be ON'
-    # level 3: env seed honoured when server_config is silent.
+    # level 3: nothing set anywhere → default ON (owner-approved flip).
+    assert ie.insight_enabled() is True, 'interactive default must be ON'
+    # level 2: env kill switch honoured, both directions.
     os.environ['TOFU_PAPER_INSIGHT'] = '0'
     try:
-        assert _with_saved_config({}, lambda: ie.insight_enabled()) is False, \
-            'env=0 must disable'
-        # level 2: server_config user toggle beats the env seed, both ways.
-        assert _with_saved_config(
-            {'paper': {'reading_experience': {'insight': True}}},
-            lambda: ie.insight_enabled()) is True, 'server_config=True must beat env=0'
-        # level 1: explicit per-request cfg (headless stamp) beats everything.
-        assert _with_saved_config(
-            {'paper': {'reading_experience': {'insight': True}}},
-            lambda: ie.insight_enabled({'paperInsightEnabled': False})) is False, \
-            'cfg stamp False must beat server_config + env'
+        assert ie.insight_enabled() is False, 'env=0 must disable'
+        # level 1: explicit per-request cfg (headless stamp / opt-in) always wins.
+        assert ie.insight_enabled({'paperInsightEnabled': True}) is True, \
+            'cfg opt-in True must beat env=0'
     finally:
         os.environ.pop('TOFU_PAPER_INSIGHT', None)
     os.environ['TOFU_PAPER_INSIGHT'] = '1'
     try:
-        assert _with_saved_config(
-            {'paper': {'reading_experience': {'insight': False}}},
-            lambda: ie.insight_enabled()) is False, 'server_config=False must beat env=1'
-        assert _with_saved_config(
-            {}, lambda: ie.insight_enabled({'paperInsightEnabled': True})) is True, \
-            'cfg opt-in True must win'
+        assert ie.insight_enabled() is True, 'env=1 must enable'
+        assert ie.insight_enabled({'paperInsightEnabled': False}) is False, \
+            'cfg stamp False must beat env=1'
     finally:
         os.environ.pop('TOFU_PAPER_INSIGHT', None)
-    _ok('insight_enabled: cfg > server_config > env > 默认 ON 四级链全部钉住')
+    _ok('insight_enabled: cfg > env kill switch > 默认 ON 三级链全部钉住')
 
 
 def test_personal_scope_registry_has_insight():
@@ -466,7 +444,7 @@ def main():
         test_resolve_anchor_exact_fuzzy_fallback,
         test_resolve_anchor_zh,
         test_resolve_insight_anchors_items,
-        test_enable_chain_four_levels,
+        test_enable_chain_three_levels,
         test_personal_scope_registry_has_insight,
         test_usage_folded_and_items_persisted,
         test_persist_insight_v2_meta_written,

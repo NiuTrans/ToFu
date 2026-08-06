@@ -850,9 +850,9 @@ function _repositionInjectGroups(body, rounds) {
   if (!body || !Array.isArray(rounds)) return;
   const _esc = (typeof CSS !== "undefined" && CSS.escape) ? CSS.escape : (s) => s;
   for (const r of rounds) {
-    if (!r || !(r._userSteerInject || r._peerInject || r._inboxInject)) continue;
+    if (!r || !(r._userSteerInject || r._peerInject || r._inboxInject || r._stallNudge)) continue;
     const injRound = r._userSteerInject ? r.steerRound
-      : (r._peerInject ? r.peerRound : r.inboxRound);
+      : (r._peerInject ? r.peerRound : (r._stallNudge ? r.stallRound : r.inboxRound));
     const anchor = (injRound || 0) - 1;
     if (anchor < 0) continue;
     const sGroup = body.querySelector(

@@ -18,6 +18,7 @@ from lib.tasks_pkg.stream_handler._budget import (
     _EMPTY_STOP_RETRY_MAX,
     _PREMATURE_RETRY_MAX_CLASSIC,
     _PREMATURE_RETRY_MAX_ZERO_BYTE,
+    _TOOL_CALLS_NO_PAYLOAD_RETRY_MAX,
     _zero_byte_backoff_seconds,
 )
 from lib.tasks_pkg.stream_handler._canned_greeting import (
@@ -47,6 +48,35 @@ def _interruptible_sleep(seconds, task):
 
 def _todo_continuation_max():
     return _sys.modules['lib.tasks_pkg.stream_handler']._todo_continuation_max()
+
+
+def _reset_round_to_base(task, round_num):
+    """Reset the round's partial text/thinking to the round base stamped by
+    ``stream_llm_response``, so a re-streamed retry never stacks on the
+    poisoned attempt's tail. The discarded snapshot is recorded in the
+    FloorRetry residue list so the shrink-convergent checkpoint/settle
+    guards recognise it as our own discard (exact byte-match) and allow the
+    overwrite. Same semantics as the truncated-tool-args retry path below
+    (which keeps its inline copy deliberately untouched).
+    """
+    with task['content_lock']:
+        _discarded_c = task['content']
+        _discarded_t = task['thinking']
+        _bc = task.get('_round_base_content')
+        _bt = task.get('_round_base_thinking')
+        if _bc is not None:
+            task['content'] = _bc
+        if _bt is not None:
+            task['thinking'] = _bt
+        _shrunk = (task['content'] != _discarded_c
+                   or task['thinking'] != _discarded_t)
+    if _shrunk:
+        _residue = task.setdefault('_floor_retry_residue', [])
+        if len(_residue) < 8:
+            _residue.append({'content': _discarded_c,
+                             'thinking': _discarded_t})
+    append_event(task, build_event(
+        EventType.DELTA_RESET, roundNum=round_num, discard=True))
 
 
 def analyse_stream_result(
@@ -489,6 +519,88 @@ def analyse_stream_result(
             except Exception as _ae:
                 logger.debug('[%s] canned-greeting audit failed: %s', tid, _ae)
 
+        # ── Tool-calls finish WITHOUT payload (2026-08-06 kimi-k3/sankuai
+        #    incident, conv msh3qeplzneph5 R3) ──
+        # The wire reported finish_reason=tool_calls yet zero tool calls
+        # were assembled: the gateway lost the model's tool-call deltas
+        # UPSTREAM (usage['_tool_calls_void']=='gateway_no_payload'), or our
+        # own phantom filter dropped every entry ('filtered' — its
+        # per-entry WARNINGs are then in the log). Normalizing this to
+        # 'stop' ends the turn mid-work and delivers a PREAMBLE as if it
+        # were the conclusion ("说了要去查,然后死了"), so retry
+        # transparently like the other transport-lying buckets. Shares the
+        # per-phase counter; the cap is the low one because the poisoned
+        # round DID bill prompt + completion tokens.
+        if last_finish_reason in ('tool_calls', 'tool_use'):
+            _void_cause = (usage or {}).get('_tool_calls_void') or 'unknown'
+            if _premature_retry_count < _TOOL_CALLS_NO_PAYLOAD_RETRY_MAX:
+                _premature_retry_count += 1
+                result['premature_retry_count'] = _premature_retry_count
+                if '_premature_retry_count_phase' in task:
+                    task['_premature_retry_count_phase'] = _premature_retry_count
+                _backoff_s = _zero_byte_backoff_seconds(_premature_retry_count)
+                logger.warning(
+                    '[%s] ⚠️ TOOL_CALLS NO PAYLOAD at round %d: '
+                    'finish_reason=%s but 0 tool call(s) assembled '
+                    '(cause=%s) — the gateway reported tool calls it never '
+                    'delivered. Retrying (%d/%d) after %.1fs backoff '
+                    'instead of ending the turn on a preamble. '
+                    'M-TraceId=%s model=%s',
+                    tid, round_num, last_finish_reason, _void_cause,
+                    _premature_retry_count, _TOOL_CALLS_NO_PAYLOAD_RETRY_MAX,
+                    _backoff_s, _trace_id, model,
+                )
+                _reset_round_to_base(task, round_num)
+                emit_phase(task, Phase.RETRYING,
+                           attempt=_premature_retry_count,
+                           max=_TOOL_CALLS_NO_PAYLOAD_RETRY_MAX,
+                           bucket='tool_calls_no_payload',
+                           backoff_s=round(_backoff_s, 2),
+                           detail=(
+                               f'⚠️ 网关声明了工具调用但载荷未送达，'
+                               f'退避 {_backoff_s:.1f}s 后重试 '
+                               f'({_premature_retry_count}/'
+                               f'{_TOOL_CALLS_NO_PAYLOAD_RETRY_MAX})…'
+                           ))
+                _interruptible_sleep(_backoff_s, task)
+                result['action'] = 'continue'
+                return result
+            # Budget exhausted — honest terminal error (same shape as the
+            # truncated-tool-args exhaustion: the turn-level auto-retry may
+            # still re-run the whole turn from pristine input). Never
+            # deliver the preamble as if the turn concluded normally.
+            result['action'] = 'break'
+            result['last_finish_reason'] = 'premature_close'
+            result['loop_exit_reason'] = (
+                f'tool_calls_no_payload_retries_exhausted_round_{round_num}'
+            )
+            from lib.error_envelope import make_envelope as _make_env
+            task['error'] = _make_env(
+                'premature_close',
+                detail=(f'Gateway repeatedly reported finish_reason='
+                        f'{last_finish_reason} without delivering any '
+                        f'tool_call payload (cause={_void_cause}); retries '
+                        f'exhausted ({_premature_retry_count}/'
+                        f'{_TOOL_CALLS_NO_PAYLOAD_RETRY_MAX}). '
+                        f'M-TraceId={_trace_id}'),
+                model=model,
+                context=f'round-{round_num}',
+                source='llm-stream',
+                raw=(f'bucket=tool_calls_no_payload cause={_void_cause} '
+                     f'attempts={_premature_retry_count}/'
+                     f'{_TOOL_CALLS_NO_PAYLOAD_RETRY_MAX} '
+                     f'M-TraceId={_trace_id}'),
+            )
+            logger.error(
+                '[%s] ⚠️ TOOL_CALLS NO PAYLOAD retries exhausted at round %d '
+                '(%d/%d). cause=%s M-TraceId=%s model=%s — settling '
+                'finishReason=premature_close with error envelope.',
+                tid, round_num, _premature_retry_count,
+                _TOOL_CALLS_NO_PAYLOAD_RETRY_MAX, _void_cause,
+                _trace_id, model,
+            )
+            return result
+
         # ── Stream anomaly — with or without content ──
         # If the LLM client flagged a stream anomaly (_missing_done,
         # _missing_finish_reason, _empty_stop), the response is likely
@@ -664,17 +776,23 @@ def analyse_stream_result(
         result['action'] = 'break'
         result['loop_exit_reason'] = f'no_tool_calls_round_{round_num}'
 
-        # ★ Fix: API reported finish_reason=tool_calls but all tool calls
-        #   were filtered out (phantom/spurious filter in lib/llm/stream.py), or
-        #   the gateway reported tool_calls but the stream contained none.
-        #   Normalize to 'stop' so the post-loop check in _finalize doesn't
-        #   misinterpret this as "loop ended unexpectedly with pending tools".
+        # ★ Defensive last resort: API reported finish_reason=tool_calls
+        #   but no tool calls were assembled. The dedicated
+        #   tool_calls_no_payload retry bucket above returns first, so this
+        #   is only reachable if a future early-return bypasses it. Do NOT
+        #   blame the phantom filter blindly — its drops carry their own
+        #   'Filtering phantom' WARNINGs; when those are absent the GATEWAY
+        #   simply never sent the payload. Normalize to 'stop' so the
+        #   post-loop check in _finalize doesn't misinterpret this as
+        #   "loop ended unexpectedly with pending tools".
         if last_finish_reason in ('tool_calls', 'tool_use'):
             logger.warning(
                 '[%s] ⚠ finish_reason=%s but assistant_msg has 0 tool_calls '
-                '(likely all filtered out by phantom/spurious filter). '
+                '(void cause=%s; dedicated retry bucket did not claim it). '
                 'Normalizing to stop. model=%s round=%d',
-                tid, last_finish_reason, model, round_num,
+                tid, last_finish_reason,
+                (usage or {}).get('_tool_calls_void') or 'unknown',
+                model, round_num,
             )
             result['last_finish_reason'] = 'stop'
 

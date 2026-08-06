@@ -407,19 +407,6 @@ def get_server_config():
     except Exception as e:
         logger.debug('[ServerConfig] face_refusals unavailable: %s', e)
 
-    # Paper reading-experience toggles (design §3.4). The GET returns the
-    # EFFECTIVE value (server_config section → env seed → default ON), so the
-    # Settings checkbox reflects what the reader will actually do; saving
-    # writes the explicit section (level 2 of the chain).
-    paper_info = {'reading_experience': {}}
-    try:
-        from lib.paper.insight_engine import insight_enabled as _ie_enabled
-        paper_info['reading_experience']['insight'] = _ie_enabled()
-        from lib.paper.checkpoint_engine import checkpoints_enabled as _cp_enabled
-        paper_info['reading_experience']['checkpoints'] = _cp_enabled()
-    except Exception as e:
-        logger.warning('[ServerConfig] paper reading_experience resolve failed: %s', e)
-
     return api_ok({
         'providers': providers, 'presets': presets,
         'models': models, 'search': search_info,
@@ -437,7 +424,6 @@ def get_server_config():
         'model_defaults': model_defaults,
         'network': network_info,
         'mt_provider': mt_provider_info,
-        'paper': paper_info,
         'upload': upload_policy,
         'context': context_policy,
         'translation': translation_policy,
@@ -1345,19 +1331,6 @@ def save_server_config():
             logger.info('[Config] MT provider updated: provider=%s, enabled=%s',
                         existing['mt_provider']['provider'],
                         existing['mt_provider']['enabled'])
-
-        if 'paper' in data and isinstance(data['paper'], dict):
-            # Reading-experience toggles — MERGE known bool keys (never
-            # wholesale-replace the section: sibling keys written by other
-            # panels survive).
-            rx_in = data['paper'].get('reading_experience')
-            if isinstance(rx_in, dict):
-                rx = existing.setdefault('paper', {}).setdefault('reading_experience', {})
-                for key in ('insight', 'checkpoints'):
-                    if key in rx_in:
-                        rx[key] = bool(rx_in[key])
-                changes.append('paper.reading_experience')
-                logger.info('[Config] paper.reading_experience → %s', rx)
 
         return existing
 

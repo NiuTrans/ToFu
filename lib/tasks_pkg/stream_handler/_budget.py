@@ -59,6 +59,16 @@ _EMPTY_STOP_RETRY_MAX = 2
 # each retry re-bills a mostly cache-read prompt, so the cap stays low.
 _CANNED_GREETING_RETRY_MAX = 2
 
+# Tool-calls-finish-without-payload retry budget (the gateway reports
+# finish_reason=tool_calls but the stream carried ZERO tool_call deltas —
+# the model's tool calls were lost upstream; 2026-08-06 kimi-k3/sankuai
+# incident, conv msh3qeplzneph5 R3). Ending the turn there delivers a
+# preamble as if it were the conclusion. The poisoned round DID bill
+# prompt + completion tokens (unlike zero-byte), and the failure is
+# intermittent gateway flakiness, so the cap matches the other
+# "tokens were spent" buckets (empty_stop / canned_greeting).
+_TOOL_CALLS_NO_PAYLOAD_RETRY_MAX = 2
+
 # ── Todo-continuation enforcer (OMC/CC backport, Rec 2) ──
 # When the model tries to end its turn (finish_reason=stop, no tool calls) but
 # its structured checklist (task['_todos'], written via the todo_write tool)

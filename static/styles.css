@@ -2009,9 +2009,12 @@ h2:hover .paper-deepen-btn,h3:hover .paper-deepen-btn,.paper-deepen-btn:focus{op
 .paper-note-editor-actions button{padding:4px 12px;border-radius:7px;border:1px solid var(--border);background:transparent;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;color:var(--text-secondary)}
 .paper-note-editor-actions .paper-note-save{background:var(--accent);border-color:var(--accent);color:#fff}
 .paper-note-editor-actions .paper-note-del:hover{color:#ef4444;border-color:#ef4444}
-/* Focus mode (P4): one block in the spotlight, the rest dims away. */
+/* Focus mode (P4): one block in the spotlight, the rest dims away. The
+ * spotlight must be VISIBLE — a pure opacity contrast (1 vs .22) read as
+ * "everything went gray" (owner report 2026-08-06); the current block gets a
+ * soft accent wash + a left accent bar via box-shadow (no layout shift). */
 .paper-focus-on .paper-report-article > *{opacity:.22;transition:opacity .25s}
-.paper-focus-on .paper-report-article > *.paper-focus-current{opacity:1}
+.paper-focus-on .paper-report-article > *.paper-focus-current{opacity:1;background:color-mix(in srgb,var(--accent) 8%,transparent);box-shadow:-4px 0 0 0 var(--accent);border-radius:4px}
 .paper-focus-btn.is-on{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,var(--border));background:color-mix(in srgb,var(--accent) 10%,transparent)}
 .paper-report-content img,.paper-report-body img{display:block;max-width:100%;height:auto;margin:14px auto;border:1px solid var(--border);border-radius:6px;background:#fff;padding:4px;box-shadow:0 2px 8px rgba(0,0,0,.15);cursor:zoom-in}
 .paper-report-content p:has(> img:only-child),.paper-report-body p:has(> img:only-child){text-align:center;margin:14px 0}

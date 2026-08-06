@@ -91,9 +91,9 @@ function _trimMsgForPersist(m) {
    *   Keeps the marker key list in lock-step with
    *   lib/tasks_pkg/segments/_types.py::SYNTHETIC_INBOX_MARKERS. */
   if (Array.isArray(r.toolRounds)
-      && r.toolRounds.some((rd) => rd && (rd._inboxInject || rd._peerInject || rd._userSteerInject))) {
+      && r.toolRounds.some((rd) => rd && (rd._inboxInject || rd._peerInject || rd._userSteerInject || rd._stallNudge))) {
     r = { ...r, toolRounds: r.toolRounds.filter(
-      (rd) => !(rd && (rd._inboxInject || rd._peerInject || rd._userSteerInject))) };
+      (rd) => !(rd && (rd._inboxInject || rd._peerInject || rd._userSteerInject || rd._stallNudge))) };
   }
   if (Array.isArray(m.apiRounds) && m.apiRounds.some((rd) => rd && rd.usage && _USAGE_TRANSIENT_KEYS.some((k) => k in rd.usage))) {
     r = { ...r, apiRounds: m.apiRounds.map((rd) => (

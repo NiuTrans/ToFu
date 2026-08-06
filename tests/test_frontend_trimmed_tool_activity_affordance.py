@@ -7,6 +7,13 @@ holds 73 real tool rounds in the DB, but on reopen the bubble showed only three
 rows — all of them SYNTHETIC "received 1 async swarm update" chips — and no
 affordance to pull the real history back.
 
+Second instance (conv msg0cop6qf64ee, 2026-08-06): the stall-nudge lane
+(`_stallNudge`, added after the `_realRounds` filter was written) re-opened the
+same hole — a trimmed turn whose 32 real rounds were stripped showed its lone
+「已提示模型继续」chip under a "使用了 1 个工具" header, and the affordance was
+suppressed because the filter never excluded the stall marker. The fixture
+below pins the stall shape so a FIFTH lane cannot drift in untested.
+
 Mechanism (both halves are per-design, the BUG is their intersection):
   • routes/conversations.py::_trim_heavy_for_window strips ``toolRounds`` for
     transport and stamps ``_trimmed`` + ``_trimmedToolRoundCount``.
@@ -139,6 +146,22 @@ function trimmedTurnNoInjects() {
   };
 }
 
+// ── The stall-nudge variant — conv msg0cop6qf64ee msg[1] ground truth. The
+//    windowed trim stripped 32 real toolRounds; the tiny `_stallNudges`
+//    display sidecar (not in _TRIMMABLE_HEAVY_FIELDS, by design) survived
+//    and rehydrated into ONE synthetic chip. The pre-fix `_realRounds`
+//    filter never excluded `_stallNudge`, so the chip counted as a real
+//    round and the "Load tool activity (32)" affordance was suppressed. ──
+function trimmedTurnWithStallNudge() {
+  return {
+    role: 'assistant', content: 'kotlinc answer', _msgId: 'a5',
+    _trimmed: true, _trimmedToolRoundCount: 32,
+    _stallNudges: [{ round: 18, tool: 'run_command', badge: 'interrupted',
+                     failedRound: 32, prompt: '[SYSTEM: TOOL CALL DID NOT RUN]',
+                     max: 1 }],
+  };
+}
+
 function run() {
   // ── 1. The reported defect: injects masquerade as tool rounds ──────────
   const m1 = trimmedTurnWithInjects();
@@ -157,6 +180,20 @@ function run() {
   check('trimmed, no injects: affordance offered',
         r2.length === 0 && affordanceShown(m2, r2, false) === true);
 
+  // ── 2b. The stall-nudge variant: the chip must NOT count as a real round,
+  //    and the affordance (the only way back to the 32 trimmed rounds) MUST
+  //    be offered. Pre-fix this was FALSE — the chip slipped past the
+  //    three-lane `_realRounds` filter. ──
+  const m5 = trimmedTurnWithStallNudge();
+  const r5 = getToolRoundsFromMsg(m5);
+  check('trimmed+stall: rounds are ONLY the synthetic stall chip',
+        r5.length === 1 && r5.every(r => r._stallNudge === true));
+  check('trimmed+stall: zero REAL tool rounds present',
+        r5.filter(r => !r._inboxInject && !r._peerInject && !r._userSteerInject
+            && !r._stallNudge).length === 0);
+  check('trimmed+stall: "Load tool activity" affordance IS offered',
+        affordanceShown(m5, r5, false) === true);
+
   // ── 3. COMPLEMENT (charter: a ban without a complement degrades into
   //    "always show it"). A turn whose REAL rounds are present, or which was
   //    never trimmed, must NOT get the affordance.
@@ -171,9 +208,9 @@ function run() {
   check('COMPLEMENT: never-trimmed turn → no affordance',
         affordanceShown(m4, getToolRoundsFromMsg(m4), false) === false);
 
-  const m5 = trimmedTurnWithInjects();
+  const m6 = trimmedTurnWithInjects();
   check('COMPLEMENT: segment timeline rendered → no affordance',
-        affordanceShown(m5, getToolRoundsFromMsg(m5), true) === false);
+        affordanceShown(m6, getToolRoundsFromMsg(m6), true) === false);
 
   console.log(out.join('\n'));
 }

@@ -173,8 +173,9 @@ PERSONAL_CAPABILITIES: dict[str, PersonalCapability] = {
             'headless / BYO surfaces unless the caller opts in. ON by '
             'default for the interactive reader (owner decision '
             '2026-08-02, docs/PAPER_READING_EXPERIENCE_DESIGN.md §3.4); '
-            'the full interactive resolution chain (server_config → env → '
-            'default ON) lives in insight_engine._config.insight_enabled — '
+            'the interactive resolution chain (env → default ON; the '
+            'Settings toggle was retired 2026-08-06) lives in '
+            'insight_engine._config.insight_enabled — '
             'this registry entry only guarantees the headless fail-closed '
             'stamp. Its own engine gates it, so prompt_block is empty.'),
         prompt_block=''),

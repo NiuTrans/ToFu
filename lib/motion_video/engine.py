@@ -302,7 +302,8 @@ def _composition_contract_findings(html: str, scene_dir: str) -> list[str]:
 def _existing_composition(index_path: str, duration: float,
                           scene: dict | None = None, *,
                           width: int = 1080, height: int = 1440,
-                          scene_index: int = 1, total_scenes: int = 1) -> str | None:
+                          scene_index: int = 1, total_scenes: int = 1,
+                          theme=None) -> str | None:
     """Return an on-disk composition iff it matches this scene's duration.
 
     Resume path for the compose stage: a scene authored before a crash must
@@ -336,7 +337,7 @@ def _existing_composition(index_path: str, duration: float,
     from lib.motion_video._template import matches_template
     if matches_template(html, scene or {}, width=width, height=height,
                         duration=duration, scene_index=scene_index,
-                        total_scenes=total_scenes):
+                        total_scenes=total_scenes, theme=theme):
         logger.info('[MotionVideo] %s holds a degraded fallback card — '
                     're-authoring instead of adopting it', index_path)
         return None
@@ -385,7 +386,7 @@ def _scene_already_rendered(mv, mp4_path: str, *, width: int, height: int,
 def _commit_scene_html(index_path: str, html: str, scene: dict,
                        scene_dir: str, *, width: int, height: int,
                        duration: float, scene_index: int,
-                       total_scenes: int) -> str:
+                       total_scenes: int, theme=None) -> str:
     """Write ``html`` to ``index_path`` unless doing so would LOSE quality.
 
     Returns the HTML that is now on disk — the new one when it was committed,
@@ -406,7 +407,8 @@ def _commit_scene_html(index_path: str, html: str, scene: dict,
 
     new_mode = ('template' if matches_template(
         html, scene, width=width, height=height, duration=duration,
-        scene_index=scene_index, total_scenes=total_scenes) else 'authored')
+        scene_index=scene_index, total_scenes=total_scenes,
+        theme=theme) else 'authored')
     new_grade = scene_grade(html, scene_dir, mode=new_mode)
 
     old_html = ''
@@ -431,7 +433,7 @@ def _commit_scene_html(index_path: str, html: str, scene: dict,
             old_mode = ('template' if matches_template(
                 old_html, scene, width=width, height=height,
                 duration=duration, scene_index=scene_index,
-                total_scenes=total_scenes) else 'authored')
+                total_scenes=total_scenes, theme=theme) else 'authored')
             old_grade = scene_grade(old_html, scene_dir, mode=old_mode)
             if is_regression(old_grade, new_grade):
                 logger.warning(
@@ -604,6 +606,24 @@ def run_motion_task(task: dict) -> None:
                                                 render_scene_html)
         _phase_started(task, phases, 'compose')
         authoring = scene_author_enabled(task)
+        # Film-level theme (design-system P1): ONE palette + font pairing +
+        # scenario bible for the whole film, replacing the old per-scene
+        # colour roulette. Default ON; any failure keeps the legacy path.
+        theme = None
+        try:
+            from lib.design_sys.themes import (classify_scenario,
+                                               default_theme_id, get_theme)
+            _tid = (task.get('theme') or '').strip()
+            if not _tid:
+                _tid = default_theme_id(classify_scenario(topic))
+            theme = get_theme(_tid)
+            if theme is not None:
+                logger.info('[MotionVideo] film theme: %s (%s)',
+                            theme.id, theme.label)
+        except Exception as e:
+            logger.warning('[MotionVideo] theme resolution failed, '
+                           'legacy path: %s', e)
+            theme = None
         scene_dirs: list[str] = []
         authored = 0
         scene_gate_issues: dict[str, list[str]] = {}
@@ -620,7 +640,7 @@ def run_motion_task(task: dict) -> None:
             # never re-author (that would re-spend an agent loop per restart).
             existing = _existing_composition(
                 index_path, dur, sc, width=width, height=height,
-                scene_index=i, total_scenes=total)
+                scene_index=i, total_scenes=total, theme=theme)
             if existing is not None:
                 html = existing
                 # A reused authored composition is STILL authored — the work
@@ -641,7 +661,8 @@ def run_motion_task(task: dict) -> None:
                                        token_budget=int(task.get('author_token_budget')
                                                         or 0) or None,
                                        model=task.get('model') or None,
-                                       abort_event=task.get('abort_event'))
+                                       abort_event=task.get('abort_event'),
+                                       theme=theme)
                 html = res['html']
                 author_rounds = res.get('rounds', 0)
                 author_tokens = res.get('tokens', 0)
@@ -656,7 +677,7 @@ def run_motion_task(task: dict) -> None:
             else:
                 html = render_scene_html(sc, width=width, height=height,
                                          duration=dur, scene_index=i,
-                                         total_scenes=total)
+                                         total_scenes=total, theme=theme)
             errs = mv.check_composition_html(html)
             if errs:
                 raise ValueError(f"template composition failed its own gate "

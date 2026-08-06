@@ -1058,6 +1058,12 @@ class SSEAccumulator:
             if rt > 0 and 'reasoning_tokens' not in self.usage:
                 self.usage['reasoning_tokens'] = rt
 
+        # Pre-filter count — the tool_calls_no_payload anomaly check below
+        # uses this to tell "the GATEWAY never sent any tool_call delta" (0)
+        # apart from "OUR phantom filter dropped every accumulated entry"
+        # (>0 — its per-entry WARNINGs then exist in the log).
+        _tool_calls_seen = len(self.tool_calls_acc)
+
         # Filter out spurious tool calls
         if self.tool_calls_acc:
             _filtered = {}
@@ -1284,6 +1290,47 @@ class SSEAccumulator:
                 resp_trace=resp_trace or 'none',
             )
 
+        # Diagnostics: tool_calls finish reason with ZERO payload
+        # (2026-08-06 kimi-k3/sankuai incident, conv msh3qeplzneph5 R3).
+        # The gateway closed the stream cleanly reporting
+        # finish_reason=tool_calls, yet not one tool_call delta accumulated
+        # — the model's tool calls were lost UPSTREAM. Downstream this used
+        # to normalize to a fake "stop" and end the turn mid-work with a
+        # preamble as the deliverable. None of the four anomaly classes
+        # above covers this shape, so dump the raw frames here and stamp
+        # usage for the loop classifier (its retry bucket reads
+        # ``_tool_calls_void``). ``cause`` separates the two worlds:
+        #   'gateway_no_payload' — pre-filter count 0: the wire itself
+        #     carried no tool_call deltas (upstream loss);
+        #   'filtered' — pre-filter count >0: OUR phantom filter dropped
+        #     every entry (its per-entry WARNINGs are then in the log).
+        _tool_calls_void = None
+        if (not aborted and finish_reason in ('tool_calls', 'tool_use')
+                and not tool_calls_acc and chunk_count > 0):
+            _tool_calls_void = ('filtered' if _tool_calls_seen
+                                else 'gateway_no_payload')
+            logger.warning(
+                '%s ⚠ TOOL_CALLS FINISH WITHOUT PAYLOAD: finish_reason=%s '
+                'but 0 tool call(s) assembled (cause=%s pre_filter=%d). '
+                'M-TraceId=%s elapsed=%.1fs chunks=%d content_len=%d '
+                'thinking_len=%d model=%s',
+                self.log_prefix, finish_reason, _tool_calls_void,
+                _tool_calls_seen, self.trace_id, _stream_elapsed_s,
+                chunk_count, len(content), len(thinking_text),
+                self.body.get('model', '?'))
+            self.raw_dumper.dump_anomaly(
+                'tool_calls_no_payload',
+                cause=_tool_calls_void,
+                pre_filter_count=_tool_calls_seen,
+                elapsed_s=round(_stream_elapsed_s, 2),
+                chunks=chunk_count,
+                content_len=len(content),
+                thinking_len=len(thinking_text),
+                finish_reason=finish_reason,
+                mm_mode=self._mm_mode,
+                resp_trace=resp_trace or 'none',
+            )
+
         # Inject metadata into usage
         if usage is None:
             usage = {}
@@ -1292,6 +1339,8 @@ class SSEAccumulator:
             usage['resp_trace_id'] = resp_trace
         usage['stream_elapsed_ms'] = round(_stream_elapsed_s * 1000)
         usage['_chunks_received'] = chunk_count
+        if _tool_calls_void:
+            usage['_tool_calls_void'] = _tool_calls_void
 
         # ── Relay the post-translation wire fingerprint into `usage` ──
         # Captured in prepare_request (the only point seeing the final wire

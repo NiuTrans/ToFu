@@ -35,6 +35,7 @@ from lib.tasks_pkg.stream_handler._budget import (  # noqa: E402,F401
     _PREMATURE_RETRY_MAX_CLASSIC,
     _PREMATURE_RETRY_MAX_ZERO_BYTE,
     _TODO_CONTINUATION_MAX_DEFAULT,
+    _TOOL_CALLS_NO_PAYLOAD_RETRY_MAX,
     _ZERO_BYTE_BACKOFF_BASE_S,
     _ZERO_BYTE_BACKOFF_MAX_S,
     _interruptible_sleep,

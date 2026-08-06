@@ -59,7 +59,8 @@ def _normalise_for_compare(html: str) -> str:
 
 def matches_template(html: str, scene: dict, *, width: int = 1080,
                      height: int = 1440, duration: float | None = None,
-                     scene_index: int = 1, total_scenes: int = 1) -> bool:
+                     scene_index: int = 1, total_scenes: int = 1,
+                     theme=None) -> bool:
     """True when ``html`` IS this scene's fallback card, marker or not.
 
     :func:`is_template_composition` only recognises cards that carry
@@ -85,7 +86,7 @@ def matches_template(html: str, scene: dict, *, width: int = 1080,
         rebuilt = render_scene_html(scene, width=width, height=height,
                                     duration=duration,
                                     scene_index=scene_index,
-                                    total_scenes=total_scenes)
+                                    total_scenes=total_scenes, theme=theme)
     except Exception as e:
         logger.warning('[MotionVideo] template re-render for comparison '
                        'failed: %s', e)
@@ -180,14 +181,18 @@ _TEMPLATE = """<!doctype html>
       .bgfill {{ position: absolute; inset: 0; background: {background}; }}
       .clip {{ position: absolute; inset: 0; display: grid; place-items: center; }}
       .headline {{
-        font-size: {font_px}px; font-weight: 800; color: #fff; letter-spacing: -1px;
+        font-size: {font_px}px; font-weight: 800; color: {ink}; letter-spacing: -1px;
         max-width: {max_width}px; text-align: center; line-height: 1.4;
         text-shadow: 0 4px 32px rgba(0,0,0,.45);
       }}
       .tag {{
         position: absolute; top: 48px; left: 56px;
-        font-size: 30px; font-weight: 600; color: rgba(255,255,255,.55);
+        font-size: 30px; font-weight: 600; color: {muted};
         letter-spacing: 4px;
+      }}
+      .accentrule {{
+        position: absolute; top: 96px; left: 56px; width: 64px; height: 6px;
+        background: {accent};
       }}
     </style>
   </head>
@@ -204,6 +209,7 @@ _TEMPLATE = """<!doctype html>
       <div class="bgfill"></div>
       <section id="card-1" class="clip" data-start="0" data-duration="{duration}" data-track-index="1">
         <div class="tag" id="scenetag">{tag}</div>
+        <div class="accentrule"></div>
         <h1 class="headline" id="headline">{headline}</h1>
       </section>
     </div>
@@ -228,12 +234,18 @@ _GRADIENTS = (
 
 def render_scene_html(scene: dict, *, width: int = 1080, height: int = 1440,
                       duration: float | None = None,
-                      scene_index: int = 1, total_scenes: int = 1) -> str:
+                      scene_index: int = 1, total_scenes: int = 1,
+                      theme=None) -> str:
     """Render one scene dict into a composition HTML.
 
     Draws ``scene['on_screen']`` (falling back to ``text`` for legacy
     storyboards) at the largest font size whose measured capacity holds it.
     ``scene['visual']`` is art direction and is never drawn.
+
+    ``theme`` (design_sys Theme) replaces the four-gradient rotation with the
+    FILM's palette: solid theme ground, ink headline, muted tag, one accent
+    rule. Even the fallback then carries the film's visual system instead of
+    advertising that it is the fallback.
     """
     caption = scene_on_screen(scene)
     headline = _html.escape(caption) if caption else '…'
@@ -251,6 +263,17 @@ def render_scene_html(scene: dict, *, width: int = 1080, height: int = 1440,
                        scene_id, len(caption),
                        on_screen_capacity(width, height, font_px), font_px,
                        width, height)
+    if theme is not None:
+        c = theme.colors
+        background = c['bg']
+        ink = c['ink']
+        muted = c['muted']
+        accent = c['accent']
+    else:
+        background = _GRADIENTS[(scene_index - 1) % len(_GRADIENTS)]
+        ink = '#fff'
+        muted = 'rgba(255,255,255,.55)'
+        accent = 'rgba(255,255,255,.0)'
     return _TEMPLATE.format(
         width=width, height=height, duration=dur,
         scene_id=_html.escape(scene_id),
@@ -258,5 +281,6 @@ def render_scene_html(scene: dict, *, width: int = 1080, height: int = 1440,
         tag=_html.escape(f'{scene_index:02d} / {total_scenes:02d}'),
         font_px=font_px,
         max_width=int(width * _HEADLINE_WIDTH_SHARE),
-        background=_GRADIENTS[(scene_index - 1) % len(_GRADIENTS)],
+        background=background,
+        ink=ink, muted=muted, accent=accent,
     )

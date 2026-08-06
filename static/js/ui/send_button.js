@@ -247,6 +247,14 @@ function updateSendButton() {
    ═══════════════════════════════════════════════════════════════════ */
 async function _userStopDuringStartup(conv, convId, opts) {
   opts = opts || {};
+  /* ★ Tell the backend FIRST (fire-and-forget), BEFORE the rescue sync: the
+   *   abort marker must land while the server is still inside its translate/
+   *   persist stretch — awaiting the conversation PUT here first (hundreds of
+   *   ms, worse on a 409-rebase) widened the exact race window this call
+   *   exists to close (the task started AFTER the user's Stop; conv
+   *   msftgnt3 2026-08-05). abort-conv is idempotent, so the pipeline's own
+   *   later abort paths stay harmless duplicates. */
+  Api.chat.abortConv(convId);
   _removeTranslatingBubble();
   if (activeConvId === convId && opts.userMsg && opts.userMsgIdx != null) {
     const _mEl = document.getElementById('msg-' + opts.userMsgIdx);
@@ -261,6 +269,5 @@ async function _userStopDuringStartup(conv, convId, opts) {
     _syncP.catch(() => {});
   }
   buildTurnNav(conv);
-  Api.chat.abortConv(convId);
 }
 if (typeof window !== 'undefined') window._userStopDuringStartup = _userStopDuringStartup;

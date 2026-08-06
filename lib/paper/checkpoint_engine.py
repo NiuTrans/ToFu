@@ -23,10 +23,9 @@ Design commitments (mirrors the insight pass deliberately):
     structured items + usage) — the primary report body is byte-identical
     whether this runs or not, and the frontend distributes flip cards from
     the structured payload (no body merge).
-  * **Four-level enable chain** (design §3.4): per-request cfg stamp
-    (``paperCheckpointsEnabled``, headless fail-closed) > server_config
-    ``paper.reading_experience.checkpoints`` > env ``TOFU_PAPER_CHECKPOINTS``
-    > interactive default ON.
+  * **Three-level enable chain** (design §3.4, Settings toggle retired
+    2026-08-06): per-request cfg stamp (``paperCheckpointsEnabled``, headless
+    fail-closed) > env ``TOFU_PAPER_CHECKPOINTS`` > interactive default ON.
   * **Cost visibility** — the call's usage is returned so
     ``report_engine._hooks._merge_second_pass`` can fold it into the report
     meta's secondPasses breakdown.
@@ -69,24 +68,15 @@ def checkpoints_lang_key(ui_lang: str) -> str:
 
 
 def checkpoints_enabled(cfg=None) -> bool:
-    """Four-level enable chain (mirrors ``insight_engine._config.insight_enabled``):
+    """Three-level enable chain (mirrors ``insight_engine._config.insight_enabled``):
 
       1. explicit per-request cfg ``paperCheckpointsEnabled`` (headless stamp /
          opt-in) — always wins;
-      2. server_config ``paper.reading_experience.checkpoints`` (user toggle);
-      3. env ``TOFU_PAPER_CHECKPOINTS`` (fleet seed);
-      4. interactive default ON.
+      2. env ``TOFU_PAPER_CHECKPOINTS`` (fleet kill switch);
+      3. interactive default ON (Settings toggle retired 2026-08-06).
     """
     if isinstance(cfg, dict) and 'paperCheckpointsEnabled' in cfg:
         return bool(cfg['paperCheckpointsEnabled'])
-    try:
-        from .insight_engine._config import _reading_experience_cfg
-        rx = _reading_experience_cfg()
-    except Exception as e:
-        logger.debug('[Paper:Checkpoints] reading_experience read failed: %s', e)
-        rx = {}
-    if 'checkpoints' in rx:
-        return bool(rx['checkpoints'])
     env = (os.environ.get('TOFU_PAPER_CHECKPOINTS', '') or '').strip().lower()
     if env:
         return env in ('1', 'true', 'yes', 'on')

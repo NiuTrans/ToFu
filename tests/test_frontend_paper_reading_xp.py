@@ -394,27 +394,48 @@ for (let hi = 0; hi < heads2.length; hi++) {
 const bq = document.createElement('blockquote');
 bq.textContent = 'Key takeaway: x';
 methodH.insertAdjacentElement('afterend', bq);
-// The section's REAL first paragraph stays first; extraP lands after it.
+// The section's REAL first prose paragraph (past the callout and any anchored
+// xp card) — located BEFORE the figure paragraph lands, or the lookup would
+// grab the figure itself.
 let realFirstP = methodH.nextElementSibling;
 while (realFirstP && realFirstP.tagName !== 'P') realFirstP = realFirstP.nextElementSibling;
+// A FIGURE paragraph right after the callout: figures stay in skim AND must
+// not consume the section's first-prose-paragraph budget.
+const figP = document.createElement('p');
+figP.innerHTML = '<img src="/api/paper/images/h/fig1.jpg">';
+bq.insertAdjacentElement('afterend', figP);
+// extraP lands after the real first paragraph.
 const extraP = document.createElement('p');
 extraP.textContent = 'second para should hide';
 realFirstP.insertAdjacentElement('afterend', extraP);
-// A table (paper card / glossary / results) and a list (design chains) in
-// the Method section MUST survive skim — the v1 keep-set hid them and
-// blanked table/list-dense chapters (owner-reported bug).
+// v3 skim (2026-08-06): a section that HAS prose collapses its detail — later
+// paragraphs, tables and lists hide. (v2 kept them all; measured on the real
+// report corpus that hid only 3–14% of characters — a visible no-op.)
 const tbl = document.createElement('table');
 tbl.innerHTML = '<tbody><tr><td>field</td><td>value</td></tr></tbody>';
 extraP.insertAdjacentElement('afterend', tbl);
 const ul = document.createElement('ul');
 ul.innerHTML = '<li>choice A → because B</li>';
 tbl.insertAdjacentElement('afterend', ul);
+// Anti-blank guarantee (the v1 lesson): a section whose ONLY content is a
+// table (Paper Card / Glossary shape) keeps it — never a bare heading.
+const soloH = document.createElement('h2');
+soloH.textContent = 'Solo Table Section';
+const soloTbl = document.createElement('table');
+soloTbl.innerHTML = '<tbody><tr><td>only</td><td>block</td></tr></tbody>';
+art2.appendChild(soloH);
+art2.appendChild(soloTbl);
 _paperXpSkimToggle();
 check('skim_on_class', c.classList.contains('paper-xp-skim-on'));
 check('skim_hides_second_para', extraP.classList.contains('xp-skim-hidden'));
 check('skim_keeps_blockquote', !bq.classList.contains('xp-skim-hidden'));
-check('skim_keeps_table', !tbl.classList.contains('xp-skim-hidden'));
-check('skim_keeps_list', !ul.classList.contains('xp-skim-hidden'));
+check('skim_hides_table', tbl.classList.contains('xp-skim-hidden'));
+check('skim_hides_list', ul.classList.contains('xp-skim-hidden'));
+check('skim_keeps_figure', !figP.classList.contains('xp-skim-hidden'));
+check('skim_figure_preserves_first_para',
+      !realFirstP.classList.contains('xp-skim-hidden'));
+check('skim_anti_blank_keeps_solo_table',
+      !soloTbl.classList.contains('xp-skim-hidden'));
 check('skim_keeps_title',
       !art2.querySelector('h1').classList.contains('xp-skim-hidden'));
 const methodFirstP = methodH.nextElementSibling;
@@ -428,7 +449,8 @@ const skimBtn = document.querySelector('.paper-skim-btn');
 _paperXpSkimToggle();
 check('skim_off_restores',
       !c.classList.contains('paper-xp-skim-on')
-      && !extraP.classList.contains('xp-skim-hidden'));
+      && !extraP.classList.contains('xp-skim-hidden')
+      && !tbl.classList.contains('xp-skim-hidden'));
 
 // ── (12) P3: deepen buttons + drawer (async) ──
 (async () => {
@@ -568,6 +590,25 @@ check('skim_off_restores',
   check('focus_j_moves', curIdx > 0);
   document.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   check('focus_esc_exits', !c.classList.contains('paper-focus-on'));
+  // Skim interplay + H1 skip (2026-08-06): a skim-collapsed block leaves the
+  // j/k flow; the bare H1 title never takes the OPENING spotlight (landing on
+  // the title read as "everything just went gray" — owner report).
+  art4.children[2].classList.add('xp-skim-hidden');
+  fkids.forEach(function (el, i) {
+    el.getBoundingClientRect = function () {
+      return { top: 10 + i * 20, bottom: 30 + i * 20 };   // everything visible
+    };
+  });
+  _paperFocusModeToggle();
+  const curB = art4.querySelector('.paper-focus-current');
+  const curBIdx = curB ? Array.prototype.indexOf.call(art4.children, curB) : -1;
+  check('focus_never_opens_on_h1', curBIdx === 1);
+  document.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'j', bubbles: true }));
+  const curC = art4.querySelector('.paper-focus-current');
+  const curCIdx = curC ? Array.prototype.indexOf.call(art4.children, curC) : -1;
+  check('focus_j_skips_skim_hidden', curCIdx === 3);
+  document.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  art4.children[2].classList.remove('xp-skim-hidden');
 
   // ── (15) P4: session summary toast ──
   const toasts = [];

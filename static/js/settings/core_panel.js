@@ -312,7 +312,6 @@ function openSettings() {
     _populateAdvancedTab(cfg);
     _populateFeishuTab(cfg);
     _populateMtProviderSection(cfg);
-    if (typeof _populatePaperXpTab === 'function') _populatePaperXpTab(cfg);
     if (typeof _populateSpeechTab === 'function') _populateSpeechTab(cfg);
     _populateMcpTab();
     if (typeof _populateSkillsTab === 'function') _populateSkillsTab();

@@ -475,3 +475,44 @@ def test_the_chip_survives_the_segment_timeline_path():
     assert 'run_command' in html
     # The synthetic row must not be counted as a tool in the panel header.
     assert 'data-full-count="1"' in html
+
+
+def test_the_grouped_panel_header_never_counts_the_chip():
+    """The GROUPED fallback path (segment-less / trimmed turns) must count
+    REAL tools in the panel header, exactly like the segment timeline does.
+
+    Ground truth (conv msg0cop6qf64ee msg[1]): a trimmed turn whose 32 real
+    rounds were stripped for transport rendered its lone rehydrated stall
+    chip under a 「使用了 1 个工具」 header — the chip is not a tool the model
+    called, and the count made the hidden history look like a single-call
+    turn. The grouped `_renderUnifiedGroup` counted `allRounds` (chips
+    included) while the timeline path counted realRounds only; this pins the
+    two paths to the SAME rule.
+    """
+    sidecar = _sidecar_from_real_producer()
+    real = {
+        'roundNum': 17, 'llmRound': 17, 'toolName': 'run_command',
+        'toolCallId': 'call_17', 'toolContent': 'blocked',
+        'status': 'blocked', 'results': [{'badge': 'blocked'}],
+    }
+    probe = _run_js(
+        'const msg1 = {_stallNudges: ' + json.dumps(sidecar)
+        + ', toolRounds: [' + json.dumps(real) + ']};\n'
+        'const html1 = renderToolRoundsHTML(getToolRoundsFromMsg(msg1), false);\n'
+        'const msg2 = {_stallNudges: ' + json.dumps(sidecar) + '};\n'
+        'const html2 = renderToolRoundsHTML(getToolRoundsFromMsg(msg2), false);\n'
+        'console.log(JSON.stringify({html1, html2}));'
+    )
+    # 1 real + 1 chip: the header claims ONE tool — the chip must not inflate it.
+    assert '使用了 1 个工具' in probe['html1'], (
+        'grouped header lost the real-round count:\n' + probe['html1'][:400])
+    assert '使用了 2' not in probe['html1'], (
+        'the synthetic stall chip inflated the grouped header tool count')
+    assert 'data-full-count="1"' in probe['html1']
+    assert 'sw-stall-row' in probe['html1'], 'the chip must still render'
+    # Chip-only (the trimmed view): no tool-count claim at all — the real
+    # count lives on the "Load tool activity" affordance (chat_render.js).
+    assert 'sw-stall-row' in probe['html2']
+    assert '使用了' not in probe['html2'], (
+        'a chip-only panel must not claim any tool count')
+    assert 'data-full-count="0"' in probe['html2']

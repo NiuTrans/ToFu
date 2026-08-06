@@ -3209,8 +3209,24 @@ function renderSegmentTimelineHTML(segments, msg, idx) {
 
 function _renderUnifiedGroup(allRounds, segments) {
   const anyActive = allRounds.some((r) => r.status === "searching" || r._swarmActive);
+  /* ★ The header counts REAL tool rounds only — never the display-only
+   *   inject chips (swarm-inbox / peer / steer / stall-nudge) that ride the
+   *   panel for chronological context. They are not calls the model made, and
+   *   counting them lied twice over: a hydrated turn reported N+chips tools,
+   *   and a TRIMMED turn (toolRounds stripped for transport, only the
+   *   `_stallNudges` sidecar survived) rendered its lone chip as "使用了 1 个
+   *   工具" (conv msg0cop6qf64ee — 32 real rounds hidden behind the trim).
+   *   Parity with the segment-timeline path (renderSegmentTimelineHTML),
+   *   which already counts realRounds only. When ONLY chips remain the count
+   *   header is omitted entirely — "0 tools used" is not a useful claim; the
+   *   trimmed-activity affordance below the panel carries the real count. */
+  const realRounds = allRounds.filter((r) => r && !r._inboxInject
+    && !r._peerInject && !r._userSteerInject && !r._stallNudge);
   const count = allRounds.length;
-  const headerLabel = _toolPanelHeaderLabel(allRounds, anyActive);
+  const headerLabel = _toolPanelHeaderLabel(realRounds, anyActive);
+  const headerHtml = realRounds.length
+    ? `<div class="ptool-panel-header"><span class="ptool-panel-label">${headerLabel}</span></div>`
+    : "";
   /* Per-round narration (translated-in-place) for the SETTLED grouped panel.
    * Empty map when no segments passed (streaming sync / branch / paper-reader
    * / upload callers) → byte-identical to the pre-fix grouped render. */
@@ -3226,10 +3242,8 @@ function _renderUnifiedGroup(allRounds, segments) {
     lines = _renderToolGroupsHTML(allRounds, allRounds, narrByRound);
   }
   return `<div class="ptool-panel${anyActive ? " ptool-panel-active" : ""}">
-       <div class="ptool-panel-header">
-         <span class="ptool-panel-label">${headerLabel}</span>
-       </div>
-       <div class="ptool-panel-body" data-full-count="${count}">${truncHtml}${lines}</div>
+       ${headerHtml}
+       <div class="ptool-panel-body" data-full-count="${realRounds.length}">${truncHtml}${lines}</div>
      </div>`;
 }
 

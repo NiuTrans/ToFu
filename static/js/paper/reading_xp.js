@@ -308,54 +308,80 @@ function _paperXpHandleCheckpointsEvent(s, ev, view) {
 }
 
 /* ── Skim mode (P2 易懂:零 LLM 确定性折叠) ───────────────────────────────
- * Each section collapses to its FIRST paragraph + callout blockquotes + the
- * reading-xp cards (the tutor layer stays visible in skim — it is the
- * highest-signal content per pixel). Deterministic DOM surgery, no model.
+ * Each section collapses to its heading + FIRST prose paragraph + callout
+ * blockquotes + figures + the reading-xp tutor layer. Deterministic DOM
+ * surgery, no model.
+ *
+ * Rule history (both directions owner-reported):
+ *   v1 hid everything except headings → table/list-dense chapters went BLANK.
+ *   v2 kept every table/list/quote → measured on the real report corpus
+ *   (lists alone carry 56% of report characters) it hid only 3–14% — pressing
+ *   速览 visibly changed nothing.
+ *   v3 (this rule): per section keep the first paragraph (the "what this
+ *   section says" sentence), all blockquote callouts (要点) and figures;
+ *   collapse the rest — later paragraphs, lists, tables, code. ANTI-BLANK:
+ *   a section with no kept content at all (e.g. the Paper Card / Glossary —
+ *   heading + one lone table) keeps its first content block, whatever tag it
+ *   is, so no chapter can ever render as a bare heading.
  */
 
 function _xpSkimApply(article, on) {
   if (!article) return;
   var kids = article.children;
-  var seenParaInSection = false;
+  var sections = [];         // [{firstContent, keptAny, seenPara}] per heading span
+  var cur = null;
   for (var i = 0; i < kids.length; i++) {
     var el = kids[i];
     var tag = el.tagName || '';
+    el.classList.remove('xp-skim-hidden');
     if (/^H[1-6]$/.test(tag)) {           // headings always stay (incl. the H1 title)
-      seenParaInSection = false;
-      el.classList.remove('xp-skim-hidden');
+      cur = { firstContent: null, keptAny: false, seenPara: false };
+      sections.push(cur);
       continue;
     }
-    // xp cards / sections / recap / finish tag / flip cards always stay.
-    if (el.classList && (el.classList.contains('paper-xp-card')
-        || el.classList.contains('paper-xp-section')
-        || el.classList.contains('paper-xp-recap')
-        || el.classList.contains('paper-xp-flip')
-        || el.classList.contains('paper-report-finish-tag')
-        || el.classList.contains('paper-terminology-audit')
-        || el.classList.contains('paper-citation-audit'))) {
-      el.classList.remove('xp-skim-hidden');
+    if (!cur) {                            // content before the first heading
+      cur = { firstContent: null, keptAny: false, seenPara: false };
+      sections.push(cur);
+    }
+    if (!on) continue;
+    var cls = el.classList;
+    // xp cards / sections / recap / finish tag / flip cards / audit cards
+    // always stay — the tutor layer is the highest-signal content per pixel.
+    if (cls && (cls.contains('paper-xp-card')
+        || cls.contains('paper-xp-section')
+        || cls.contains('paper-xp-recap')
+        || cls.contains('paper-xp-flip')
+        || cls.contains('paper-report-finish-tag')
+        || cls.contains('paper-terminology-audit')
+        || cls.contains('paper-citation-audit'))) {
+      cur.keptAny = true;
       continue;
     }
-    if (!on) {
-      el.classList.remove('xp-skim-hidden');
-      continue;
-    }
-    // Skim = "structure-only": it hides LONG-FORM PROSE (2nd+ paragraph of
-    // each section) and keeps everything scannable — the first paragraph,
-    // callouts, TABLES (paper card / glossary / results), LISTS (design
-    // chains), code, figures and math. Hiding structure was the v1 bug the
-    // owner screenshot exposed: for table/list-dense reports it blanked the
-    // chapter entirely.
+    if (!cur.firstContent) cur.firstContent = el;
     var keep = false;
-    if (tag === 'P') {
-      if (!seenParaInSection) { keep = true; seenParaInSection = true; }
-    } else if (/^(BLOCKQUOTE|TABLE|UL|OL|PRE|FIGURE)$/.test(tag)) {
-      keep = true;
-    } else if (tag === 'DIV' && el.querySelector
-               && el.querySelector('img, table, .katex-display')) {
-      keep = true;   // framed figures / display-math wrappers
+    var isFigure = (tag === 'P' || tag === 'DIV') && el.querySelector
+      && el.querySelector('img, .katex-display');
+    if (tag === 'BLOCKQUOTE') {
+      keep = true;                          // 要点 callouts stay
+    } else if (isFigure) {
+      keep = true;                          // figures / display math stay; the
+                                            // paragraph budget is untouched
+    } else if (tag === 'P' && !cur.seenPara) {
+      keep = true;                          // the section's first prose paragraph
+      cur.seenPara = true;
     }
-    el.classList.toggle('xp-skim-hidden', !keep);
+    if (keep) cur.keptAny = true;
+    else el.classList.add('xp-skim-hidden');
+  }
+  // Anti-blank pass: a section whose content all collapsed keeps its first
+  // content block (the v1 lesson — never ship a bare heading).
+  if (on) {
+    for (var s = 0; s < sections.length; s++) {
+      var sec = sections[s];
+      if (!sec.keptAny && sec.firstContent) {
+        sec.firstContent.classList.remove('xp-skim-hidden');
+      }
+    }
   }
 }
 
@@ -368,6 +394,11 @@ function _paperXpSkimToggle() {
   var on = !container.classList.contains('paper-xp-skim-on');
   container.classList.toggle('paper-xp-skim-on', on);
   _xpSkimApply(article, on);
+  // Focus-mode interplay: collapsed blocks must leave the j/k flow (and
+  // rejoin it when skim turns off) — refresh the spotlight block list.
+  if (typeof window._paperFocusAfterRender === 'function') {
+    window._paperFocusAfterRender(article, container, null);
+  }
   // Sync every skim button label/state (report toolbar).
   var label = on
     ? ((typeof t === 'function') ? t('paper.xpSkimFull') : 'Full')

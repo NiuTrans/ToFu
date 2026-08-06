@@ -219,11 +219,6 @@ async function _saveServerConfig() {
     payload.mt_provider = _collectMtProviderConfig();
   }
 
-  // Paper reading-experience toggles (merged server-side into paper.reading_experience)
-  if (typeof _collectPaperXpConfig === 'function') {
-    payload.paper = _collectPaperXpConfig();
-  }
-
   // Speech-to-text: fold the dedicated STT provider into the providers list
   // BEFORE it is shipped (payload.providers = _stgProviders below/above).
   // Writes an explicit per-cell key_access capability override — see

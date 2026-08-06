@@ -546,7 +546,8 @@ def _full_gate(html: str, scene_dir: str, *, abort_event=None,
 
 def _build_prompt(scene: dict, *, width: int, height: int, duration: float,
                   scene_index: int, total_scenes: int,
-                  font_rel: str = '') -> str:
+                  font_rel: str = '', theme=None,
+                  font_rels: dict | None = None) -> str:
     contract = _read_guide('COMPOSITION_CONTRACT.md')
     craft = _read_guide('MOTION_CRAFT.md')
     skeleton = _read_guide('skeleton.html', limit=6000)
@@ -578,7 +579,34 @@ def _build_prompt(scene: dict, *, width: int, height: int, duration: float,
             'cannot draw itself.\n'
             + '\n'.join(lines) + '\n')
     font_block = ''
-    if font_rel:
+    if theme is not None and font_rels:
+        # Themed path: the film's font pairing is already staged. Name ONLY
+        # the families that actually materialised (font_rels is the proof),
+        # and bind the palette/type hierarchy through the theme block.
+        from lib.design_sys.fonts import font_face_block, get_font
+        from lib.design_sys.themes import theme_prompt_block
+        faces = []
+        for role in ('display', 'body', 'latin'):
+            face = get_font(theme.fonts.get(role, ''))
+            if face is not None and any(k[0] == face.id for k in font_rels):
+                faces.append(face)
+        css = font_face_block(faces, rel_paths=font_rels)
+        body_fam = get_font(theme.fonts.get('body', ''))
+        staged_ids = {f.id for f in faces}
+        theme_css = theme_prompt_block(theme, for_video=True,
+                                       staged_font_ids=staged_ids)
+        font_block = (
+            f'\n## Film theme + typefaces (already staged in this scene)\n'
+            f'{theme_css}\n\n'
+            f'Put these @font-face rules in your <style> verbatim, then set '
+            f'the families on your text (body default: '
+            f"`font-family: '{body_fam.family if body_fam else ''}', "
+            f"Inter, sans-serif` — CJK glyphs resolve from the staged face):\n"
+            f'```css\n{css}\n```\n'
+            f'Never name a family you have not declared this way (PingFang SC, '
+            f'Microsoft YaHei, Source Han Sans…): naming an absent face does '
+            f'not get you that face, it silently falls back.\n')
+    elif font_rel:
         from lib.motion_video._fonts import CJK_SANS_FAMILY, font_face_css
         font_block = (
             f'\n## Typeface (already staged in this scene)\n'
@@ -668,6 +696,7 @@ def author_scene(scene: dict, scene_dir: str, *, width: int, height: int,
                  token_budget: int | None = None,
                  model: str | None = None,
                  abort_event=None,
+                 theme=None,
                  transient_attempts: int = _TRANSIENT_ATTEMPTS) -> dict:
     """Author one scene's composition with a bounded agent loop.
 
@@ -852,16 +881,38 @@ def _author_once(scene: dict, scene_dir: str, *, width: int, height: int,
     # unreachable network leaves font_rel empty and the prompt simply omits the
     # typeface block (pre-existing fontconfig fallback behaviour).
     font_rel = ''
-    try:
-        from lib.motion_video._assets import materialise
-        from lib.motion_video._fonts import ensure_cjk_sans
-        font_path = ensure_cjk_sans()
-        if font_path:
-            font_rel, _tier = materialise(
-                font_path, scene_dir,
-                name='cjk-sans' + os.path.splitext(font_path)[1])
-    except Exception as e:
-        logger.warning('[SceneAuthor] could not stage the CJK sans face: %s', e)
+    font_rels: dict = {}
+    if theme is not None:
+        # Themed path: stage every weight of each role face in the film's
+        # pairing. Any face that fails to stage is simply absent from
+        # font_rels, and the prompt block remaps its role to a staged one —
+        # a missing font degrades the pairing, never the film.
+        try:
+            from lib.design_sys.fonts import (get_font,
+                                              stage_font_into_scene)
+            for role in ('display', 'body', 'latin'):
+                face = get_font(theme.fonts.get(role, ''))
+                if face is None:
+                    continue
+                for src in face.sources:
+                    rel = stage_font_into_scene(scene_dir, face.id,
+                                                src.weight)
+                    if rel:
+                        font_rels[(face.id, src.weight)] = rel
+        except Exception as e:
+            logger.warning('[SceneAuthor] theme font staging failed: %s', e)
+            font_rels = {}
+    if not font_rels:
+        try:
+            from lib.motion_video._assets import materialise
+            from lib.motion_video._fonts import ensure_cjk_sans
+            font_path = ensure_cjk_sans()
+            if font_path:
+                font_rel, _tier = materialise(
+                    font_path, scene_dir,
+                    name='cjk-sans' + os.path.splitext(font_path)[1])
+        except Exception as e:
+            logger.warning('[SceneAuthor] could not stage the CJK sans face: %s', e)
     # Materialise the deep craft corpus BEFORE the prompt is built — the index
     # travels inside the prompt, so a corpus fetched later would be invisible
     # to this scene. Same managed-dependency contract as the font above:
@@ -873,7 +924,8 @@ def _author_once(scene: dict, scene_dir: str, *, width: int, height: int,
         logger.warning('[SceneAuthor] craft corpus unavailable: %s', e)
     prompt = _build_prompt(scene, width=width, height=height,
                            duration=duration, scene_index=scene_index,
-                           total_scenes=total_scenes, font_rel=font_rel)
+                           total_scenes=total_scenes, font_rel=font_rel,
+                           theme=theme, font_rels=font_rels)
     if seed_html:
         # Hand the model its own unfinished work plus the gate's current
         # verdict, so the attempt continues the repair rather than restarting.
