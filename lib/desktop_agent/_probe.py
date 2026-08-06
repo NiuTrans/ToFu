@@ -38,7 +38,12 @@ def probe_server(url: str, timeout: float = 4.0) -> tuple[bool, str]:
     if not base:
         return False, 'unreachable'
     try:
-        resp = requests.get(base + '/api/health', timeout=timeout)
+        # no_proxy='*' — the SAME transport the poll loop uses (_run.py):
+        # requests would otherwise honor the system/env proxy (Windows
+        # registry included), so the probe could measure a route the poll
+        # never takes (or vice versa). Probe and poll must see ONE truth.
+        resp = requests.get(base + '/api/health', timeout=timeout,
+                            proxies={'no_proxy': '*'})
     except requests.exceptions.ConnectTimeout as e:
         logger.debug('[Agent] server probe timed out: %s', e)
         return False, 'timeout'

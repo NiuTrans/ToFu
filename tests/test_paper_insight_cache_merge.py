@@ -26,6 +26,32 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault('TRADING_ENABLED', '0')
 
+try:
+    import pytest
+except ImportError:  # standalone runner path
+    pytest = None
+
+
+if pytest is not None:
+    @pytest.fixture(autouse=True)
+    def _restore_paper_async_fetchone():
+        """_install_stub_db raw-assigns ``rp.async_fetchone`` with no restore.
+
+        Without this fixture the stub LEAKS into every later suite in the
+        same xdist worker — its tiny rows map answers None to ANY (phash,
+        lang) it doesn't know, so e.g. test_paper_export_double_encode's
+        seeded review row 404s despite a fresh connection seeing it
+        (CI-only, ordering-dependent — the 2026-08-06 multi-run hunt).
+        """
+        try:
+            import routes.paper as rp
+        except Exception:
+            yield
+            return
+        orig = rp.async_fetchone
+        yield
+        rp.async_fetchone = orig
+
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
 def _ok(msg): print(' ', _color('✓', '32'), msg)

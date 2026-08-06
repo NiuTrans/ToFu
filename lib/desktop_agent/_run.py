@@ -176,8 +176,18 @@ def _build_agent_frame(agent_id, permissions, share_roots=None):
 #  Polling Loop (runs on your local machine)
 # ══════════════════════════════════════════════════════════
 
+# Route self-repair tuning (owner incident 2026-08-06): a saved route can
+# die under the agent (proxy URL, a tunnel child reaped at exit, a server
+# that moved). After this many CONSECUTIVE route-dead polls the loop calls
+# the route_repair callback (the launcher wires resume_attachment into it),
+# which re-walks the persisted attach candidates + the discovery ladder;
+# the cooldown bounds how often that (potentially ~30s) walk may run.
+_ROUTE_REPAIR_THRESHOLD = 6
+_ROUTE_REPAIR_COOLDOWN_S = 300.0
+
+
 def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
-              stop_event=None, on_status=None):
+              stop_event=None, on_status=None, route_repair=None):
     """Main agent loop — polls server for commands, executes locally, returns results.
 
     Args:
@@ -198,6 +208,16 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
             refresh from it without a 1 Hz storm. The desktop tray renders
             this as its link line: a silently-failing poll was exactly how a
             proxy-URL attachment hid for hours (owner incident 2026-08-03).
+        route_repair: optional zero-arg callable invoked after
+            ``_ROUTE_REPAIR_THRESHOLD`` consecutive route-dead polls
+            (``proxy`` / ``unreachable`` — 'auth' and 'ok' mean the address
+            REACHED Tofu and reset the streak). It must return ``(url,
+            secret)`` for a live replacement route, or None. A changed URL
+            rebinds this loop's endpoint + credential IN PLACE — the link
+            line's「正在自动重找通路」promise is kept by this hook, not by
+            hoping the dead address recovers (2026-08-06: without it a
+            gateway-intercepted attachment polled the same wall forever
+            while the tray text claimed re-discovery was running).
     """
 
     endpoint = f'{server_url.rstrip("/")}/api/desktop/poll'
@@ -220,6 +240,48 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
             on_status(dict({'state': state}, **extra))
         except Exception as e:
             logger.debug('[Agent] on_status callback failed: %s', e)
+
+    # ── Route self-repair ──
+    # 'proxy'/'unreachable' mean the ADDRESS is dead; 'ok'/'auth' mean it
+    # reached Tofu (a wrong credential never re-points the route). The
+    # streak gates the walk so a brief blip never triggers it.
+    route = {'url': server_url.rstrip('/'), 'secret': bridge_secret}
+    route_dead = {'streak': 0, 'last_walk': 0.0}
+
+    def _route_alive():
+        route_dead['streak'] = 0
+
+    def _route_dead_hit():
+        """One more poll against a dead route; maybe run the repair walk."""
+        if route_repair is None:
+            return
+        route_dead['streak'] += 1
+        if route_dead['streak'] < _ROUTE_REPAIR_THRESHOLD:
+            return
+        now = time.time()
+        if now - route_dead['last_walk'] < _ROUTE_REPAIR_COOLDOWN_S:
+            return
+        route_dead['last_walk'] = now
+        nonlocal endpoint, headers
+        try:
+            repaired = route_repair()
+        except Exception as e:
+            logger.warning('[Agent] route repair walk failed: %s', e)
+            return
+        if not repaired:
+            return
+        new_url, new_secret = repaired
+        new_url = str(new_url or '').strip().rstrip('/')
+        if not new_url or new_url == route['url']:
+            return
+        route['url'] = new_url
+        route['secret'] = str(new_secret or '').strip()
+        endpoint = '%s/api/desktop/poll' % new_url
+        headers = ({'X-Bridge-Secret': route['secret']}
+                   if route['secret'] else {})
+        route_dead['streak'] = 0
+        logger.info('[Agent] route re-pointed by the repair walk: %s',
+                    new_url)
 
     agent_id = _ensure_agent_id()
     agent_frame = _build_agent_frame(
@@ -284,11 +346,13 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
                     tofu_refusal = False
                 if tofu_refusal:
                     _emit('auth')
+                    _route_alive()  # Tofu answered — the address is fine
                     logger.error('Server returned 401 — bridge auth failed. '
                                  'Set --bridge-secret (or TOFU_BRIDGE_SECRET env var) '
                                  'to match the server.')
                 else:
                     _emit('proxy')
+                    _route_dead_hit()
                     logger.error(
                         '401 answered by a GATEWAY, not Tofu — the server '
                         'address is intercepted (SSO proxy?). Re-check the '
@@ -303,6 +367,7 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
                 continue
 
             _emit('ok')
+            _route_alive()
             data = resp.json()
             commands = data.get('commands', [])
 
@@ -359,6 +424,7 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
         except requests.ConnectionError:
             consecutive_errors += 1
             _emit('unreachable')
+            _route_dead_hit()
             if consecutive_errors == 1:
                 logger.info('Cannot reach server at %s, retrying...', server_url, exc_info=True)
             wait = min(poll_interval * (2 ** min(consecutive_errors, 5)), 60)
