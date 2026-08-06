@@ -125,9 +125,6 @@ def _gate_outline(ctx: dict, artifact: dict) -> list:
     return []
 
 
-OUTLINE = Stage('outline', _run_outline, gate=_gate_outline, retry=1)
-
-
 # ── Stage: design (zero-LLM) ──────────────────────────────
 
 def _run_design(ctx: dict) -> dict:
@@ -185,9 +182,6 @@ def _run_design(ctx: dict) -> dict:
     return out
 
 
-DESIGN = Stage('design', _run_design, gate=None, retry=0)
-
-
 # ── Stage: author (per page) ──────────────────────────────
 
 def _run_author(ctx: dict) -> dict:
@@ -240,9 +234,6 @@ def _gate_author(ctx: dict, artifact: dict) -> list:
     if not artifact.get('page_files'):
         return ['author produced zero pages']
     return []
-
-
-AUTHOR = Stage('author', _run_author, gate=_gate_author, retry=0)
 
 
 # ── Stage: assets ─────────────────────────────────────────
@@ -316,9 +307,6 @@ def _run_assets(ctx: dict) -> dict:
     return {'downloaded': downloaded, 'pages': len(deck.pages)}
 
 
-ASSETS = Stage('assets', _run_assets, gate=None, retry=0)
-
-
 def _write_manifest(deck_dir: str, ctx: dict) -> None:
     """Write deck.pptd from the outline + design artifacts (idempotent)."""
     import yaml
@@ -347,9 +335,6 @@ def _run_render(ctx: dict) -> dict:
                                scale=2.0)
     return {'previews': [p['png'] for p in manifest['pages']],
             'failed': manifest['failed']}
-
-
-RENDER = Stage('render', _run_render, gate=None, retry=1)
 
 
 # ── Stage: visual_qa ──────────────────────────────────────
@@ -411,9 +396,6 @@ def _run_visual_qa(ctx: dict) -> dict:
     return {'ran': True, 'clean': clean, 'repaired': repaired}
 
 
-VISUAL_QA = Stage('visual_qa', _run_visual_qa, gate=None, retry=0)
-
-
 # ── Stage: export ─────────────────────────────────────────
 
 def _run_export(ctx: dict) -> dict:
@@ -438,13 +420,25 @@ def _gate_export(ctx: dict, artifact: dict) -> list:
     return []
 
 
-EXPORT = Stage('export', _run_export, gate=_gate_export, retry=1)
-
-
 # ── Public entry ──────────────────────────────────────────
 
 def slides_recipe_stages() -> list:
-    return [OUTLINE, DESIGN, AUTHOR, ASSETS, RENDER, VISUAL_QA, EXPORT]
+    """Fresh Stage objects on EVERY call.
+
+    Module-level ``Stage('render', _run_render, …)`` constants froze their
+    function references at import time, silently defeating the documented
+    monkeypatch seams (``_llm_chat`` / ``_run_render``): the unit tests patch
+    ``recipe._run_render`` yet the REAL chromium render still ran — green on
+    dev machines (browser present), red on CI (no chromium, 2026-08-06).
+    Building the graph here resolves each seam at call time, after any patch.
+    """
+    return [Stage('outline', _run_outline, gate=_gate_outline, retry=1),
+            Stage('design', _run_design),
+            Stage('author', _run_author, gate=_gate_author),
+            Stage('assets', _run_assets),
+            Stage('render', _run_render, retry=1),
+            Stage('visual_qa', _run_visual_qa),
+            Stage('export', _run_export, gate=_gate_export, retry=1)]
 
 
 def build_deck_from_topic(topic: str, workdir: str, *, lang: str = 'zh',

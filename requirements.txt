@@ -102,6 +102,14 @@ trafilatura>=1.6
 playwright>=1.40
 Pillow>=10.0
 python-pptx>=0.6.21
+Pillow>=10.0
+python-pptx>=0.6.21
+# fontTools — CFF→glyf conversion for PPTX font embedding (lib/slides/
+# export_pptx.py, P4). Without it the export deliberately degrades to NO
+# embedded fonts (PowerPoint then substitutes the typeface), which read as a
+# silent feature loss on a clean env (public CI, 2026-08-06). Pure-Python,
+# no native build step.
+fontTools>=4.40
 # lxml — floor aligned with bootstrap.py's _CONDA_PYTHON_DEPS so the pip path
 # and the conda-repair path build the SAME environment (they drifted: 4.9 here
 # vs >=5.3 there). >=5.3 is not a guess, it is the floor our own declared deps

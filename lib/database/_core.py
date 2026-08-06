@@ -23,6 +23,7 @@ import os
 import sqlite3
 import threading
 import time
+import weakref
 
 from lib.log import get_logger
 
@@ -1018,6 +1019,40 @@ _sqlite_pool = []
 _sqlite_pool_lock = threading.Lock()
 _SQLITE_POOL_MAX = int(getenv_compat('TOFU_SQLITE_POOL_MAX', default='20'))
 
+# Every live wrapper, weakly held. The test harness's leaked-transaction
+# reaper (tests/conftest.py) enumerates this to roll back write txns that
+# outlived their test — in WAL one zombie txn write-locks the whole worker
+# DB for every later test (the CI 'database is locked' cascade, 2026-08-06).
+# Weak refs: zero production cost, no lifetime interference.
+_LIVE_SQLITE_CONNS: 'weakref.WeakSet' = weakref.WeakSet()
+
+
+def reap_idle_write_transactions(idle_s: float = 1.0) -> int:
+    """Roll back sqlite write txns idle past ``idle_s``; return the count.
+
+    Test-harness belt (called by an autouse conftest fixture at every test
+    boundary): pytest-timeout kills a test's MAIN thread, never its
+    background threads, so a thread stopped mid-transaction holds its write
+    txn forever — and in WAL that locks every later test out of the worker
+    DB. A genuinely-live background writer touches its connection
+    continuously (``_last_used`` is stamped on every execute); only a zombie
+    goes quiet past the threshold. Not used by production paths.
+    """
+    reaped = 0
+    now = time.monotonic()
+    for w in list(_LIVE_SQLITE_CONNS):
+        try:
+            if (not w._closed and w._conn.in_transaction
+                    and now - w._last_used > idle_s):
+                logger.warning('[DB] reaping leaked write txn (idle %.1fs) — '
+                               'a thread outlived its owner mid-transaction',
+                               now - w._last_used)
+                w._conn.rollback()
+                reaped += 1
+        except Exception as e:
+            logger.debug('[DB] txn reap probe failed: %s', e)
+    return reaped
+
 
 def _new_sqlite_connection():
     """Create a new SQLite connection with WAL mode and optimal settings."""
@@ -1049,6 +1084,7 @@ def _new_sqlite_connection():
     # connection to a DIFFERENT file and the caller writes/reads the wrong
     # database (CI-only 404 on a committed row, 2026-08-05).
     w._pool_path = os.path.abspath(DB_PATH)
+    _LIVE_SQLITE_CONNS.add(w)
     return w
 
 

@@ -440,6 +440,7 @@ class TestP4:
         notesSz (CT_Presentation order), at most one regular and one bold
         slot, and the bytes are glyf-outline TTFs (PowerPoint rejects CFF)."""
         pytest.importorskip('pptx')
+        pytest.importorskip('fontTools')  # embedding degrades off without it
         from lib.design_sys import fonts as _fonts
         if not _fonts.ensure_font('misans', 400):
             pytest.skip('misans not staged locally')

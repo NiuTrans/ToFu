@@ -31,6 +31,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 
 import pytest
 
@@ -292,6 +293,26 @@ def _install_sync_app_context_shim():
 
 
 _install_sync_app_context_shim()
+
+
+# ─── Leaked-transaction reaper (2026-08-06, epic pt_3e3ff7dae98047fe) ───
+# pytest-timeout kills a test's MAIN thread, never its background threads —
+# a thread killed/parked while holding an open sqlite write txn keeps it
+# FOREVER, and in WAL one such zombie write-locks the whole per-worker DB:
+# every later test's INSERT then burns its 30s busy_timeout and fails with
+# 'database is locked' (CI cascade: test_error_result_model_metadata /
+# test_task_birth_row / test_tool_exec_failure_verdict, 2026-08-06). This
+# autouse belt rolls back any txn still open at a test boundary whose last
+# activity predates the boundary by >1s (a genuinely-live background writer
+# touches the connection continuously; only a zombie goes quiet).
+@pytest.fixture(autouse=True)
+def _reap_leaked_db_transactions():
+    yield
+    try:
+        import lib.database._core as _dbc
+        _dbc.reap_idle_write_transactions()
+    except Exception as e:
+        _conftest_logger.debug('txn reaper unavailable: %s', e)
 
 
 # ─── tofu_search global-config isolation (pre-existing) ───────────────

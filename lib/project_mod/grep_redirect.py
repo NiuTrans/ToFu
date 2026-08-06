@@ -673,7 +673,12 @@ def _walk_dfs(cur_abs, rel_prefix, spec, t0, out, disp_base):
     followed (GNU -r semantics); symlinked files are read through."""
     try:
         entries = list(os.scandir(cur_abs))
-    except OSError:
+    except OSError as e:
+        # Unreadable directory mid-descent (permissions, FUSE blip) — GNU
+        # grep reports it on stderr; here we skip the subtree but the skip
+        # must still leave a trace (§2.2 ratchet).
+        logger.debug('[grep_redirect] scandir %s failed, subtree skipped: %s',
+                     cur_abs, e)
         return
     for ent in entries:
         _check_deadline(t0)
@@ -1083,12 +1088,16 @@ def plan_grep_redirect(command, cwd):
             spec = _parse_grep_args(grep_words, eff_cwd)
             stdout, stderr, rc = _execute(spec, eff_cwd, t0)
         except _Deadline:
+            logger.debug('[grep_redirect] deadline hit (%.0fs) on segment: %.120s',
+                         _DEADLINE_S, seg_raw.strip())
             return GrepRedirectPlan(
                 refused_segment=seg_raw.strip(),
                 refusal_reason=f'internal grep engine exceeded the '
                                f'{_DEADLINE_S:.0f}s deadline (hostile '
                                f'filesystem window)')
         except _Refusal as rf:
+            logger.debug('[grep_redirect] segment not redirectable: %.120s — %s',
+                         seg_raw.strip(), rf.reason)
             return GrepRedirectPlan(refused_segment=seg_raw.strip(),
                                     refusal_reason=rf.reason)
         first_moved = k - len(assigns)
