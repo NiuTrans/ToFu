@@ -110,6 +110,20 @@ def test_stub_payload_uses_a_real_harmless_exe():
     assert 'whoami.exe' in src
 
 
+def test_probe_reads_real_nsi_target_keys():
+    """Second probe run died on KeyError 'exe': the payload-side table
+    (_TARGETS) spells it 'exe', the NSI-side table (_NSI_TARGETS) the
+    probe actually reads spells it 'app_exe'. Pin the probe's key set
+    against the real table so a rename goes red here."""
+    from lib.desktop_dist import winbuilder as wb
+    for target in ('agent', 'full'):
+        keys = wb._NSI_TARGETS[target]
+        for k in ('app_exe', 'app_name', 'autostart_value'):
+            assert k in keys, (target, k)
+    src = open(_MOD_PATH, encoding='utf-8').read()
+    assert "nt['app_exe']" in src and "nt['exe']" not in src
+
+
 def test_render_import_bypasses_the_fat_lib_facade():
     """lib/__init__.py eagerly imports flask/redis/psycopg2 via
     lib.pricing — the FIRST probe run on a bare runner died at 'No

@@ -113,7 +113,7 @@ def build_installer(target: str, makensis: str, workdir: str, *,
     os.makedirs(os.path.join(payload, '_internal'), exist_ok=True)
     whoami = os.path.join(os.environ.get('WINDIR', r'C:\Windows'),
                           'System32', 'whoami.exe')
-    shutil.copy2(whoami, os.path.join(payload, nt['exe']))
+    shutil.copy2(whoami, os.path.join(payload, nt['app_exe']))
     with open(os.path.join(payload, '_internal', 'stub.txt'), 'w') as f:
         f.write('stub payload — wizard UI probe only\n')
 
