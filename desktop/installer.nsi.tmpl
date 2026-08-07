@@ -266,11 +266,16 @@ Var FontBody
   !define IMAGE_BITMAP 0
 !endif
 !ifdef TOFU_DIAG
-; Append one line to the diag log. Clobbers $9.
+; The log rides ONE handle opened once in .onInit — the first CI probe
+; run (2026-08-07) proved per-line FileOpen/FileWrite/FileClose cycles
+; lose ~90% of lines on a guarded Windows host (AV/EDR file races).
+; The wizard exits via a normal Finish click, and process exit flushes
+; the CRT buffer.
+Var DiagLog
+; Append one line to the diag log. Writes through the shared $DiagLog
+; handle (opened by TOFU_DIAG_HEADER); clobbers nothing.
 !macro TOFU_DIAG_WRITE line
-  FileOpen $9 "$TEMP\tofu-setup-diag.log" a
-  FileWrite $9 "${line}$\r$\n"
-  FileClose $9
+  FileWrite $DiagLog "${line}$\r$\n"
 !macroend
 ; Rect + visibility of a window. Clobbers $8, $r3-$r7; preserves $0.
 !macro TOFU_DIAG_HW tag hwnd
@@ -305,6 +310,7 @@ Var FontBody
   !endif
 !macroend
 !macro TOFU_DIAG_HEADER
+  FileOpen $DiagLog "$TEMP\tofu-setup-diag.log" w
   StrCpy $8 "=== tofu-setup-diag ${APP_NAME} ${APP_VERSION} compiled ${__DATE__} ${__TIME__} ==="
   !insertmacro TOFU_DIAG_WRITE "$8"
   System::Call 'user32::GetDC(i 0) p .r6'

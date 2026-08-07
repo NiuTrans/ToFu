@@ -334,11 +334,13 @@ def drive(exe: str, outdir: str, *, title: str, settle: float,
         user32.ReleaseDC(0, dc)
 
         deadline = time.time() + timeout
+        last_new = time.time()
         while time.time() < deadline:
             pages = _log_pages(diag_log)
             new = [p for p in pages if p not in seen]
             if new:
                 page = new[-1]
+                last_new = time.time()
                 time.sleep(settle)  # let the page finish painting
                 hwnd = find_wizard(title) or hwnd
                 summary['pages'][page] = shot(
@@ -350,6 +352,16 @@ def drive(exe: str, outdir: str, *, title: str, settle: float,
                 elif page == 'finish':
                     click_next(hwnd)  # Finish closes the wizard
                     break
+            elif 'finish' not in seen and time.time() - last_new > 15:
+                # The finish page auto-advances in and its mark can lag
+                # (or the log lane is degraded on this host) — click
+                # Next anyway: a graceful exit is what flushes the
+                # diag log's last writes. Harmless on a disabled button.
+                try:
+                    click_next(hwnd)
+                except RuntimeError:
+                    pass
+                last_new = time.time()
             elif proc.poll() is not None and not pages:
                 # The wizard died before any marker — capture what is
                 # (or is no longer) there and bail.
