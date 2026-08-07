@@ -43,6 +43,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 
 PAGES = ('welcome', 'directory', 'progress', 'finish')
 BM_CLICK = 0x00F5
@@ -88,6 +89,23 @@ def build_installer(target: str, makensis: str, workdir: str, *,
     error-free on the runner.
     """
     sys.path.insert(0, _repo_root())
+    # Namespace-injection bypass: lib/__init__.py is the server's fat
+    # facade — it eagerly pulls flask/redis/psycopg2/… via lib.pricing,
+    # which a bare CI runner does not have (first probe run died at
+    # 'No module named requests', 2026-08-07). The render chain itself
+    # needs only stdlib + PIL, so register minimal parent packages with
+    # __path__ and the submodule imports below never execute the
+    # facade. Local proof: render succeeds with requests/flask/redis/
+    # psycopg2/cryptography/matplotlib all import-blocked.
+    root = _repo_root()
+    if 'lib' not in sys.modules:
+        pkg = types.ModuleType('lib')
+        pkg.__path__ = [os.path.join(root, 'lib')]
+        sys.modules['lib'] = pkg
+    if 'lib.desktop_dist' not in sys.modules:
+        pkg = types.ModuleType('lib.desktop_dist')
+        pkg.__path__ = [os.path.join(root, 'lib', 'desktop_dist')]
+        sys.modules['lib.desktop_dist'] = pkg
     from lib.desktop_dist import installer_art, winbuilder as wb
 
     nt = wb._NSI_TARGETS[target]
@@ -393,5 +411,7 @@ if __name__ == '__main__':
     try:
         sys.exit(main())
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f'[win-ci-shot] FAILED: {e}', file=sys.stderr)
         sys.exit(2)

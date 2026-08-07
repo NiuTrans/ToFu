@@ -108,3 +108,14 @@ def test_stub_payload_uses_a_real_harmless_exe():
     lane we are measuring)."""
     src = open(_MOD_PATH, encoding='utf-8').read()
     assert 'whoami.exe' in src
+
+
+def test_render_import_bypasses_the_fat_lib_facade():
+    """lib/__init__.py eagerly imports flask/redis/psycopg2 via
+    lib.pricing — the FIRST probe run on a bare runner died at 'No
+    module named requests' (2026-08-07). The probe must import the
+    render chain through the namespace-injection bypass; removing it
+    re-breaks CI in the worst place."""
+    src = open(_MOD_PATH, encoding='utf-8').read()
+    assert "sys.modules['lib']" in src and '__path__' in src, (
+        'the lib/__init__ bypass fell out of build_installer')
