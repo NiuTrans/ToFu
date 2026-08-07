@@ -206,13 +206,16 @@ Var FontBody
   IntOp $2 $r1 * 13
   IntOp $2 $2 / 72
   IntOp $2 0 - $2
+  StrCpy $4 $2
   System::Call 'gdi32::CreateFont(i $2, i 0, i 0, i 0, i 700, i 0, i 0, i 0, i 1, i 0, i 0, i 5, i 0, w "$FontFamily") p .s'
   Pop $FontTitle
   IntOp $2 $r1 * 9
   IntOp $2 $2 / 72
   IntOp $2 0 - $2
+  StrCpy $5 $2
   System::Call 'gdi32::CreateFont(i $2, i 0, i 0, i 0, i 400, i 0, i 0, i 0, i 1, i 0, i 0, i 5, i 0, w "$FontFamily") p .s'
   Pop $FontBody
+  !insertmacro TOFU_DIAG_FONTS
 !macroend
 
 ; Full-page art + one label helper shared by every page.
@@ -244,6 +247,7 @@ Var FontBody
   Pop $0
   SendMessage $0 ${WM_SETFONT} ${font} 1
   !insertmacro TOFU_DIAG_HW "label" $0
+  !insertmacro TOFU_DIAG_TEXT "label" $0
 !macroend
 
 ; ── Diagnostic build seam (compile with -DTOFU_DIAG=1) ────────────
@@ -319,6 +323,37 @@ Var FontBody
   ${EndIf}
   !insertmacro TOFU_DIAG_WRITE "$8"
 !macroend
+; A label's live text length — distinguishes "created but EMPTY" (len 0)
+; from "created with text yet never painted". Clobbers $8, $r7.
+!macro TOFU_DIAG_TEXT tag hwnd
+  SendMessage ${hwnd} ${WM_GETTEXTLENGTH} 0 0 $r7
+  StrCpy $8 "${tag} text: len=$r7"
+  !insertmacro TOFU_DIAG_WRITE "$8"
+!macroend
+; The font pipeline facts: real DPI, the two requested pixel heights
+; (negative = EM-height request) and the resulting GDI handles — a zero
+; or absurd value here blanks text without touching geometry.
+!macro TOFU_DIAG_FONTS
+  StrCpy $8 "fonts: dpi=$r1 htitle=$4 hbody=$5 title=$FontTitle body=$FontBody"
+  !insertmacro TOFU_DIAG_WRITE "$8"
+!macroend
+; A one-line marker (page reached Show / page left Show).
+!macro TOFU_DIAG_MARK msg
+  !insertmacro TOFU_DIAG_WRITE "${msg}"
+!macroend
+; The nav-button retitle lane, every link logged: $HWNDPARENT, the
+; GetDlgItem result (in $0 by the caller), and the button's ACTUAL text
+; after the retitle. The 2026-08-07 real-machine screenshot showed the
+; STOCK Next text on the first page — this probe adjudicates between
+; "retitle no-opped" and "retitle landed but was overwritten".
+; Clobbers $8; preserves $0.
+!macro TOFU_DIAG_RETITLE page expected
+  StrCpy $8 "page ${page} retitle: hwndparent=$HWNDPARENT next_btn=$0 expected='${expected}'"
+  !insertmacro TOFU_DIAG_WRITE "$8"
+  System::Call 'user32::GetWindowTextW(p $0, w .r8, i 256)'
+  StrCpy $8 "page ${page} retitle: actual='$8'"
+  !insertmacro TOFU_DIAG_WRITE "$8"
+!macroend
 ; The live-page probe body: 400 ms into nsDialogs::Show, log the
 ; dialog, the art control's image, then EVERY child window (class +
 ; rect + visibility) — the discriminating snapshot for "created but
@@ -355,6 +390,14 @@ FunctionEnd
 !macro TOFU_DIAG_HEADER
 !macroend
 !macro TOFU_DIAG_ART_CHECK file
+!macroend
+!macro TOFU_DIAG_TEXT tag hwnd
+!macroend
+!macro TOFU_DIAG_FONTS
+!macroend
+!macro TOFU_DIAG_MARK msg
+!macroend
+!macro TOFU_DIAG_RETITLE page expected
 !macroend
 !endif
 
@@ -460,6 +503,8 @@ Function WelcomePageCreate
   !insertmacro TOFU_LABEL 20u 87u 236u 26u "$(TOFU_WELCOME_BODY)" $FontBody
   GetDlgItem $0 $HWNDPARENT 1
   SendMessage $0 ${WM_SETTEXT} 0 "STR:$(TOFU_BTN_INSTALL)"
+  !insertmacro TOFU_DIAG_RETITLE "welcome" "$(TOFU_BTN_INSTALL)"
+  !insertmacro TOFU_DIAG_MARK "welcome: reached Show"
   nsDialogs::Show
   ${NSD_FreeImage} $R0
 FunctionEnd
@@ -482,6 +527,7 @@ Function DirPageCreate
   Pop $0
   ${NSD_OnClick} $0 OnBrowseFolder
 @AUTOSTART_PAGE@
+  !insertmacro TOFU_DIAG_MARK "directory: reached Show"
   nsDialogs::Show
   ${NSD_FreeImage} $R0
 FunctionEnd
@@ -532,6 +578,7 @@ Function ProgressPageCreate
   GetDlgItem $0 $HWNDPARENT 3
   EnableWindow $0 0
   ${NSD_CreateTimer} OnInstallNow 150
+  !insertmacro TOFU_DIAG_MARK "progress: reached Show"
   nsDialogs::Show
   ${NSD_FreeImage} $R0
 FunctionEnd
@@ -563,6 +610,8 @@ Function FinishPageCreate
   ${NSD_Check} $ChkLaunch
   GetDlgItem $0 $HWNDPARENT 1
   SendMessage $0 ${WM_SETTEXT} 0 "STR:$(TOFU_BTN_FINISH)"
+  !insertmacro TOFU_DIAG_RETITLE "finish" "$(TOFU_BTN_FINISH)"
+  !insertmacro TOFU_DIAG_MARK "finish: reached Show"
   nsDialogs::Show
   ${NSD_FreeImage} $R0
 FunctionEnd
@@ -637,6 +686,8 @@ Function un.ConfirmPageCreate
   !insertmacro TOFU_LABEL 20u 73u 236u 30u "$(TOFU_UN_BODY)" $FontBody
   GetDlgItem $0 $HWNDPARENT 1
   SendMessage $0 ${WM_SETTEXT} 0 "STR:$(TOFU_BTN_UNINSTALL)"
+  !insertmacro TOFU_DIAG_RETITLE "un.confirm" "$(TOFU_BTN_UNINSTALL)"
+  !insertmacro TOFU_DIAG_MARK "un.confirm: reached Show"
   nsDialogs::Show
   ${NSD_FreeImage} $R0
 FunctionEnd
@@ -661,6 +712,7 @@ Function un.ProgressPageCreate
   GetDlgItem $0 $HWNDPARENT 3
   EnableWindow $0 0
   ${NSD_CreateTimer} un.OnUninstallNow 150
+  !insertmacro TOFU_DIAG_MARK "un.progress: reached Show"
   nsDialogs::Show
   ${NSD_FreeImage} $R0
 FunctionEnd
@@ -684,6 +736,8 @@ Function un.FinishPageCreate
   !insertmacro TOFU_LABEL 20u 73u 236u 10u "$(TOFU_UN_DONE_SUB)" $FontBody
   GetDlgItem $0 $HWNDPARENT 1
   SendMessage $0 ${WM_SETTEXT} 0 "STR:$(TOFU_BTN_FINISH)"
+  !insertmacro TOFU_DIAG_RETITLE "un.finish" "$(TOFU_BTN_FINISH)"
+  !insertmacro TOFU_DIAG_MARK "un.finish: reached Show"
   nsDialogs::Show
   ${NSD_FreeImage} $R0
 FunctionEnd

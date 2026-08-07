@@ -63,7 +63,7 @@ __pycache__/
 # tests/test_gitignore_covers_export_excludes.py asserts the two lists stay in
 # sync so this gap cannot silently reopen. Documented keepers stay tracked:
 #   scripts/gen_desktop_icons.py (CI icon gen), export.py, CLAUDE.md,
-#   static/provider_templates/yourprovider.json (functional internal template),
+#   static/provider_templates/meituan.json (functional internal template),
 #   scripts/package_extension.sh (builds the store upload zip; the SHIPPED
 #     docs/chrome-web-store/ kit tells the reader to run it, so a clean clone
 #     without it makes that instruction a dead end),
@@ -113,7 +113,16 @@ __pycache__/
 !/scripts/cache_ab_probe.py
 # debug/ = standalone scratch/benchmark scripts (never imported by the app);
 # tracked *.log already ignored above, this covers the .py/.json/.png/.md/.html too.
-/debug/
+# NOTE: contents-level (/debug/*), NOT dir-level (/debug/) — git never descends
+# into an excluded DIRECTORY, so a /debug/ rule would make the negation below
+# dead (the uploads/* + !.gitkeep pattern is the established shape).
+/debug/*
+# Whitelist: the CI wizard pixel probe (the manual installer-ui-probe.yml
+# workflow drives it on windows-latest). That workflow ships in the
+# opensource export, so the script must too — the same dead-pipeline
+# argument as release_assets.py: a public clone without it carries a
+# workflow that dies on a missing file.
+!/debug/win_ci_shot.py
 # Raw AI-gen asset candidates + proof strips (review-only, multi-MB) under the
 # pet-icon dir. Anchored to that subtree, not a bare _candidates glob.
 static/icons/pet/_candidates/
@@ -150,7 +159,7 @@ docs/解答260505_v2.pdf
 
 # ── CWD pollution: stray dirs created by eval/agent harnesses that wrote
 #    output to a path RELATIVE to the repo root instead of an absolute one
-#    (e.g. INS/your-username/..., mnt/dolphinfs/...; the harness stripped the
+#    (e.g. INS/ruanjunhao04/..., mnt/dolphinfs/...; the harness stripped the
 #    leading "/" and re-created our own abs path as a nested tree). Not part
 #    of the app — see the 2026-06 "unrelated folders polluting the tree" note. ──
 /INS/

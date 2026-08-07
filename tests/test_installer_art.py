@@ -269,10 +269,52 @@ def test_diag_seam_is_wired_into_the_shared_macros():
         'TOFU_PAGE_ART')
     assert '!insertmacro TOFU_DIAG_HW "label" $0' in label_macro, (
         'label-level diag fell out of TOFU_LABEL')
+    assert '!insertmacro TOFU_DIAG_TEXT "label" $0' in label_macro, (
+        'the label text-length probe fell out of TOFU_LABEL')
+    fonts_macro = tmpl.split('!macro TOFU_CREATE_FONTS')[1] \
+                      .split('!macroend')[0]
+    assert '!insertmacro TOFU_DIAG_FONTS' in fonts_macro, (
+        'the font-pipeline probe fell out of TOFU_CREATE_FONTS')
     assert '!ifdef TOFU_DIAG' in tmpl and 'OnTofuDiagProbe' in tmpl, (
         'the diag block / live-page probe timer went missing')
     # The empty-expansion else branch is what keeps production builds
     # byte-clean of the seam.
-    assert tmpl.count('!macro TOFU_DIAG_WRITE') == 2, (
-        'TOFU_DIAG_* macros must exist in BOTH an ifdef and an '
-        'empty-else form')
+    for name in ('TOFU_DIAG_WRITE', 'TOFU_DIAG_HW', 'TOFU_DIAG_PAGE',
+                 'TOFU_DIAG_HEADER', 'TOFU_DIAG_ART_CHECK',
+                 'TOFU_DIAG_TEXT', 'TOFU_DIAG_FONTS', 'TOFU_DIAG_MARK',
+                 'TOFU_DIAG_RETITLE'):
+        assert tmpl.count(f'!macro {name}') == 2, (
+            f'{name} must exist in BOTH an ifdef and an empty-else form')
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  The page-function probe coverage (2026-08-07 round 2 of the seam)
+# ═══════════════════════════════════════════════════════════════════
+# The owner's screenshot showed even the nav-button RETITLE absent on
+# the welcome page — the widened seam must log every page reaching
+# nsDialogs::Show and audit the retitle lane end to end.
+
+_PAGES = ('WelcomePageCreate', 'DirPageCreate', 'ProgressPageCreate',
+          'FinishPageCreate', 'un.ConfirmPageCreate',
+          'un.ProgressPageCreate', 'un.FinishPageCreate')
+_RETITLING = {'WelcomePageCreate': 'welcome', 'FinishPageCreate': 'finish',
+              'un.ConfirmPageCreate': 'un.confirm',
+              'un.FinishPageCreate': 'un.finish'}
+
+
+def test_every_page_logs_reached_show_before_show():
+    for script, target in ((_FULL, 'full'), (_AGENT, 'agent')):
+        for page in _PAGES:
+            body = script.split(f'Function {page}')[1] \
+                         .split('FunctionEnd')[0]
+            assert 'reached Show' in body, (target, page)
+            assert body.index('reached Show') < \
+                body.index('nsDialogs::Show'), (target, page)
+
+
+def test_retitling_pages_probe_the_button_lane():
+    for script, target in ((_FULL, 'full'), (_AGENT, 'agent')):
+        for page, tag in _RETITLING.items():
+            body = script.split(f'Function {page}')[1] \
+                         .split('FunctionEnd')[0]
+            assert f'TOFU_DIAG_RETITLE "{tag}"' in body, (target, page)
