@@ -132,14 +132,21 @@ def build_installer(target: str, makensis: str, workdir: str, *,
                          autostart=bool(nt['autostart_value']))
 
     out_file = os.path.join(workdir, f'probe-{target}.exe')
-    # makensis on Windows chokes on MIXED separators in the File /r
-    # payload glob ("C:\\…\\payload/*" -> no files found, fourth probe
-    # run). Forward slashes are accepted by BOTH the Windows and the
-    # Linux makensis, so every path handed to the renderer is
-    # normalized here.
-    fwd = lambda p: p.replace(os.sep, '/')  # noqa: E731
-    nsi = wb._render_nsi('0.0.0-ci', fwd(payload), fwd(out_file),
-                         target, art_dir=fwd(art_dir))
+    nsi = wb._render_nsi('0.0.0-ci', payload, out_file, target,
+                         art_dir=art_dir)
+    if sys.platform == 'win32':
+        # Windows makensis' File glob only matches the NATIVE form
+        # `dir\*` — probe runs 4-5 proved both `dir/*` and mixed forms
+        # report "no files found". The template keeps the POSIX form
+        # for the Linux production build; the probe rewrites the one
+        # glob line in the CI copy only (and fails loudly if the
+        # template ever stops matching this exact string).
+        before = f'File /r "{payload}/*"'
+        after = f'File /r "{payload}\\*"'
+        if before not in nsi:
+            raise RuntimeError('payload glob line not found in the '
+                               'rendered script — template drifted')
+        nsi = nsi.replace(before, after)
     script = os.path.join(workdir, 'installer.nsi')
     with open(script, 'w', encoding='utf-8') as f:
         f.write(nsi)
@@ -400,8 +407,11 @@ def main(argv=None) -> int:
     os.makedirs(args.out, exist_ok=True)
     exe = args.drive_only
     if not exe:
-        workdir = os.path.join(tempfile.gettempdir(),
-                               f'win-ci-shot-{int(time.time())}')
+        # On Windows CI, tempfile.gettempdir() hands back the 8.3 short
+        # form (C:\Users\RUNNER~1\…) — one more variable in the
+        # File-glob fight; a repo-local workdir is a clean ASCII path.
+        base = _repo_root() if sys.platform == 'win32' else tempfile.gettempdir()
+        workdir = os.path.join(base, f'win-ci-shot-{int(time.time())}')
         os.makedirs(workdir, exist_ok=True)
         exe = build_installer(args.target,
                               args.makensis or _find_makensis(),
