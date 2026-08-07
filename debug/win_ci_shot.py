@@ -109,6 +109,16 @@ def build_installer(target: str, makensis: str, workdir: str, *,
     from lib.desktop_dist import installer_art, winbuilder as wb
 
     nt = wb._NSI_TARGETS[target]
+    # static/icons/tofu.ico is gitignored (generated asset) — a fresh CI
+    # checkout has NO icon and makensis dies on the `Icon` line. The
+    # generator is PIL-only and tracked; regenerate when absent (third
+    # probe run, 2026-08-07).
+    ico = os.path.join(root, 'static', 'icons', 'tofu.ico')
+    if not os.path.isfile(ico):
+        subprocess.run([sys.executable,
+                        os.path.join(root, 'scripts',
+                                     'gen_desktop_icons.py')],
+                       check=True, timeout=600, capture_output=True)
     payload = os.path.join(workdir, 'payload')
     os.makedirs(os.path.join(payload, '_internal'), exist_ok=True)
     whoami = os.path.join(os.environ.get('WINDIR', r'C:\Windows'),
@@ -133,7 +143,9 @@ def build_installer(target: str, makensis: str, workdir: str, *,
     cmd.append(script)
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
     if p.returncode != 0 or not os.path.isfile(out_file):
-        raise RuntimeError(f'makensis failed:\n{p.stdout[-3000:]}')
+        raise RuntimeError(
+            f'makensis rc={p.returncode}\n--- stdout ---\n'
+            f'{p.stdout[-2500:]}\n--- stderr ---\n{p.stderr[-2500:]}')
     return out_file
 
 
