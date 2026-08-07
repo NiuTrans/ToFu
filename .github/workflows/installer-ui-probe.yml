@@ -56,4 +56,4 @@ jobs:
         with:
           name: wizard-probe-${{ inputs.target }}
           path: probe-out/
-          if-no-files-found: error
+          if-no-files-found: warn

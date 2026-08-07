@@ -132,8 +132,14 @@ def build_installer(target: str, makensis: str, workdir: str, *,
                          autostart=bool(nt['autostart_value']))
 
     out_file = os.path.join(workdir, f'probe-{target}.exe')
-    nsi = wb._render_nsi('0.0.0-ci', payload, out_file, target,
-                         art_dir=art_dir)
+    # makensis on Windows chokes on MIXED separators in the File /r
+    # payload glob ("C:\\…\\payload/*" -> no files found, fourth probe
+    # run). Forward slashes are accepted by BOTH the Windows and the
+    # Linux makensis, so every path handed to the renderer is
+    # normalized here.
+    fwd = lambda p: p.replace(os.sep, '/')  # noqa: E731
+    nsi = wb._render_nsi('0.0.0-ci', fwd(payload), fwd(out_file),
+                         target, art_dir=fwd(art_dir))
     script = os.path.join(workdir, 'installer.nsi')
     with open(script, 'w', encoding='utf-8') as f:
         f.write(nsi)
