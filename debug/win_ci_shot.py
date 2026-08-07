@@ -135,18 +135,21 @@ def build_installer(target: str, makensis: str, workdir: str, *,
     nsi = wb._render_nsi('0.0.0-ci', payload, out_file, target,
                          art_dir=art_dir)
     if sys.platform == 'win32':
-        # Windows makensis' File glob only matches the NATIVE form
-        # `dir\*` — probe runs 4-5 proved both `dir/*` and mixed forms
-        # report "no files found". The template keeps the POSIX form
-        # for the Linux production build; the probe rewrites the one
-        # glob line in the CI copy only (and fails loudly if the
-        # template ever stops matching this exact string).
-        before = f'File /r "{payload}/*"'
-        after = f'File /r "{payload}\\*"'
-        if before not in nsi:
-            raise RuntimeError('payload glob line not found in the '
-                               'rendered script — template drifted')
-        nsi = nsi.replace(before, after)
+        # Windows makensis' File handler does not normalize `/` inside
+        # host paths — neither the glob `dir/*` (runs 4-5) nor the
+        # single-file `dir/file.bmp` form (run 6, art File lines)
+        # resolve. Icon/UninstallIcon's loader DOES tolerate the mixed
+        # form (run 6 sailed past them), so only File lines are
+        # rewritten. The template keeps POSIX separators for the Linux
+        # production build; the probe rewrites its CI copy and fails
+        # loudly when the template drifts off these strings.
+        pairs = [(f'File /r "{payload}/*"', f'File /r "{payload}\\*"'),
+                 (f'File "{art_dir}/', f'File "{art_dir}\\')]
+        for before, after in pairs:
+            if before not in nsi:
+                raise RuntimeError(f'expected line not found: '
+                                   f'{before!r} — template drifted')
+            nsi = nsi.replace(before, after)
     script = os.path.join(workdir, 'installer.nsi')
     with open(script, 'w', encoding='utf-8') as f:
         f.write(nsi)
