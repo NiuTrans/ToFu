@@ -19,6 +19,7 @@ for redis pub/sub):
 """
 import os
 import sys
+import time
 
 import pytest
 
@@ -211,6 +212,90 @@ def test_publish_fails_open_to_local_on_bus_error():
     hub.subscribe(c, 'paper', 't1')
     hub.push_event('paper', 't1', {'type': 'progress'})  # publish raises
     assert len(c.frames) == 1, 'fail-open: local delivery must still happen'
+
+
+def test_subscriber_reconnects_and_resubscribes_after_socket_failure():
+    """The fan-out listener heals in-process after Redis is restarted."""
+    from lib.agent_core.push_bus import RedisPushBus
+
+    class _FailingPubSub:
+        def subscribe(self, _topic):
+            raise RuntimeError('pubsub socket dropped')
+
+        def close(self):
+            pass
+
+    class _RecoveredPubSub:
+        def __init__(self):
+            self.sent = False
+
+        def subscribe(self, _topic):
+            pass
+
+        def get_message(self, **_kwargs):
+            if not self.sent:
+                self.sent = True
+                return {'type': 'message',
+                        'data': '{"channel":"paper","taskId":"t1","type":"done"}'}
+            time.sleep(0.005)
+            return None
+
+        def close(self):
+            pass
+
+    class _Client:
+        def __init__(self, pubsub):
+            self._pubsub = pubsub
+
+        def ping(self):
+            return True
+
+        def pubsub(self, **_kwargs):
+            return self._pubsub
+
+        def close(self):
+            pass
+
+    clients = iter([_Client(_FailingPubSub()),
+                    _Client(_RecoveredPubSub())])
+    delivered = []
+    bus = RedisPushBus(delivered.append, client_factory=lambda: next(clients))
+    bus._retry_delay = 0.01
+    bus._RETRY_MIN = 0.01
+    bus._RETRY_MAX = 0.05
+    bus.start()
+    try:
+        deadline = time.time() + 2.0
+        while not delivered and time.time() < deadline:
+            time.sleep(0.01)
+        assert delivered and delivered[0]['type'] == 'done'
+        assert bus.health()['subscriber_available'] is True
+    finally:
+        bus.stop()
+
+
+def test_targeted_socket_delivery_crosses_replicas_without_broadcasting():
+    """A digest POST on B can repair the exact WebSocket living on A."""
+    from lib.agent_core.push_bus import RedisPushBus
+    broker = {}
+    bus_a = RedisPushBus(deliver_fn=None, client=_FakeClient(broker))
+    bus_b = RedisPushBus(deliver_fn=None, client=_FakeClient(broker))
+    hub_a = _make_hub(bus_a)
+    hub_b = _make_hub(bus_b)
+    bus_a._deliver = hub_a._deliver_frame
+    bus_b._deliver = hub_b._deliver_frame
+    ps_a = bus_a._client.pubsub(); ps_a.subscribe('tofu:push:fanout')
+
+    target = _SyncClient(); target.req_id = 'socket-a'
+    sibling = _SyncClient(); sibling.req_id = 'socket-other'
+    hub_a.register(target); hub_a.register(sibling)
+
+    assert hub_b.deliver_to_socket(
+        'socket-a', {'type': 'conv_state_snapshot', 'rev': 7}) is True
+    for raw in ps_a.drain():
+        bus_a.on_message(raw)
+    assert target.frames == [{'type': 'conv_state_snapshot', 'rev': 7}]
+    assert sibling.frames == []
 
 
 # ══════════════════════════════════════════════════════════════════════

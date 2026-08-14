@@ -32,13 +32,13 @@ def _run(coro):
 
 
 def _app():
-    from quart import Quart, g
+    from quart import g
 
     from lib.api_keys import local_admin_context
+    from lib.app_factory import create_base_app
     from routes.api_v1.logs import api_v1_logs_bp
 
-    app = Quart(__name__)
-    app.config['TESTING'] = True
+    app = create_base_app(__name__, {'TESTING': True})
 
     @app.before_request
     async def _grant():

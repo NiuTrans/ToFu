@@ -8,7 +8,7 @@ Extracted from ``routes/conversations.py``. Registers on the same
 import re
 import time
 
-from flask import request
+from quart import request
 
 from lib.api_response import api_ok
 from lib.database import DOMAIN_CHAT, async_fetchall
@@ -45,6 +45,32 @@ def _head_cap_sql(backend: str) -> str:
             else 'substr(search_text, 1, 10000)')
 
 
+def _snippet_projection_sql(backend: str, placeholders: str) -> str:
+    """Project a bounded snippet in SQL instead of returning full search blobs.
+
+    ``search_text`` can be hundreds of megabytes for a long conversation.  A
+    final result set of 50 rows must not copy all of those values through the
+    driver and then materialize them again in Python merely to keep ~80 chars.
+    The database still locates the match in the authoritative full text, but
+    only the bounded substring crosses the process boundary.
+    """
+    if backend == 'pg':
+        snippet_expr = (
+            'substring(search_text FROM GREATEST(1, match_pos - ?) FOR ?)'
+        )
+        pos_expr = 'strpos(lower(search_text), ?)'
+    else:
+        snippet_expr = 'substr(search_text, max(1, match_pos - ?), ?)'
+        pos_expr = 'instr(lower(search_text), ?)'
+    return (
+        'SELECT id, CASE WHEN match_pos > 0 THEN ' + snippet_expr +
+        " ELSE '' END AS snippet FROM ("
+        'SELECT id, search_text, ' + pos_expr + ' AS match_pos '
+        'FROM conversations WHERE user_id=? AND id IN (' + placeholders +
+        ')) AS matched'
+    )
+
+
 def _log_search_timing(query: str, n_results: int, elapsed: float) -> None:
     """Log search latency — WARNING when slow, DEBUG otherwise."""
     if elapsed >= _SLOW_SEARCH_THRESHOLD_S:
@@ -65,7 +91,8 @@ async def search_convs():
       Phase 2: If <50 results, LIKE fallback on search_text to catch
                substring matches that FTS5 tokenization misses.
 
-    Snippets are extracted in Python from the final result set (max 50 rows).
+    Snippets are projected to a bounded substring in SQL (max 50 rows); full
+    search blobs never cross into Python.
     """
     query = (request.args.get('q') or '').strip().lower()
     if not query or len(query) < 2:
@@ -151,25 +178,20 @@ async def search_convs():
         _log_search_timing(query, 0, elapsed)
         return api_ok({'items': []})
 
-    # ── Extract snippets in Python (portable — no PG substring/position) ──
+    # ── Project bounded snippets in SQL ──
     placeholders = ','.join(['?'] * len(result_ids))
+    snippet_width = (2 * SNIPPET_RADIUS) + len(query)
     snippet_rows = await async_fetchall(
-        f"SELECT id, search_text FROM conversations WHERE id IN ({placeholders})",
-        tuple(result_ids), domain=DOMAIN_CHAT)
+        _snippet_projection_sql(_BACKEND, placeholders),
+        (SNIPPET_RADIUS, snippet_width, query, DEFAULT_USER_ID, *result_ids),
+        domain=DOMAIN_CHAT)
 
     snippet_map = {}
     for r in snippet_rows:
-        text = r['search_text'] or ''
-        pos = text.lower().find(query)
-        if pos >= 0:
-            start = max(0, pos - SNIPPET_RADIUS)
-            end = min(len(text), pos + len(query) + SNIPPET_RADIUS)
-            snip = text[start:end].replace('\n', ' ').strip()
-            if snip:
-                snip = '…' + snip + '…'
-            snippet_map[r['id']] = snip
-        else:
-            snippet_map[r['id']] = ''
+        snip = (r['snippet'] or '').replace('\n', ' ').strip()
+        if snip:
+            snip = '…' + snip + '…'
+        snippet_map[r['id']] = snip
 
     results = [
         {

@@ -22,7 +22,7 @@ logger = get_logger(__name__)
 #    distinguish between project roots.
 _FS_TOOLS_FOR_ROOT_PILL = frozenset({
     'read_files', 'inspect_image', 'list_dir', 'grep_search', 'find_files',
-    'write_file', 'apply_diff', 'apply_diffs',
+    'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
     'insert_content', 'insert_contents',
     'create_project', 'run_command',
 })
@@ -79,7 +79,7 @@ def _extract_first_path_arg(fn_name, fn_args):
         return ''
     if fn_name in ('apply_diff', 'insert_content', 'inspect_image'):
         return fn_args.get('path') or ''
-    if fn_name in ('apply_diffs', 'insert_contents'):
+    if fn_name in ('edit_file', 'apply_diffs', 'insert_contents'):
         edits = fn_args.get('edits')
         if isinstance(edits, list):
             for e in edits:

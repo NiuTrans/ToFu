@@ -59,6 +59,8 @@ _IMG_EXT_MIME = {
     '.svg': 'image/svg+xml',
 }
 
+_MAX_REMOTE_IMAGE_BYTES = 10 * 1024 * 1024
+
 # Marker for an uploaded image URL. A reverse proxy (VS Code / code-server
 # ``/proxy/<port>/``) prepends a base path, so the stored URL can be
 # ``/proxy/15002/api/images/<f>`` rather than a bare ``/api/images/<f>``. We
@@ -138,7 +140,16 @@ def _resolve_image_bytes(ref: str) -> dict | None:
         try:
             header, b64_part = ref.split(',', 1)
             mime_type = header.split(':')[1].split(';')[0]
+            if not mime_type.lower().startswith('image/'):
+                raise ValueError('data URI is not an image')
+            # Reject before decoding: a 500 MiB base64 string otherwise creates
+            # another hundreds-of-megabytes allocation on this hot tool path.
+            max_encoded = ((_MAX_REMOTE_IMAGE_BYTES + 2) // 3) * 4 + 8
+            if len(b64_part) > max_encoded:
+                raise ValueError('inline image exceeds 10 MiB decoded limit')
             raw = base64.b64decode(b64_part)
+            if len(raw) > _MAX_REMOTE_IMAGE_BYTES:
+                raise ValueError('inline image exceeds 10 MiB decoded limit')
             return {'kind': 'image', 'image_b64': b64_part, 'mime_type': mime_type, 'raw': raw}
         except (ValueError, IndexError) as e:
             logger.warning('[Attachments] Failed to parse data URI: %s', e)
@@ -167,15 +178,18 @@ def _resolve_image_bytes(ref: str) -> dict | None:
     # ── Remote URL ──
     if ref.startswith(('http://', 'https://')):
         try:
-            from lib.http_client import http_get
-            resp = http_get(ref, timeout=30)
-            resp.raise_for_status()
-            raw = resp.content
+            from lib.safe_fetch import fetch_public_bytes
+            raw, content_type, _final_url = fetch_public_bytes(
+                ref,
+                max_bytes=_MAX_REMOTE_IMAGE_BYTES,
+                timeout=30,
+                max_redirects=3,
+                allow_hosts_env='TOFU_IMAGE_FETCH_ALLOW_HOSTS',
+            )
         except Exception as e:
             logger.warning('[Attachments] Failed to download image %.80s: %s', ref[:80], e)
             return None
-        ct = resp.headers.get('Content-Type', 'image/png')
-        mime_type = ct.split(';')[0].strip() if ct.startswith('image/') else 'image/png'
+        mime_type = content_type if content_type.startswith('image/') else 'image/png'
         return {'kind': 'image', 'image_b64': base64.b64encode(raw).decode('ascii'),
                 'mime_type': mime_type, 'raw': raw}
 

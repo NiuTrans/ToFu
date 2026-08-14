@@ -32,11 +32,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = runtime_sections_dir()
 
 
 def _node_deps_available() -> bool:
@@ -53,7 +55,8 @@ _HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
 const ROOT = process.argv[1];
-const NEUTER = process.argv[2] === 'neuter';
+const SOURCES = process.argv[2];
+const NEUTER = process.argv[3] === 'neuter';
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM('<!DOCTYPE html><body></body>', { url: 'http://localhost/' });
 const win = dom.window;
@@ -66,10 +69,10 @@ global.t = win.t = (k) => k;
 
 // ── Load the real showChoice from dialog.js ──
 const dialogSrc = fs.readFileSync(
-  path.join(ROOT, 'static', 'js', 'core', 'dialog.js'), 'utf8');
+  path.join(SOURCES, 'core', 'dialog.js'), 'utf8');
 eval(dialogSrc);   // defines showChoice etc. on this scope + window
 
-const NEUTER_ARROWS = process.argv[2] === 'neuter_arrows';
+const NEUTER_ARROWS = process.argv[3] === 'neuter_arrows';
 
 if (NEUTER) {
   // NEUTER: break the liveCheck auto-resolve — the dialog will then hang open
@@ -94,7 +97,7 @@ if (NEUTER_ARROWS) {
 
 // ── Extract _promptInjectMode from the shipped send pipeline ──
 const sendSrc = fs.readFileSync(
-  path.join(ROOT, 'static', 'js', 'main', 'main_send_pipeline.js'), 'utf8');
+  path.join(SOURCES, 'main', 'main_send_pipeline.js'), 'utf8');
 const m = sendSrc.match(/async function _promptInjectMode\([\s\S]*?\n\}\n/);
 if (!m) { console.log(JSON.stringify({error: '_promptInjectMode not found'})); process.exit(0); }
 // conversations + activeStreams globals the liveCheck reads.
@@ -198,7 +201,7 @@ function clickChoice(value) {
 def _run(neuter: bool = False, mode: str | None = None) -> dict:
     arg = mode if mode else ('neuter' if neuter else 'normal')
     proc = subprocess.run(
-        ['node', '-e', _HARNESS, ROOT, arg],
+        ['node', '-e', _HARNESS, ROOT, JS_DIR, arg],
         capture_output=True, text=True, timeout=60, cwd=ROOT)
     assert proc.returncode == 0, f'node harness failed: {proc.stderr[:2000]}'
     line = [ln for ln in proc.stdout.strip().splitlines() if ln.startswith('{')][-1]

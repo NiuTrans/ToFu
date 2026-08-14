@@ -90,14 +90,20 @@ class TestProviderRefusesBinaryUrls:
 
         def _fake(url, **k):
             seen['url'] = url
+            seen['client_id'] = k.get('client_id')
             return 'extracted article text'
 
         # The provider does `from lib.browser import fetch_url_via_browser`,
         # so patch the package-facade name it actually binds.
         import lib.browser as browser_pkg
         monkeypatch.setattr(browser_pkg, 'fetch_url_via_browser', _fake, raising=False)
+        monkeypatch.setattr(
+            browser_pkg, 'is_extension_connected',
+            lambda client_id=None: client_id == 'client-html', raising=False)
 
-        prov = sb._ChatuiBrowserProvider()
+        prov = sb._ChatuiBrowserProvider(
+            user_id='user-html', client_id='client-html', bound=True)
         out = prov.fetch_url('https://example.com/article')
         assert out == 'extracted article text'
         assert seen['url'] == 'https://example.com/article'
+        assert seen['client_id'] == 'client-html'

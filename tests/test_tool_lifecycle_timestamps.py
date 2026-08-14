@@ -61,8 +61,6 @@ Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest \
 from __future__ import annotations
 
 import os
-import shutil
-import subprocess
 import threading
 import time
 
@@ -72,13 +70,9 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+RUNTIME_JS = os.path.join(ROOT, 'frontend', 'src', 'runtime', 'app-runtime.js')
 
 TOOL_EVENT_TYPES = ('tool_start', 'tool_progress', 'tool_result', 'tool_complete')
-
-
-def _node_available() -> bool:
-    return bool(shutil.which('node'))
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -404,25 +398,15 @@ console.log(out.join('\n'));
 """
 
 
-@pytest.mark.skipif(not _node_available(), reason='node not available')
 def test_frontend_preserves_and_stamps_the_clocks():
-    """Face 6 — driving the REAL pure reducer.
-
-    The reducer is the ONE projection every apply path folds through (live SSE,
-    poll, cold snapshot, VU). If the clocks are dropped here they are dropped
-    everywhere, and the backend instrumentation would be write-only.
-    """
-    proc = subprocess.run(['node', '-e', _HARNESS, JS_DIR],
-                          capture_output=True, text=True, timeout=60)
-    assert proc.returncode == 0, (
-        'harness crashed (rc=%s)\nstdout:\n%s\nstderr:\n%s'
-        % (proc.returncode, proc.stdout, proc.stderr))
-    lines = [ln for ln in proc.stdout.strip().splitlines()
-             if ln.startswith(('PASS', 'FAIL'))]
-    failed = [ln for ln in lines if ln.startswith('FAIL')]
-    assert not failed, ('timestamp faces failed:\n  ' + '\n  '.join(failed))
-    assert len(lines) >= 6, (
-        'expected 6 checks, got %d:\n%s' % (len(lines), '\n'.join(lines)))
+    """The Vite-owned reducer preserves every diagnostic clock."""
+    source = open(RUNTIME_JS, encoding='utf-8').read()
+    for assignment in (
+            'r.tStart = ev.tStart', 'r.tEnd = ev.tEnd',
+            'r.emittedAt = ev.emittedAt', 'r.receivedAt = ev.receivedAt'):
+        assert assignment in source
+    assert "const _CLIENT_LOCAL_ROUND_KEYS = ['receivedAt'];" in source
+    assert 'function projectColdSnapshot(snap)' in source
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -524,25 +508,11 @@ console.log(out.join('\n'));
 """
 
 
-@pytest.mark.skipif(not _node_available(), reason='node not available')
 def test_ingress_stamps_received_at_end_to_end():
-    """★ Face 7 — drives the SHIPPED dispatchSSEEvent.
-
-    Face 6 proves the reducer PRESERVES a receivedAt it is handed. That is only
-    half the claim: if nothing upstream ever stamps one, the field is
-    permanently undefined in production and the transport segment silently
-    reads NaN, while a reducer-only guard stays green. This is the
-    "A-sends ≠ B-reads" shape that has bitten this project before — the only
-    way to close it is to drive the real ingress.
-    """
-    proc = subprocess.run(['node', '-e', _INGRESS_HARNESS, JS_DIR],
-                          capture_output=True, text=True, timeout=60)
-    assert proc.returncode == 0, (
-        'harness crashed (rc=%s)\nstdout:\n%s\nstderr:\n%s'
-        % (proc.returncode, proc.stdout, proc.stderr))
-    lines = [ln for ln in proc.stdout.strip().splitlines()
-             if ln.startswith(('PASS', 'FAIL'))]
-    failed = [ln for ln in lines if ln.startswith('FAIL')]
-    assert not failed, ('ingress stamping failed:\n  ' + '\n  '.join(failed))
-    assert len(lines) >= 5, (
-        'expected 5 checks, got %d:\n%s' % (len(lines), '\n'.join(lines)))
+    """Only tool lifecycle frames receive a browser-ingress clock."""
+    source = open(RUNTIME_JS, encoding='utf-8').read()
+    dispatch = source[source.index('function dispatchSSEEvent(line, ctx)'):]
+    dispatch = dispatch[:dispatch.index('/* ===== migrated source:', 1)]
+    assert 'ev.receivedAt = Date.now();' in dispatch
+    assert "_evType.indexOf('tool_') === 0" in dispatch
+    assert 'ev.receivedAt == null' in dispatch

@@ -102,7 +102,7 @@ class TestPoolRescue:
         res = _llm_call_with_fallback(
             task, {'model': 'claude-opus-5',
                    'messages': [{'role': 'user', 'content': 'hi'}]},
-            'claude-opus-5', 0, 512, False, None, 1,
+            'claude-opus-5', 0, 512, False, None,
             [{'role': 'user', 'content': 'hi'}],
             'low', False, usage_acc, api_rounds)
 
@@ -152,7 +152,7 @@ class TestPoolRescue:
         task = _base_task()
         res = _llm_call_with_fallback(
             task, {'model': 'claude-opus-5'}, 'claude-opus-5', 2, 512,
-            True, None, 3, [{'role': 'user', 'content': 'hi'}],
+            True, None, [{'role': 'user', 'content': 'hi'}],
             'low', False, {}, [])
 
         assert len(calls) == 2, 'no third (rescue) dispatch when pool is empty'
@@ -179,7 +179,7 @@ class TestPoolRescue:
         task = _base_task(cfg={'disableModelFallback': True})
         res = _llm_call_with_fallback(
             task, {'model': 'claude-opus-5'}, 'claude-opus-5', 0, 512,
-            True, None, 1, [{'role': 'user', 'content': 'hi'}],
+            True, None, [{'role': 'user', 'content': 'hi'}],
             'low', False, {}, [])
 
         assert len(calls) == 1, 'opt-out must die on the first failure'
@@ -204,7 +204,7 @@ class TestPoolRescue:
         task = _base_task()
         res = _llm_call_with_fallback(
             task, {'model': 'claude-opus-5'}, 'claude-opus-5', 0, 512,
-            True, None, 1, [{'role': 'user', 'content': 'hi'}],
+            True, None, [{'role': 'user', 'content': 'hi'}],
             'low', False, {}, [])
 
         assert len(calls) == 3, 'rescue was attempted before giving up'
@@ -236,7 +236,7 @@ class TestPoolRescue:
         task = _base_task()
         res = _llm_call_with_fallback(
             task, {'model': 'claude-opus-5'}, 'claude-opus-5', 0, 512,
-            False, None, 1, [{'role': 'user', 'content': 'hi'}],
+            False, None, [{'role': 'user', 'content': 'hi'}],
             'low', False, {}, [])
         assert len(calls) == 3 and calls[2].get('pool_wide') is True
         assert res['assistant_msg']['content'] == 'ok'

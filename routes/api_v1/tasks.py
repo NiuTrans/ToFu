@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import time
 
-from flask import Blueprint, request
+from quart import Blueprint, request
 
 from lib.api_response import (
     api_bad_request, api_internal_error, api_not_found, api_ok, sse_response,
@@ -30,12 +30,14 @@ from lib.api_response import (
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.request_parser import optional_bool, parse_body, require_str
+from routes.task_http import task_replay_cursor, task_replay_parameters
 
 from .auth import current_auth, require_scope
 
 logger = get_logger(__name__)
 
 api_v1_tasks_bp = Blueprint('api_v1_tasks', __name__)
+_TASK_REPLAY_PARAMETERS = task_replay_parameters()
 
 
 def _registries() -> dict:
@@ -58,8 +60,12 @@ def _registries() -> dict:
     for mod_path, attr in (
         ('routes.paper', '_report_runtime'),
         ('routes.paper', '_translate_runtime'),
+        ('routes.paper', '_qa_runtime'),
+        ('routes.paper', '_recommend_runtime'),
+        ('routes.paper', '_deepen_runtime'),
         ('routes.translate', '_translate_runtime'),
         ('routes.api_v1.agents', '_search_runtime'),
+        ('routes.api_v1.orchestrations', 'orchestration_run_runtime'),
         # Production-substrate capabilities. Both are ordinary TaskRuntime
         # instances with the standard task shape, but were absent from this
         # list — so /api/v1/tasks could not see a motion job at all, and
@@ -132,7 +138,7 @@ def _starters() -> dict:
         ('lib.longform.engine', 'start_report_job', 'longform-report', 'topic',
          ('lang', 'depth')),
         ('lib.slides.engine', 'start_slides_job', 'slides-deck', 'topic',
-         ('lang', 'style', 'max_pages', 'size')),
+         ('lang', 'style', 'max_pages', 'size', 'model')),
     ):
         try:
             mod = __import__(mod_path, fromlist=[attr])
@@ -319,14 +325,9 @@ def get_task(task_id):
 @require_scope('tasks')
 @api_meta(summary='Cursor-based event replay (long-poll)',
           tags=['tasks'], scope='tasks',
-          parameters=[{'name': 'cursor', 'in': 'query',
-                        'schema': {'type': 'integer', 'default': 0}}])
+          parameters=_TASK_REPLAY_PARAMETERS)
 def task_events(task_id):
-    try:
-        cursor = max(0, int(request.args.get('cursor') or 0))
-    except (ValueError, TypeError) as _e_audit:
-        logger.debug('[tasks] task_events caught %s: %s', type(_e_audit).__name__, _e_audit)
-        cursor = 0
+    cursor = task_replay_cursor(request.args)
     rt, task = _find_task(task_id)
     if task is None:
         return api_not_found('Task not found')
@@ -398,8 +399,7 @@ def task_request_payload(task_id, round_num):
 @require_scope('tasks')
 @api_meta(summary='Server-Sent Events stream of task events',
           tags=['tasks'], scope='tasks',
-          parameters=[{'name': 'cursor', 'in': 'query',
-                        'schema': {'type': 'integer', 'default': 0}}],
+          parameters=_TASK_REPLAY_PARAMETERS,
           responses={
               '200': {'description': 'SSE',
                       'content': {'text/event-stream': {
@@ -407,24 +407,21 @@ def task_request_payload(task_id, round_num):
               '404': {'description': 'Not Found'},
           })
 def task_stream(task_id):
-    try:
-        cursor = max(0, int(request.args.get('cursor') or 0))
-    except (ValueError, TypeError) as _e_audit:
-        logger.debug('[tasks] task_stream caught %s: %s', type(_e_audit).__name__, _e_audit)
-        cursor = 0
+    cursor = task_replay_cursor(request.args)
     rt, task = _find_task(task_id)
     if task is None:
         return api_not_found('Task not found')
 
     def gen():
         nonlocal cursor
+        from lib.task_replay import task_memory_replay_page
         last_heartbeat = time.time()
         while True:
-            with task['events_lock']:
-                new_events = list(task['events'][cursor:])
-                cursor = len(task['events'])
-            for ev in new_events:
-                yield f'id: {ev.get("seq", "")}\n'
+            page = task_memory_replay_page(task, cursor)
+            new_events = page.events
+            cursor = page.next_cursor
+            for event_id, ev in page.frames:
+                yield f'id: {event_id}\n'
                 yield f'data: {json.dumps(ev, ensure_ascii=False)}\n\n'
                 if ev.get('type') in ('done', 'error', 'aborted'):
                     return

@@ -139,18 +139,14 @@ def test_a_real_tool_round_is_not_wire_excluded():
 
 def _i18n_has_key(key: str) -> dict | None:
     """Return the {zh, en} pair for *key* from the shipped dictionary."""
-    src = (_ROOT / 'static/js/i18n.js').read_text(encoding='utf-8')
-    m = re.search(
-        r"'" + re.escape(key) + r"':\s*\{(.*?)\}", src, re.DOTALL)
-    if not m:
-        return None
-    block = m.group(1)
     out = {}
     for lang in ('zh', 'en'):
-        lm = re.search(lang + r":\s*'((?:[^'\\]|\\.)*)'", block)
-        if lm:
-            out[lang] = lm.group(1)
-    return out
+        catalog = json.loads(
+            (_ROOT / f'frontend/src/i18n/locales/{lang}.json').read_text(
+                encoding='utf-8'))
+        if key in catalog:
+            out[lang] = catalog[key]
+    return out or None
 
 
 def test_the_nudge_phase_label_is_translatable():
@@ -169,7 +165,7 @@ def test_the_nudge_phase_label_is_translatable():
     )
 
     pair = _i18n_has_key(key)
-    assert pair is not None, f'{key} is emitted but missing from i18n.js'
+    assert pair is not None, f'{key} is emitted but missing from locale chunks'
     assert pair.get('zh'), f'{key} has no zh translation'
     assert pair.get('en'), f'{key} has no en translation'
 
@@ -189,7 +185,7 @@ def test_the_nudge_phase_detail_fallback_is_not_chinese_only():
     assert detail, 'the nudge phase event must carry a `detail` fallback'
     assert not re.search(r'[\u4e00-\u9fff]', detail.group(1)), (
         'the `detail` fallback is rendered verbatim by non-i18n clients, so it '
-        'must not be Chinese-only; put the localized copy in i18n.js instead'
+        'must not be Chinese-only; put the localized copy in locale chunks instead'
     )
 
 

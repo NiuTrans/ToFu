@@ -16,6 +16,8 @@ The fix coerces a string-typed list arg via ``json.loads`` (skipping it when it
 does not decode to a list) and drops the char-accepting ``str`` spec branch.
 """
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {'scripts/bar.py'}
+
 import json
 
 from lib.tasks_pkg.compaction._layer2 import _extract_recently_accessed_files

@@ -13,9 +13,13 @@ Covers:
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import tempfile
 import time
 import unittest
 from unittest.mock import patch
+
+import pytest
 
 from lib import agent_inbox
 from lib.swarm.integration import (
@@ -29,6 +33,9 @@ from lib.swarm.protocol import (
     SubAgentStatus,
     SubTaskSpec,
 )
+
+
+pytestmark = pytest.mark.unit
 
 
 # ─────────────────────────────────────────────────────────
@@ -52,8 +59,6 @@ class _FakeAgent:
             total_tokens=tokens,
             rounds_used=1,
         )
-        self.max_rounds = spec.max_rounds
-
     def run(self) -> SubAgentResult:
         # Simulate a tiny bit of work so the scheduler thread can yield.
         time.sleep(0.01)
@@ -347,6 +352,63 @@ class TestAwaitAgents(unittest.TestCase):
         ids_seen = {p['agent_id'] for p in result['completed']}
         self.assertEqual(ids_seen, {'fast', 'slow'},
                          'no-ids await must include the early finisher')
+
+    def test_scheduler_cannot_terminate_before_master_publishes_result(self):
+        """Pin the scheduler->master completion handoff order.
+
+        Historically the scheduler popped ``_running`` and queued the result
+        before invoking the master callback. Its driver could therefore reach
+        idle/terminated while master still had no result for that known spec.
+        A blocked callback makes that normally tiny production race fully
+        deterministic.
+        """
+        import threading
+
+        spec = SubTaskSpec(id='handoff', role='general', objective='H')
+        master = MasterOrchestrator(
+            task_id=self.task_id, conv_id='', specs=[spec],
+            output_dir='',
+        )
+        callback_entered = threading.Event()
+        release_callback = threading.Event()
+        original_callback = master._on_agent_complete_callback
+
+        def _blocked_callback(done_spec, result):
+            callback_entered.set()
+            release_callback.wait(timeout=5)
+            original_callback(done_spec, result)
+
+        master._on_agent_complete_callback = _blocked_callback
+        holder = {}
+        try:
+            with _patch_factory():
+                master.run_in_background()
+                self.assertTrue(callback_entered.wait(timeout=2))
+                with master._scheduler._lock:
+                    self.assertIn('handoff', master._scheduler._running,
+                                  'scheduler exposed idle before master callback')
+                    self.assertNotIn('handoff', master._scheduler._completed)
+
+                waiter = threading.Thread(
+                    target=lambda: holder.setdefault(
+                        'result', master.await_agents(
+                            mode='all', timeout_seconds=5)),
+                    daemon=True,
+                )
+                waiter.start()
+                time.sleep(0.05)
+                self.assertTrue(waiter.is_alive(),
+                                'await returned through the handoff gap')
+                release_callback.set()
+                waiter.join(timeout=3)
+                self.assertFalse(waiter.is_alive())
+        finally:
+            release_callback.set()
+
+        result = holder['result']
+        self.assertFalse(result['timed_out'])
+        self.assertEqual(
+            {row['agent_id'] for row in result['completed']}, {'handoff'})
 
     def test_await_no_ids_when_all_already_done(self):
         """Regression: await_agents() with no ids, called after ALL agents
@@ -981,7 +1043,7 @@ class TestSwarmDecoupledFromProject(unittest.TestCase):
 
     def test_bare_conversation_swarm_has_all_three_tools(self):
         from lib.tasks_pkg.model_config import _assemble_tool_list
-        tool_list, has_real, _ = _assemble_tool_list(
+        tool_list, has_real = _assemble_tool_list(
             cfg={}, project_path='', project_enabled=False,
             task_id='t-bare', search_mode='off', search_enabled=False,
             fetch_enabled=True, code_exec_enabled=False,
@@ -999,7 +1061,7 @@ class TestSwarmDecoupledFromProject(unittest.TestCase):
     def test_swarm_off_does_not_inject_tools(self):
         """Negative: swarm tools only show when swarm_enabled is true."""
         from lib.tasks_pkg.model_config import _assemble_tool_list
-        tool_list, _, _ = _assemble_tool_list(
+        tool_list, _ = _assemble_tool_list(
             cfg={}, project_path='', project_enabled=True,
             task_id='t-noswarm', search_mode='off', search_enabled=False,
             fetch_enabled=True, code_exec_enabled=False,
@@ -1374,11 +1436,25 @@ class TestRehydration(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        import os
-        os.environ['TOFU_DB_BACKEND'] = 'sqlite'
-        os.environ.setdefault('TOFU_DB_PATH', '/tmp/swarm_rehydrate_unittest.db')
-        from lib.database import init_db
-        init_db()
+        from lib.storage import StorageSupervisor
+        from lib.swarm import persistence as persistence
+
+        cls._storage_root = tempfile.TemporaryDirectory(
+            prefix='tofu-swarm-sidecar-')
+        cls._storage_supervisor = StorageSupervisor(
+            project_root=Path(cls._storage_root.name), backend='sqlite',
+            startup_timeout=20)
+        cls._storage_supervisor.start()
+        cls._storage_patch = patch.object(
+            persistence, '_storage',
+            side_effect=lambda **_kwargs: cls._storage_supervisor.client)
+        cls._storage_patch.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._storage_patch.stop()
+        cls._storage_supervisor.stop()
+        cls._storage_root.cleanup()
 
     def setUp(self):
         from lib.swarm import persistence as p
@@ -1410,6 +1486,63 @@ class TestRehydration(unittest.TestCase):
                           rounds_used=1, delivered=False)
         keys = [s['swarm_key'] for s in self.p.load_resumable_sessions()]
         self.assertIn(self.key, keys)
+
+    def test_native_upserts_preserve_creation_and_delivery_state(self):
+        with patch.object(self.p, '_now_ms', side_effect=[100, 200, 300, 400]):
+            self.p.save_session(
+                self.key, conv_id='first', task_id='t1', specs=[{'id': 'a1'}],
+                config={'generation': 1})
+            self.p.save_session(
+                self.key, conv_id='second', task_id='t2', specs=[{'id': 'a1'}],
+                config={'generation': 2})
+            self.p.save_agent(
+                self.key, 'a1', role='coder', objective='work',
+                status='completed', messages=[{'role': 'assistant',
+                                               'content': 'first'}],
+                result={'final_answer': 'first'}, rounds_used=1,
+                delivered=True)
+            self.p.save_agent(
+                self.key, 'a1', role='coder', objective='work',
+                status='completed', messages=[{'role': 'assistant',
+                                               'content': 'second'}],
+                result={'final_answer': 'second'}, rounds_used=2,
+                delivered=None)
+
+        session = self.p._storage().query(
+            'swarm.session.get', {'swarm_key': self.key})
+        self.assertEqual(session['conv_id'], 'second')
+        self.assertEqual(session['task_id'], 't2')
+        self.assertEqual(session['config']['generation'], 2)
+        self.assertEqual(session['created_at'], 100)
+        self.assertEqual(session['updated_at'], 200)
+
+        agent = session['agents'][0]
+        self.assertEqual(agent['messages'][0]['content'], 'second')
+        self.assertEqual(agent['result']['final_answer'], 'second')
+        self.assertEqual(agent['rounds_used'], 2)
+        self.assertEqual(agent['delivered'], 1)
+        self.assertEqual(agent['updated_at'], 400)
+
+    def test_unserializable_checkpoint_does_not_erase_last_good_state(self):
+        self.p.save_session(
+            self.key, conv_id=self.key, task_id='good', specs=[{'id': 'a1'}],
+            config={'serializable': True})
+        self.p.save_agent(
+            self.key, 'a1', role='coder', objective='work', status='running',
+            messages=[{'role': 'user', 'content': 'good'}], rounds_used=1)
+        before = self.p._storage().query(
+            'swarm.session.get', {'swarm_key': self.key})
+
+        self.p.save_session(
+            self.key, conv_id=self.key, task_id='bad', specs=[object()],
+            config={'serializable': False})
+        self.p.save_agent(
+            self.key, 'a1', role='coder', objective='work', status='running',
+            messages=[object()], rounds_used=99)
+
+        after = self.p._storage().query(
+            'swarm.session.get', {'swarm_key': self.key})
+        self.assertEqual(after, before)
 
     def test_rehydrate_preloads_completed_and_respawns_running(self):
         # Persist a session: a1 completed (delivered), a2 running mid-flight.
@@ -1457,6 +1590,7 @@ class TestRehydration(unittest.TestCase):
         # a2 was re-spawned: its resume messages were seeded into the map
         self.assertIn('a2', master._resume_messages)
         self.assertEqual(len(master._resume_messages['a2']), 2)
+        self.assertEqual(master._resume_rounds['a2'], 1)
 
     def test_rehydrate_reenqueues_undelivered_completed(self):
         self.p.save_session(self.key, conv_id=self.key, task_id='t3',

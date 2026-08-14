@@ -52,11 +52,22 @@ import re
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path, runtime_section_names
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-API_JS = os.path.join(ROOT, 'static', 'js', 'api.js')
+API_JS = runtime_section_path('api.js')
+ORCHESTRATION_API_JS = runtime_section_path('api/orchestrations.js')
+API_SURFACE_FILES = (API_JS, ORCHESTRATION_API_JS)
+
+
+def _api_surface_source() -> str:
+    return '\n'.join(
+        open(path, encoding='utf-8').read()  # noqa: SIM115
+        for path in API_SURFACE_FILES
+    )
 
 # Install Flask→Quart shim before importing routes (mirrors the pattern used by
 # tests/test_task_supersede_and_stuck.py).
@@ -231,7 +242,9 @@ def _registered_templates(app) -> set[str]:
 
 # ── Tests ─────────────────────────────────────────────────────────────
 def test_api_js_exists():
-    assert os.path.isfile(API_JS), 'static/js/api.js is missing'
+    assert 'api.js' in runtime_section_names(), 'migrated api.js owner is missing'
+    assert os.path.isfile(ORCHESTRATION_API_JS), (
+        'focused orchestration API transport is missing')
 
 
 def test_normalise_truncates_dangling_query_interpolation():
@@ -259,8 +272,7 @@ def test_every_api_js_path_resolves_to_a_live_route():
     — it sees factory-registered routes (register_task_routes) that a decorator
     grep misses, and it covers the WHOLE client, not just /api/v1/*.
     """
-    with open(API_JS, encoding='utf-8') as f:
-        js = f.read()
+    js = _api_surface_source()
 
     client_paths = _extract_client_paths(js)
     # Drop external-plugin carve-outs (raw-prefix match, pre-normalisation).
@@ -321,8 +333,7 @@ def test_extractor_sees_every_api_call_site():
     domain uses it. If a future domain does, it needs its own contract coverage
     (e.g. enumerate the suffixes), which this test can't infer statically.
     """
-    with open(API_JS, encoding='utf-8') as f:
-        js = f.read()
+    js = _api_surface_source()
 
     refs, inline = _scan_call_site_coverage(js)
 
@@ -343,8 +354,7 @@ def test_extractor_sees_every_api_call_site():
 
 
 if __name__ == '__main__':
-    with open(API_JS, encoding='utf-8') as f:
-        _js = f.read()
+    _js = _api_surface_source()
     _paths = sorted(_extract_client_paths(_js))
     print(f'Extracted {len(_paths)} /api paths from api.js:')
     for _p in _paths:

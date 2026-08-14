@@ -1,6 +1,5 @@
-"""tests/test_frontend_trimmed_tool_activity_affordance.py — the windowed-open
-"Load tool activity (N)" affordance must survive a turn that ALSO received
-async-swarm / peer / user-steer inbox injects.
+"""The windowed-open "Load execution process (N)" button must survive a
+turn that also received async-swarm / peer / user-steer inbox injects.
 
 Real-world defect (conv ms34q20atwnf35, 2026-07-27): the first assistant turn
 holds 73 real tool rounds in the DB, but on reopen the bubble showed only three
@@ -45,6 +44,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 CORE_JS = os.path.join(ROOT, 'static', 'js', 'core.js')
 RENDER_JS = os.path.join(ROOT, 'static', 'js', 'ui', 'chat_render.js')
+STYLES = os.path.join(ROOT, 'static', 'styles.css')
 
 
 def _node():
@@ -95,9 +95,9 @@ def _affordance_predicate(render_src):
         render_src, re.S)
     if not m:
         raise AssertionError(
-            'the trimmed-tool-activity affordance guard is gone from '
-            'chat_render.js — either the affordance was removed (a real '
-            'regression) or this guard needs re-pointing')
+            'the message-activity-loader guard is gone from chat_render.js — '
+            'either the affordance was removed (a real regression) or this '
+            'guard needs re-pointing')
     return (m.group('deriv') or ''), ' '.join(m.group('cond').split())
 
 
@@ -171,7 +171,7 @@ function run() {
   check('trimmed+injects: zero REAL tool rounds present',
         r1.filter(r => !r._inboxInject && !r._peerInject && !r._userSteerInject).length === 0);
   // The user must still be offered a way back to the 73 trimmed rounds.
-  check('trimmed+injects: "Load tool activity" affordance IS offered',
+  check('trimmed+injects: "Load execution process" affordance IS offered',
         affordanceShown(m1, r1, false) === true);
 
   // ── 2. Control: the no-inject shape must keep working ──────────────────
@@ -191,7 +191,7 @@ function run() {
   check('trimmed+stall: zero REAL tool rounds present',
         r5.filter(r => !r._inboxInject && !r._peerInject && !r._userSteerInject
             && !r._stallNudge).length === 0);
-  check('trimmed+stall: "Load tool activity" affordance IS offered',
+  check('trimmed+stall: "Load execution process" affordance IS offered',
         affordanceShown(m5, r5, false) === true);
 
   // ── 3. COMPLEMENT (charter: a ban without a complement degrades into
@@ -257,6 +257,29 @@ def test_scan_surface_report():
     print(f'affordance derivation: {" ".join(deriv.split()) or "(none)"}')
     print(f'affordance predicate: {pred}')
     assert '_trimmedToolRoundCount' in pred
+
+
+def test_message_activity_loader_is_quiet_inline_metadata():
+    css = open(STYLES, encoding='utf-8').read()
+    match = re.search(
+        r'\.message-activity-loader\{(?P<base>[^}]*)\}', css)
+    assert match, 'message activity loader CSS missing'
+    base = match.group('base').replace(' ', '').replace('\n', '')
+    assert 'width:fit-content' in base
+    assert 'max-width:100%' in base
+    assert 'display:inline-flex' in base
+    assert 'background:transparent' in base
+    assert 'border:0' in base
+    declarations = set(filter(None, base.split(';')))
+    assert 'width:100%' not in declarations
+    assert 'min-height:36px' not in declarations
+
+    error = re.search(
+        r'\.message-activity-loader\.is-error\{(?P<state>[^}]*)\}', css)
+    assert error, 'error state CSS missing'
+    error_state = error.group('state').replace(' ', '').replace('\n', '')
+    assert 'background:transparent' in error_state
+    assert 'border' not in error_state
 
 
 @pytest.mark.skipif(not _node(), reason='node not available')

@@ -124,6 +124,10 @@ class Slot:
                                     # '' / 'openai' = OpenAI Chat Completions (default)
                                     # 'anthropic' = Anthropic Messages API (POST /v1/messages)
                                     # 'responses' = OpenAI Responses API (POST …/responses)
+    responses_profile: str = ''     # Responses feature profile:
+                                    # compatible / openai / codex. Core
+                                    # protocol support never implies public
+                                    # OpenAI-only request fields.
     oauth: str = ''                 # subscription-OAuth provider for this slot:
                                     # '' = normal api_key auth (default)
                                     # 'claude' / 'codex' = resolve a live token +

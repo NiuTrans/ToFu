@@ -223,6 +223,11 @@ chatInner writers and closed the "ratchet is blind on the hottest file" hole.
 | ~740–900 | tool panel / group / slot `appendChild` + `innerHTML` | CONTENT-DERIVED (live) | same |
 | various | sentinel / evict `remove()` | STRUCT-ONLY | keep |
 
+The 2026-08-14 program-call projection kept this file at its existing ratchet
+floor: the `execute_tools` gateway reuses the superseded-round prune owner,
+and two duplicate streaming-tail assignment sites were consolidated to offset
+the settled-thinking Markdown paints. No additional raw writer was admitted.
+
 **Classification verdict: CONTENT-DERIVED (live-projection engine).** Its zones project the
 SAME `assistantMsg` the reducer mutates — the divergence risk is not *what* it reads but
 *where the write comes from* on non-SSE triggers (`health_stream_timer._streamFrameArg`,

@@ -168,15 +168,16 @@ async def stream_anthropic_chunks(task, model: str
     thinking_block_open = False
     block_index = 0
     task_id = task.get('id') or ''
+    from lib.task_replay import task_memory_replay_page
 
     def _evt(name: str, data: dict) -> str:
         return f'event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n'
 
     try:
       while True:
-        with task['events_lock']:
-            new_events = list(task['events'][cursor:])
-            cursor = len(task['events'])
+        page = task_memory_replay_page(task, cursor)
+        new_events = page.events
+        cursor = page.next_cursor
 
         for ev in new_events:
             etype = ev.get('type', '')

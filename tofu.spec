@@ -39,6 +39,12 @@ _UPX_EXCLUDE = [
 # (e.g. desktop/launcher.py) during CI builds.
 ROOT = os.path.abspath(SPECPATH)
 
+# Frozen packages must never ship a partial or source-only frontend. This runs
+# before Analysis/PyInstaller starts and requires no Node installation.
+sys.path.insert(0, ROOT)
+from lib.vite_assets import validate_vite_artifact
+validate_vite_artifact()
+
 # ── Hidden imports: dynamically-imported modules that PyInstaller misses ──
 hidden_imports = []
 
@@ -47,7 +53,7 @@ hidden_imports = []
 # misses it. Must be listed explicitly or the frozen build can't start.
 hidden_imports += ['server']
 
-# All lib subpackages (Flask blueprints, LLM dispatch, tools, etc.)
+# All lib subpackages (Quart blueprints, LLM dispatch, tools, etc.)
 hidden_imports += collect_submodules('lib')
 hidden_imports += collect_submodules('routes')
 
@@ -55,8 +61,9 @@ hidden_imports += collect_submodules('routes')
 hidden_imports += ['hypercorn', 'hypercorn.asyncio', 'hypercorn.config',
                    'hypercorn.protocol', 'cryptography']
 
-# Flask internals
-hidden_imports += ['flask.json', 'flask.templating', 'jinja2.ext']
+# Quart/Jinja internals loaded dynamically by the ASGI application.
+hidden_imports += collect_submodules('quart')
+hidden_imports += ['jinja2.ext']
 
 # Database backends (PG primary, SQLite fallback)
 hidden_imports += ['sqlite3', 'json', 'psycopg2', 'psycopg2.extensions',
@@ -73,7 +80,6 @@ hidden_imports += [
     'fitz', 'pymupdf',
     'markdown',
     'psutil',
-    'flask_compress',
     'mcp',
     'playwright', 'playwright.sync_api', 'playwright.async_api',
     'tkinter', 'tkinter.ttk',
@@ -132,8 +138,7 @@ for _src, _dst in _candidate_datas:
 
 # Collect data files from packages that ship non-Python assets
 datas += collect_data_files('trafilatura', include_py_files=False)
-datas += collect_data_files('flask', include_py_files=False)
-datas += collect_data_files('flask_compress', include_py_files=False)
+datas += collect_data_files('quart', include_py_files=False)
 datas += collect_data_files('jinja2', include_py_files=False)
 datas += collect_data_files('certifi', include_py_files=False)
 

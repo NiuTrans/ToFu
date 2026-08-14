@@ -14,6 +14,8 @@ Public surface
 - :func:`_sanitize_gateway_content` — single-string keyword replacement
 - :func:`_fix_orphaned_tool_calls` — defensive Anthropic tool_use/tool_result fixer
 - :func:`_fix_tool_call_adjacency` — Anthropic adjacency requirement enforcer
+- :func:`_fix_tool_call_wire_shape` — any-model tool_call protocol healer
+  (empty name/type/id, non-string arguments, unpairable tool_call_id)
 - :func:`_fix_empty_user_messages` — replace empty user content with placeholder
 - :func:`_drop_empty_assistant_messages` — drop pure-ghost assistant messages
 - :func:`_merge_consecutive_same_role` — merge consecutive user/assistant pairs
@@ -55,8 +57,10 @@ from lib.llm_sanitize._fields import (  # noqa: E402,F401
 # ══════════════════════════════════════════════════════════
 
 from lib.llm_sanitize._toolcalls import (  # noqa: E402,F401
+    _UNNAMED_TOOL_NAME,
     _fix_orphaned_tool_calls,
     _fix_tool_call_adjacency,
+    _fix_tool_call_wire_shape,
 )
 
 
@@ -81,6 +85,8 @@ __all__ = [
     '_strip_tool_calls',
     '_fix_orphaned_tool_calls',
     '_fix_tool_call_adjacency',
+    '_fix_tool_call_wire_shape',
+    '_UNNAMED_TOOL_NAME',
     '_fix_empty_user_messages',
     '_drop_empty_assistant_messages',
     '_merge_consecutive_same_role',

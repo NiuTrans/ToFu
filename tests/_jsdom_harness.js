@@ -93,6 +93,18 @@ function setup(opts) {
   global.window = win;
   global.document = win.document;
   global.console = console;
+  // DOM listeners require a signal from the same realm.  Node's global
+  // AbortController produces an incompatible AbortSignal in jsdom, which
+  // made native lifecycle-backed feature modules fail before their first
+  // assertion even though the browser path is valid.
+  global.AbortController = win.AbortController;
+  global.AbortSignal = win.AbortSignal;
+  for (const name of [
+    'Element', 'HTMLElement', 'HTMLButtonElement', 'HTMLInputElement',
+    'HTMLTextAreaElement', 'Event', 'EventTarget', 'CustomEvent',
+  ]) {
+    global[name] = win[name];
+  }
 
   // Neuter tickers + frame callbacks so self-installing timers in the source
   // (swarm panel tickers, deferred finishStream calls, etc.) don't hang node.

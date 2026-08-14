@@ -165,8 +165,16 @@ class TestPartialSyncCarriesTerminalMeta:
         class _DB:
             def execute(self, sql, params=()):
                 s = ' '.join(sql.split())
-                if s.startswith('SELECT messages, updated_at'):
-                    return _FetchRow([state['messages'], state['updated_at'], state['rev']])
+                if s.startswith('SELECT messages,'):
+                    # conversation_repository's archive-compatible projection
+                    # (messages first, then requested metadata).
+                    return _FetchRow({
+                        'messages': state['messages'],
+                        'id': 'c1', 'user_id': 1,
+                        'updated_at': state['updated_at'],
+                        'rev': state['rev'],
+                        'msg_count': len(messages),
+                    })
                 if s.startswith('UPDATE conversations SET messages'):
                     captured['messages'] = params[0]
                     return _Cur(1)
@@ -183,6 +191,28 @@ class TestPartialSyncCarriesTerminalMeta:
                 return self._v
 
         return _DB(), captured
+
+    @staticmethod
+    def _patch_repository(monkeypatch, messages, captured):
+        """Adapt the checkpoint test to the centralized repository seam."""
+        import lib.database.conversation_repository as repo
+
+        def _load(_db, conv_id, **_kwargs):
+            return repo.ConversationSnapshot(
+                metadata={
+                    'id': conv_id, 'user_id': 1, 'rev': 7,
+                    'msg_count': len(messages), 'messages_rows_rev': None,
+                },
+                messages=json.loads(json.dumps(messages)),
+                source='legacy_blob',
+            )
+
+        def _replace(_db, _conv_id, updated, **_kwargs):
+            captured['messages'] = json.dumps(updated)
+            return repo.ConversationWriteResult(True, 8)
+
+        monkeypatch.setattr(repo, 'load_conversation', _load)
+        monkeypatch.setattr(repo, 'replace_messages', _replace)
 
     def test_partial_sync_writes_finish_metadata(self, monkeypatch):
         """★ FIXTURE CORRECTED 2026-07-31 (duplicate-bubble root fix).
@@ -212,6 +242,7 @@ class TestPartialSyncCarriesTerminalMeta:
             {'role': 'assistant', 'content': '', 'thinking': '', '_taskId': 'abc1234567-dead-beef-0000-000000000001'},
         ]
         db, captured = self._fake_conv_db(messages)
+        self._patch_repository(monkeypatch, messages, captured)
         monkeypatch.setattr(S, 'get_thread_db', lambda *a, **k: db)
         # Latest-task guard must pass.
         monkeypatch.setattr(S, '_latest_task_for_conv', lambda cid: None, raising=False)
@@ -245,6 +276,7 @@ class TestPartialSyncCarriesTerminalMeta:
             {'role': 'assistant', 'content': '', 'thinking': ''},
         ]
         db, captured = self._fake_conv_db(messages)
+        self._patch_repository(monkeypatch, messages, captured)
         monkeypatch.setattr(S, 'get_thread_db', lambda *a, **k: db)
         monkeypatch.setattr(S, '_latest_task_for_conv', lambda cid: None, raising=False)
 
@@ -269,6 +301,7 @@ class TestPartialSyncCarriesTerminalMeta:
             {'role': 'assistant', 'content': '', 'thinking': ''},
         ]
         db, captured = self._fake_conv_db(messages)
+        self._patch_repository(monkeypatch, messages, captured)
         monkeypatch.setattr(S, 'get_thread_db', lambda *a, **k: db)
         monkeypatch.setattr(S, '_latest_task_for_conv', lambda cid: None, raising=False)
 

@@ -18,6 +18,8 @@ Split out of the flat ``report_engine.py`` while preserving
 (and the ``.report_engine`` relative form) byte-for-byte via the package facade.
 """
 
+import uuid
+
 from lib.log import get_logger
 
 from ..report_runtime import _append_report_event
@@ -61,42 +63,56 @@ def _merge_second_pass(task, phash, name, payload, *, model=None):
                 entry['costUsd'] = cost.get('costUsd')
         except Exception as e:
             logger.warning('[Paper:SecondPass] %s cost computation failed: %s', name, e)
-    passes = meta.setdefault('secondPasses', {})
-    passes[name] = entry
+    def _apply(current):
+        passes = current.setdefault('secondPasses', {})
+        passes[name] = entry
+        # Total = body usage + Σ pass usages (token fields), re-costed once.
+        try:
+            keys = ('prompt_tokens', 'completion_tokens', 'cache_read_tokens',
+                    'cache_write_tokens', 'reasoning_tokens')
+            total = {k: int(current.get(_camel(k), 0) or 0) for k in keys}
+            for pass_meta in passes.values():
+                pass_usage = (pass_meta or {}).get('usage') or {}
+                for k in keys:
+                    total[k] += int(pass_usage.get(k, 0) or 0)
+            from lib.cost import compute_cost
+            total_cost = compute_cost(
+                total, model_id=model or current.get('model') or '',
+                provider_id=current.get('providerId') or None)
+            if total_cost:
+                current['totalCostCny'] = total_cost.get('costCny')
+                current['totalCostUsd'] = total_cost.get('costUsd')
+            current['totalUsage'] = total
+        except Exception as e:
+            logger.warning(
+                '[Paper:SecondPass] total-cost computation failed: %s', e)
+        return current
 
-    # Total = body usage + Σ pass usages (token fields), re-costed once.
+    # Merge against the lock-protected CURRENT database JSON. A deepen request
+    # can start as soon as the done event is visible, while these hooks are
+    # still running; writing the task's older in-memory dict would erase it.
     try:
-        keys = ('prompt_tokens', 'completion_tokens', 'cache_read_tokens',
-                'cache_write_tokens', 'reasoning_tokens')
-        total = {k: int(meta.get(_camel(k), 0) or 0) for k in keys}
-        for p in passes.values():
-            u = (p or {}).get('usage') or {}
-            for k in keys:
-                total[k] += int(u.get(k, 0) or 0)
-        from lib.cost import compute_cost
-        tcost = compute_cost(total, model_id=model or meta.get('model') or '',
-                             provider_id=meta.get('providerId') or None)
-        if tcost:
-            meta['totalCostCny'] = tcost.get('costCny')
-            meta['totalCostUsd'] = tcost.get('costUsd')
-        meta['totalUsage'] = total
-    except Exception as e:
-        logger.warning('[Paper:SecondPass] total-cost computation failed: %s', e)
-
-    # Meta-only re-persist (body untouched). The row was written before the
-    # hooks ran; UPDATE the single column rather than re-upserting the body.
-    try:
-        import json as _json
-        from lib.database import get_thread_db
-        db = get_thread_db()
-        db.execute(
-            "UPDATE paper_reports SET meta = ? WHERE paper_hash = ? AND lang = ?",
-            (_json.dumps(meta, ensure_ascii=False), phash, task.get('lang') or ''))
+        from lib.storage import get_storage_client
+        response = get_storage_client(write=True).command(
+            'paper.report.second_pass.merge', {
+                'paper_hash': phash, 'lang': task.get('lang') or '',
+                'name': name, 'entry': entry,
+            }, f'paper.report.second-pass:{uuid.uuid4().hex}')
+        updated = response.get('meta') if response.get('found') else None
+        if not isinstance(updated, dict):
+            logger.warning('[Paper:SecondPass] report row missing during meta '
+                           'merge — hash=%s pass=%s', phash, name)
+            meta = _apply(meta)
+        else:
+            meta = updated
+        task['report_meta'] = meta
         logger.info('[Paper:SecondPass] meta re-persisted — hash=%s pass=%s',
                     phash, name)
     except Exception as e:
         logger.warning('[Paper:SecondPass] meta re-persist failed hash=%s pass=%s: %s',
                        phash, name, e)
+        meta = _apply(meta)
+        task['report_meta'] = meta
 
     _append_report_event(task, {'type': 'report_meta', 'paperHash': phash,
                                 'meta': meta})

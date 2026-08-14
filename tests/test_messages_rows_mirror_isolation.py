@@ -68,6 +68,12 @@ def test_hook_swallows_a_failing_backfill(monkeypatch):
         def commit(self):
             pass
 
+        def begin(self):
+            pass
+
+        def rollback(self):
+            pass
+
     mr.mirror_write_and_commit(_DB(), 'c1', [], full=True)   # must not raise
 
 
@@ -131,6 +137,8 @@ def test_autopilot_vu_append_survives_a_raising_mirror(monkeypatch):
             # The append now reads (messages, rev) in ONE statement and writes
             # under a rev-CAS, so the fake row must carry the rev column and the
             # UPDATE must report rowcount — that IS the authoritative write.
+            if sql.strip().upper().startswith('SELECT REV'):
+                return _Cur([1])
             if sql.strip().upper().startswith('SELECT'):
                 return _Cur(['[]', 0])
             if 'UPDATE' in sql.upper():
@@ -139,6 +147,12 @@ def test_autopilot_vu_append_survives_a_raising_mirror(monkeypatch):
             return _Cur(None)
 
         def commit(self):
+            pass
+
+        def begin(self):
+            pass
+
+        def rollback(self):
             pass
 
     monkeypatch.setattr('lib.database.get_thread_db', lambda *a, **kw: _DB())
@@ -155,8 +169,8 @@ def test_autopilot_vu_append_survives_a_raising_mirror(monkeypatch):
     assert out['_isVirtualUser'] is True
 
 
-def test_swarm_snapshot_survives_a_raising_mirror(monkeypatch):
-    """A landed snapshot must not be reported as lost because the mirror failed."""
+def test_swarm_snapshot_no_longer_calls_legacy_post_commit_mirror(monkeypatch):
+    """The repository owns both writes; the obsolete hook is unreachable."""
     import lib.database.messages_rows as mr
 
     def _boom(*a, **kw):
@@ -193,6 +207,12 @@ def test_swarm_snapshot_survives_a_raising_mirror(monkeypatch):
         def commit(self):
             pass
 
+        def begin(self):
+            pass
+
+        def rollback(self):
+            pass
+
     monkeypatch.setattr('lib.database.get_thread_db', lambda *a, **kw: _DB())
 
     ok = snap.persist_snapshot_to_conversation(
@@ -201,8 +221,8 @@ def test_swarm_snapshot_survives_a_raising_mirror(monkeypatch):
          'version': 100001},
     )
     assert ok is True, (
-        'the CAS UPDATE committed, so a mirror failure must not make this '
-        'report the snapshot as not persisted'
+        'the strong repository path must not depend on the obsolete '
+        'post-commit mirror hook'
     )
 
 

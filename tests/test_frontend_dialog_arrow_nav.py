@@ -29,10 +29,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
+DIALOG_JS = runtime_section_path('core/dialog.js')
 
 
 def _node_deps_available() -> bool:
@@ -54,8 +57,7 @@ global.document = win.document;
 global.requestAnimationFrame = win.requestAnimationFrame = (fn) => setTimeout(fn, 0);
 global.t = win.t = (k) => k;
 
-let dialogSrc = fs.readFileSync(
-  path.join(ROOT, 'static', 'js', 'core', 'dialog.js'), 'utf8');
+let dialogSrc = fs.readFileSync(process.argv[3], 'utf8');
 
 if (NEUTER) {
   // NEUTER: Enter ignores which button is focused and always confirms OK.
@@ -110,7 +112,7 @@ function key(k) {
 def _run(neuter: bool = False) -> dict:
     arg = 'neuter' if neuter else 'normal'
     proc = subprocess.run(
-        ['node', '-e', _HARNESS, ROOT, arg],
+        ['node', '-e', _HARNESS, ROOT, arg, DIALOG_JS],
         capture_output=True, text=True, timeout=60, cwd=ROOT)
     assert proc.returncode == 0, f'node harness failed: {proc.stderr[:2000]}'
     line = [ln for ln in proc.stdout.strip().splitlines() if ln.startswith('{')][-1]

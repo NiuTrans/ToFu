@@ -11,7 +11,7 @@ paths of the old loop so the migration is provably behavior-preserving:
 
   1. final answer (natural completion)      → COMPLETED + answer
   2. tool round then final answer           → batch hook once, then COMPLETED
-  3. max_rounds exhausted                   → COMPLETED + [Partial …] answer
+  3. many productive tool rounds            → tools stay available, then complete
   4. abort after a tool round               → CANCELLED + partial answer
   5. wall-clock timeout (before_round halt) → COMPLETED + timeout event
   6. LLM error on round 1                   → FAILED + error message
@@ -24,13 +24,8 @@ NEUTER evidence (manual, 2026-07-27):
   * swapping ``execute_tools=`` for the per-tool ``execute_tool=`` path
     turns test 2 red (the batch hook never fires — parallel-pool contract
     broken);
-  * NOTE on ``tools_terminal_round``: flipping it is INVISIBLE at the swarm
-    level, because swarm's dispatch hook deliberately ignores the
-    chassis-offered tools (it builds its body from self.tools). The flip is
-    therefore pinned at the chassis level instead —
-    tests/test_agent_loop.py::test_tools_terminal_round_off_offers_tools_
-    every_round. (First draft of this docstring claimed a swarm-level
-    dispatch-count bite; that claim was measured WRONG and corrected.)
+  * tool availability is pinned both here and at the chassis level; there is
+    no terminal tool-less round or numeric ceiling.
 """
 
 from __future__ import annotations
@@ -50,12 +45,12 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.normpath(os.path.join(_HERE, '..'))
 
 
-def _mk_agent(*, dispatch_fn, max_rounds=0, timeout_seconds=0,
+def _mk_agent(*, dispatch_fn, timeout_seconds=0,
               abort_check=None, events=None):
     from lib.swarm.agent import SubAgent
     from lib.swarm.types import SubTaskSpec
     spec = SubTaskSpec(role='researcher', objective='parity-test objective',
-                       max_rounds=max_rounds, timeout_seconds=timeout_seconds)
+                       timeout_seconds=timeout_seconds)
     agent = SubAgent(
         spec,
         parent_task={},               # no id → request snapshots are no-ops
@@ -81,8 +76,8 @@ def _mk_agent(*, dispatch_fn, max_rounds=0, timeout_seconds=0,
     return agent
 
 
-def _tc(name='web_search', _id='t1'):
-    return {'id': _id, 'function': {'name': name, 'arguments': '{}'}}
+def _tc(name='web_search', _id='t1', arguments='{}'):
+    return {'id': _id, 'function': {'name': name, 'arguments': arguments}}
 
 
 def _final_msg(text):
@@ -115,6 +110,21 @@ class TestSwarmOnChassis(unittest.TestCase):
         self.assertEqual(disp['n'], 1)
         self.assertEqual(agent._tool_batches, [])
 
+    def test_rehydrated_round_number_continues_from_checkpoint(self):
+        events = []
+
+        def dispatch(body, **kw):
+            return _final_msg('resumed agent completed normally')
+
+        agent = _mk_agent(dispatch_fn=dispatch, events=events.append)
+        agent._round_offset = 5
+        agent.result.rounds_used = 5
+        agent._run_loop(time.time())
+
+        self.assertEqual(agent.result.rounds_used, 6)
+        completed = [e for e in events if e.get('phase') == 'done']
+        self.assertEqual(completed[-1]['roundNum'], 6)
+
     def test_tool_round_then_final_uses_batch_hook(self):
         from lib.swarm.types import SubAgentStatus
         seq = [_tool_msg([_tc('web_search', 't1'), _tc('fetch_url', 't2')]),
@@ -140,35 +150,27 @@ class TestSwarmOnChassis(unittest.TestCase):
         roles = [m['role'] for m in agent.messages]
         self.assertEqual(roles.count('tool'), 2)
 
-    def test_max_rounds_exhausted_extracts_partial(self):
+    def test_many_tool_rounds_complete_naturally(self):
         from lib.swarm.types import SubAgentStatus
         disp = {'n': 0}
 
         def dispatch(body, **kw):
             disp['n'] += 1
-            # Round 1 leaves substantive content in history (for the partial
-            # extraction), then keeps demanding tools forever.
-            msg, sr, u = _tool_msg([_tc()])
-            msg['content'] = 'working on it — substantive partial content here'
+            if disp['n'] > 12:
+                return ({'role': 'assistant', 'content': 'finished naturally',
+                         'tool_calls': []}, 'stop', {})
+            n = disp['n']
+            msg, sr, u = _tool_msg([
+                _tc(_id=f't{n}', arguments=f'{{"query":"step-{n}"}}')])
             return msg, sr, u
 
-        agent = _mk_agent(dispatch_fn=dispatch, max_rounds=2)
+        agent = _mk_agent(dispatch_fn=dispatch)
         agent._run_loop(time.time())
         self.assertEqual(agent.result.status, SubAgentStatus.COMPLETED.value)
-        # 2 LOOP rounds + 1 tool-less WRAP-UP turn. The wrap-up is the
-        # deliberate replacement for scraping the last assistant line out of
-        # history: a halted agent now WRITES UP what it established, so the
-        # rounds it already paid for are not discarded. ``rounds_used`` still
-        # counts loop rounds only, so a tools_terminal_round=True regression
-        # (which would add a real 3rd LOOP round) still bites there.
-        self.assertEqual(disp['n'], 3, '2 loop rounds + 1 wrap-up turn')
-        self.assertEqual(agent.result.rounds_used, 2,
-                         'must run EXACTLY max_rounds LOOP rounds — a '
-                         'tools_terminal_round=True regression adds a 3rd')
-        self.assertTrue(agent.result.final_answer.startswith('[Stopped'),
-                        agent.result.final_answer[:80])
-        self.assertIn('max rounds (2) reached', agent.result.final_answer)
-        self.assertEqual(len(agent._tool_batches), 2)
+        self.assertEqual(disp['n'], 13)
+        self.assertEqual(agent.result.rounds_used, 13)
+        self.assertEqual(agent.result.final_answer, 'finished naturally')
+        self.assertEqual(len(agent._tool_batches), 12)
 
     def test_abort_after_tool_round_cancels(self):
         from lib.swarm.types import SubAgentStatus

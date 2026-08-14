@@ -26,7 +26,8 @@ sys.modules.setdefault('flask', _quart)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _TARGET = os.path.join(_ROOT, 'routes', 'api_v1', 'oauth.py')
-_CONSUMER_JS = os.path.join(_ROOT, 'static', 'js', 'settings', 'oauth.js')
+_CONSUMER_JS = os.path.join(
+    _ROOT, 'frontend', 'src', 'runtime', 'app-runtime.js')
 
 pytestmark = pytest.mark.unit
 
@@ -69,7 +70,7 @@ def _sites():
 
 
 def test_envelope_parity():
-    from flask import jsonify
+    from quart import jsonify
     app = _make_app()
 
     async def _t():
@@ -102,7 +103,7 @@ def test_consumer_reads_providers_by_name():
     keys (an 'ok' entry would surface as a fake provider card)."""
     with open(_CONSUMER_JS, encoding='utf-8') as f:
         src = f.read()
-    seg_start = src.find('_loadOAuthStatus')
+    seg_start = src.find('function _loadOAuthStatus')
     assert seg_start > 0, 'consumer function missing'
     seg = src[seg_start:seg_start + 3000]
     assert 'data.claude' in seg and 'data.codex' in seg, (

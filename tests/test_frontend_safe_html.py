@@ -114,13 +114,11 @@ def test_safe_html_in_bundler():
     )
 
 
-def test_safe_html_in_index_html():
+def test_safe_html_is_not_a_raw_index_script():
     with open(os.path.join(ROOT, 'index.html'), encoding='utf-8') as f:
         html = f.read()
-    assert 'static/js/core/safe_html.js' in html, (
-        'safe_html.js dev-mode <script> tag missing from index.html '
-        '(needed for the bundler dev-mode fallback).'
-    )
+    assert 'static/js/core/safe_html.js' not in html
+    assert '<!-- TOFU_APP_ASSETS -->' in html
 
 
 # ── 3. Chat-render lint: no bare template-string HTML sinks ──

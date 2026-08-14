@@ -5,9 +5,9 @@ The thin shell every "one sentence → finished product" recipe is built from
 knows NOTHING about video, audio or LLMs so P6 can MOVE it verbatim into
 ``lib/production/`` — that step must be a relocation, not a rewrite.
 
-A stage is a 5-tuple:
+A stage is a 7-tuple:
 
-    Stage(name, run, gate, retry, resumable)
+    Stage(name, run, gate, retry, resumable, resume_ttl_s, checkpoint_version)
 
   * ``run(ctx) -> artifact``      the work; artifact must be JSON-serializable
                                  (heavy binaries are referenced BY PATH, never
@@ -17,12 +17,17 @@ A stage is a 5-tuple:
   * ``retry``                     extra attempts on gate failure / exception.
   * ``resumable``                 when True a COMPLETED stage recorded in the
                                  state file is skipped on a later run.
+  * ``resume_ttl_s``              optional maximum checkpoint age. Expiring an
+                                 upstream stage invalidates its whole suffix.
+  * ``checkpoint_version``       optional semantic revision. A mismatch also
+                                 invalidates that stage and its whole suffix.
 
 **Crash-resume is a correctness contract, not a cost optimization** (owner
 directive, 2026-07-25): each stage's artifact is committed to the state file
 as soon as its gate passes, so a process killed mid-graph resumes at the
-first unfinished stage and never redoes completed work. The state file is the
-checkpoint; there is no in-memory-only progress.
+first unfinished or contract-invalid stage and never redoes a reusable
+checkpoint. The state file is the checkpoint; there is no in-memory-only
+progress.
 """
 
 from __future__ import annotations
@@ -66,6 +71,8 @@ class Stage:
     gate: Optional[Callable[[dict, Any], list]] = None
     retry: int = 0
     resumable: bool = True
+    resume_ttl_s: Optional[float] = None
+    checkpoint_version: str = ''
 
 
 # ── State file (the checkpoint) ───────────────────────────
@@ -94,14 +101,53 @@ def stage_artifact(state: dict, name: str) -> Any:
     return entry.get('artifact') if isinstance(entry, dict) else None
 
 
-def _commit(state_path: str, state: dict, name: str, artifact: Any) -> None:
-    """Atomically record ``name`` as done. This IS the checkpoint."""
+def _commit(state_path: str, state: dict, stage: Stage, artifact: Any) -> None:
+    """Atomically record ``stage`` as done. This IS the checkpoint."""
     from lib.json_store import write_json_atomic
-    state.setdefault('stages', {})[name] = {
-        'ok': True, 'artifact': artifact, 'at': round(time.time(), 3),
+    state.setdefault('stages', {})[stage.name] = {
+        'ok': True,
+        'artifact': artifact,
+        'at': round(time.time(), 3),
+        'checkpoint_version': stage.checkpoint_version,
     }
     state['version'] = STATE_VERSION
     write_json_atomic(state_path, state)
+
+
+def _checkpoint_reusable(state: dict, stage: Stage, now: float) -> tuple[bool, str]:
+    """Return whether a completed checkpoint satisfies this stage contract."""
+    if not stage_is_done(state, stage.name):
+        return False, 'missing'
+    entry = state['stages'][stage.name]
+    if (stage.checkpoint_version and
+            entry.get('checkpoint_version') != stage.checkpoint_version):
+        return False, 'version changed'
+    if stage.resume_ttl_s is not None:
+        try:
+            age = max(0.0, now - float(entry['at']))
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.debug('[Production] invalid checkpoint timestamp: %s', exc)
+            return False, 'checkpoint has no valid timestamp'
+        ttl = max(0.0, float(stage.resume_ttl_s))
+        if age > ttl:
+            return False, f'expired ({age:.0f}s > {ttl:.0f}s)'
+    return True, ''
+
+
+def _invalidate_suffix(state_path: str, state: dict, stages: list,
+                       start_index: int) -> list[str]:
+    """Drop a stage and every dependent checkpoint as one atomic state edit."""
+    names = [stage.name for stage in stages[start_index:]]
+    entries = state.setdefault('stages', {})
+    removed = [name for name in names if name in entries]
+    if not removed:
+        return []
+    for name in removed:
+        entries.pop(name, None)
+    from lib.json_store import write_json_atomic
+    state['version'] = STATE_VERSION
+    write_json_atomic(state_path, state)
+    return removed
 
 
 # ── Runner ────────────────────────────────────────────────
@@ -142,12 +188,28 @@ def run_stages(stages: list, ctx: dict, *, state_path: str,
         if _aborted():
             raise StageAborted(f'aborted before stage {stage.name!r}')
 
-        if stage.resumable and stage_is_done(state, stage.name):
+        reusable, stale_reason = _checkpoint_reusable(
+            state, stage, time.time())
+        if stage.resumable and reusable:
             artifacts[stage.name] = stage_artifact(state, stage.name)
             logger.info('[Stages] %s: resumed from checkpoint (skipped)', stage.name)
             _emit({'type': 'stage_skipped', 'stage': stage.name,
                    'index': index, 'total': total, 'resumed': True})
             continue
+
+        # A stage artifact and every artifact after it belong to one dependency
+        # epoch. Leaving old downstream entries in the file would let a crash
+        # after refreshed research resume into an old outline/page/export.
+        removed = _invalidate_suffix(state_path, state, stages, index - 1)
+        for name in removed:
+            artifacts.pop(name, None)
+        if removed:
+            reason = stale_reason if stage.resumable else 'stage is non-resumable'
+            logger.info('[Stages] %s: checkpoint invalidated (%s); suffix=%s',
+                        stage.name, reason, ','.join(removed))
+            _emit({'type': 'stage_checkpoint_invalidated',
+                   'stage': stage.name, 'reason': reason,
+                   'stages': removed, 'index': index, 'total': total})
 
         attempts = max(1, stage.retry + 1)
         last_detail = ''
@@ -182,7 +244,7 @@ def run_stages(stages: list, ctx: dict, *, state_path: str,
                 continue
 
             artifacts[stage.name] = artifact
-            _commit(state_path, state, stage.name, artifact)
+            _commit(state_path, state, stage, artifact)
             elapsed = round(time.time() - started, 2)
             logger.info('[Stages] %s done in %.2fs (%d/%d)',
                         stage.name, elapsed, index, total)

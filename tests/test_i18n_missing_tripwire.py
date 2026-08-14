@@ -36,8 +36,12 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tests._runtime_sections import native_module_path
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-I18N = os.path.join(REPO, 'static', 'js', 'i18n.js')
+I18N = os.path.join(REPO, 'frontend', 'src', 'i18n', 'index.ts')
+I18N_BUNDLE = native_module_path('i18n-missing-tripwire.js', I18N)
+LOCALES = os.path.join(REPO, 'frontend', 'src', 'i18n', 'locales')
 
 try:
     import pytest
@@ -54,11 +58,10 @@ def _have_node():
 
 
 def _drive(body, lang='en', neuter=False):
-    """Load the real i18n.js under a minimal DOM stub and run *body*."""
-    src = open(I18N, encoding='utf-8').read()
+    """Load the bundled native i18n owner under a minimal DOM and run body."""
+    src = open(I18N_BUNDLE, encoding='utf-8').read()
     if neuter:
-        # Restore the pre-fix silent expression.
-        needle = '    _reportMissingTranslation(key, _i18nLang);\n'
+        needle = 'console.warn(`[i18n] missing ${fingerprint}`);'
         assert needle in src, (
             'NEUTER anchor missing — the tripwire call was reworded; update '
             'this test so it keeps proving the report is load-bearing')
@@ -68,12 +71,19 @@ def _drive(body, lang='en', neuter=False):
 globalThis.window = globalThis;
 globalThis.localStorage = {{ getItem: () => {json.dumps(lang)}, setItem: () => {{}} }};
 globalThis.document = {{ documentElement: {{}}, querySelectorAll: () => [],
-                        addEventListener: () => {{}}, readyState: 'complete' }};
+                        getElementById: () => null,
+                        addEventListener: () => {{}}, readyState: 'complete',
+                        get cookie() {{ return ''; }}, set cookie(value) {{}} }};
+globalThis.CustomEvent = class CustomEvent {{ constructor(type, init) {{ this.type = type; this.detail = init?.detail; }} }};
+globalThis.dispatchEvent = () => true;
 const __warns = [];
 console.warn = (...a) => __warns.push(a.join(' '));
 {src}
-const __out = (() => {{ {body} }})();
-console.log('@@' + JSON.stringify(__out));
+(async () => {{
+  await ready();
+  const __out = await (async () => {{ {body} }})();
+  console.log('@@' + JSON.stringify(__out));
+}})().catch((error) => {{ console.error(error); process.exitCode = 1; }});
 """
     with tempfile.NamedTemporaryFile('w', suffix='.js', delete=False,
                                      encoding='utf-8') as fh:
@@ -93,22 +103,15 @@ console.log('@@' + JSON.stringify(__out));
 # ── Face 1: the UI must NOT change ───────────────────────────────────────
 
 @_unit
-def test_fallback_still_renders_chinese_not_a_raw_key():
-    """Observability must not cost correctness.
-
-    Making the miss loud is worthless if it also degrades the UI to a raw key
-    string — that would be a visible regression traded for a log line.
-    """
+def test_missing_key_is_visible_and_reported():
+    """A missing key must be both visible in the UI and observable in logs."""
     if not _have_node():
         print('SKIP (node unavailable)')
         return
     out = _drive("""
-        _i18n['probe.zhOnly'] = { zh: '中文文案' };
-        return { text: t('probe.zhOnly'), warns: __warns.length };
+        return { text: t('probe.missing'), warns: __warns.length };
     """)
-    assert out['text'] == '中文文案', (
-        'the zh fallback must still render — the tripwire reports, it does not '
-        'change what the user sees')
+    assert out['text'] == 'probe.missing'
     assert out['warns'] == 1
 
 
@@ -120,32 +123,24 @@ def test_healthy_keys_are_silent():
         return
     out = _drive("""
         const a = t('sidebar.settings');
-        return { text: a, warns: __warns.length, missing: i18nMissingKeys() };
+        return { text: a, warns: __warns.length };
     """)
     assert out['text'] == 'Settings', 'en resolution must be unaffected'
     assert out['warns'] == 0, 'a fully-translated key must never warn'
-    assert out['missing'] == []
 
 
 @_unit
-def test_unknown_key_returns_the_key_and_does_not_warn():
-    """An unknown key is a caller bug, not a missing-translation event.
-
-    Conflating the two would flood the new signal with typos and make the
-    language-pack use case unreadable.
-    """
+def test_unknown_key_returns_the_key_and_warns():
+    """Caller typos must not silently degrade into untranslated chrome."""
     if not _have_node():
         print('SKIP (node unavailable)')
         return
     out = _drive("""
         const a = t('totally.unknown.key');
-        return { text: a, warns: __warns.length, missing: i18nMissingKeys() };
+        return { text: a, warns: __warns.length };
     """)
     assert out['text'] == 'totally.unknown.key'
-    assert out['warns'] == 0, (
-        'an absent ENTRY is a different failure from an entry missing one '
-        'language; only the latter is the language-pack hazard')
-    assert out['missing'] == []
+    assert out['warns'] == 1
 
 
 # ── Face 2: the report is usable ─────────────────────────────────────────
@@ -156,53 +151,37 @@ def test_report_is_one_shot_per_key_so_a_render_loop_cannot_flood():
         print('SKIP (node unavailable)')
         return
     out = _drive("""
-        _i18n['probe.a'] = { zh: '甲' };
-        _i18n['probe.b'] = { zh: '乙' };
         for (let i = 0; i < 50; i++) { t('probe.a'); t('probe.b'); }
-        return { warns: __warns.length, missing: i18nMissingKeys().sort() };
+        return { warns: __warns.length };
     """)
     assert out['warns'] == 2, (
         f"100 calls produced {out['warns']} warnings — the one-shot latch is "
         f'broken and a hot render loop would drown the console')
-    assert out['missing'] == ['en:probe.a', 'en:probe.b']
 
 
 @_unit
-def test_missing_set_is_machine_readable_for_a_pack_acceptance_gate():
-    """This is how a future language-pack change proves itself.
+def test_locale_key_sets_match_for_pack_acceptance_gate():
+    """The split locale chunks must expose identical key sets."""
+    with open(os.path.join(LOCALES, 'zh.json'), encoding='utf-8') as handle:
+        zh = json.load(handle)
+    with open(os.path.join(LOCALES, 'en.json'), encoding='utf-8') as handle:
+        en = json.load(handle)
+    assert set(en) == set(zh), (
+        f'locale key drift: en-only={sorted(set(en) - set(zh))[:10]}, '
+        f'zh-only={sorted(set(zh) - set(en))[:10]}')
 
-    Exercise the UI in `en`, then assert i18nMissingKeys() is empty. That check
-    is impossible without this seam, which is why the seam ships BEFORE the
-    split.
-    """
+
+@_unit
+def test_zh_ui_reports_an_unknown_key_once_too():
     if not _have_node():
         print('SKIP (node unavailable)')
         return
     out = _drive("""
-        _i18n['probe.gap'] = { zh: '缺' };
-        t('probe.gap');
-        const before = i18nMissingKeys();
-        resetI18nMissingKeysForTests();
-        const after = i18nMissingKeys();
-        return { before, after };
-    """)
-    assert out['before'] == ['en:probe.gap'], 'lang:key shape is the contract'
-    assert out['after'] == [], 'reset seam must clear it for the next scenario'
-
-
-@_unit
-def test_zh_ui_never_reports_since_zh_is_the_fallback_language():
-    """Running in zh cannot produce a miss — guards against a noisy default."""
-    if not _have_node():
-        print('SKIP (node unavailable)')
-        return
-    out = _drive("""
-        _i18n['probe.zhOnly'] = { zh: '中文文案' };
-        t('probe.zhOnly');
-        return { warns: __warns.length, missing: i18nMissingKeys() };
+        t('probe.missing');
+        t('probe.missing');
+        return { warns: __warns.length };
     """, lang='zh')
-    assert out['warns'] == 0
-    assert out['missing'] == []
+    assert out['warns'] == 1
 
 
 # ── NEUTER ───────────────────────────────────────────────────────────────
@@ -213,14 +192,13 @@ def test_NEUTER_removing_the_report_restores_the_silent_degrade():
         print('SKIP (node unavailable)')
         return
     body = """
-        _i18n['probe.zhOnly'] = { zh: '中文文案' };
-        const text = t('probe.zhOnly');
+        const text = t('probe.missing');
         return { text, warns: __warns.length };
     """
     shipped = _drive(body)
     neutered = _drive(body, neuter=True)
 
-    assert neutered['warns'] == 0 and neutered['text'] == '中文文案', (
+    assert neutered['warns'] == 0 and neutered['text'] == 'probe.missing', (
         'without the report the miss is invisible — this is the pre-fix '
         'defect being reproduced')
     assert shipped['warns'] == 1, (

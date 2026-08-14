@@ -60,10 +60,8 @@ _NODE = shutil.which('node')
 # carrier, so a refactor re-introducing the key here is covered from day one.
 # The authoritative coverage is the tree-wide sweep below, which DISCOVERS
 # carriers instead of trusting this list.
-_KNOWN_KEY_FILES = [
-    'static/js/settings/branding.js',
-    'static/js/settings/visibility_defaults.js',
-]
+_KNOWN_KEY_FILES = ['frontend/src/runtime/app-runtime.js']
+_AUDIT_SYNTHETIC_REPO_PATHS = {'static/js/settings/branding.js'}
 
 # ── The instrument itself, hoisted to module scope so it can be ASSERTED ON ──
 # Matches an UNQUOTED `meituan:` object key anywhere — deliberately NOT anchored
@@ -166,7 +164,7 @@ def test_all_js_with_meituan_key_sanitizes_clean(tmp_path):
     count assertion left is liveness (see below), which is about the guard not
     silently becoming a no-op.
     """
-    js_root = os.path.join(ROOT, 'static', 'js')
+    js_root = os.path.join(ROOT, 'frontend', 'src')
     swept = []
     for dirpath, _, filenames in os.walk(js_root):
         for fn in sorted(filenames):
@@ -188,7 +186,7 @@ def test_all_js_with_meituan_key_sanitizes_clean(tmp_path):
     # files or how many. Deleting every carrier is a real event that should be
     # noticed once, not silently absorbed.
     assert swept, (
-        'no static/js file carries an unquoted `meituan:` key any more, so this '
+        'no frontend source carries an unquoted `meituan:` key any more, so this '
         'sweep asserted nothing. If the brand token was renamed, retarget '
         '_UNQUOTED_KEY_RE at the new token; if the keys were all quoted, say so '
         'and delete this guard deliberately rather than leaving it vacuously green.'
@@ -252,7 +250,7 @@ def test_verify_exported_js_syntax_raises_on_broken(tmp_path):
     if _NODE is None:
         pytest.skip('node not installed')
     from export import _verify_exported_js_syntax, ExportSyntaxError
-    js_dir = tmp_path / 'static' / 'js'
+    js_dir = tmp_path / 'frontend' / 'src'
     js_dir.mkdir(parents=True)
     (js_dir / 'ok.js').write_text('const a = 1;\n', encoding='utf-8')
     # The exact corruption the sanitizer used to produce.
@@ -266,7 +264,7 @@ def test_verify_exported_js_syntax_passes_on_clean(tmp_path):
     if _NODE is None:
         pytest.skip('node not installed')
     from export import _verify_exported_js_syntax
-    js_dir = tmp_path / 'static' / 'js'
+    js_dir = tmp_path / 'frontend' / 'src'
     js_dir.mkdir(parents=True)
     (js_dir / 'a.js').write_text('const a = 1;\n', encoding='utf-8')
     (js_dir / 'b.js').write_text("const M = { yourprovider: 1 };\n", encoding='utf-8')

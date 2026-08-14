@@ -6,7 +6,7 @@ Mirrors the architecture of routes/browser.py:
   - Desktop Agent polls /api/desktop/poll → picks up commands, returns results
 """
 
-from flask import Blueprint, jsonify
+from quart import Blueprint, jsonify
 
 from lib.log import get_logger
 from lib.request_parser import async_parse_body

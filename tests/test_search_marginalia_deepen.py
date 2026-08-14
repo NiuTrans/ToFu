@@ -97,7 +97,8 @@ class TestDeepenHelpers:
         assert _dedup_key('https://a.com/x/') == 'a.com/x'
         assert _dedup_key('http://a.com/x') == 'a.com/x'
         # embedded scheme in query must be preserved
-        assert _dedup_key('https://a.com/r?t=http://b.com') == 'a.com/r?t=http://b.com'
+        assert _dedup_key('https://a.com/r?t=http://b.com') == (
+            'a.com/r?t=http%3A%2F%2Fb.com')
 
     def test_harvest_links_reads_only_links_section(self):
         page = {

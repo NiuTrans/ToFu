@@ -22,7 +22,7 @@ cookie-paste path (POST with ``cookie_header``) is the universal fallback.
 
 from __future__ import annotations
 
-from flask import Blueprint, request
+from quart import Blueprint, request
 
 from lib.api_response import api_bad_request, api_error, api_internal_error, api_ok
 from lib.log import get_logger
@@ -211,72 +211,6 @@ def interactive_login(domain):
                 result.get('cookie_count', 0), dom)
     return api_ok({'domain': dom, 'cookie_count': result.get('cookie_count', 0),
                    'source': source_row})
-
-
-@api_v1_auth_sources_bp.route('/api/v1/auth-sources/cookie-consent/pending', methods=['GET'])
-@require_auth
-@api_meta(
-    summary='List pending cookie-capture consent prompts',
-    description=(
-        'Returns ``{pending: [{id, domain, url, created_at}]}`` — consent '
-        'prompts fired by the login-wall capture chain that no client has '
-        'answered yet. The frontend polls this on load so a banner survives '
-        'a page reload (the push frame alone would be missed).'
-    ),
-    tags=['capabilities'],
-)
-def cookie_consent_pending():
-    from lib.browser.cookie_capture import pending_consents
-    return api_ok({'pending': pending_consents()})
-
-
-@api_v1_auth_sources_bp.route('/api/v1/auth-sources/cookie-consent/resolve', methods=['POST'])
-@require_auth
-@api_meta(
-    summary='Resolve a cookie-capture consent prompt',
-    description=(
-        'Body: ``{id, approved}``. A grant is persisted per-domain (one-time '
-        '— later walls for the same domain capture without re-asking); a '
-        'denial suppresses re-asking for a cooldown.'
-    ),
-    tags=['capabilities'],
-)
-def cookie_consent_resolve():
-    from lib.browser.cookie_capture import resolve_consent
-
-    data = parse_body()
-    consent_id = (data.get('id') or '').strip()
-    if not consent_id:
-        return api_bad_request('id is required', field='id')
-    if not resolve_consent(consent_id, bool(data.get('approved'))):
-        return api_error(f'Unknown or expired consent prompt: {consent_id}', status=404)
-    return api_ok({'id': consent_id, 'approved': bool(data.get('approved'))})
-
-
-@api_v1_auth_sources_bp.route('/api/v1/auth-sources/cookie-consent/grants', methods=['GET'])
-@require_auth
-@api_meta(
-    summary='List per-domain cookie-capture grants',
-    description='Returns ``{grants: [{domain, granted_at}]}`` (no cookie data).',
-    tags=['capabilities'],
-)
-def cookie_consent_grants():
-    from lib.browser.cookie_capture import consent_grants
-    return api_ok({'grants': consent_grants()})
-
-
-@api_v1_auth_sources_bp.route('/api/v1/auth-sources/cookie-consent/<domain>', methods=['DELETE'])
-@require_auth
-@api_meta(
-    summary='Revoke a cookie-capture consent grant',
-    description='The next login wall for this domain asks for consent again.',
-    tags=['capabilities'],
-)
-def cookie_consent_revoke(domain):
-    from lib.browser.cookie_capture import revoke_consent
-    if not revoke_consent(domain):
-        return api_error(f'No consent grant for: {domain}', status=404)
-    return api_ok({'domain': domain})
 
 
 __all__ = ['api_v1_auth_sources_bp']

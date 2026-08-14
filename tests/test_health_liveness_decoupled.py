@@ -133,6 +133,26 @@ def test_cached_db_failure_never_flips_liveness(probe_env):
     assert data['db_error'] == 'FUSE hang'
 
 
+def test_storage_degradation_is_visible_without_flipping_liveness(
+        probe_env, monkeypatch):
+    common, cache = probe_env
+    cache.update({'at': time.time(), 'responsive': True, 'ever': True})
+    import lib.storage as storage
+    monkeypatch.setattr(storage, 'storage_status', lambda: {
+        'ready': False,
+        'state': 'restarting',
+        'backend': 'sqlite',
+        'restart_attempts': 2,
+    })
+
+    data = _call_health(common)
+
+    assert data['ok'] is True
+    assert data['storage_ready'] is False
+    assert data['storage']['state'] == 'restarting'
+    assert data['storage']['restart_attempts'] == 2
+
+
 def test_refresh_thread_populates_cache(probe_env, monkeypatch):
     """The background refresh is the ONE place SELECT 1 runs: stub the thread
     target's DB call, run _refresh_db_probe, and see the cache update."""

@@ -29,7 +29,9 @@ Pinned here:
      filesystem greps are EXECUTED by the in-process GNU-faithful engine
      (lib/project_mod/grep_redirect.py) and the pipeline spliced around
      temp files — refuse+teach only when translation is impossible;
-  5. the kill switches TOFU_RUN_GREP_GUARD=0 / TOFU_GREP_REDIRECT=0.
+  5. quoted multi-word argv values use one shared shell parser in both the
+     transparent planner and refusal fallback;
+  6. the kill switches TOFU_RUN_GREP_GUARD=0 / TOFU_GREP_REDIRECT=0.
 
 Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/test_run_command_grep_redirect.py -v
 """
@@ -87,6 +89,10 @@ class TestGrepRedirectBlockedShapes:
         'grep -rn x lib/ > /tmp/out.txt',       # redirect stripped, operand caught
         'grep -q x config.yaml && echo found',  # control-flow grep → adapt
         'grep -m 5 x lib/a.py',                 # arg-flag consumed, operand caught
+        'grep "not found" app.log',
+        'grep -i "not found" app.log',
+        'grep -- "a b" app.log',
+        'grep -e "a b" app.log',
         'grep --include=*.py -rn x lib/',
         '( grep -rn x lib/ )',                  # subshell framing is no evasion
         'echo $(grep -rn x lib/)',              # command substitution seen through
@@ -103,6 +109,10 @@ class TestGrepRedirectAllowedShapes:
         'ps aux | grep python',                 # stream filter — no replacement
         'ps aux | grep -v grep 2>/dev/null',    # redirect must not fake an operand
         'pytest -q 2>&1 | grep PASS',
+        'ldd /bin/sh 2>/dev/null | grep "not found" | sort -u',
+        "printf 'two words\\n' | grep -i 'two words'",
+        "printf 'a b\\n' | grep -- 'a b'",
+        'printf "%s\\n" "$V" | grep "$PATTERN"',
         'pytest -q 2>&1 | grep -v slow | head -20',
         'git log --oneline | grep fix',
         'make 2>&1 | tail -50',
@@ -113,6 +123,7 @@ class TestGrepRedirectAllowedShapes:
         'echo "$V" | grep -q x',
         'grep -e foo',                          # stdin grep, no operands
         'grep x -',                             # explicit stdin marker
+        'grep "a b" -',                        # quoted pattern, explicit stdin
         'grep x <<EOF',                         # heredoc → fail open
         'timeout 30 grep -rn x lib/',           # bounded wrapper — see scan guard
         'cat f.log | grep x',                   # grep filters cat's stream
@@ -147,6 +158,15 @@ class TestGrepRedirectEndToEnd:
         assert '1::root { --cream' in result
         assert '---' in result
 
+    def test_display_callback_is_out_of_band(self, ws):
+        seen = []
+        result = tool_run_command(
+            ws, 'grep -n "x = 1" lib/a.py',
+            on_grep_intercept=seen.append)
+        assert seen == [1]
+        assert 'grep_search' not in result
+        assert 'x = 1' in result
+
     def test_recursive_grep_executes(self, ws):
         result = tool_run_command(ws, 'grep -rn "x = 1" lib/')
         assert 'Command intercepted' not in result
@@ -172,19 +192,19 @@ class TestGrepRedirectEndToEnd:
                 'grep -q zzz lib/a.py || echo MISSING')
         assert 'FOUND' in result and 'MISSING' in result
 
-    def test_refusal_fallback_with_reason(self, ws):
-        """Untranslatable shapes still refuse+teach — and now SAY why."""
+    def test_full_gnu_option_fallback(self, ws):
+        """Options not translated to rg execute through native GNU grep."""
         result = tool_run_command(ws, "grep -P 'x+' lib/a.py")
-        assert 'Command intercepted' in result
-        assert 'unsupported grep flag -P' in result
-        assert 'grep_search' in result
+        assert 'Command intercepted' not in result
+        assert 'x = 1' in result
+        assert '[exit code: 0]' in result
 
-    def test_refusal_when_earlier_segment_writes(self, ws):
-        """Plan-time execution would read STALE bytes — honest refusal."""
+    def test_earlier_segment_write_is_visible(self, ws):
+        """Runtime delegation observes bytes written by an earlier segment."""
         result = tool_run_command(
             ws, "printf 'y = 2\\n' > lib/new.py; grep -rn 'y = 2' lib/")
-        assert 'Command intercepted' in result
-        assert 'not provably read-only' in result
+        assert 'Command intercepted' not in result
+        assert 'lib/new.py:1:y = 2' in result
 
     def test_redirect_kill_switch_restores_refusal(self, ws, monkeypatch):
         monkeypatch.setenv('TOFU_GREP_REDIRECT', '0')
@@ -195,6 +215,15 @@ class TestGrepRedirectEndToEnd:
         result = tool_run_command(ws, "printf 'a\\nb\\n' | grep a")
         assert 'Command intercepted' not in result
         assert 'a' in result
+
+    def test_quoted_multiword_stream_filter_actually_runs(self, ws):
+        result = tool_run_command(
+            ws, 'printf "libx.so => not found\\nliby.so => ok\\n" '
+                '| grep "not found" | sort -u')
+        assert 'Command intercepted' not in result
+        output = result.split('\n', 1)[1]
+        assert 'libx.so => not found' in output
+        assert 'liby.so => ok' not in output
 
     def test_subshell_stream_filter_actually_runs(self, ws):
         """The 2026-08-06 incident shape: a stream filter inside a subshell

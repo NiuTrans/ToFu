@@ -26,7 +26,7 @@ pytestmark = pytest.mark.unit
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUNDLER_PY = ROOT / 'lib' / 'js_bundler.py'
-FEATURE_LOADER = ROOT / 'static' / 'js' / 'feature-loader.js'
+FEATURE_LOADER = ROOT / 'static' / 'js' / 'feature-bridge.js'
 I18N = ROOT / 'static' / 'js' / 'i18n.js'
 SKILLS_INSTALL = ROOT / 'static' / 'js' / 'skills_install.js'
 PANEL_HTML = ROOT / 'static' / 'settings_panels' / 'skills.html'
@@ -44,7 +44,7 @@ def _manifest():
 # ---------------------------------------------------------------------------
 def test_skills_deferred_installer_stays_core():
     bundle, deferred, _ep, _crit = _manifest()
-    assert 'skills.js' in deferred, 'skills.js must be in _DEFERRED_FILES'
+    assert 'skills.js' in deferred, 'skills.js must be in _CLASSIC_ASSET_FILES'
     assert 'skills.js' not in bundle, (
         'skills.js must NOT remain in _BUNDLE_FILES')
     # Shipped shape (2026-08-01): the installer STAYS CORE so a zip install
@@ -64,14 +64,14 @@ def test_skills_stubs_in_py_table():
     _bf, _df, entry_points, _crit = _manifest()
     missing = [s for s in SKILLS_STUBS if s not in entry_points]
     assert not missing, (
-        f'_DEFERRED_ENTRY_POINTS is missing skills stubs: {missing}')
+        f'_FEATURE_ENTRY_POINTS is missing skills stubs: {missing}')
 
 
 def test_skills_stubs_in_loader_table():
     loader = FEATURE_LOADER.read_text()
     missing = [s for s in SKILLS_STUBS if f"'{s}'" not in loader]
     assert not missing, (
-        f'feature-loader.js is missing skills stubs: {missing}')
+        f'feature-bridge.js is missing skills stubs: {missing}')
 
 
 def test_static_panel_onclicks_exist():

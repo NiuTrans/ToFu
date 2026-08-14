@@ -50,14 +50,16 @@ import time
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-REDUCER_JS = os.path.join(ROOT, 'static', 'js', 'ui', 'stream_reducer.js')
-TOOL_ROUNDS_JS = os.path.join(ROOT, 'static', 'js', 'ui', 'tool_rounds.js')
+REDUCER_JS = runtime_section_path('ui/stream_reducer.js')
+TOOL_ROUNDS_JS = runtime_section_path('ui/tool_rounds.js')
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -496,7 +498,7 @@ def test_pipeline_has_no_second_private_write_path():
     """
     from tests._source_scan import js_function_body, strip_comments
 
-    with open(os.path.join(ROOT, 'static', 'js', 'ui', 'sse_handlers_io.js'),
+    with open(runtime_section_path('ui/sse_handlers_io.js'),
               encoding='utf-8') as fh:
         src = fh.read()
     body = js_function_body(src, '_handleToolProgress')

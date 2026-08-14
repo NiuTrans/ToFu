@@ -103,6 +103,7 @@ _NS_REQUIRES_PERMISSION = {
     'notifications': 'notifications',
     'alarms': 'alarms',
     'downloads': 'downloads',
+    'webRequest': 'webRequest',
     'webNavigation': 'webNavigation',
     'declarativeNetRequest': 'declarativeNetRequest',
     'management': 'management',

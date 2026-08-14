@@ -47,6 +47,13 @@ def _sync_endpoint_turns_to_conversation(task, endpoint_turns):
     if not endpoint_turns:
         return None
 
+    # V2 owns visible identity in conversation_turns.  The accumulated legacy
+    # list is only an executor-local phase snapshot and must never be written
+    # back into conversations.messages.
+    if task.get('_turnProtocolV2'):
+        from lib.turn_lifecycle import sync_visible_run_turns
+        return sync_visible_run_turns(task, endpoint_turns)
+
     try:
         from lib.agent_core.store import get_conversation_store
         store = get_conversation_store()

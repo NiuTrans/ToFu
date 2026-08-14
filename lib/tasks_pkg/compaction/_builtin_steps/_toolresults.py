@@ -10,12 +10,50 @@ re-expressed against :class:`CompactionContext` and registered as the
 
 from __future__ import annotations
 
+import json
+
 from lib.log import get_logger
 from lib.tasks_pkg.compaction._steps import CompactionContext, register_step
 from lib.tasks_pkg.compaction._tokens import _human_size
 from lib.tasks_pkg.compaction._builtin_steps._shared import _log_id
 
 logger = get_logger(__name__)
+
+
+def _archive_message_if_enabled(ctx: CompactionContext, msg: dict,
+                                content, tool_name: str) -> str | None:
+    """Message-aware wrapper so filenames and telemetry carry the call ID."""
+    task = ctx.task if isinstance(ctx.task, dict) else None
+    if task is None:
+        return None
+    try:
+        from lib.context_experiment_flags import normalize_context_experiment_flags
+        enabled = normalize_context_experiment_flags(
+            task.get('config') or {})['compaction']['evidenceLedger']
+        if not enabled:
+            return None
+        from lib.tasks_pkg.compaction._persist import _persist_to_disk
+        raw = (content if isinstance(content, str) else
+               json.dumps(content, ensure_ascii=False, sort_keys=True))
+        tool_call_id = str(msg.get('tool_call_id') or '')
+        placeholder = _persist_to_disk(
+            raw, tool_name, tool_call_id, ctx.conv_id)
+        if not isinstance(placeholder, str) or '[Persisted to:' not in placeholder:
+            logger.warning('[L1] evidence archive for %s returned no durable '
+                           'reference; using the normal compact placeholder',
+                           tool_name)
+            return None
+        task.setdefault('_contextEvidenceArchives', []).append({
+            'toolName': tool_name,
+            'toolCallId': tool_call_id,
+            'contentChars': len(raw),
+            'reference': placeholder.splitlines()[0] if placeholder else '',
+        })
+        return placeholder
+    except Exception as exc:
+        logger.warning('[L1] evidence archive failed for %s: %s',
+                       tool_name, exc)
+        return None
 
 
 def _find_paired_assistant(messages: list, tool_idx: int) -> int | None:
@@ -38,6 +76,12 @@ def compact_tool_results(ctx: CompactionContext) -> int:
     _c = ctx.constants
     messages = ctx.messages
     conv_id = ctx.conv_id
+    try:
+        from lib.tasks_pkg.compaction._tokens import _estimate_total_tokens
+        tokens_before = _estimate_total_tokens(messages)
+    except Exception as exc:
+        logger.debug('[L1] pre-compaction token estimate unavailable: %s', exc)
+        tokens_before = 0
 
     paired_assistant_indices: set[int] = ctx.scratch.setdefault(
         'paired_assistant_indices', set())
@@ -86,7 +130,9 @@ def compact_tool_results(ctx: CompactionContext) -> int:
             if image_count > 0:
                 _before_chars = text_len + image_chars
                 text_preview = ' '.join(text_parts).strip()[:200]
-                msg['content'] = (
+                archived = _archive_message_if_enabled(
+                    ctx, msg, content, tool_name)
+                msg['content'] = archived or (
                     f'[{tool_name} result compacted — had {image_count} '
                     f'image(s) ({_human_size(image_chars)} base64) + '
                     f'{text_len:,} chars text — re-call tool if needed]\n'
@@ -100,11 +146,13 @@ def compact_tool_results(ctx: CompactionContext) -> int:
                 skipped_short += 1
             else:
                 _before_chars = text_len
-                msg['content'] = (
+                archived = _archive_message_if_enabled(
+                    ctx, msg, content, tool_name)
+                msg['content'] = archived or (
                     f'[{tool_name} result compacted — was {text_len:,} chars'
                     f' — re-call tool if full content needed]'
                 )
-                tool_tokens_saved += text_len // 4
+                tool_tokens_saved += max(0, text_len - len(msg['content'])) // 4
                 compacted_count += 1
                 mutated = True
                 ctx.stamp(msg, _before_chars, len(msg['content']))
@@ -115,6 +163,27 @@ def compact_tool_results(ctx: CompactionContext) -> int:
                 skipped_already += 1
             elif content.startswith('[Persisted to:'):
                 skipped_already += 1
+            elif tool_name == 'load_skill' and content.startswith('Skill loaded:'):
+                old_len = len(content)
+                skill_id = ''
+                content_hash = ''
+                for line in content.splitlines()[:8]:
+                    if line.startswith('id: '):
+                        skill_id = line[4:].strip()
+                    elif line.startswith('content_hash: '):
+                        content_hash = line[14:].strip()
+                msg['content'] = (
+                    '[load_skill receipt — full workflow compacted]\n'
+                    f'id: {skill_id or "unknown"}\n'
+                    f'content_hash: {content_hash or "unknown"}\n'
+                    'Call load_skill with this exact id if the full workflow '
+                    'is needed again.'
+                )
+                tool_tokens_saved += max(
+                    0, old_len - len(msg['content'])) // 4
+                compacted_count += 1
+                mutated = True
+                ctx.stamp(msg, old_len, len(msg['content']))
             elif len(content) <= _c.MICRO_COMPACT_THRESHOLD:
                 skipped_short += 1
             else:
@@ -127,11 +196,12 @@ def compact_tool_results(ctx: CompactionContext) -> int:
                     f'Preview: {first_two}\n'
                     f'[Re-call tool if full content needed]'
                 )
-                msg['content'] = placeholder
-                tool_tokens_saved += (old_len - len(placeholder)) // 4
+                msg['content'] = (_archive_message_if_enabled(
+                    ctx, msg, content, tool_name) or placeholder)
+                tool_tokens_saved += max(0, old_len - len(msg['content'])) // 4
                 compacted_count += 1
                 mutated = True
-                ctx.stamp(msg, old_len, len(placeholder))
+                ctx.stamp(msg, old_len, len(msg['content']))
 
         if mutated:
             paired_idx = _find_paired_assistant(messages, idx)
@@ -144,4 +214,14 @@ def compact_tool_results(ctx: CompactionContext) -> int:
                 _log_id(conv_id),
                 len(cold_indices), compacted_count,
                 skipped_short, skipped_already, tool_tokens_saved)
+    if compacted_count and isinstance(ctx.task, dict):
+        try:
+            from lib.context_telemetry import record_compaction_event
+            from lib.tasks_pkg.compaction._tokens import _estimate_total_tokens
+            record_compaction_event(
+                ctx.task, trigger='l1', reason='cold_tool_results',
+                tokens_before=tokens_before,
+                tokens_after=_estimate_total_tokens(messages))
+        except Exception as exc:
+            logger.debug('[L1] context telemetry failed: %s', exc)
     return tool_tokens_saved

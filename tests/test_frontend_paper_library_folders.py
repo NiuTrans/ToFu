@@ -1,6 +1,6 @@
-"""jsdom test for the Reading-mode paper-library FOLDERS feature.
+"""jsdom test for the native Reading-mode paper-library folders feature.
 
-Loads the REAL shipped ``static/js/paper/library.js`` under jsdom and drives the
+Compiles ``features/paper/library.ts`` and drives the
 folder render / assign / drill-in paths directly against stubbed ``Api`` +
 minimal globals, asserting:
 
@@ -29,7 +29,9 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-LIBRARY_JS = os.path.join(ROOT, 'static', 'js', 'paper', 'library.js')
+LIBRARY_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'library.ts')
+ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
 
 
 def _node_deps_available() -> bool:
@@ -71,7 +73,21 @@ global.Api = win.Api = {
   },
 };
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper/library.js
+eval(fs.readFileSync(process.argv[2], 'utf8'));  // compiled native library owner
+if (typeof win._renderPaperLibrary === 'function') {
+  for (const name of ['_paperFolders', '_paperLibrary', '_activePaperId',
+    '_activePaperFolderId', '_paperLibraryLoading']) {
+    Object.defineProperty(globalThis, name, {
+      configurable: true,
+      get() { return win[name]; },
+      set(value) { win[name] = value; },
+    });
+  }
+  for (const name of ['_renderPaperLibrary', '_assignPaperFolder',
+    '_setActivePaperFolder', '_deletePaperFolder']) {
+    globalThis[name] = win[name];
+  }
+}
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -158,10 +174,16 @@ def _run(js_path: str):
     return [ln for ln in output.splitlines() if ln.startswith(('PASS ', 'FAIL '))]
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_paper_library_folders_render_assign_and_view():
-    lines = _run(LIBRARY_JS)
-    fails = [ln for ln in lines if ln.startswith('FAIL')]
-    assert not fails, 'paper library folder failures:\n' + '\n'.join(lines)
-    assert len(lines) >= 15, 'expected >=15 result lines, got:\n' + '\n'.join(lines)
+@pytest.mark.skipif(not _node_deps_available() or not os.path.isfile(ESBUILD),
+                    reason='node + jsdom + esbuild dev-deps not installed')
+def test_vite_paper_library_folders_match_classic_contract(tmp_path):
+    built = tmp_path / 'paper-library.js'
+    compiled = subprocess.run(
+        [ESBUILD, LIBRARY_TS, '--bundle', '--format=iife',
+         '--platform=browser', f'--outfile={built}'],
+        capture_output=True, text=True, timeout=60)
+    assert compiled.returncode == 0, compiled.stderr
+    lines = _run(str(built))
+    failures = [line for line in lines if line.startswith('FAIL')]
+    assert not failures, 'Vite paper library folder failures:\n' + '\n'.join(lines)
+    assert len(lines) >= 15

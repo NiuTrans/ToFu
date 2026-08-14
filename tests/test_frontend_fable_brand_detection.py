@@ -38,11 +38,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-BRANDING = os.path.join(ROOT, 'static', 'js', 'settings', 'branding.js')
+BRANDING = runtime_section_path('settings/branding.js')
 
 
 def _node_available() -> bool:
@@ -100,6 +102,14 @@ check('claude_opus_stays_claude', _detectBrand('claude-opus-4-8') === 'claude');
 check('gpt_stays_openai', _detectBrand('gpt-5.6') === 'openai');
 check('gemini_stays_gemini', _detectBrand('gemini-3.5-flash') === 'gemini');
 
+// ── Codex line maps to OpenAI (bare wire ids, no gpt/chatgpt substring) ──
+// ChatGPT-subscription providers stamp brand='oauth'; surfaces that only
+// have the model_id (info-rail, finish-info, provider model cards) detect
+// from the id alone — 'codex-*' must not fall through to the grey box.
+check('codex_auto_review_is_openai', _detectBrand('codex-auto-review') === 'openai');
+check('codex_mini_latest_is_openai', _detectBrand('codex-mini-latest') === 'openai');
+check('gpt_codex_spark_is_openai', _detectBrand('gpt-5.3-codex-spark') === 'openai');
+
 // ── NEUTER: drop 'fable' out of the claude pattern → regresses to generic ──
 {
   const neutered = SRC.replace(
@@ -110,6 +120,18 @@ check('gemini_stays_gemini', _detectBrand('gemini-3.5-flash') === 'gemini');
   const nb = _detectBrand('fable-5');
   check('neuter_regresses_to_generic', nb === 'generic',
         'neutered _detectBrand(fable-5) = ' + nb);
+}
+
+// ── NEUTER 2: drop 'codex' out of the openai pattern → regresses to generic ──
+{
+  const neutered = SRC.replace(
+    "[/gpt|openai|o[134]-|chatgpt|codex|dall/i, 'openai']",
+    "[/gpt|openai|o[134]-|chatgpt|dall/i,   'openai']");
+  check('neuter2_applied', neutered !== SRC);
+  loadBranding(neutered);
+  const nb = _detectBrand('codex-auto-review');
+  check('neuter2_regresses_to_generic', nb === 'generic',
+        'neutered _detectBrand(codex-auto-review) = ' + nb);
 }
 
 console.log(out.join('\n'));
@@ -124,6 +146,8 @@ def test_fable_detects_as_claude_brand():
     # too. Fail fast rather than silently pass a stale test.
     assert "|haiku|fable/i, 'claude'" in src, \
         'branding.js Claude pattern signature drifted — update this test'
+    assert "|chatgpt|codex|dall/i, 'openai'" in src, \
+        'branding.js OpenAI pattern signature drifted — update this test'
 
     harness = os.path.join(HERE, '_fable_brand_detection_harness.js')
     with open(harness, 'w') as f:
@@ -142,5 +166,5 @@ def test_fable_detects_as_claude_brand():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'fable-brand-detection failures:\n' + output
-    # 11 positive + 2 neuter = 13 checks total.
-    assert output.count('PASS') >= 13, f'expected >=13 PASS, got:\n{output}'
+    # 14 positive + 2 neuter pairs = 18 checks total.
+    assert output.count('PASS') >= 18, f'expected >=18 PASS, got:\n{output}'

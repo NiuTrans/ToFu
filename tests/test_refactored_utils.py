@@ -11,6 +11,8 @@ Run:  pytest tests/test_refactored_utils.py -m unit -v
 """
 from __future__ import annotations
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {'scripts/attribute_losses.py'}
+
 import json
 import os
 import sys

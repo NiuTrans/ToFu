@@ -93,10 +93,7 @@ class TestLogIsolation(unittest.TestCase):
             'LOG_ISOLATION_PROBE_MARKER')
         audit_log('log_isolation_probe', note='guard')
         for h in logging.getLogger().handlers:
-            try:
-                h.flush()
-            except Exception:
-                pass
+            h.flush()
 
         after_app = os.path.getsize(prod_app) if os.path.exists(prod_app) else 0
         after_audit = (os.path.getsize(prod_audit)

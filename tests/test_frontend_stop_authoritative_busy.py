@@ -85,7 +85,7 @@ global.getActiveConv = () => _activeConv;
  * activeTaskId OR the server-authoritative set. The shipped convIsBusy
  * delegates there; the badge harness stubs it the same way. */
 global.convIsBusy = (c) => !!c && (
-  activeStreams.has(c.id) || !!c.activeTaskId ||
+  activeStreams.has(c.id) || !!c.activeTaskId || !!c._activeAttemptId ||
   !!(c._authoritativeActiveTaskIds && c._authoritativeActiveTaskIds.size > 0));
 global.sendMessage = () => { out.push('FAIL sendMessage_called_during_stop'); };
 global.renderConversationList = () => {};
@@ -97,6 +97,13 @@ global.finishStream = (cid) => { _finishStreamCalls.push(cid); };
 // Spy: every abort request the cascade sends to the server.
 let _abortCalls = [];
 global.Api = { chat: { abortTask: (tid) => { _abortCalls.push(tid); } } };
+let _v2AbortCalls = [];
+global.TurnStoreV2 = {
+  abortConversation: (conv) => {
+    _v2AbortCalls.push(conv._activeAttemptId);
+    return Promise.resolve();
+  },
+};
 
 // argv[2] = real ui/send_button.js
 eval(fs.readFileSync(process.argv[2], 'utf8'));
@@ -197,6 +204,24 @@ check('E_pin_task_aborted', _abortCalls.length === 1 && _abortCalls[0] === 'task
 check('E_pin_cleared', convE.activeTaskId === null);
 check('E_finishStream_ran', _finishStreamCalls.length === 1);
 
+// ══ Scenario F: v2 abort keeps Stop visible until the terminal projection
+//    repaints the preserved partial. The turn runtime clears this latch only
+//    after no pending/running turn remains. ══
+reset();
+const convF = {
+  id: 'conv-x', activeTaskId: null, _activeAttemptId: 'attempt-v2',
+  messages: [{ role: 'assistant', content: 'visible partial' }],
+};
+_activeConv = convF;
+conversations.length = 0; conversations.push(convF);
+updateSendButton();
+check('F_precondition_v2_stop_shaped', isStopShape());
+btn.onclick();
+check('F_v2_abort_fired', _v2AbortCalls.length === 1 &&
+      _v2AbortCalls[0] === 'attempt-v2');
+check('F_v2_abort_stays_settling', convF._finishingStream && isStopShape());
+check('F_v2_abort_pins_attempt', convF._finishingAttemptId === 'attempt-v2');
+
 console.log(out.join('\n'));
 """
 
@@ -222,4 +247,4 @@ def test_stop_click_with_authoritative_only_busy_fires_abort():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'stop-button authoritative-busy failures:\n' + output
-    assert output.count('PASS') >= 14, f'expected >=14 PASS lines, got:\n{output}'
+    assert output.count('PASS') >= 17, f'expected >=17 PASS lines, got:\n{output}'

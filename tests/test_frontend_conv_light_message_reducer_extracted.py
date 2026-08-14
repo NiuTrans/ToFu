@@ -24,11 +24,19 @@ from __future__ import annotations
 
 import pathlib
 import re
+import sys
+
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-CONV_JS = ROOT / 'static' / 'js' / 'core' / 'conversations.js'
-HELPERS_JS = ROOT / 'static' / 'js' / 'core' / 'conv_persist_helpers.js'
+sys.path.insert(0, str(ROOT / 'tests'))
+from _runtime_sections import runtime_section_names, runtime_section_path  # noqa: E402
+
+CONV_JS = pathlib.Path(runtime_section_path('core/conversations.js'))
+HELPERS_JS = pathlib.Path(runtime_section_path('core/conv_persist_helpers.js'))
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +57,7 @@ def test_helpers_exposes_reducer_on_window():
     the symbol reachable from conversations.js's surviving call via
     bundle-level window scope. The new reducer must follow suit."""
     src = HELPERS_JS.read_text()
-    assert 'window._lightMessageForSync = _lightMessageForSync' in src, (
+    assert 'runtimeScope._lightMessageForSync = _lightMessageForSync' in src, (
         'core/conv_persist_helpers.js must expose _lightMessageForSync '
         'on window — same convention slice 3 established for '
         '_trimMsgForPersist')
@@ -133,13 +141,9 @@ def test_conversations_js_uses_extracted_reducer():
 #    conversations.js (established by slice 3).
 # ---------------------------------------------------------------------------
 def test_bundler_lists_helpers_before_conversations_js():
-    import sys
-    if str(ROOT) not in sys.path:
-        sys.path.insert(0, str(ROOT))
-    from lib.js_bundler import _BUNDLE_FILES
-    assert 'core/conv_persist_helpers.js' in _BUNDLE_FILES
-    idx_helpers = _BUNDLE_FILES.index('core/conv_persist_helpers.js')
-    idx_conv = _BUNDLE_FILES.index('core/conversations.js')
+    owners = runtime_section_names()
+    idx_helpers = owners.index('core/conv_persist_helpers.js')
+    idx_conv = owners.index('core/conversations.js')
     assert idx_helpers < idx_conv, (
         f'core/conv_persist_helpers.js (idx {idx_helpers}) must precede '
         f'core/conversations.js (idx {idx_conv}) so the extracted '

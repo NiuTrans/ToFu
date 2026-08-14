@@ -367,6 +367,9 @@ def validate_deck(deck: Deck) -> list:
                 continue
             if b[2] <= 0 or b[3] <= 0:
                 out.append(f'{ewhere} ({eid}): bounds w/h must be positive')
+            if ('allowOverlap' in el
+                    and not isinstance(el.get('allowOverlap'), bool)):
+                out.append(f'{ewhere} ({eid}): allowOverlap must be boolean')
             if (b[0] + b[2] < 0 or b[1] + b[3] < 0
                     or b[0] > deck.width or b[1] > deck.height):
                 out.append(f'{ewhere} ({eid}): element fully outside the page')
@@ -382,6 +385,10 @@ def validate_deck(deck: Deck) -> list:
                     if fs is not None and (not isinstance(fs, (int, float))
                                            or fs <= 0 or fs > 400):
                         out.append(f'{ewhere} ({eid}): fontSize {fs!r} out of range')
+                    fit = content.get('fit')
+                    if fit is not None and fit not in ('shrink', 'none', 'resize'):
+                        out.append(f'{ewhere} ({eid}): text fit must be '
+                                   f'shrink|none|resize, got {fit!r}')
                     ref = content.get('style')
                     if isinstance(ref, str) and ref.startswith('$'):
                         styles = (deck.theme or {}).get('textStyles') or {}

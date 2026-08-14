@@ -366,11 +366,10 @@ class TestSilentCatches:
         # re-raise). Not visible through the local _handle indirection.
         ('routes/common.py', '_db_safe.wrapper', '_db_errors'),
         ('routes/common.py', '_db_safe.async_wrapper', '_db_errors'),
-        # system_context._trace_fallback: the LAST-RESORT trace-helper swallow —
-        # deliberately silent so a failing logging backend can never propagate
-        # out of pure instrumentation and break the turn it only observes.
-        ('lib/tasks_pkg/system_context/_inject.py',
-         '_inject_system_contexts._trace_fallback', 'Exception'),
+        # Context manifests are authoritative; this INFO summary is only
+        # instrumentation and a broken logging backend must not break a turn.
+        ('lib/tasks_pkg/context_composer/_render.py',
+         '_emit_context_summary', 'Exception'),
         # terminal_state_log_summary: builds a diagnostic string that is ITSELF
         # only ever passed to logger.error on a persist-failure branch; its own
         # fallback returns a marker string rather than logging (logging here
@@ -398,10 +397,18 @@ class TestSilentCatches:
          'load_message_window._seq', 'KeyError,IndexError,TypeError,ValueError'),
         ('lib/llm_dispatch/big_prefix_gate.py',
          'estimate_prefix_tokens', 'TypeError,ValueError'),
-        ('lib/shutdown_marker.py', 'record_boot', 'TypeError,ValueError'),
+        # Partial tool-input JSON is the expected shape between Anthropic SSE
+        # chunks; logging every incomplete fragment would add per-chunk I/O.
+        ('lib/llm/anthropic_outbound/_sse.py',
+         '_capture_delta', 'JSONDecodeError,TypeError'),
+        # ip_address(ValueError) is the ordinary hostname branch, so logging
+        # here would emit one debug record for every valid bypass hostname.
+        ('lib/proxy.py', '_normalize_bypass_domain', 'ValueError'),
+        # Missing map/list indexes implement ToolScript optional-access/null
+        # semantics; a record for every miss would be user-program log noise.
+        ('lib/tools/toolscript.py',
+         'eval_node', 'KeyError,IndexError,TypeError'),
         ('lib/shutdown_marker.py', '_is_num', 'TypeError,ValueError'),
-        ('lib/tasks_pkg/killed_recovery.py',
-         'list_killed_turn_convs', 'JSONDecodeError,TypeError'),
         ('lib/tasks_pkg/killed_recovery.py',
          '_context_weight', 'TypeError,ValueError'),
     }
@@ -453,10 +460,8 @@ class TestAssignmentSilentCatches:
         ('lib/api_response.py', 'safe_route.wrapper', 'Exception'),
         ('routes/common.py', '_db_safe.wrapper', '_db_errors'),
         ('routes/common.py', '_db_safe.async_wrapper', '_db_errors'),
-        ('lib/tasks_pkg/system_context/_inject.py',
-         '_inject_system_contexts._trace_fallback', 'Exception'),
-        ('lib/memory/prefetch/_rerank.py',
-         '_run_with_deadline._worker', 'BaseException'),
+        ('lib/tasks_pkg/context_composer/_render.py',
+         '_emit_context_summary', 'Exception'),
         ('lib/tasks_pkg/manager/_persist.py',
          'terminal_state_log_summary', 'Exception'),
         # ── entry_points().get(...) TypeError fallback → Python <3.10 API shape.
@@ -477,8 +482,6 @@ class TestAssignmentSilentCatches:
         ('lib/tasks_pkg/cache_tracking/_persist.py',
          'read_persisted_boundary', 'TypeError,KeyError,IndexError'),
         ('lib/tasks_pkg/killed_recovery.py',
-         'list_killed_turn_convs', 'JSONDecodeError,TypeError'),
-        ('lib/tasks_pkg/killed_recovery.py',
          '_context_weight', 'TypeError,ValueError'),
         ('lib/tasks_pkg/killed_recovery.py',
          '_redispatch_conv', 'JSONDecodeError,TypeError'),
@@ -492,11 +495,6 @@ class TestAssignmentSilentCatches:
          'recover_stale_tasks_on_startup', 'JSONDecodeError,TypeError'),
         ('lib/tasks_pkg/manager/_sync.py',
          '_reconcile_orphan_placeholder_on_settle', 'JSONDecodeError,TypeError'),
-        ('routes/api_v1/conversations.py',
-         'create_branch', 'KeyError,TypeError,IndexError'),
-        ('routes/conversations.py', '_save_conv_blocking', 'JSONDecodeError,TypeError'),
-        ('routes/conversations.py', '_persist_reconcile',
-         'TypeError,ValueError,KeyError,IndexError'),
         # ── Narrow parse of a DB `rev` int / window arg → 0 fallback. ──
         ('routes/conversations.py', '_row_rev', 'TypeError,ValueError'),
         ('routes/conversations.py', 'list_convs', 'TypeError,ValueError'),
@@ -506,11 +504,20 @@ class TestAssignmentSilentCatches:
         ('lib/database/_pg_backup/__init__.py', '<module>', 'AttributeError,TypeError'),
         ('lib/translate/segment_backfill.py', '<module>', 'ValueError,TypeError'),
         ('lib/self_update/_apply.py', '_apply_via_tarball', 'TypeError,ValueError'),
-        ('lib/shutdown_marker.py', 'record_boot', 'TypeError,ValueError'),
         ('lib/shutdown_marker.py', '_is_num', 'TypeError,ValueError'),
         ('lib/llm_dispatch/big_prefix_gate.py',
          'estimate_prefix_tokens', 'TypeError,ValueError'),
         ('lib/llm/anthropic_outbound/_sse.py', 'translate', 'TypeError,ValueError'),
+        # input_json_delta is intentionally incomplete between SSE chunks;
+        # parsing failure is protocol progress, not malformed persisted data.
+        # Logging every partial fragment would create O(chunks) debug I/O.
+        ('lib/llm/anthropic_outbound/_sse.py',
+         '_capture_delta', 'JSONDecodeError,TypeError'),
+        # ip_address rejects hostnames by design before IDNA validation.
+        ('lib/proxy.py', '_normalize_bypass_domain', 'ValueError'),
+        # ToolScript indexes intentionally evaluate absent members to null.
+        ('lib/tools/toolscript.py',
+         'eval_node', 'KeyError,IndexError,TypeError'),
         ('lib/tasks_pkg/wire_fingerprint.py', 'system_fingerprint', 'TypeError,ValueError'),
         # ── RuntimeError = "no running event loop" in a sync context → skip
         #    the async spawn. Control-flow, not an error. ──

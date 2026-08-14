@@ -65,8 +65,11 @@ def test_full_tool_set_matches_chat_tier_registry():
     # Core pins (belt against the profile itself being gutted):
     for core in ('web_search', 'fetch_url', 'read_files', 'inspect_image',
                  'run_command', 'create_memory', 'search_memories',
-                 'activate_skill', 'todo_write', 'schedule_create'):
+                 'todo_write'):
         assert core in paper_names, f'{core} missing from paper full set'
+    assert 'schedule_create' in _names(ctx.enabled_tool_catalog), (
+        'scheduler must remain discoverable even though its searchable policy '
+        'keeps it out of the eager wire schema')
     # Project-write family must stay gated OFF (no project attached).
     for gated in ('write_file', 'apply_diff', 'list_dir', 'grep_search'):
         assert gated not in paper_names, f'{gated} leaked into project-less set'

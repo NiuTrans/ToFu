@@ -139,7 +139,9 @@ class TestKeyModuleImports:
         'lib.project_mod.scanner',
     ])
     def test_import_succeeds(self, mod_name):
-        __import__(mod_name)
+        import importlib
+        module = importlib.import_module(mod_name)
+        assert module.__name__ == mod_name
 
 
 # ═══════════════════════════════════════════════════════════
@@ -148,9 +150,15 @@ class TestKeyModuleImports:
 
 @pytest.mark.unit
 class TestFsKeepalive:
-    def test_start_no_error(self):
-        from lib.fs_keepalive import start_fs_keepalive
-        start_fs_keepalive()  # should not raise
+    def test_start_no_error(self, monkeypatch):
+        import lib.fs_keepalive as keepalive
+        # Force the ordinary local-disk no-op so this unit test never starts a
+        # real daemon against the developer's mount.
+        monkeypatch.setattr(keepalive, '_is_network_mount', lambda _p: False)
+        before = keepalive._thread
+        result = keepalive.start_fs_keepalive()
+        assert result is None
+        assert keepalive._thread is before
 
     def test_network_mount_detection(self):
         from lib.fs_keepalive import _is_network_mount

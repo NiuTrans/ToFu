@@ -1,0 +1,3 @@
+# Optional. The local Singularity/Apptainer path only needs requirements.txt.
+-r requirements.txt
+harbor[modal,daytona,e2b,runloop,novita] @ git+https://github.com/harbor-framework/harbor.git@ea2fee78517f2e591bad69fcf1e6731f9c23ec99

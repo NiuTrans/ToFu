@@ -56,11 +56,14 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-POLL_JS = os.path.join(ROOT, 'static', 'js', 'ui', 'sse_poll_fallback.js')
+POLL_JS = runtime_section_path('ui/sse_poll_fallback.js')
+ENDPOINT_PROJECTION_JS = runtime_section_path('ui/endpoint_turn_projection.js')
 
 
 def _node_available() -> bool:
@@ -78,10 +81,15 @@ if (CFG.reprobeMs != null) global._SSE_REPROBE_INTERVAL_MS = CFG.reprobeMs;
 
 const calls = { stallWatchClear: [], clearSseCursor: [], trySSE: [],
                 pollQueries: [],
+                turnSnapshots: [], startStreaming: [], replaceAll: 0,
                 twUpdate: 0, twStop: 0, finishStream: 0, save: 0 };
 global.stallWatchClear = (t) => { calls.stallWatchClear.push(t); };
 global._clearSseCursor = (t) => { calls.clearSseCursor.push(t); };
-global.twUpdate = () => { calls.twUpdate++; };
+global.twUpdate = () => {
+  calls.twUpdate++;
+  if (typeof conv !== 'undefined')
+    calls.turnSnapshots.push(JSON.parse(JSON.stringify(conv.messages)));
+};
 global.twStop = () => { calls.twStop++; };
 global.finishStream = () => { calls.finishStream++; };
 global.saveConversations = () => { calls.save++; };
@@ -90,6 +98,19 @@ global.showToast = () => {};
 global._checkServerHealth = async () => true;
 global._reportClientError = () => {};
 global.setStreamPhase = () => {};
+global._maskVuMachineTokens = (s) =>
+  String(s || '').replace(/\[(?:VU|PROGRESS):[^\]]*\]/gi, '').trim();
+let _mid = 0;
+global._ensureMsgId = (m) => {
+  if (m && !m._msgId) m._msgId = 'poll-mid-' + (++_mid);
+  return m;
+};
+global.ConvView = {
+  replaceAll: () => { calls.replaceAll++; },
+  startStreaming: (convId, opts) => {
+    calls.startStreaming.push({ convId, opts });
+  },
+};
 global.projectColdSnapshot = (s) => ({ content: s.content || '', thinking: s.thinking || '',
                                       toolRounds: s.toolRounds || [] });
 global._resolveAssistantById = (conv, id, fb) => {
@@ -145,6 +166,7 @@ global._trySSE = async (convId, taskId, strm, msg) => {
   return step === 'done';
 };
 
+eval(fs.readFileSync(process.argv[4], 'utf8'));   // endpoint_turn_projection.js
 eval(fs.readFileSync(process.argv[2], 'utf8'));   // ui/sse_poll_fallback.js (real)
 
 (async () => {
@@ -158,6 +180,7 @@ eval(fs.readFileSync(process.argv[2], 'utf8'));   // ui/sse_poll_fallback.js (re
     ghostContent: placeholder.content,
     inTreeContent: inTree.content,
     inTreeIsPlaceholder: inTree === placeholder,
+    messages: conv.messages,
   }));
 })();
 """
@@ -174,7 +197,10 @@ def _run(cfg: dict) -> dict:
     with open(probe, 'w', encoding='utf-8') as f:
         f.write(_HARNESS)
     try:
-        p = subprocess.run(['node', probe, POLL_JS, json.dumps(cfg)],
+        p = subprocess.run([
+            'node', probe, POLL_JS, json.dumps(cfg),
+            ENDPOINT_PROJECTION_JS,
+        ],
                            capture_output=True, text=True, timeout=60, cwd=ROOT)
     finally:
         os.unlink(probe)
@@ -183,11 +209,14 @@ def _run(cfg: dict) -> dict:
 
 
 _RUN1 = {'data': {'status': 'running', 'content': 'x' * 10, 'thinking': 't1',
-                  'toolRounds': [], 'taskId': 'task-dg-1', 'phase': None}}
+                  'contentEpoch': 0, 'toolRounds': [],
+                  'taskId': 'task-dg-1', 'phase': None}}
 _RUN2 = {'data': {'status': 'running', 'content': 'y' * 30, 'thinking': 't1t2',
-                  'toolRounds': [], 'taskId': 'task-dg-1', 'phase': None}}
+                  'contentEpoch': 0, 'toolRounds': [],
+                  'taskId': 'task-dg-1', 'phase': None}}
 _DONE = {'data': {'status': 'done', 'content': 'z' * 40, 'thinking': 't1t2',
-                  'toolRounds': [], 'taskId': 'task-dg-1', 'finishReason': 'stop'}}
+                  'contentEpoch': 0, 'toolRounds': [],
+                  'taskId': 'task-dg-1', 'finishReason': 'stop'}}
 
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
@@ -267,6 +296,151 @@ def test_incr_omissions_keep_state_and_echo_fp():
 
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_incr_tool_round_deltas_replace_tail_and_append_without_losing_prefix():
+    """The bounded tool-round wire patch must reconstruct the exact live list:
+    a mutable-tail update replaces that row and a later append preserves both
+    sealed rows.  This is the client half of the large-poll regression."""
+    fp1 = {'c': [0, 1], 't': [0, 2], 'r': [2, 10]}
+    fp2 = {'c': [0, 1], 't': [0, 2], 'r': [2, 11]}
+    fp3 = {'c': [0, 1], 't': [0, 2], 'r': [3, 12]}
+    closed = {'roundNum': 1, 'status': 'done', 'result': 'sealed'}
+    live_a = {'roundNum': 2, 'status': 'running', 'result': 'partial-a'}
+    live_b = {'roundNum': 2, 'status': 'done', 'result': 'partial-b'}
+    appended = {'roundNum': 3, 'status': 'running', 'result': 'new'}
+    full = {'data': {
+        'status': 'running', 'content': '', 'thinking': '',
+        'toolRounds': [closed, live_a], 'taskId': 'task-dg-1', 'fp': fp1,
+    }}
+    replace_tail = {'data': {
+        'status': 'running', 'contentSame': True, 'thinkingSame': True,
+        'toolRoundsDelta': {'start': 1, 'rows': [live_b]},
+        'taskId': 'task-dg-1', 'fp': fp2,
+    }}
+    append = {'data': {
+        'status': 'running', 'contentSame': True, 'thinkingSame': True,
+        'toolRoundsDelta': {'start': 2, 'rows': [appended]},
+        'taskId': 'task-dg-1', 'fp': fp3,
+    }}
+    done = {'data': {
+        'status': 'done', 'content': 'done', 'thinking': '',
+        'toolRounds': [closed, live_b, appended], 'taskId': 'task-dg-1',
+        'finishReason': 'stop', 'fp': fp3,
+    }}
+    r = _run({'reprobeMs': 1e15, 'polls': [full, replace_tail, append, done]})
+    snaps = r['calls']['turnSnapshots']
+    assert snaps[1][-1]['toolRounds'] == [closed, live_b], r
+    assert snaps[2][-1]['toolRounds'] == [closed, live_b, appended], r
+    assert r['calls']['pollQueries'][1]['ifp'] == _js(fp1), r
+    assert r['calls']['pollQueries'][2]['ifp'] == _js(fp2), r
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_incr_tool_round_delta_with_missing_local_base_forces_full_retry():
+    """A reload/rebind race may erase the local patch base.  The client must
+    not apply a gapped delta and must omit ifp on the next request so the
+    server self-heals with a full snapshot."""
+    fp = {'c': [0, 1], 't': [0, 2], 'r': [4, 10]}
+    bad_patch = {'data': {
+        'status': 'running', 'content': '', 'thinking': '',
+        'toolRoundsDelta': {'start': 3, 'rows': [{'roundNum': 4}]},
+        'taskId': 'task-dg-1', 'fp': fp,
+    }}
+    full = {'data': {
+        'status': 'done', 'content': 'done', 'thinking': '',
+        'toolRounds': [{'roundNum': i} for i in range(1, 5)],
+        'taskId': 'task-dg-1', 'finishReason': 'stop', 'fp': fp,
+    }}
+    r = _run({'reprobeMs': 1e15, 'polls': [bad_patch, full]})
+    assert r['calls']['pollQueries'][1]['ifp'] is None, r
+    assert [x['roundNum'] for x in r['messages'][-1]['toolRounds']] == [1, 2, 3, 4], r
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_poll_adopts_authoritative_inter_round_reset():
+    """A tool round may replace its pre-tool narration with an empty live
+    deliverable while retaining the narration on toolRounds. Poll snapshots
+    are authoritative for a live turn: the empty/shorter reset must replace
+    the bottom content immediately, not remain duplicated until later text
+    grows past the old narration length."""
+    narration = 'I will inspect the current implementation before changing it.'
+    prior_thinking = 'I need to inspect the data flow carefully.'
+    round_after_reset = {
+        'roundNum': 1, 'llmRound': 0, 'toolCallId': 'tc-reset',
+        'toolName': 'read_files', 'status': 'searching',
+        'assistantContent': narration, 'thinking': prior_thinking,
+    }
+    first = {'data': {
+        'status': 'running', 'content': narration, 'thinking': prior_thinking,
+        'contentEpoch': 0, 'toolRounds': [],
+        'taskId': 'task-dg-1', 'phase': None,
+    }}
+    reset = {'data': {
+        'status': 'running', 'content': '', 'thinking': '',
+        'contentEpoch': 1, 'toolRounds': [round_after_reset],
+        'taskId': 'task-dg-1', 'phase': {'phase': 'tool_exec'},
+    }}
+    new_tail = {'data': {
+        'status': 'running', 'content': 'Final', 'thinking': '',
+        'contentEpoch': 1,
+        'toolRounds': [dict(round_after_reset, status='done')],
+        'taskId': 'task-dg-1', 'phase': None,
+    }}
+    done = {'data': {
+        'status': 'done', 'content': 'Final answer', 'thinking': '',
+        'contentEpoch': 1,
+        'toolRounds': [dict(round_after_reset, status='done')],
+        'taskId': 'task-dg-1', 'finishReason': 'stop',
+    }}
+    r = _run({'reprobeMs': 1e15, 'polls': [first, reset, new_tail, done]})
+    contents = [snap[-1].get('content') for snap in r['calls']['turnSnapshots']]
+    thinking = [snap[-1].get('thinking') for snap in r['calls']['turnSnapshots']]
+    assert contents[:3] == [narration, '', 'Final'], (
+        'poll mode kept stale pre-tool narration in the bottom content zone; '
+        f'expected narration → empty reset → new tail, got {contents}')
+    assert thinking[:3] == [prior_thinking, '', ''], (
+        'poll mode kept stale per-round thinking in the bottom thinking zone; '
+        f'expected thinking → empty reset, got {thinking}')
+    reset_msg = r['calls']['turnSnapshots'][1][-1]
+    assert reset_msg['toolRounds'][0].get('assistantContent') == narration, (
+        'inter-round narration must remain preserved on its tool round')
+    assert reset_msg['toolRounds'][0].get('thinking') == prior_thinking, (
+        'inter-round thinking must remain preserved on its tool round')
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_poll_keeps_longer_text_within_same_epoch_and_rejects_stale_epoch():
+    """A shorter poll is authoritative only after an explicit reset epoch.
+    Same-epoch lag and an older generation must not erase newer client text."""
+    first = {'data': {
+        'status': 'running', 'content': 'already streamed text', 'thinking': 'reasoning',
+        'contentEpoch': 2, 'toolRounds': [], 'taskId': 'task-dg-1', 'phase': None,
+    }}
+    lagging = {'data': {
+        'status': 'running', 'content': 'old', 'thinking': 'r',
+        'contentEpoch': 2, 'toolRounds': [], 'taskId': 'task-dg-1', 'phase': None,
+    }}
+    reset = {'data': {
+        'status': 'running', 'content': '', 'thinking': '',
+        'contentEpoch': 3, 'toolRounds': [], 'taskId': 'task-dg-1', 'phase': None,
+    }}
+    stale = {'data': {
+        'status': 'running', 'content': 'resurrected old narration', 'thinking': 'old think',
+        'contentEpoch': 2, 'toolRounds': [], 'taskId': 'task-dg-1', 'phase': None,
+    }}
+    done = {'data': {
+        'status': 'done', 'content': 'final answer', 'thinking': '',
+        'contentEpoch': 3, 'toolRounds': [], 'taskId': 'task-dg-1',
+        'finishReason': 'stop',
+    }}
+    r = _run({'reprobeMs': 1e15, 'polls': [first, lagging, reset, stale, done]})
+    contents = [snap[-1].get('content') for snap in r['calls']['turnSnapshots']]
+    assert contents[:4] == [
+        'already streamed text', 'already streamed text', '', '',
+    ], f'same/stale epoch snapshot clobbered client state: {contents}'
+    assert r['inTreeContent'] == 'final answer', r
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_reprobe_cursorless_and_hands_back_to_sse():
     """Scenario C (interval 0): a failed probe resumes polling; a later probe
     that attaches runs the turn to done and poll YIELDS (no poll-lane
@@ -284,6 +458,46 @@ def test_reprobe_cursorless_and_hands_back_to_sse():
         f"the successful probe hands back immediately — no further polls: {r}"
     assert r['calls']['finishStream'] == 0 and r['calls']['twStop'] == 0, \
         f"on handback _trySSE owns finalization; the poll lane must not double-finalize: {r}"
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_flow_autopilot_poll_projects_vu_and_discards_task_done_placeholder():
+    """SSE-down parity: poll must show a VU, never a Critic, and clean it on
+    TASK_DONE even when endpointTurns is unchanged in the terminal response."""
+    running = {'data': {
+        'status': 'running', 'endpointMode': True, 'flowMode': True,
+        'flowProjection': 'autopilot', 'endpointPhase': 'reviewing',
+        'endpointIteration': 1, 'turnRole': 'virtual_user', 'emits': 'user',
+        'vuMsgId': 'vu-poll-1', 'autopilotRunId': 'run-poll-1',
+        'endpointTurns': [{
+            'role': 'assistant', 'content': 'worker result',
+            '_epIteration': 1, '_msgId': 'worker-poll-1',
+        }],
+        'content': '[PROGRESS: resolved=1 remaining=1] Keep going',
+        'thinking': '', 'toolRounds': [], 'taskId': 'task-dg-1',
+    }}
+    terminal = {'data': {
+        'status': 'done', 'endpointMode': True, 'flowMode': True,
+        'flowProjection': 'autopilot', 'endpointPhase': 'done',
+        'endpointStopReason': 'completed', 'endpointIteration': 1,
+        'turnRole': 'virtual_user', 'emits': 'user',
+        'vuMsgId': 'vu-poll-1', 'autopilotRunId': 'run-poll-1',
+        'endpointTurnsSame': True, 'contentSame': True,
+        'thinkingSame': True, 'roundsSame': True,
+        'taskId': 'task-dg-1', 'finishReason': 'stop',
+    }}
+    r = _run({'reprobeMs': 1e15, 'polls': [running, terminal]})
+    first = r['calls']['turnSnapshots'][0]
+    vu = next((m for m in first if m.get('_msgId') == 'vu-poll-1'), None)
+    assert vu and vu.get('_isVirtualUser') is True, r
+    assert not vu.get('_isEndpointReview'), r
+    assert vu.get('_autopilotRunId') == 'run-poll-1', r
+    assert vu.get('content') == 'Keep going', r
+    assert any(c['opts'].get('role') == 'autopilot'
+               and c['opts'].get('msgId') == 'vu-poll-1'
+               for c in r['calls']['startStreaming']), r
+    assert not any(m.get('_msgId') == 'vu-poll-1' for m in r['messages']), r
+    assert r['calls']['finishStream'] == 1 and r['calls']['twStop'] == 1, r
 
 
 def test_source_wires_degraded_mode_seams():
@@ -308,6 +522,12 @@ def test_source_wires_degraded_mode_seams():
     assert '_pollQuery.ifp = JSON.stringify(_pollFP)' in src, 'the fp echo was removed'
     assert 'data.contentSame' in src and 'data.roundsSame' in src, 'the omission merge guards were removed'
     assert '_pollFP = null;' in src, 'the rebind→force-full reset was removed'
+    assert 'data.contentEpoch' in src and 'epochAdvanced' in src and 'epochStale' in src, \
+        'the generation-aware shrink contract was removed from degraded polling'
+    assert 'projectEndpointChatTurn(' in src, \
+        'poll fallback no longer consumes shared Flow turn identity policy'
+    assert '_flowPollInFlight' in src, \
+        'poll fallback lost stable in-flight flow-turn projection/cleanup'
 
 
 if __name__ == '__main__':

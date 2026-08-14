@@ -194,9 +194,9 @@ The remaining domains follow the same pattern.
 
 ## 8. References
 
-- `static/js/api.js`                                    — implementation
+- `frontend/src/api/transport.ts`                       — implementation
 - `tests/test_frontend_api_isolation.py`                — ratchet guard
 - `.tofu/memories/separation-of-concerns-directive.md`  — frontend/backend boundary
 - `routes/api_v1/`                                      — v1 backend surface (long-term target)
-- `static/js/push.js`                                   — server-push hub
-- `lib/js_bundler.py`                                   — bundle order (`api.js` after `core.js`)
+- `frontend/src/runtime/app-runtime.js`                 — server-push client
+- `lib/vite_assets.py`                                  — validated manifest loading

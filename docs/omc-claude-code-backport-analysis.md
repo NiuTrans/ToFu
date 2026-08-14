@@ -410,7 +410,7 @@ These areas are where Tofu is at parity with or ahead of OMC/Claude Code:
 - **Verdict:** Parity.
 
 ### 5.7 Suspicious Completion Detection ✅
-- Tofu: `_check_suspicious_completion()` detects empty content, short content after tool calls, max rounds exhausted, fast completion with no content.
+- Tofu: `_check_suspicious_completion()` detects empty content, short content after tool calls, and fast completion with no content. Tool use itself has no numeric round cap.
 - OMC/CC: No equivalent (rely on todo enforcement instead).
 - **Verdict:** Tofu is ahead (but different approach).
 

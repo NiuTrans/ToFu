@@ -11,6 +11,7 @@ import json
 import uuid
 from typing import Any
 
+from lib.llm_sanitize import _UNNAMED_TOOL_NAME
 from lib.log import audit_log, get_logger
 from lib.tasks_pkg.executor import SWARM_TOOL_NAMES
 from lib.tasks_pkg.manager import append_event
@@ -50,6 +51,15 @@ def _reject_undispatched(tc, display_name, tc_id, receipt_msg, rejected_meta,
     round_entry['_rejected'] = rejected_meta
     event_payload['status'] = 'rejected'
     event_payload['_rejected'] = rejected_meta
+    _source = str(tc.get('source') or 'native_direct')
+    round_entry['source'] = _source
+    event_payload['source'] = _source
+    if isinstance(tc.get('caller'), dict):
+        round_entry['caller'] = dict(tc['caller'])
+        event_payload['caller'] = dict(tc['caller'])
+        if tc['caller'].get('type') == 'program' and tc['caller'].get('caller_id'):
+            round_entry['_programCallId'] = tc['caller']['caller_id']
+            event_payload['programCallId'] = tc['caller']['caller_id']
     task['toolRounds'].append(round_entry)
     append_event(task, event_payload)
     return ((tc, display_name, tc_id, {}, rn, round_entry, receipt_msg),
@@ -112,6 +122,9 @@ def parse_tool_calls(
     #   key set below (`thinkingSignature`).
     _assistant_thinking = (assistant_msg.get('reasoning_content') or '').strip()
     _assistant_thinking_signature = assistant_msg.get('thinking_signature') or ''
+    _assistant_responses_items = assistant_msg.get('_responses_items') or []
+    _assistant_anthropic_blocks = (
+        assistant_msg.get('_anthropic_content_blocks') or [])
 
     _total_tcs = len(assistant_msg['tool_calls'])
     # Live set of REAL tool names for this turn (built-ins + MCP + swarm +
@@ -172,6 +185,17 @@ def parse_tool_calls(
                 # back so the synthetic tool_result pairs with the tool_use
                 # instead of becoming a second, differently-keyed orphan.
                 tc['id'] = tc_id
+            # Same write-back for an EMPTY name: this wire dict is replayed
+            # verbatim on the next round, and strict vendors hard-400 the
+            # WHOLE request on name='' (Kimi "tokenization failed" —
+            # live-probed 2026-08-07, task 9a8196f3 R4). The receipt below
+            # still tells the model the call never ran; the placeholder only
+            # keeps the replayed wire protocol-valid. The build_body
+            # chokepoint (_fix_tool_call_wire_shape) heals every OTHER
+            # producer — this is the source fix.
+            _fn_wire = tc.get('function')
+            if isinstance(_fn_wire, dict) and not (_fn_wire.get('name') or ''):
+                _fn_wire['name'] = _UNNAMED_TOOL_NAME
             _drop_reason = _ingested.drop_reason or 'missing'
             if _drop_reason == 'internal_artifact':
                 _why = (f'its function name {fn_name!r} is an internal/proxy '
@@ -249,6 +273,8 @@ def parse_tool_calls(
             parsed_tcs.append(_receipt)
             continue
         tc_id = tc.get('id') or f'call_{uuid.uuid4().hex[:12]}'
+        if not tc.get('id'):
+            tc['id'] = tc_id
         # Harness self-repair tracking — surfaced to the UI so the user knows
         # the displayed/executed args were auto-corrected from a malformed
         # model output.  ``_json_repaired`` = recovered truncated/invalid JSON;
@@ -299,16 +325,60 @@ def parse_tool_calls(
             tool_name_aliased=_tool_name_aliased, resolved_tool_name=fn_name,
         )
 
+        # Hosted PTC schemas are an upstream routing hint, not an application
+        # authorization boundary. Enforce Tofu's explicit allow-list and hard
+        # per-program call ceiling before any early-cache reuse or execution.
+        from lib.tasks_pkg.orchestrator._programmatic import (
+            reject_programmatic_call,
+        )
+        _program_rejection = reject_programmatic_call(task, tc, fn_name)
+        if _program_rejection:
+            _program_msg, _program_meta = _program_rejection
+            if tc_id in _early:
+                rn, round_entry = _early[tc_id]
+                round_entry['status'] = 'rejected'
+                round_entry['_rejected'] = _program_meta
+                parsed_tcs.append((
+                    tc, fn_name, tc_id, {}, rn, round_entry, _program_msg))
+            else:
+                _receipt, tool_round_num = _reject_undispatched(
+                    tc, fn_name, tc_id, _program_msg, _program_meta,
+                    task, tool_round_num, round_num, project_enabled)
+                parsed_tcs.append(_receipt)
+            continue
+
         # ── Check if this tool was already announced during streaming ──
         if tc_id in _early:
             rn, round_entry = _early[tc_id]
+            round_entry['source'] = str(
+                tc.get('source') or round_entry.get('source')
+                or 'native_direct')
+            if isinstance(tc.get('caller'), dict):
+                round_entry['caller'] = dict(tc['caller'])
+                if (tc['caller'].get('type') == 'program'
+                        and tc['caller'].get('caller_id')):
+                    round_entry['_programCallId'] = tc['caller']['caller_id']
             # ★ Harness fixed this call's args AFTER the streaming early-
             #   announce already rendered the (garbled) display — patch the
             #   stale round entry so the UI shows the corrected line + badge.
             if _repair_summary:
-                _apply_repair_to_round(round_entry, fn_name, fn_args, _repair_summary,
-                                       project_enabled,
-                                       task.get('convId') or task.get('id'))
+                _patched = _apply_repair_to_round(
+                    round_entry, fn_name, fn_args, _repair_summary,
+                    project_enabled,
+                    task.get('convId') or task.get('id'))
+                if _patched is not None:
+                    # The garbled early-announce line is ALREADY on the user's
+                    # screen; the settle frame would eventually refresh it, but
+                    # a long-running command would show e.g. '$ ?' for its
+                    # whole duration (2026-08-06: the gateway cut the stream
+                    # mid-arguments, the announce rendered '?'). Push the
+                    # corrected display over the live lane NOW. tool_progress
+                    # never settles a round (reducer discipline), so this
+                    # cannot flip the spinner early.
+                    from lib.agent_core.events import EventType, emit as _emit_ev
+                    _emit_ev(task, EventType.TOOL_PROGRESS,
+                             roundNum=rn, toolCallId=tc_id, toolName=fn_name,
+                             query=_patched, _repaired=_repair_summary)
             # ★ Hallucinated tool announced during streaming — mark the
             #   already-rendered round as rejected so the UI restyles it.
             if _hallucinated:
@@ -322,13 +392,20 @@ def parse_tool_calls(
             #   vanished at finalize (assemble_segments reads round['thinking'],
             #   and committedMessage overwrites the live-stamped copy).
             if not _ac_tagged and (_assistant_content or _assistant_thinking
-                                   or _assistant_thinking_signature):
+                                   or _assistant_thinking_signature
+                                   or _assistant_responses_items
+                                   or _assistant_anthropic_blocks):
                 if _assistant_content:
                     round_entry['assistantContent'] = _assistant_content
                 if _assistant_thinking:
                     round_entry['thinking'] = _assistant_thinking
                 if _assistant_thinking_signature:
                     round_entry['thinkingSignature'] = _assistant_thinking_signature
+                if _assistant_responses_items:
+                    round_entry['_responsesItems'] = _assistant_responses_items
+                if _assistant_anthropic_blocks:
+                    round_entry['_anthropicContentBlocks'] = (
+                        _assistant_anthropic_blocks)
                 _ac_tagged = True
             # ★ Preserve Gemini thought_signature (and any other vendor-specific
             #   extra_content) so the frontend can round-trip it on Continue.
@@ -359,6 +436,16 @@ def parse_tool_calls(
         #   same assistant turn — needed for accurate Continue grouping.
         round_entry['llmRound'] = round_num
         event_payload['llmRound'] = round_num
+        _source = str(tc.get('source') or 'native_direct')
+        round_entry['source'] = _source
+        event_payload['source'] = _source
+        if isinstance(tc.get('caller'), dict):
+            round_entry['caller'] = dict(tc['caller'])
+            event_payload['caller'] = dict(tc['caller'])
+            if (tc['caller'].get('type') == 'program'
+                    and tc['caller'].get('caller_id')):
+                round_entry['_programCallId'] = tc['caller']['caller_id']
+                event_payload['programCallId'] = tc['caller']['caller_id']
         # ★ Harness self-repair badge — tells the user this call's arguments
         #   were auto-corrected from a malformed model output.
         if _repair_summary:
@@ -380,7 +467,9 @@ def parse_tool_calls(
         #   finalize (assemble_segments reads round['thinking'] and the
         #   authoritative committedMessage overwrites the live-stamped copy).
         if not _ac_tagged and (_assistant_content or _assistant_thinking
-                               or _assistant_thinking_signature):
+                               or _assistant_thinking_signature
+                               or _assistant_responses_items
+                               or _assistant_anthropic_blocks):
             if _assistant_content:
                 round_entry['assistantContent'] = _assistant_content
                 event_payload['assistantContent'] = _assistant_content
@@ -390,6 +479,14 @@ def parse_tool_calls(
             if _assistant_thinking_signature:
                 round_entry['thinkingSignature'] = _assistant_thinking_signature
                 event_payload['thinkingSignature'] = _assistant_thinking_signature
+            if _assistant_responses_items:
+                # Opaque encrypted/server-compaction state is persisted for
+                # stateless Responses replay, but deliberately omitted from
+                # the live UI event payload.
+                round_entry['_responsesItems'] = _assistant_responses_items
+            if _assistant_anthropic_blocks:
+                round_entry['_anthropicContentBlocks'] = (
+                    _assistant_anthropic_blocks)
             _ac_tagged = True
         # ★ Preserve Gemini thought_signature on the persisted tool round.
         #   Captured off the assistant tool_call entry by lib.llm's

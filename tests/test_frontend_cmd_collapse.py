@@ -32,6 +32,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -39,7 +40,10 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+sys.path.insert(0, HERE)
+from _runtime_sections import runtime_section_path  # noqa: E402
+
+TOOL_ROUNDS = runtime_section_path('ui/tool_rounds.js')
 STYLES = os.path.join(ROOT, 'static', 'styles.css')
 
 LONG_CMD = "grep -c 'jsonify(' routes/api_v1/browser.py && python3 - <<'EOF'\nimport pathlib\nprint('baseline tightened')\nEOF"
@@ -142,6 +146,23 @@ check('untoggle_removes_cmd_open', !blockEl.classList.contains('cmd-open'));
 const html1c = _renderUnifiedToolLine(doneLong, false);
 check('rerender_collapses_again', !html1c.includes('ptool-cmd-ok cmd-open'));
 
+// ── 5b. Output pane toggle: NAMED action only. The data-tofu-action
+// interpreter executes a restricted grammar (no `var`, no ternaries) and
+// silently refuses inline JS beyond it — the pre-2026-08-14 inline version
+// threw "Unsupported action expression" on every click, so the output could
+// never be opened. Guard both the wiring AND the behavior. ──
+const outToggle = host.querySelector('.ptool-cmd-toggle');
+check('output_toggle_el_present', !!outToggle);
+check('output_toggle_named_action', html1.includes('data-tofu-action="_cmdOutputToggle(this,event)"'));
+check('output_toggle_no_inline_var', !html1.includes('var w=this.parentElement'));
+_cmdOutputToggle(outToggle, { stopPropagation() {} });
+const outWrap = host.querySelector('.ptool-cmd-output-wrap');
+check('output_toggle_expands', outWrap.classList.contains('expanded'));
+check('output_toggle_label_collapse', outToggle.textContent === '▾ Collapse');
+_cmdOutputToggle(outToggle, { stopPropagation() {} });
+check('output_toggle_collapses', !outWrap.classList.contains('expanded'));
+check('output_toggle_label_show', outToggle.textContent === '▸ Show output');
+
 // ── 6. code_exec: identical treatment ──
 const ceLong = {
   status: 'done', toolName: 'code_exec', query: LONG_CMD,
@@ -168,7 +189,7 @@ def test_cmd_collapse_contract():
     try:
         proc = subprocess.run(
             ['node', harness,
-             os.path.join(JS_DIR, 'ui', 'tool_rounds.js'),  # argv[2]
+             TOOL_ROUNDS,  # argv[2]
              ROOT,                                          # argv[3]
              LONG_CMD],                                     # argv[4]
             capture_output=True, text=True, timeout=60,

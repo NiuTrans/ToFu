@@ -7,14 +7,15 @@ role is to be controlled by a Tofu server — the agent loop IS this process.
 
 Four acts (docs/DESKTOP_AGENT_DIST_DESIGN.md §4.1):
 
-  1. import the installer's preseed (server address, one-shot, non-secret);
-  2. ensure an attachment — the shared connect-line dialog, once, then
-     persisted (cancel ⇒ exit 0: an agent with nothing to poll is nothing);
+  1. import the installer's internal attachment (routes + credential);
+  2. if no attachment exists, try zero-input discovery and otherwise stay
+     idle until a fresh personalized installer is run;
   3. rebuild the permission floor — persisted tiers over deny-all;
   4. run the agent in a thread + a minimal tray on the main thread.
 
-The tray is the whole "configuration capability": Server label, Connect…,
-the four permission tiers, Start with Windows, Quit.
+The tray is the whole "configuration capability": server/link status,
+browser-assisted relay, diagnostics, the four permission tiers,
+Start with Windows, and Quit.
 
 Two disciplines copied from desktop/launcher.py because they bit us there:
 
@@ -175,13 +176,18 @@ def _reconcile_autostart() -> None:
     installer wrote, so the tray checkbox shows the truth.
     """
     try:
-        from lib.desktop_agent.config import load_config, save_config
-        cfg = load_config()
-        if 'autostart' in cfg:
-            _autostart_apply(bool(cfg.get('autostart')))
-        else:
-            cfg['autostart'] = _autostart_get()
-            save_config(cfg)
+        from lib.desktop_agent.config import update_config
+
+        def _ensure_choice(cfg):
+            if 'autostart' not in cfg:
+                cfg['autostart'] = _autostart_get()
+            return cfg
+
+        # Resolve absence and persist the installer state in the same locked
+        # transaction.  A concurrent role/attachment write can no longer be
+        # erased by a stale whole-config snapshot.
+        cfg = update_config(_ensure_choice)
+        _autostart_apply(bool(cfg.get('autostart')))
     except Exception as e:
         _log('Autostart reconcile failed: %s' % e)
         logger.warning('Autostart reconcile failed: %s', e)
@@ -189,10 +195,13 @@ def _reconcile_autostart() -> None:
 
 def _persist_autostart(enabled: bool) -> None:
     try:
-        from lib.desktop_agent.config import load_config, save_config
-        cfg = load_config()
-        cfg['autostart'] = bool(enabled)
-        save_config(cfg)
+        from lib.desktop_agent.config import update_config
+
+        def _mutate(cfg):
+            cfg['autostart'] = bool(enabled)
+            return cfg
+
+        update_config(_mutate)
     except Exception as e:
         _log('Autostart persist failed: %s' % e)
         logger.warning('Autostart persist failed: %s', e)
@@ -289,7 +298,8 @@ def _start_agent(state: dict, perms: dict) -> None:
         try:
             run_agent(url, perms, poll_interval=1.0,
                       bridge_secret=secret, stop_event=stop,
-                      on_status=_on_status, route_repair=_route_repair)
+                      on_status=_on_status, route_repair=_route_repair,
+                      browser_relay=state.get('browser_relay'))
         except Exception as e:
             _log('Agent loop crashed: %s' % e)
             logger.error('Agent loop crashed: %s', e, exc_info=True)
@@ -327,6 +337,8 @@ def _link_status_text(state: dict) -> str:
     if code == 'unconfigured':
         return theme.t('desktop.tray.stUnattached', lang)
     if code == 'ok':
+        if st.get('transport') == 'browser':
+            return theme.t('desktop.tray.stOkBrowser', lang)
         return theme.t('desktop.tray.stOk', lang)
     if code == 'auth':
         return theme.t('desktop.tray.stAuth', lang)
@@ -371,6 +383,12 @@ def _diag_report(state: dict) -> str:
                      % (cfg.get('attach_candidates') or []))
     except Exception as e:
         lines.append('config unreadable: %s' % e)
+    relay = state.get('browser_relay')
+    if relay is not None:
+        lines.append('browser_relay: 127.0.0.1:%s (%s)'
+                     % (getattr(relay, 'port', 0) or 'not-bound',
+                        'browser-seen' if relay.browser_available()
+                        else 'waiting-for-browser'))
     lines.append('log file: %s' % _LOG_PATH)
     try:
         with open(_LOG_PATH, encoding='utf-8', errors='replace') as f:
@@ -407,9 +425,7 @@ def _copy_diag_to_clipboard(text: str, log=_log) -> bool:
 
 def _run_tray(state: dict, perms: dict) -> None:
     """The minimal tray: the whole configuration surface of this component."""
-    from desktop.connect_ui import prompt_connect_line
-    from lib.desktop_agent.config import save_remote_server, \
-        save_computer_control
+    from lib.desktop_agent.config import save_computer_control
 
     try:
         import pystray
@@ -425,31 +441,6 @@ def _run_tray(state: dict, perms: dict) -> None:
             if ev is not None:
                 ev.set()
         return
-
-    def on_connect(icon, item):
-        # Only the DIALOG rides the tk host thread; the save/restart/menu
-        # refresh below stay on the tray thread (icon.update_menu is not
-        # thread-safe to call from the host). host.call inlines when the
-        # host is down or the caller is already on it (role-window path).
-        from desktop import _tk_host
-        parsed = _tk_host.call(
-            lambda: prompt_connect_line(state.get('url') or '', log=_log))
-        if parsed is None:
-            return
-        url, secret = parsed
-        try:
-            save_remote_server(url, secret)
-        except Exception as e:
-            _log('Could not save attachment: %s' % e)
-            logger.warning('Could not save attachment: %s', e)
-            return
-        state['url'], state['secret'] = url, secret
-        _log('Attached to %s' % url)
-        _restart_agent(state, perms)
-        try:
-            icon.update_menu()
-        except Exception as e:
-            _log('Menu refresh failed after connect: %s' % e)
 
     def _toggle_perm(key: str):
         def _handler(icon, item):
@@ -514,11 +505,25 @@ def _run_tray(state: dict, perms: dict) -> None:
         return role_window.role_state_agent(
             state.get('url') or '', perms, autostart,
             show_flag=role_window.should_show_at_startup(),
-            link_text=_link_status_text(state))
+            link_text=_link_status_text(state),
+            link_state=(state.get('last_status') or {}).get('state') or '')
+
+    def on_browser_relay(icon, item):
+        """Open Tofu so its signed-in tab can carry the Codelab SSO hop."""
+        url = str(state.get('url') or '').strip().rstrip('/')
+        if not url:
+            return
+        try:
+            import webbrowser
+            webbrowser.open(url + '/#tofu-agent-relay')
+            _log('Opened browser-assisted connection page: %s' % url)
+        except Exception as e:
+            _log('Could not open browser-assisted connection page: %s' % e)
+            logger.warning('Could not open browser relay page: %s', e)
 
     _role_actions = {
         'toggle_perm': lambda key: _toggle_perm(key)(_NULL_ICON, None),
-        'connect': lambda: on_connect(_NULL_ICON, None),
+        'browser_relay': lambda: on_browser_relay(_NULL_ICON, None),
         'toggle_autostart': lambda: on_toggle_autostart(_NULL_ICON, None),
         # The window's「复制诊断信息」button: the action only BUILDS the
         # report — the clipboard write happens window-side (tk thread).
@@ -553,11 +558,12 @@ def _run_tray(state: dict, perms: dict) -> None:
         MenuItem(lambda item: _tt('desktop.tray.linkState',
                                   status=_link_status_text(state)),
                  None, enabled=False),
+        MenuItem(_tt('desktop.tray.browserRelay'), on_browser_relay,
+                 visible=lambda item: bool(state.get('url'))),
         # One click hands the user the whole dead-link evidence pack
         # (saved route / candidates / link verdict / log tail) for a
         # paste back to the server side — no shell access needed.
         MenuItem(_tt('desktop.tray.copyDiag'), on_copy_diag),
-        MenuItem(_tt('desktop.tray.connectDifferent'), on_connect),
         pystray.Menu.SEPARATOR,
         MenuItem(_tt('desktop.tray.permissions'), pystray.Menu(
             MenuItem(_tt('desktop.tray.permWrite'), _toggle_perm('allow_write'),
@@ -603,7 +609,7 @@ def main():
     _enable_dpi_awareness()
 
     # ── 1. Attach imports (zero-config first, legacy preseed second) ──
-    # The download-baked bundle carries the credential AND the route
+    # The personalized installer attachment carries the credential AND route
     # candidates — strictly superior to the build-time URL-only preseed,
     # so it imports FIRST (a written attachment makes the preseed a no-op).
     from desktop.connect_ui import import_attach_bundle, import_preseed
@@ -657,12 +663,11 @@ def main():
         else:
             # Owner decree 2026-08-05: NO first-run dialog (the pairing
             # code is dead; typing anything is the burden we removed).
-            # Start idle — the role window shows the unattached state with
-            # the honest link line, and the tray's connect-line item stays
-            # as the manual repair path.
+            # Start idle — the role window and tray tell the user to rerun a
+            # fresh personalized installer. There is deliberately no manual
+            # address/credential repair surface.
             _log('No attach bundle and no server discovered — starting '
-                 'unattached; the control panel shows the link state and '
-                 'the tray Connect item remains the manual path')
+                 'unattached; rerun a personalized installer to attach')
 
     # ── 3. Permission floor: persisted tiers over deny-all ──
     from lib.desktop_agent._permissions import safe_default
@@ -678,7 +683,31 @@ def main():
     # ── 4. Autostart reconcile (config ↔ HKCU Run value) ──
     _reconcile_autostart()
 
-    state = {'url': url, 'secret': secret, 'stop': None, 'thread': None}
+    state = {'url': url, 'secret': secret, 'stop': None, 'thread': None,
+             'browser_relay': None}
+
+    # A web-only Codelab / VS Code proxy is reachable only in a browser that
+    # owns the gateway login cookie.  The loopback broker lets that already-
+    # authenticated Tofu tab carry polls without ever exporting its cookies.
+    # Direct/LAN deployments simply never use this optional transport.
+    try:
+        from lib.desktop_agent._browser_relay import BrowserRelay
+
+        def _relay_urls():
+            urls = [state.get('url') or '']
+            try:
+                from lib.desktop_agent.config import load_config
+                urls.extend(load_config().get('attach_candidates') or [])
+            except Exception as e:
+                _log('Browser-relay candidate read failed: %s' % e)
+            return urls
+
+        relay = BrowserRelay(_relay_urls, log=_log)
+        if relay.start():
+            state['browser_relay'] = relay
+    except Exception as e:
+        _log('Browser relay unavailable: %s' % e)
+        logger.warning('Browser relay unavailable: %s', e)
     _start_agent(state, perms)
     _run_tray(state, perms)
 

@@ -41,13 +41,23 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 
-_HOOK_MARKERS = ('mirror_write_and_commit', 'dual_write_conv')
+_HOOK_MARKERS = (
+    'mirror_write_and_commit', 'dual_write_conv', 'write_conv_rows')
 
 # (path fragment, def name or '*') — grandfathered; shrinks only.
 _ALLOWLIST = {
     ('lib/database/_schema_sqlite/_chat.py', '*'),   # one-off DDL migration
     ('lib/database/_schema_pg/_chat.py', '*'),       # one-off DDL migration
     ('lib/chat/persistence.py', 'load_or_create_conv'),  # INSERT … '[]' (empty)
+    # The canonical rows remain authoritative while this verified maintenance
+    # operation replaces only the retired hot blob with an empty archive stub.
+    ('lib/database/message_archive_offload.py',
+     'offload_frozen_message_archives'),
+    # Offline recovery imports legacy PG rows with messages_rows_rev left at
+    # its stale default, so readers intentionally fall back to the blob until
+    # the normal row migrator proves and advances the marker.
+    ('lib/database/pg_tooling.py',
+     'merge_recovery_conversation_archives'),
 }
 
 _DEF_RE = re.compile(r'^(\s*)(?:async\s+)?def\s+(\w+)')
@@ -61,7 +71,8 @@ def _git_files():
     out = subprocess.run(
         ['git', 'ls-files', 'lib/*.py', 'routes/*.py'],
         cwd=ROOT, capture_output=True, text=True, check=True)
-    return [f for f in out.stdout.split() if f.endswith('.py')]
+    return [f for f in out.stdout.split()
+            if f.endswith('.py') and os.path.isfile(os.path.join(ROOT, f))]
 
 
 def _def_spans(lines):
@@ -106,7 +117,7 @@ def _scan_source(src: str, path: str) -> list[str]:
         if not any(marker in body for marker in _HOOK_MARKERS):
             violations.append(
                 f'{path}:{idx + 1} {kind} in `{def_name}` has no dual-write '
-                'hook (mirror_write_and_commit / dual_write_conv)')
+                'hook (repository write_conv_rows / legacy dual-write)')
 
     for i, line in enumerate(lines):
         if _UPDATE_RE.search(line):
@@ -131,13 +142,14 @@ def test_every_blob_writer_has_a_dual_write_hook():
 def test_NEUTER_stripped_hook_is_flagged():
     """Byte-reverting NEUTER: remove the hook markers from one hooked file —
     the scanner MUST flag its writers (proves the guard is not vacuous)."""
-    with open(os.path.join(ROOT, 'routes/conversations.py'), encoding='utf-8') as f:
-        src = f.read()
-    assert 'mirror_write_and_commit' in src, 'precondition: hooks present'
-    neutered = src.replace('mirror_write_and_commit', 'REMOVED_HOOK')
-    violations = _scan_source(neutered, 'routes/conversations.py')
-    # save_conv stays covered by its inline dual_write_conv, but the five
-    # hooked writers must now be flagged.
+    src = '''
+def synthetic_writer(db, messages):
+    db.execute("UPDATE conversations SET messages=? WHERE id=?")
+    write_conv_rows(db, "c1", messages)
+'''
+    assert not _scan_source(src, 'synthetic.py')
+    neutered = src.replace('write_conv_rows', 'REMOVED_HOOK')
+    violations = _scan_source(neutered, 'synthetic.py')
     assert violations, 'NEUTER FAILED: scanner did not fire on stripped hooks'
 
 

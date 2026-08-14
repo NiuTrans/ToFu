@@ -1,6 +1,6 @@
 """Guards for pt_3879f00e sub-part 5B — defer
 ui/streaming_swarm_panel.js (55KB) from the CORE boot bundle into
-_DEFERRED_FILES.
+_CLASSIC_ASSET_FILES.
 
 The swarm "Parallel Execution" panel renders only for conversations with
 swarm (multi-agent) activity. Census (2026-08-01, grep-verified):
@@ -33,7 +33,7 @@ STREAMING_UI = ROOT / 'static' / 'js' / 'ui' / 'streaming_ui.js'
 CHAT_RENDER = ROOT / 'static' / 'js' / 'ui' / 'chat_render.js'
 TOOL_ROUNDS = ROOT / 'static' / 'js' / 'ui' / 'tool_rounds.js'
 PANEL = ROOT / 'static' / 'js' / 'ui' / 'streaming_swarm_panel.js'
-FEATURE_LOADER = ROOT / 'static' / 'js' / 'feature-loader.js'
+FEATURE_LOADER = ROOT / 'static' / 'js' / 'feature-bridge.js'
 ENTRY = 'ui/streaming_swarm_panel.js'
 
 
@@ -48,7 +48,7 @@ def _manifest():
 def test_swarm_panel_in_deferred_files():
     _bf, deferred, _ep, _crit = _manifest()
     assert ENTRY in deferred, (
-        f"'{ENTRY}' must be in _DEFERRED_FILES — 55KB of swarm-only panel "
+        f"'{ENTRY}' must be in _CLASSIC_ASSET_FILES — 55KB of swarm-only panel "
         'out of the render-blocking core')
 
 
@@ -125,6 +125,5 @@ def test_no_stub_entries():
         assert f"'{name}'" not in loader
 
 
-def test_dev_fallback_script_tag_kept():
-    assert 'static/js/ui/streaming_swarm_panel.js' in INDEX_HTML.read_text(), (
-        'index.html must carry the streaming_swarm_panel.js dev-fallback tag')
+def test_index_has_no_raw_swarm_panel_script():
+    assert 'static/js/ui/streaming_swarm_panel.js' not in INDEX_HTML.read_text()

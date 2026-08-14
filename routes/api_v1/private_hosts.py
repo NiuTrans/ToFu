@@ -23,7 +23,7 @@ IP addresses are rejected with 400 rather than stored.
 
 from __future__ import annotations
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.api_response import api_bad_request, api_error, api_ok
 from lib.log import get_logger

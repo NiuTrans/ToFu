@@ -21,6 +21,7 @@ suite stays green on a vanilla box (the guarded-optional dep). The pure-Python
 resolver tests always run.
 """
 
+import copy
 import json
 
 import pytest
@@ -81,6 +82,15 @@ def _spy(monkeypatch):
     # No incremental accumulator in these tests → whole-message path.
     monkeypatch.setattr('lib.translate.finalize_incremental', lambda *a, **k: False)
     monkeypatch.setattr('lib.translate.cancel_incremental', lambda *a, **k: False)
+    import lib.database.conversation_repository as repo
+
+    def _load(db, conv_id, **_kwargs):
+        return repo.ConversationSnapshot(
+            metadata={'settings': json.dumps(db._settings), 'rev': 0},
+            messages=copy.deepcopy(db._messages),
+            source='test_repository')
+
+    monkeypatch.setattr(repo, 'load_conversation', _load)
 
     class _SyncThread:
         def __init__(self, target=None, daemon=None, name=None):

@@ -29,10 +29,6 @@ import json as _json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Flask→Quart shim (mirrors test_chat_manager_migration.py).
-import quart as _quart
-sys.modules['flask'] = _quart
-
 import pytest
 
 pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]

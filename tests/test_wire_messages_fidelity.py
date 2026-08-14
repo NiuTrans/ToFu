@@ -29,6 +29,10 @@ import json
 import os
 import sys
 
+import pytest
+
+pytestmark = pytest.mark.unit
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -156,6 +160,12 @@ def _tool_order(msgs):
     return [m.get('tool_call_id') for m in msgs if m.get('role') == 'tool']
 
 
+def _assistant_tool_order(msgs):
+    return [tc.get('id')
+            for message in msgs if message.get('role') == 'assistant'
+            for tc in (message.get('tool_calls') or [])]
+
+
 def _system_text(msgs):
     out = []
     for m in msgs:
@@ -189,7 +199,10 @@ def test_carrier_transforms_fire():
     """Byte-identity must rest on REAL transforms, not an empty no-op run."""
     raw, config = _fixture(), _config()
     wire = _build_hot(raw, config)
-    # (1) tool reorder: author order [zzz, aaa] → sorted [aaa, zzz]
+    # (1) The assistant's tool_calls array remains in the model's slot order,
+    # while the following tool-result run is canonicalized by tool_call_id.
+    # Pairing is by ID, not by the two arrays sharing a positional order.
+    assert _assistant_tool_order(wire) == ['call_zzz', 'call_aaa']
     assert _tool_order(wire) == ['call_aaa', 'call_zzz'], (
         f'sort_tool_results did not reorder: {_tool_order(wire)}')
     # (2) empty user rewritten

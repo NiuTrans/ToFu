@@ -190,6 +190,16 @@ class _Parser(HTMLParser):
     def handle_data(self, data):
         if not data:
             return
+        # Pretty-printed PPTD commonly separates sibling block tags with a
+        # newline and indentation, e.g. ``</p>\n    <p>``.  Browsers discard
+        # that inter-tag whitespace, but the OOXML path used to open a fresh
+        # paragraph for it.  PowerPoint therefore received five paragraphs
+        # for a visibly three-line title and expanded the shape past its
+        # authored bounds.  Whitespace outside an active paragraph is source
+        # formatting, never slide content.  Newlines inside a paragraph stay
+        # significant (``<br>`` deliberately arrives here as ``"\n"``).
+        if not data.strip() and self._cur is None:
+            return
         if not data.strip() and '\n' not in data:
             return
         p = self._para()

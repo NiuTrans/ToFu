@@ -22,6 +22,7 @@ Checks:
 
 import ast
 import importlib
+import importlib.util
 import logging
 import os
 import py_compile
@@ -39,27 +40,15 @@ if not logger.handlers:
 ROOT = Path(__file__).resolve().parent
 os.chdir(ROOT)
 
-# ─── Flask→Quart shim ────────────────────────────────────────────────
-# routes/ and lib/ import from `flask`, but at runtime server.py installs a
-# shim that maps `flask` → `quart` (Quart is a Flask API superset). Several
-# modules use Quart-only features such as `@blueprint.websocket` (routes/push.py).
-# Without the shim, importing routes here raises
-# `'Blueprint' object has no attribute 'websocket'`, which cascades into every
-# section-2/3 import check below. Install the same shim before any route import.
-def _install_flask_quart_shim():
-    try:
-        import quart
-    except ImportError:
-        logger.warning('quart not installed — skipping flask→quart shim')
-        return
-    sys.modules['flask'] = quart
-    for attr in ('json', 'globals', 'helpers', 'wrappers', 'ctx'):
-        quart_sub = sys.modules.get(f'quart.{attr}')
-        if quart_sub is not None:
-            sys.modules[f'flask.{attr}'] = quart_sub
-
-
-_install_flask_quart_shim()
+# tofu_search imports pymupdf4llm as part of its public facade.  The optional
+# layout backend is both unsupported by our RapidOCR version and unnecessary
+# for an import audit; without the process policy, a healthcheck alone retains
+# a host-sized ONNX thread pool and floods stderr on cpuset-restricted hosts.
+try:
+    from runtime_guards import install_pymupdf_classic_policy
+    install_pymupdf_classic_policy()
+except Exception as e:
+    logger.debug('PyMuPDF classic policy unavailable: %s', e)
 
 # ─── Helpers ─────────────────────────────────────────────────────────
 class C:
@@ -165,14 +154,28 @@ if '--runtime' in sys.argv:
         fail(f"database NOT responsive ({_health.get('db_engine', '?')}): "
              f"{_health.get('db_error', 'unknown')}")
 
-    # 3. Index page actually serves HTML (bundle injection / static serving)
+    # 3. Required storage sidecar.  Older servers did not expose this field, so
+    # keep their runtime probe compatible while making the new production
+    # contract fail loudly whenever the sidecar is fenced or restarting.
+    if 'storage_ready' not in _health:
+        warn('server does not report storage sidecar readiness (legacy build)')
+    elif _health.get('storage_ready'):
+        _storage = _health.get('storage') or {}
+        ok(f"storage sidecar ready ({_storage.get('backend', '?')}, "
+           f"pid {_storage.get('pid', '?')})")
+    else:
+        _storage = _health.get('storage') or {}
+        fail(f"storage sidecar NOT ready (state={_storage.get('state', '?')}): "
+             f"{_storage.get('last_error', 'unknown') or 'unknown'}")
+
+    # 4. Index page actually serves HTML (bundle injection / static serving)
     _s2, _b2 = _get('/')
     if _s2 == 200 and _b2 and b'<html' in _b2[:2000].lower():
         ok("index page serves HTML")
     else:
         fail(f"index page did not serve HTML (status={_s2})")
 
-    # 4. At least one LLM credential somewhere the server reads:
+    # 5. At least one LLM credential somewhere the server reads:
     #    env vars → .env → server_config providers (api_keys or oauth slot).
     _has_key = bool(os.environ.get('LLM_API_KEY') or os.environ.get('LLM_API_KEYS'))
     if not _has_key:
@@ -212,7 +215,7 @@ if '--runtime' in sys.argv:
              "is up but chat will not answer until you add one in "
              "Settings → Providers")
 
-    # 5. Optional browser engine (JS-rendered page fetching)
+    # 6. Optional browser engine (JS-rendered page fetching)
     #
     # `import playwright` is NOT evidence the browser works: it stays green when
     # Chromium cannot launch at all (missing libatk/libnss → the binary dies
@@ -299,10 +302,39 @@ if '--runtime' in sys.argv:
 # ═══════════════════════════════════════════════════════════════════════
 section("1. Python Syntax Check")
 py_files = []
-skip_dirs = {'.git', '__pycache__', 'node_modules', 'debug', 'analysis_scripts',
-             'offline_pkgs', 'logs', '.project_sessions', '.chatui', 'uploads'}
+# Only these top-level directories ship executable Python as part of Tofu.
+# A user's project, a self-update rollback snapshot, or an audit worktree may
+# legitimately sit beside them; a project health check must never compile the
+# contents of those unrelated trees.
+source_dirs = {
+    'android', 'benchmarks', 'browser_extension', 'clients', 'deploy',
+    'desktop', 'lib', 'promo', 'propaganda', 'routes', 'scripts', 'static',
+    'tests', 'tofu', 'tools',
+}
+skip_dirs = {
+    '.git', '__pycache__', 'node_modules', 'debug', 'analysis_scripts',
+    'offline_pkgs', 'logs', '.project_sessions', '.project_indexes',
+    '.chatui', '.pytest_cache', '.ruff_cache', '.tofu', '.tofu_cache_probe',
+    '.tofu_chrome_deps', '.tofu_trash', '.icon-backups', 'uploads',
+    'overleaf_cache', 'build', 'dist',
+}
+# Install/update recovery and audit tooling deliberately leave whole worktree
+# snapshots beside the source tree. They are not Tofu source, and walking a
+# node_modules backup or nested benchmark checkout across shared/FUSE storage
+# can turn this health check from seconds into minutes (or make it appear
+# hung). Match generated families, not just today's timestamped directory.
+skip_dir_prefixes = ('node_modules.', 'node_modules_', 'swebench_',
+                     'abtest_', 'remote:')
 for root, dirs, files in os.walk('.'):
-    dirs[:] = [d for d in dirs if d not in skip_dirs]
+    if root == '.':
+        dirs[:] = [d for d in dirs if d in source_dirs]
+    else:
+        dirs[:] = [
+            d for d in dirs
+            if d not in skip_dirs
+            and not d.startswith(skip_dir_prefixes)
+            and not d.endswith('_workdir')
+        ]
     for f in files:
         if f.endswith('.py'):
             py_files.append(os.path.join(root, f))
@@ -366,7 +398,7 @@ for module_name, names in tl_checks:
 # Blueprint loading
 try:
     from routes import ALL_BLUEPRINTS
-    ok(f"All {len(ALL_BLUEPRINTS)} Flask blueprints imported")
+    ok(f"All {len(ALL_BLUEPRINTS)} Quart blueprints imported")
 except Exception as e:
     logger.debug('Blueprint import failed', exc_info=True)
     fail(f"routes/__init__.py: {e}")
@@ -393,15 +425,25 @@ for root, dirs, files in os.walk('routes'):
                 continue
 
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 for child in ast.walk(node):
-                    if isinstance(child, ast.ImportFrom) and child.module:
+                    if isinstance(child, ast.ImportFrom):
                         names = [a.name for a in child.names]
                         level = child.level
                         if level > 0:
-                            full_module = 'routes.' + child.module
+                            # Resolve relative to the file's real package.
+                            # ``routes/api_v1/foo.py: from .auth`` means
+                            # routes.api_v1.auth, not routes.auth.
+                            parts = Path(path).with_suffix('').parts
+                            package = '.'.join(parts[:-1])
+                            relative = '.' * level + (child.module or '')
+                            try:
+                                full_module = importlib.util.resolve_name(
+                                    relative, package)
+                            except (ImportError, ValueError):
+                                full_module = relative
                         else:
-                            full_module = child.module
+                            full_module = child.module or ''
                         lazy_imports.append((path, node.name, child.lineno, full_module, names))
 
 lazy_errors = 0
@@ -409,8 +451,21 @@ for filepath, func, lineno, module, names in lazy_imports:
     try:
         mod = importlib.import_module(module)
         for name in names:
-            if not hasattr(mod, name):
-                fail(f"{filepath}:{lineno} in {func}() — {module}.{name} does NOT exist")
+            if name == '*' or hasattr(mod, name):
+                continue
+            # Python's ``from package import child`` also tries to import a
+            # child submodule even when package.__init__ does not eagerly
+            # expose it. Mirror that behavior before declaring the import
+            # broken (lib.presence, lib.boot_identity, ... are all valid).
+            try:
+                importlib.import_module(f'{module}.{name}')
+            except ModuleNotFoundError as e:
+                fail(f"{filepath}:{lineno} in {func}() — "
+                     f"{module}.{name} does NOT exist ({e})")
+                lazy_errors += 1
+            except Exception as e:
+                fail(f"{filepath}:{lineno} in {func}() — "
+                     f"{module}.{name} import failed: {e}")
                 lazy_errors += 1
     except ModuleNotFoundError as e:
         logger.debug('Module import failed: %s', module, exc_info=True)
@@ -553,8 +608,8 @@ cdn_re = re.compile('|'.join(cdn_patterns))
 scan_files = []
 for ext in ('*.html', '*.css'):
     scan_files.extend(ROOT.glob(ext))
-for ext in ('*.js',):
-    scan_files.extend((ROOT / 'static/js').rglob(ext))
+for ext in ('*.js', '*.ts'):
+    scan_files.extend((ROOT / 'frontend/src').rglob(ext))
 for ext in ('*.css',):
     scan_files.extend((ROOT / 'static/css').rglob(ext))
 
@@ -587,13 +642,12 @@ if cdn_leaks == 0:
 # ═══════════════════════════════════════════════════════════════════════
 section("8. JS Defensive Guards")
 
-# The markdown rendering + library guards were refactored out of the old
-# monolithic static/js/core.js into static/js/core/*.js. Concatenate the
-# relevant modules and scan the combined source.
+# Rendering libraries are Vite-owned ESM imports. Verify that the owner module
+# retains every package seam and that HTML shells do not load CDN scripts.
 _guard_files = [
-    'static/js/core/markdown.js',
-    'static/js/core/cache_stats.js',
-    'static/js/core.js',
+    'frontend/src/vendor-runtime.ts',
+    'frontend/src/features/paper/pdf-viewer.ts',
+    'frontend/src/runtime/app-runtime.js',
 ]
 core_js_parts = []
 for _gf in _guard_files:
@@ -609,18 +663,19 @@ if not core_js_parts:
 else:
     core_js = '\n'.join(core_js_parts)
     checks = {
-        "marked.setOptions guarded":    r"typeof\s+marked\s*!==?\s*['\"]undefined['\"]\s*\)\s*\{?\s*marked\.setOptions",
-        "renderMarkdown has fallback":  r"typeof\s+marked\s*===?\s*['\"]undefined['\"][\s\S]*?return\s+['\"]?<pre",
-        "hljs usage guarded":          r"typeof\s+hljs\s*===?\s*['\"]undefined['\"]",
-        "katex usage guarded":         r"typeof\s+katex\s*!==?\s*['\"]undefined['\"]",
-        "DOMPurify usage guarded":     r"typeof\s+DOMPurify\s*!==?\s*['\"]undefined['\"]",
+        "Marked imported as ESM": r"from\s+['\"]marked['\"]",
+        "Highlight.js imported as ESM": r"from\s+['\"]highlight\.js/lib/common['\"]",
+        "DOMPurify imported as ESM": r"from\s+['\"]dompurify['\"]",
+        "KaTeX remains a lazy import": r"import\(['\"]katex['\"]\)",
+        "PDF.js remains a lazy import": r"import\(['\"]pdfjs-dist/legacy/build/pdf\.mjs['\"]\)",
+        "html2canvas remains a lazy import": r"import\(['\"]html2canvas['\"]\)",
     }
 
     for desc, pattern in checks.items():
         if re.search(pattern, core_js):
             ok(desc)
         else:
-            fail(f"core.js: {desc} — guard NOT found")
+            fail(f"frontend ESM owner: {desc} — owner NOT found")
 
 
 # ═══════════════════════════════════════════════════════════════════════

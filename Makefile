@@ -8,7 +8,7 @@
 #    make test-api      — Run API integration tests only
 #    make test-visual   — Run Playwright visual E2E tests
 #    make test-e2e      — Run hermetic E2E smoke (real app + browser + stub LLM)
-#    make test-frontend — Run frontend jsdom + tsc tests (needs `npm install`)
+#    make test-frontend — Run Vite/ESM artifact + owner contracts (needs npm)
 #    make test-all      — Run all tests (unit + api + visual)
 #    make audit-tests   — Census the test suite's own health (report)
 #    make suite-health  — Gate: test-suite health must not regress (ratchet)
@@ -46,10 +46,17 @@ lint-fix: ## Auto-fix lint issues
 vendor-mcp: ## Re-sync tools/<name>/ snapshots of internal MCP servers from sibling checkouts
 	./scripts/vendor_mcp.sh
 
-.PHONY: typecheck
-typecheck: ## Type-check the vanilla-JS frontend (tsc --checkJs, no build step)
+.PHONY: typecheck frontend-build frontend-budget
+typecheck: ## Type-check the Vite ESM graph
 	@if [ ! -d node_modules/typescript ]; then echo '⚠️  Run `npm install` first (installs TypeScript dev-dep)'; exit 1; fi
 	npx tsc --noEmit
+	npm run typecheck:modules
+
+frontend-build: ## Build content-hashed Vite/TypeScript modules
+	npm run build:frontend
+
+frontend-budget: frontend-build ## Enforce compressed frontend resource budgets
+	python3 scripts/frontend_budget.py
 
 # ── Test-suite health ────────────────────────────────────────
 #
@@ -66,21 +73,29 @@ audit-tests: ## Census the test suite's own health (human-readable report)
 	python3 scripts/audit_tests.py
 
 suite-health: ## Gate: test-suite health must not regress (one-way ratchet)
-	python3 -m pytest $(PYTEST_BASE) tests/test_suite_health_ratchet.py --timeout=600 --tb=short -q
+	$(PYTEST) $(PYTEST_BASE) tests/test_suite_health_ratchet.py --timeout=600 --tb=short -q
 
 # ── Tests ──────────────────────────────────────────────────────
 #
-# JOBS controls test parallelism (pytest-xdist). Default `auto` = one worker
-# per core — full capacity. Each worker re-imports the full `server` module,
-# which used to `mlockall()` its ~340 MB C-extension working set as
-# UNRECLAIMABLE pinned memory; under `auto` on a many-core box that was a burst
-# of tens of GB of un-reclaimable pages that OOM-reaped the pod (and any
-# co-resident live server). That root cause is fixed in tests/conftest.py
-# (TOFU_MLOCK=0 in test workers → transient, reclaimable RSS), so `auto` is now
-# safe: worker RSS is ordinary reclaimable memory the kernel can page under
-# pressure. Override with `JOBS=N` on a tight box; `JOBS=0` runs serially.
-JOBS ?= auto
+# JOBS controls test parallelism (pytest-xdist). Keep the default bounded: each
+# worker re-imports the full server stack and measured ~170-205 MB RSS here;
+# `-n auto` on a many-core shared host can therefore launch tens of GiB at once
+# and compete with the live personal server. CI or a dedicated workstation can
+# still opt into `JOBS=auto`; `JOBS=0` runs serially.
+JOBS ?= 4
 PYTEST_PARALLEL = $(if $(filter 0,$(JOBS)),,-n $(JOBS) --dist worksteal)
+
+# Every xdist worker imports NumPy through the app/plugin graph. On a 64-core
+# host, leaving BLAS defaults untouched creates ~64 native threads PER worker;
+# bounded process parallelism alone does not prevent that nested explosion.
+# Tests are latency-insensitive and predominantly non-numeric, so one native
+# numeric worker is the safe default. Dedicated benchmark hosts can override
+# with TEST_NUMERIC_THREADS=N.
+TEST_NUMERIC_THREADS ?= 1
+PYTEST = OPENBLAS_NUM_THREADS=$(TEST_NUMERIC_THREADS) \
+	OMP_NUM_THREADS=$(TEST_NUMERIC_THREADS) \
+	MKL_NUM_THREADS=$(TEST_NUMERIC_THREADS) \
+	NUMEXPR_NUM_THREADS=$(TEST_NUMERIC_THREADS) python -m pytest
 
 # PYTEST_BASE — flags every Python test target needs in THIS env. TWO entrypoint
 # landmines, both empirically reproduced 2026-08-04:
@@ -97,30 +112,85 @@ PYTEST_PARALLEL = $(if $(filter 0,$(JOBS)),,-n $(JOBS) --dist worksteal)
 # xdist/anyio and force us to re-add each by hand.
 PYTEST_BASE = -p no:napari -p no:timeout
 
+# The pre-Vite jsdom harnesses load individual files from the deleted
+# ``static/js`` graph and therefore cannot describe the shipped application.
+# Keep Python/backend collection independent of those historical files; the
+# frontend lane below runs the ESM source, artifact and serving contracts after
+# producing the exact graph users receive.
+FRONTEND_UNIT_IGNORES = \
+	--ignore-glob=tests/test_frontend_*.py \
+	--ignore=tests/test_bundle_corruption_guard.py \
+	--ignore=tests/test_bundle_concurrency.py \
+	--ignore=tests/test_bundle_manifest_parity.py \
+	--ignore=tests/test_bundle_manifest_freshness.py \
+	--ignore=tests/test_bundle_nonblocking_serve.py \
+	--ignore=tests/test_bundle_source_syntax_ratchet.py \
+	--ignore=tests/test_i18n_pack_emission.py \
+	--ignore=tests/test_stale_bundle_self_heal.py \
+	--ignore=tests/test_stale_i18n_pack_self_heal.py \
+	--ignore=tests/test_static_route_offload.py \
+	--ignore=tests/test_static_serving_registration.py \
+	--ignore=tests/test_task_mode_states.py \
+	--ignore=tests/test_orchestration_endpoint_parity.py \
+	--ignore=tests/test_orchestration_wire_contracts.py
+
+FRONTEND_ESM_TESTS = \
+	tests/test_bundle_corruption_guard.py \
+	tests/test_bundle_concurrency.py \
+	tests/test_bundle_manifest_parity.py \
+	tests/test_bundle_manifest_freshness.py \
+	tests/test_bundle_nonblocking_serve.py \
+	tests/test_bundle_source_syntax_ratchet.py \
+	tests/test_frontend_api_transport_vite.py \
+	tests/test_frontend_attempt_stream_vite.py \
+	tests/test_frontend_balance_vite.py \
+	tests/test_frontend_budget.py \
+	tests/test_frontend_memory_vite.py \
+	tests/test_frontend_paper_arxiv_fetch_vite.py \
+	tests/test_frontend_paper_arxiv_search_vite.py \
+	tests/test_frontend_paper_lifecycle_vite.py \
+	tests/test_frontend_paper_push_transport_vite.py \
+	tests/test_frontend_paper_qa_task_vite.py \
+	tests/test_frontend_paper_recommend_vite.py \
+	tests/test_frontend_vite_asset_base.py \
+	tests/test_frontend_vite_domains.py \
+	tests/test_i18n_pack_emission.py \
+	tests/test_install_npm_bounded.py \
+	tests/test_stale_bundle_self_heal.py \
+	tests/test_stale_i18n_pack_self_heal.py \
+	tests/test_static_route_offload.py \
+	tests/test_static_serving_registration.py
+
+ifeq ($(JOBS),0)
 test-unit: ## Run unit tests (parallel; override JOBS=N, JOBS=0 for serial)
-	python -m pytest $(PYTEST_BASE) -m unit $(PYTEST_PARALLEL) --timeout=300 --tb=short -q
+	$(PYTEST) $(PYTEST_BASE) $(FRONTEND_UNIT_IGNORES) -m unit --timeout=300 --tb=short -q
+else
+test-unit: ## Run unit tests (parallel; override JOBS=N, JOBS=0 for serial)
+	$(PYTEST) $(PYTEST_BASE) $(FRONTEND_UNIT_IGNORES) -m "unit and not ci_serial" $(PYTEST_PARALLEL) --timeout=300 --tb=short -q
+	$(PYTEST) $(PYTEST_BASE) $(FRONTEND_UNIT_IGNORES) -m "unit and ci_serial" --timeout=600 --tb=short -q
+endif
 
 test-api: ## Run API integration tests (Flask test client + mock LLM)
-	python -m pytest $(PYTEST_BASE) -m api $(PYTEST_PARALLEL) --timeout=300 --tb=short -q
+	$(PYTEST) $(PYTEST_BASE) -m api $(PYTEST_PARALLEL) --timeout=300 --tb=short -q
 
 test-visual: ## Run Playwright visual E2E tests (needs chromium)
-	python -m pytest $(PYTEST_BASE) -m visual --tb=short -q
+	$(PYTEST) $(PYTEST_BASE) -m visual --tb=short -q
 
 test-e2e: ## Run hermetic E2E journeys — real app + real browser + stub LLM (P0-3 主干道巡检)
-	python -m pytest $(PYTEST_BASE) tests/test_e2e_smoke.py tests/test_e2e_journeys.py -m visual -ra --tb=short -q
+	$(PYTEST) $(PYTEST_BASE) tests/test_e2e_smoke.py tests/test_e2e_journeys.py -m visual -ra --tb=short -q
 
-test-frontend: ## Run frontend tests (jsdom harnesses + tsc ratchet — needs `npm install`)
+test-frontend: ## Run Vite ESM source, artifact and serving contracts
 	@if [ ! -d node_modules/jsdom ]; then echo '⚠️  Run `npm install` first (installs jsdom + typescript dev-deps)'; exit 1; fi
-	TOFU_REQUIRE_FRONTEND=1 python -m pytest $(PYTEST_BASE) tests/test_frontend_*.py $(PYTEST_PARALLEL) --timeout=180 -ra --tb=short -q
+	npm run check:actions
+	TOFU_REQUIRE_FRONTEND=1 $(PYTEST) $(PYTEST_BASE) $(FRONTEND_ESM_TESTS) $(PYTEST_PARALLEL) --timeout=300 -ra --tb=short -q
 
-test-all: ## Run all tests (unit + api + visual)
-	python -m pytest $(PYTEST_BASE) --tb=short -q
+test-all: test-unit test-api test-frontend test-e2e ## Run all current backend, ESM frontend and browser gates
 
 test-coverage: ## Run unit + api tests with coverage report
-	python -m pytest $(PYTEST_BASE) -m "unit or api" --cov=lib --cov=routes --cov-report=term-missing --tb=short -q
+	$(PYTEST) $(PYTEST_BASE) -m "unit or api" --cov=lib --cov=routes --cov-report=term-missing --tb=short -q
 
 smoke: ## Run smoke tests only (import validation, cross-platform, syntax)
-	python -m pytest $(PYTEST_BASE) tests/test_smoke.py -m unit --tb=short -v
+	$(PYTEST) $(PYTEST_BASE) tests/test_smoke.py -m unit --tb=short -v
 
 test-affected: ## Iteration loop: run only tests that can see your changes (static reverse index — full tier stays the gate, P2-3)
 	python scripts/test_select.py --run
@@ -153,5 +223,22 @@ desktop: desktop-icons ## Build desktop installer (PyInstaller)
 
 # ── Server lifecycle ───────────────────────────────────────────
 
-stop: ## Stop the running Tofu server (reads data/.server.lock, SIGTERM)
-	./stop.sh
+.PHONY: start stop restart status logs doctor
+
+start: ## Start Tofu through the project-local manager
+	python serverctl.py start
+
+stop: ## Stop Tofu and keep it stopped
+	python serverctl.py stop
+
+restart: ## Restart Tofu through the project-local manager
+	python serverctl.py restart
+
+status: ## Show manager + server ownership and health state
+	python serverctl.py status
+
+logs: ## Follow the managed server console
+	python serverctl.py logs -f
+
+doctor: ## Diagnose locks, ports, manager and legacy lifecycle owners
+	python serverctl.py doctor

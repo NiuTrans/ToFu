@@ -130,7 +130,8 @@ def build_wire_messages(raw_messages: list, config: dict, *,
                         mode: str = 'snapshot',
                         task: dict | None = None,
                         conv_id: str = '',
-                        provider_id: str = '') -> list:
+                        provider_id: str = '',
+                        return_manifest: bool = False):
     """Full wire-form pipeline for the debug panel (cold path).
 
     ``_transform_messages`` (DB → API form) → ``_inject_system_contexts``
@@ -155,7 +156,8 @@ def build_wire_messages(raw_messages: list, config: dict, *,
         provider_id: Provider context for the gateway-sanitize gate.
 
     Returns:
-        The wire-form OpenAI message array.
+        The wire-form OpenAI message array. With ``return_manifest=True``,
+        returns ``(messages, context_manifest)``.
     """
     from lib.tasks_pkg.conv_message_builder import _transform_messages
     from lib.tasks_pkg.system_context import _inject_system_contexts
@@ -196,4 +198,7 @@ def build_wire_messages(raw_messages: list, config: dict, *,
         logger.warning('[wire_messages] inject failed (mode=%s conv=%s): %s — '
                        'returning un-injected wire form', mode, (conv_id or '')[:8], e)
 
-    return apply_wire_sanitize(msgs, conv_id=conv_id, provider_id=provider_id)
+    wire = apply_wire_sanitize(msgs, conv_id=conv_id, provider_id=provider_id)
+    if return_manifest:
+        return wire, list(_task.get('_contextManifest') or [])
+    return wire

@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import unittest
 
 import pytest
@@ -38,7 +39,11 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+sys.path.insert(0, HERE)
+from _runtime_sections import runtime_section_path  # noqa: E402
+
+STREAM_SESSION = runtime_section_path('ui/stream_session.js')
+SSE_HANDLERS_MISC = runtime_section_path('ui/sse_handlers_misc.js')
 
 
 def _node_deps_available() -> bool:
@@ -68,9 +73,9 @@ function check(name, cond, note) {
  * proving the fold line is what retires it. */
 const _NEUTER = process.argv[3] === 'neuter-fold';
 
-eval(fs.readFileSync(path.join(ROOT, 'static/js/ui/stream_session.js'), 'utf8'));
+eval(fs.readFileSync(process.argv[4], 'utf8'));
 
-let _src = fs.readFileSync(path.join(ROOT, 'static/js/ui/sse_handlers_misc.js'), 'utf8');
+let _src = fs.readFileSync(process.argv[5], 'utf8');
 if (_NEUTER) {
   const _target = "foldStreamPhaseIf(convId, 'compacting');";
   if (!_src.includes(_target)) throw new Error('neuter target line missing from sse_handlers_misc.js');
@@ -146,7 +151,8 @@ def _run_harness(neuter=False):
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, ROOT, 'neuter-fold' if neuter else ''],
+            ['node', harness, ROOT, 'neuter-fold' if neuter else '',
+             STREAM_SESSION, SSE_HANDLERS_MISC],
             capture_output=True, text=True, timeout=60,
         )
     finally:

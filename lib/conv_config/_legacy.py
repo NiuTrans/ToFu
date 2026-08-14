@@ -34,6 +34,10 @@ _LEGACY_PRESET_TO_MODEL: dict[str, str] = {
     'minimax': 'MiniMax-M2.7',
     'doubao': 'Doubao-Seed-2.0-pro',
     'opus': 'aws.claude-opus-4.7',
+    # Early GPT-5.6 integration mistakenly represented Pro reasoning as a
+    # separate SKU. The public API keeps the normal model ID and uses
+    # ``reasoning.mode='pro'`` instead.
+    'gpt-5.6-pro': 'gpt-5.6',
     # Compound preset → both a model AND a thinking depth. The model
     # choice falls back to opus; the depth is extracted separately
     # by ``extract_legacy_thinking_depth``.

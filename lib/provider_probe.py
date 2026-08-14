@@ -1,8 +1,8 @@
 """Access-matrix cell-probe engine — server-owned background reachability test.
 
-Moved out of ``routes/config.py`` (2026-06). Sends a 1-token completion to
-every (key × wire-id) SLOT of a provider to learn which pairs the gateway
-actually routes. The probed (key, id) set is the dispatcher's own slot set
+Moved out of ``routes/config.py`` (2026-06). Sends a tiny real request to
+every (key × wire-id) SLOT of a provider and validates its output payload.
+The probed (key, id) set is the dispatcher's own slot set
 each key's pool resolved through ``resolve_request_ids`` (an explicit
 ``request_ids`` pool, possibly replaced per key by ``key_access``, else
 ``[model_id] + aliases``) — because each wire id on a gateway can route to
@@ -27,6 +27,8 @@ the re-exported name) takes effect. Same for ``probe_cache_path``.
 
 import hashlib
 import io
+import json
+import re
 import threading
 import time as _time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -45,6 +47,17 @@ from lib.model_info.capability_taxonomy import is_chat_model as _is_chat_model
 # their REAL endpoint — see nonchat_probe_fn().
 SKIPPED = 'skipped'
 
+# Public snapshot contract. Version 2 is the first version in which ``ok``
+# means a semantically valid response payload was observed. Version 1 treated
+# HTTP 400 as success and treated any HTTP 200 body as success, which produced
+# contradictory UI such as a green pip whose tooltip said ``HTTP 400``.
+PROBE_SCHEMA_VERSION = 2
+
+_HTTP_STATUS_RE = re.compile(r'\bHTTP\s+(\d{3})\b', re.IGNORECASE)
+_CHAT_PROBE_PROMPT = 'Reply with exactly OK.'
+_CHAT_PROBE_MAX_TOKENS = 16
+_UNSET = object()
+
 # Image cells generate one real (tiny) billed image per probe, so they get a
 # single attempt regardless of the matrix attempts selector — multiplying a
 # billed generation to filter a rare transient 429 is a bad trade.
@@ -60,11 +73,11 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
     Returns one of: 'ok', 'rate_limited', 'unauthorized', 'not_found',
     'unavailable', 'error' plus a short human-readable detail string.
 
-    A 200 OR an HTTP 400 both count as ``ok`` — a 400 means the gateway
-    accepted the (key, model) routing and only rejected the (deliberately
-    tiny) request shape, which still proves the pair is reachable.
-    Exception: a body carrying a routing-rejection marker (see
-    ``_ROUTE_MISSING_MARKERS``) is ``not_found`` on ANY status.
+    ``ok`` is intentionally strict: the endpoint must return 2xx *and* a
+    protocol-valid response containing generated output. Merely reaching the
+    gateway is not enough. In particular, HTTP 400 is ``bad_request`` even if
+    it proves a route exists — the app cannot consume a request the provider
+    rejects, so painting that cell green would be a false promise.
 
     ``protocol='anthropic'`` probes the Anthropic Messages API
     (``POST /v1/messages`` with ``x-api-key`` + ``anthropic-version``)
@@ -102,8 +115,8 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
             headers.update(extra_headers)
         payload = {
             'model': model_id,
-            'messages': [{'role': 'user', 'content': 'hi'}],
-            'max_tokens': 1,
+            'messages': [{'role': 'user', 'content': _CHAT_PROBE_PROMPT}],
+            'max_tokens': _CHAT_PROBE_MAX_TOKENS,
             'stream': False,
         }
         try:
@@ -121,12 +134,16 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
             return 'unavailable', 'network: %s' % str(e)[:120]
         code = resp.status_code
         try:
-            body = resp.text[:400]
+            body = resp.text[:65536]
         except (UnicodeDecodeError, ValueError, OSError, AttributeError) as e:
             logger.debug('[CellProbe] %s @ %s: could not read response body: %s',
                          model_id, base_url, e)
             body = ''
-        return _classify_status(code, body)
+        return _classify_verified(
+            code, body, validate=lambda parsed, raw, raw_bytes:
+            _validate_chat_response(parsed, raw, raw_bytes, 'openai'),
+            proof='generated text', surface='/chat/completions',
+            secret_values=(api_key,))
 
     # ── Subscription (OAuth) providers ──────────────────────────────────
     if oauth:
@@ -158,7 +175,8 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
                 hdrs['chatgpt-account-id'] = account_id
             body = codex_translate_request({
                 'model': model_id,
-                'messages': [{'role': 'user', 'content': '.'}],
+                'messages': [{'role': 'user', 'content': _CHAT_PROBE_PROMPT}],
+                'max_tokens': _CHAT_PROBE_MAX_TOKENS,
                 'stream': True,
             })
             url = f'{base_url.rstrip("/")}/responses'
@@ -171,7 +189,7 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
                                      timeout=timeout)
                     code = resp.status_code
                     try:
-                        resp_body = resp.text[:400]
+                        resp_body = resp.text[:65536]
                     except (UnicodeDecodeError, ValueError, OSError) as e:
                         logger.debug('[CellProbe] codex %s: could not read response body: %s',
                                      model_id, e)
@@ -181,7 +199,7 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
                                              body=_json.dumps(body).encode(),
                                              agent_id=route)
                     code = reader.status_code
-                    resp_body = reader.read_all_text()[:400]
+                    resp_body = reader.read_all_text()[:65536]
             except _eg.EgressUnavailable as e:
                 logger.debug('[CellProbe] codex %s desktop egress unavailable: %s',
                              model_id, e)
@@ -190,13 +208,18 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
                 logger.warning('[CellProbe] codex %s network error: %s',
                                model_id, e)
                 return 'unavailable', 'network: %s' % str(e)[:120]
-            return _classify_status(code, resp_body)
+            return _classify_verified(
+                code, resp_body,
+                validate=lambda parsed, raw, raw_bytes:
+                _validate_chat_response(parsed, raw, raw_bytes, 'responses'),
+                proof='generated text', surface='/responses',
+                secret_values=(token, account_id))
         from lib.llm.anthropic_outbound import anthropic_messages_url
         from lib.oauth.outbound import claude_oauth_url, resolve_oauth_request
         payload = {
             'model': model_id,
-            'messages': [{'role': 'user', 'content': '.'}],
-            'max_tokens': 1,
+            'messages': [{'role': 'user', 'content': _CHAT_PROBE_PROMPT}],
+            'max_tokens': _CHAT_PROBE_MAX_TOKENS,
         }
         try:
             token, hdrs, body = resolve_oauth_request(oauth, payload,
@@ -242,19 +265,23 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
             return 'unavailable', 'network: %s' % str(e)[:120]
         code = resp.status_code
         try:
-            resp_body = resp.text[:400]
+            resp_body = resp.text[:65536]
         except (UnicodeDecodeError, ValueError, OSError) as e:
             logger.debug('[CellProbe] %s @ %s: could not read response body: %s',
                          model_id, base_url, e)
             resp_body = ''
-        return _classify_status(code, resp_body)
+        return _classify_verified(
+            code, resp_body,
+            validate=lambda parsed, raw, raw_bytes:
+            _validate_chat_response(parsed, raw, raw_bytes, 'anthropic'),
+            proof='generated text', surface='/v1/messages',
+            secret_values=(token,))
 
-    # ``max_tokens: 1`` is the floor — the probe only needs to learn whether
-    # the gateway accepts the (key, model) routing, never the completion
-    # itself, so output cost is held to a single token per attempt.
+    # Keep the output budget tiny but large enough for reasoning-capable
+    # providers to produce visible text. A successful HTTP envelope without
+    # generated content is deliberately not sufficient evidence.
     if protocol == 'responses':
         # Responses API providers (DeepSeek …) — minimal stateless payload.
-        # 400 still classifies ok (routing proven, shape rejected).
         from lib.llm.responses_outbound import (
             openai_body_to_responses, responses_url,
         )
@@ -264,8 +291,8 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
             headers.update(extra_headers)
         payload, _rev = openai_body_to_responses(
             {'model': model_id,
-             'messages': [{'role': 'user', 'content': 'hi'}],
-             'max_tokens': 16},
+             'messages': [{'role': 'user', 'content': _CHAT_PROBE_PROMPT}],
+             'max_tokens': _CHAT_PROBE_MAX_TOKENS},
             profile='default', stream=False)
     elif protocol == 'anthropic':
         from lib.llm.anthropic_outbound import (
@@ -275,8 +302,8 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
         headers = anthropic_headers(api_key, extra_headers)
         payload = {
             'model': model_id,
-            'messages': [{'role': 'user', 'content': '.'}],
-            'max_tokens': 1,
+            'messages': [{'role': 'user', 'content': _CHAT_PROBE_PROMPT}],
+            'max_tokens': _CHAT_PROBE_MAX_TOKENS,
         }
     else:
         url = base_url.rstrip('/') + '/chat/completions'
@@ -285,8 +312,8 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
             headers.update(extra_headers)
         payload = {
             'model': model_id,
-            'messages': [{'role': 'user', 'content': 'hi'}],
-            'max_tokens': 1,
+            'messages': [{'role': 'user', 'content': _CHAT_PROBE_PROMPT}],
+            'max_tokens': _CHAT_PROBE_MAX_TOKENS,
             'stream': False,
         }
     try:
@@ -297,12 +324,20 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
 
     code = resp.status_code
     try:
-        body = resp.text[:400]
+        body = resp.text[:65536]
     except (UnicodeDecodeError, ValueError, OSError) as e:
         logger.debug('[CellProbe] %s @ %s: could not read response body: %s',
                      model_id, base_url, e)
         body = ''
-    return _classify_status(code, body)
+    return _classify_verified(
+        code, body,
+        validate=lambda parsed, raw, raw_bytes:
+        _validate_chat_response(parsed, raw, raw_bytes, protocol),
+        proof='generated text',
+        surface=('/responses' if protocol == 'responses'
+                 else '/v1/messages' if protocol == 'anthropic'
+                 else '/chat/completions'),
+        secret_values=(api_key,))
 
 
 # Body markers that mean "this gateway has NO route for the model" — as
@@ -314,23 +349,42 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
 _ROUTE_MISSING_MARKERS = (
     'model_not_found', 'does not exist', 'no such model',
     'unsupported model', 'unsupported_model', 'model not supported',
+    'invalid model name',
     '不支持的模型类型',
 )
+
+
+def _redact_probe_text(body, secret_values=()):
+    text = str(body or '')
+    for secret in secret_values or ():
+        secret = str(secret or '')
+        if len(secret) >= 6:
+            text = text.replace(secret, '***')
+    # Provider errors sometimes echo credential-like application ids even
+    # when the exact value is not available at cache-normalization time.
+    text = re.sub(
+        r'(?i)(\bapp(?:lication)?[ _-]?id\b\s*[:=]?\s*)[A-Za-z0-9._-]{6,}',
+        r'\1***', text)
+    text = re.sub(r'(?i)(\bbearer\s+)[A-Za-z0-9._~+/-]{6,}', r'\1***', text)
+    return text
 
 
 def _classify_status(code: int, body: str):
     """Map an HTTP status (+body excerpt) to a (verdict, detail) pair.
 
-    A 200 OR a 400 both count as ``ok`` — a 400 means the gateway accepted
-    the (key, model) routing and only rejected the (deliberately tiny)
-    request shape, which still proves the pair is reachable. The routing-
-    rejection body sniff runs FIRST: a missing route must never read as ok.
+    This only classifies the HTTP envelope. Callers must additionally validate
+    the payload before exposing ``ok``. The routing-rejection body sniff runs
+    first so gateways that encode a missing model as HTTP 200/400 still cannot
+    read as available.
     """
+    body = _redact_probe_text(body)
     lower = body.lower()
     if any(m in lower for m in _ROUTE_MISSING_MARKERS):
         return 'not_found', 'HTTP %d %.120s' % (code, body)
-    if code == 200 or code == 400:
+    if 200 <= code < 300:
         return 'ok', 'HTTP %d' % code
+    if code in (400, 409, 415, 422):
+        return 'bad_request', 'HTTP %d %.160s' % (code, body)
     if code == 429 or code == 402:
         return 'rate_limited', 'HTTP %d %.120s' % (code, body)
     if code in (401, 403):
@@ -342,15 +396,142 @@ def _classify_status(code: int, body: str):
     return 'error', 'HTTP %d %.120s' % (code, body)
 
 
+def _json_or_none(body: str):
+    try:
+        return json.loads(body)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        logger.debug('[CellProbe] response is not JSON: %s', exc)
+        return None
+
+
+def _content_text(value) -> str:
+    """Extract user-visible text from a known response content value."""
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, list):
+        return ''
+    out = []
+    for part in value:
+        if isinstance(part, str):
+            out.append(part)
+            continue
+        if not isinstance(part, dict):
+            continue
+        if part.get('type') in ('text', 'output_text'):
+            text = part.get('text')
+            if isinstance(text, str):
+                out.append(text)
+    return ''.join(out).strip()
+
+
+def _chat_json_text(parsed, protocol: str) -> str:
+    """Extract generated text from OpenAI, Anthropic, or Responses JSON."""
+    if not isinstance(parsed, dict):
+        return ''
+
+    if protocol == 'anthropic':
+        text = _content_text(parsed.get('content'))
+        if text:
+            return text
+
+    if protocol == 'responses':
+        text = _content_text(parsed.get('output_text'))
+        if text:
+            return text
+        output = parsed.get('output')
+        if isinstance(output, list):
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                text = _content_text(item.get('content'))
+                if text:
+                    return text
+
+    choices = parsed.get('choices')
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            msg = choice.get('message')
+            if isinstance(msg, dict):
+                text = _content_text(msg.get('content'))
+                if text:
+                    return text
+            text = _content_text(choice.get('text'))
+            if text:
+                return text
+    return ''
+
+
+def _sse_generated_text(raw: str) -> str:
+    """Extract a text delta from a Responses/Anthropic SSE transcript."""
+    for line in (raw or '').splitlines():
+        if not line.startswith('data:'):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == '[DONE]':
+            continue
+        event = _json_or_none(payload)
+        if not isinstance(event, dict):
+            continue
+        # Responses API: response.output_text.delta; Anthropic Messages:
+        # content_block_delta with delta.text. Some compatible gateways put a
+        # plain string directly in ``delta``.
+        delta = event.get('delta')
+        if isinstance(delta, str) and delta.strip():
+            return delta.strip()
+        if isinstance(delta, dict):
+            text = delta.get('text')
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+        text = _chat_json_text(event, 'responses')
+        if text:
+            return text
+        response = event.get('response')
+        text = _chat_json_text(response, 'responses')
+        if text:
+            return text
+    return ''
+
+
+def _validate_chat_response(parsed, raw, _raw_bytes, protocol):
+    if _chat_json_text(parsed, protocol):
+        return None
+    if _sse_generated_text(raw):
+        return None
+    if parsed is None:
+        return 'non-JSON/non-SSE response'
+    return 'no generated text in response'
+
+
+def _classify_verified(code, body, *, validate, proof, surface,
+                       raw_bytes=None, parsed=_UNSET, secret_values=()):
+    """Require both a successful HTTP envelope and semantic output proof."""
+    body = _redact_probe_text(body, secret_values)
+    status, detail = _classify_status(code, body)
+    if status != 'ok':
+        return status, detail
+    if parsed is _UNSET:
+        parsed = _json_or_none(body)
+    reason = validate(parsed, body, raw_bytes)
+    if reason:
+        return 'invalid_response', (
+            'HTTP %d via %s — invalid response (%s) %.120s'
+            % (code, surface, reason, body))
+    return 'ok', 'HTTP %d · verified %s via %s' % (code, proof, surface)
+
+
 def _post_and_classify(url, headers, timeout, *, json_body=None, files=None,
-                       data=None, validate=None, surface=''):
+                       data=None, validate=None, surface='', proof='output',
+                       secret_values=()):
     """POST one modality probe and classify the answer.
 
     Shared tail for every non-chat probe: same transport error handling and
     status→verdict ladder as :func:`probe_one_cell`, plus an optional
-    ``validate(parsed_json, raw_body)`` hook that inspects a 200 response's
-    SHAPE (None = reachable). A 200 whose shape fails validation is an
-    'error' (the endpoint answered but not in the dialect the app speaks).
+    ``validate(parsed_json, raw_body, raw_bytes)`` hook that inspects a 2xx
+    response's shape (None = verified). A 2xx whose shape fails validation is
+    ``invalid_response``: the endpoint answered, but not in a dialect the app
+    can consume.
     ``surface`` names the endpoint in the ok detail (e.g. '/embeddings').
     """
     from lib.http_client import http_post
@@ -363,25 +544,23 @@ def _post_and_classify(url, headers, timeout, *, json_body=None, files=None,
         return 'unavailable', 'network: %s' % str(e)[:120]
     code = resp.status_code
     try:
-        body = resp.text[:400]
+        body = resp.text[:65536]
     except (UnicodeDecodeError, ValueError, OSError) as e:
         logger.debug('[CellProbe] %s: could not read response body: %s',
                      surface or url, e)
         body = ''
-    if code == 200 and validate is not None:
-        try:
-            parsed = resp.json()
-        except Exception as e:
-            logger.debug('[CellProbe] %s: 200 but non-JSON body: %s', surface, e)
-            parsed = None
-        reason = validate(parsed, body)
-        if reason:
-            return 'error', 'HTTP 200 via %s — invalid shape (%s) %.120s' % (
-                surface, reason, body)
-    status, detail = _classify_status(code, body)
-    if status == 'ok' and surface:
-        detail = '%s via %s' % (detail, surface)
-    return status, detail
+    raw_bytes = getattr(resp, 'content', None)
+    if not isinstance(raw_bytes, bytes):
+        raw_bytes = None
+    try:
+        parsed = resp.json()
+    except (AttributeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        logger.debug('[CellProbe] response.json unavailable; parsing body: %s', exc)
+        parsed = _json_or_none(body)
+    return _classify_verified(
+        code, body, validate=validate or (lambda parsed, raw, raw_b: None),
+        proof=proof, surface=surface or url, raw_bytes=raw_bytes,
+        parsed=parsed, secret_values=secret_values)
 
 
 # ── Non-chat modality probes ──────────────────────────────────────────
@@ -419,7 +598,7 @@ def _auth_headers(api_key, extra_headers):
     return headers
 
 
-def _validate_embedding(parsed, _raw):
+def _validate_embedding(parsed, _raw, _raw_bytes):
     try:
         emb = (parsed or {}).get('data', [{}])[0].get('embedding')
     except (AttributeError, IndexError, TypeError) as _e:
@@ -428,11 +607,13 @@ def _validate_embedding(parsed, _raw):
     return None if emb else 'empty embedding vector'
 
 
-def _validate_transcription(parsed, _raw):
-    return None if isinstance(parsed, dict) else 'non-JSON response'
+def _validate_transcription(parsed, _raw, _raw_bytes):
+    if not isinstance(parsed, dict):
+        return 'non-JSON response'
+    return None if isinstance(parsed.get('text'), str) else 'missing text field'
 
 
-def _validate_images_api(parsed, _raw):
+def _validate_images_api(parsed, _raw, _raw_bytes):
     try:
         item = (parsed or {}).get('data', [{}])[0]
     except (AttributeError, IndexError, TypeError) as _e:
@@ -443,7 +624,7 @@ def _validate_images_api(parsed, _raw):
     return 'no image payload (b64_json/url)'
 
 
-def _validate_image_chat(parsed, _raw):
+def _validate_image_chat(parsed, _raw, _raw_bytes):
     try:
         content = (parsed or {})['choices'][0]['message'].get('content')
     except (AttributeError, IndexError, KeyError, TypeError) as _e:
@@ -468,7 +649,8 @@ def probe_embedding_cell(base_url, api_key, model_id, extra_headers, timeout,
     return _post_and_classify(
         url, _auth_headers(api_key, extra_headers), timeout,
         json_body={'model': model_id, 'input': 'ping'},
-        validate=_validate_embedding, surface='/embeddings')
+        validate=_validate_embedding, surface='/embeddings',
+        proof='embedding vector', secret_values=(api_key,))
 
 
 def probe_transcription_cell(base_url, api_key, model_id, extra_headers,
@@ -481,7 +663,8 @@ def probe_transcription_cell(base_url, api_key, model_id, extra_headers,
     return _post_and_classify(
         url, _auth_headers(api_key, extra_headers), timeout,
         files=files, data=data,
-        validate=_validate_transcription, surface='/audio/transcriptions')
+        validate=_validate_transcription, surface='/audio/transcriptions',
+        proof='transcript payload', secret_values=(api_key,))
 
 
 def probe_image_cell(base_url, api_key, model_id, extra_headers, timeout,
@@ -504,7 +687,9 @@ def probe_image_cell(base_url, api_key, model_id, extra_headers, timeout,
                    'n': 1}
         return _post_and_classify(url, headers, timeout, json_body=payload,
                                   validate=_validate_images_api,
-                                  surface='/images/generations')
+                                  surface='/images/generations',
+                                  proof='image payload',
+                                  secret_values=(api_key,))
     url = base_url.rstrip('/') + '/chat/completions'
     payload = {
         'model': model_id,
@@ -515,18 +700,22 @@ def probe_image_cell(base_url, api_key, model_id, extra_headers, timeout,
     }
     return _post_and_classify(url, headers, timeout, json_body=payload,
                               validate=_validate_image_chat,
-                              surface='image chat')
+                              surface='image chat', proof='image payload',
+                              secret_values=(api_key,))
 
 
-def _validate_tts(_parsed, raw):
+def _validate_tts(_parsed, raw, raw_bytes):
     # /audio/speech answers with raw audio bytes (no JSON envelope). The
     # _post_and_classify harness hands us resp.text (decoded, best-effort)
     # — the container magic survives as ASCII/latin-1 chars.
-    if not raw:
+    data = raw_bytes
+    if not data and raw:
+        data = raw.encode('latin-1', errors='ignore')
+    if not data:
         return 'empty body'
-    if raw[:4] == 'RIFF' or raw[:3] == 'ID3' or raw[:4] in ('fLaC', 'OggS'):
+    if data[:4] == b'RIFF' or data[:3] == b'ID3' or data[:4] in (b'fLaC', b'OggS'):
         return None
-    if raw[0] == '\xff':  # MP3 frame sync (decoded as latin-1)
+    if data[0] == 0xff:  # MP3 frame sync
         return None
     return 'non-audio payload'
 
@@ -546,7 +735,8 @@ def probe_tts_cell(base_url, api_key, model_id, extra_headers, timeout,
                'voice': default_voice(), 'response_format': 'wav'}
     return _post_and_classify(
         url, _auth_headers(api_key, extra_headers), timeout,
-        json_body=payload, validate=_validate_tts, surface='/audio/speech')
+        json_body=payload, validate=_validate_tts, surface='/audio/speech',
+        proof='audio bytes', secret_values=(api_key,))
 
 
 def nonchat_probe_fn(caps):
@@ -586,7 +776,9 @@ _PROBE_SURFACE_NAMES = {
 # Verdicts that warrant a retry (could be a transient blip), versus ones
 # that are definitive on the first attempt (no point re-asking).
 _PROBE_TRANSIENT = {'rate_limited', 'unavailable', 'error'}
-_PROBE_DEFINITIVE = {'unauthorized', 'not_found'}
+_PROBE_DEFINITIVE = {
+    'unauthorized', 'not_found', 'bad_request', 'invalid_response',
+}
 
 
 def probe_cell_multi(base_url, api_key, model_id, extra_headers, timeout,
@@ -629,7 +821,101 @@ def probe_cell_multi(base_url, api_key, model_id, extra_headers, timeout,
 # ══════════════════════════════════════════════════════
 CELL_PROBE_TASKS: dict = {}
 CELL_PROBE_LOCK = threading.Lock()
-_PROBE_DISABLE_STATUSES = {'rate_limited', 'unauthorized', 'not_found', 'unavailable'}
+_PROBE_DISABLE_STATUSES = {
+    'rate_limited', 'unauthorized', 'not_found', 'unavailable',
+    'bad_request', 'invalid_response', 'error',
+}
+
+_PROOF_BY_SURFACE = {
+    'chat': 'generated_text',
+    'image': 'image_payload',
+    'transcription': 'transcript_payload',
+    'tts': 'audio_bytes',
+    'embedding': 'embedding_vector',
+}
+
+
+def _http_status_from_detail(detail) -> int | None:
+    match = _HTTP_STATUS_RE.search(str(detail or ''))
+    return int(match.group(1)) if match else None
+
+
+def normalize_probe_snapshot(snapshot: dict) -> dict:
+    """Upgrade old probe snapshots to the strict v2 public contract.
+
+    The migration is deliberately read-time and non-destructive: persisted
+    files can be shared with an older process during a rolling deployment.
+    Legacy ``ok + HTTP 400`` cells become ``bad_request`` immediately; legacy
+    chat ``HTTP 200`` cells become neutral ``unverified`` until re-tested,
+    because version 1 never inspected their response payload. Existing
+    non-chat HTTP 200 cells did have modality shape validation, so their proof
+    can be inferred safely from ``probe_surface``.
+    """
+    if not isinstance(snapshot, dict):
+        return snapshot
+    try:
+        version = int(snapshot.get('probe_schema_version') or 1)
+    except (TypeError, ValueError) as exc:
+        logger.debug('[CellProbe] invalid probe schema version: %s', exc)
+        version = 1
+    out = dict(snapshot)
+    cells_out = {}
+    raw_cells = snapshot.get('cells')
+    if not isinstance(raw_cells, dict):
+        raw_cells = {}
+    for key, original in raw_cells.items():
+        if not isinstance(original, dict):
+            continue
+        cell = dict(original)
+        cell['detail'] = _redact_probe_text(cell.get('detail'))
+        status = str(cell.get('status') or '')
+        http_status = cell.get('http_status')
+        if not isinstance(http_status, int):
+            http_status = _http_status_from_detail(cell.get('detail'))
+        if http_status is not None:
+            cell['http_status'] = http_status
+
+        if status == 'ok' and http_status is not None and http_status >= 400:
+            status = ('bad_request' if http_status in (400, 409, 415, 422)
+                      else 'error')
+            cell['status'] = status
+            cell['recommend_disable'] = True
+            cell.pop('proof', None)
+            cell['detail'] = ('%s — legacy false-positive corrected; provider '
+                              'rejected the probe request' %
+                              (cell.get('detail') or 'HTTP %d' % http_status))
+        elif status == 'ok' and not cell.get('proof'):
+            surface = str(cell.get('probe_surface') or 'chat')
+            if version < PROBE_SCHEMA_VERSION and surface in ('chat', ''):
+                cell['status'] = 'unverified'
+                cell['recommend_disable'] = False
+                cell['detail'] = ('%s — legacy result did not validate generated '
+                                  'content; re-test required' %
+                                  (cell.get('detail') or 'HTTP 2xx'))
+            else:
+                proof = _PROOF_BY_SURFACE.get(surface)
+                if proof:
+                    cell['proof'] = proof
+        cells_out[key] = cell
+
+    out['cells'] = cells_out
+    out['probe_schema_version'] = PROBE_SCHEMA_VERSION
+    # Summaries are a view over cells, never trusted from an older schema.
+    n_ok = sum(1 for c in cells_out.values() if c.get('status') == 'ok')
+    n_disable = sum(1 for c in cells_out.values()
+                    if c.get('recommend_disable') is True)
+    n_skipped = sum(1 for c in cells_out.values()
+                    if c.get('status') == SKIPPED)
+    n_neutral = sum(1 for c in cells_out.values()
+                    if c.get('status') in ('not_logged_in', 'unverified'))
+    out['summary'] = {
+        'ok': n_ok,
+        'disable': n_disable,
+        'skipped': n_skipped,
+        'neutral': n_neutral,
+        'failed': max(0, len(cells_out) - n_ok - n_skipped - n_neutral),
+    }
+    return out
 
 
 def build_probe_work(provider: dict, models: list, api_keys: list) -> list:
@@ -719,15 +1005,26 @@ def _recount_summary(task: dict):
     therefore reflect the merged set from the very first poll, not just the
     cells completed in this run."""
     cells = task['cells']
-    n_disable = sum(1 for c in cells.values() if c['recommend_disable'])
-    n_skipped = sum(1 for c in cells.values() if c['status'] == SKIPPED)
-    task['summary'] = {'ok': len(cells) - n_disable - n_skipped,
-                       'disable': n_disable, 'skipped': n_skipped}
+    n_ok = sum(1 for c in cells.values() if c.get('status') == 'ok')
+    n_disable = sum(1 for c in cells.values()
+                    if c.get('recommend_disable') is True)
+    n_skipped = sum(1 for c in cells.values()
+                    if c.get('status') == SKIPPED)
+    n_neutral = sum(1 for c in cells.values()
+                    if c.get('status') in ('not_logged_in', 'unverified'))
+    task['summary'] = {
+        'ok': n_ok,
+        'disable': n_disable,
+        'skipped': n_skipped,
+        'neutral': n_neutral,
+        'failed': max(0, len(cells) - n_ok - n_skipped - n_neutral),
+    }
 
 
 def public_probe_snapshot(task: dict) -> dict:
     """The serialisable, secret-free view of a probe task (for poll + disk)."""
-    return {
+    return normalize_probe_snapshot({
+        'probe_schema_version': PROBE_SCHEMA_VERSION,
         'provider_id': task['provider_id'],
         'status': task['status'],
         'started_at': task['started_at'],
@@ -738,7 +1035,7 @@ def public_probe_snapshot(task: dict) -> dict:
         'cells': task['cells'],
         'summary': task['summary'],
         'error': task['error'],
-    }
+    })
 
 
 def run_cell_probe_task(task: dict, work: list, timeout: int):
@@ -796,6 +1093,8 @@ def run_cell_probe_task(task: dict, work: list, timeout: int):
                               % ','.join(caps),
                     'recommend_disable': False,
                     'probe_surface': 'none',
+                    'http_status': None,
+                    'proof': None,
                 }
             surface = _PROBE_SURFACE_NAMES[probe_fn]
             if 'image_gen' in caps:
@@ -812,6 +1111,7 @@ def run_cell_probe_task(task: dict, work: list, timeout: int):
                                           protocol=cell_protocol, probe_fn=probe_fn,
                                           oauth=oauth,
                                           **({'adapter': adapter} if adapter else {}))
+        http_status = _http_status_from_detail(detail)
         return {
             'key_idx': key_idx,
             'model_id': mid,
@@ -820,6 +1120,9 @@ def run_cell_probe_task(task: dict, work: list, timeout: int):
             'detail': detail,
             'recommend_disable': status in _PROBE_DISABLE_STATUSES,
             'probe_surface': surface,
+            'http_status': http_status,
+            'proof': (_PROOF_BY_SURFACE.get(surface)
+                      if status == 'ok' else None),
         }
 
     last_persist = 0.0
@@ -870,5 +1173,7 @@ __all__ = [
     'probe_tts_cell', 'nonchat_probe_fn',
     'probe_cache_path', 'probe_cell_key', 'persist_probe_task',
     'build_probe_work',
-    'public_probe_snapshot', 'CELL_PROBE_TASKS', 'CELL_PROBE_LOCK', 'SKIPPED',
+    'public_probe_snapshot', 'normalize_probe_snapshot',
+    'CELL_PROBE_TASKS', 'CELL_PROBE_LOCK', 'SKIPPED',
+    'PROBE_SCHEMA_VERSION',
 ]

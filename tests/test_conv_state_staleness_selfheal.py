@@ -74,8 +74,10 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
-CONV_LIST = os.path.join(JS_DIR, 'ui', 'conversation_list.js')
+from tests._runtime_sections import runtime_section_path
+
+REDUCER = runtime_section_path('core/conv_state_reducer.js')
+CONV_LIST = runtime_section_path('ui/conversation_list.js')
 
 
 def _node_available() -> bool:
@@ -285,7 +287,8 @@ def test_repair_does_not_depend_on_the_push_channel():
             conv_id, 'task_ids',
             client=['frozen'],                 # client never moves
             server=['moving-%d' % i],          # server advances
-            now=t0 + i * (thresh / 2))
+            now=t0 + i * (thresh / 2),
+            observer_id='no-such-socket-anywhere')
     assert v['sustained'], (
         'precondition: the tracker must judge this a sustained stall; got %r' % v)
 
@@ -428,8 +431,8 @@ function check(name, cond, detail) {
   out.push((cond ? 'PASS ' : 'FAIL ') + name + (cond ? '' : '  :: ' + (detail || '')));
 }
 
-const JS_DIR = process.argv[1];
-(0, eval)(fs.readFileSync(path.join(JS_DIR, 'core/conv_state_reducer.js'), 'utf8'));
+const REDUCER = process.argv[1];
+(0, eval)(fs.readFileSync(REDUCER, 'utf8'));
 
 const WALL = Date.now() * 1e6;
 // A conv this tab believes is IDLE, holding an old rev — the frozen client.
@@ -467,7 +470,7 @@ reportSyncDigest(conversations).then(() => {
   console.log(out.join('\n'));
 }).catch((e) => { console.log('FAIL harness_threw :: ' + (e && e.message)); });
 """
-    proc = subprocess.run(['node', '-e', harness, JS_DIR],
+    proc = subprocess.run(['node', '-e', harness, REDUCER],
                           capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, (
         'harness crashed (rc=%s)\nstdout:\n%s\nstderr:\n%s'
@@ -477,6 +480,57 @@ reportSyncDigest(conversations).then(() => {
     assert not failed, ('in-band repair application failed:\n  '
                         + '\n  '.join(failed))
     assert len(lines) >= 3, 'expected 3 checks, got:\n%s' % '\n'.join(lines)
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not available')
+def test_client_repairs_rev_with_body_verify_not_task_snapshot():
+    """Rev drift refreshes the active body and lazily marks background bodies."""
+    harness = r"""
+const fs = require('fs');
+const path = require('path');
+global.window = global;
+global.debugLog = () => {};
+global.activeStreams = new Map();
+global.activeConvId = 'active';
+global._editingMsgIdx = null;
+const _log = console.log.bind(console);
+global.console = { log: _log, warn: () => {}, error: () => {}, debug: () => {} };
+
+const REDUCER = process.argv[1];
+(0, eval)(fs.readFileSync(REDUCER, 'utf8'));
+
+const active = { id: 'active', messages: [{role:'user', content:'old'}], _serverRev: 1 };
+const background = { id: 'background', messages: [{role:'user', content:'old'}], _serverRev: 2 };
+global.conversations = [active, background];
+let verifies = 0;
+global._verifyActiveConvFromServer = async (id) => {
+  verifies++;
+  if (id === 'active') active._serverRev = 99;
+  return false;  // GET landed; content happened to be byte-identical
+};
+global.renderConversationList = () => {};
+global.Api = { conversations: { reportSyncDigest: async () => ({
+  ok: true, checked: 2, divergences: [
+    {convId:'active', kind:'rev', client:1, server:99},
+    {convId:'background', kind:'rev', client:2, server:88},
+  ], reloadConvIds: ['active', 'background'], repaired: false, snapshot: null,
+}) } };
+
+reportSyncDigest(conversations).then(() => {
+  const checks = [
+    ['active_verified_once', verifies === 1],
+    ['active_rev_adopted', active._serverRev === 99],
+    ['active_no_longer_stale', active._needsLoad === false],
+    ['background_marked_for_lazy_hydration', background._needsLoad === true],
+  ];
+  console.log(checks.map(([n, ok]) => (ok ? 'PASS ' : 'FAIL ') + n).join('\n'));
+}).catch((e) => { console.log('FAIL harness_threw ' + (e && e.message)); });
+"""
+    proc = subprocess.run(['node', '-e', harness, REDUCER],
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    failed = [ln for ln in proc.stdout.splitlines() if ln.startswith('FAIL')]
+    assert not failed, '\n'.join(failed)
 
 
 def test_probe_endpoint_wires_detection_to_repair():
@@ -573,8 +627,8 @@ function check(name, cond, detail) {
   out.push((cond ? 'PASS ' : 'FAIL ') + name + (cond ? '' : '  :: ' + (detail || '')));
 }
 
-const JS_DIR = process.argv[1];
-(0, eval)(fs.readFileSync(path.join(JS_DIR, 'core/conv_state_reducer.js'), 'utf8'));
+const REDUCER = process.argv[1];
+(0, eval)(fs.readFileSync(REDUCER, 'utf8'));
 
 const M = new Map();
 const WALL = Date.now() * 1e6;
@@ -655,7 +709,7 @@ console.log(out.join('\n'));
 
 @pytest.mark.skipif(not _node_available(), reason='node not available')
 def test_client_confidence_dimension():
-    proc = subprocess.run(['node', '-e', _HARNESS, JS_DIR],
+    proc = subprocess.run(['node', '-e', _HARNESS, REDUCER],
                           capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, (
         'harness crashed (rc=%s)\nstdout:\n%s\nstderr:\n%s'
@@ -717,16 +771,12 @@ def test_i18n_key_exists_for_the_degraded_state():
     Measured precedent in this project: a tooltip shipped as the literal string
     ``project.qrScan`` because the render guard never checked the dictionary.
     """
-    i18n = os.path.join(JS_DIR, 'i18n.js')
-    src = open(i18n, encoding='utf-8').read()
-    assert "'sidebar.stateUnconfirmed'" in src, (
-        'sidebar.stateUnconfirmed must exist in i18n.js or the tooltip renders '
-        'as a raw key')
-    m = re.search(r"'sidebar\.stateUnconfirmed':\s*\{([^}]*)\}", src)
-    assert m, 'malformed i18n entry'
-    entry = m.group(1)
-    assert 'zh:' in entry and 'en:' in entry, (
-        'both languages required — the Chinese UI is the primary one here')
+    import json
+    locale_root = os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales')
+    for language in ('zh', 'en'):
+        with open(os.path.join(locale_root, language + '.json'), encoding='utf-8') as handle:
+            catalog = json.load(handle)
+        assert catalog.get('sidebar.stateUnconfirmed'), language
 
 
 def test_css_targets_the_degraded_state():

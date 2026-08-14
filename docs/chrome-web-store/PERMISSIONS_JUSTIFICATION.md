@@ -41,6 +41,12 @@ Used to list the user's open tabs (titles and URLs) so they can choose which tab
 The assistant can be asked to save a file the user is looking at (for example "download this report"). That task is carried out with chrome.downloads.download, using the URL the task names and an optional filename. This is the only use; the extension does not read, search, or modify the user's existing download history.
 ```
 
+## `webRequest`
+
+```
+Used only while an active Tofu browser task explicitly requests network-response capture for its target tab. The extension records bounded response metadata (URL, method, status, resource type and timing), never response bodies, cookies, or authorization headers; the listener is removed when the task stops or its lease is released.
+```
+
 ## `storage`
 
 ```

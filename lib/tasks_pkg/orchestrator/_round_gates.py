@@ -1,24 +1,20 @@
-"""Per-round gates: budget ceiling + tool-rounds ceiling + per-round diagnostic.
+"""Per-round financial budget gate and diagnostic logging.
 
 Extracted 2026-07-31 (pt_03f4cdf1 slice 17) from
 ``lib/tasks_pkg/orchestrator/_run.py`` run_task stream loop.
 
-The three gates are evaluated in strict order after the LLM call and
-before tool dispatch:
+The budget check is evaluated after the LLM call and before tool dispatch:
 
-1. **max_budget_usd** (Claude Agent SDK parity): hard $ ceiling on
+* **max_budget_usd** (Claude Agent SDK parity): hard $ ceiling on
    accumulated cost. 0 / unset disables. On exceed: stamps
    ``finishReason='budget_exceeded'``, emits ROUND_END(reason='budget'),
    sets ``exit_reason``, and breaks.
-2. **tool_rounds_exhausted**: safety ceiling on tool call rounds. On
-   exceed: stamps ``finishReason='tool_rounds_exhausted'``, emits
-   ROUND_END(reason='budget'), sets ``exit_reason``, and breaks.
-3. **per-round diagnostic**: INFO-level log of finish_reason / model /
+* **per-round diagnostic**: INFO-level log of finish_reason / model /
    content-length / tool_calls count for every tool round.
 
 The helper mutates ``rs`` (RoundState) in place and returns a bool:
-``True`` when the caller should break out of the stream loop (one of
-the budget gates fired), ``False`` when the round may proceed to tool
+``True`` when the caller should break out of the stream loop (the
+financial budget fired), ``False`` when the round may proceed to tool
 dispatch. All event emission is via ``append_event`` /
 ``build_event`` / ``EventType`` so the wire contract stays identical.
 """
@@ -34,16 +30,70 @@ from lib.tasks_pkg.manager import append_event
 logger = get_logger(__name__)
 
 
+def check_task_resource_budget(
+    task: dict[str, Any],
+    rs: Any,
+    *,
+    round_num: int,
+    cfg: dict[str, Any],
+) -> bool:
+    """Warn once at the soft threshold; terminate before another API call."""
+    from lib.task_budget import evaluate_task_budget
+
+    decision = evaluate_task_budget(
+        task, cfg, usage=rs.accumulated_usage,
+        api_rounds=len(rs.api_rounds))
+    warned = task.setdefault('_budgetWarnings', set())
+    for reading in decision.warnings:
+        if reading.name in warned:
+            continue
+        warned.add(reading.name)
+        append_event(task, build_event(
+            EventType.BUDGET_WARNING,
+            limit=reading.name,
+            used=reading.used,
+            remaining=reading.remaining,
+            hardLimit=reading.limit,
+            unit=reading.unit,
+        ))
+
+    reading = decision.exceeded
+    if reading is None:
+        return False
+    rs.last_finish_reason = 'budget_exceeded'
+    rs.exit_reason = f'budget_exceeded_{reading.name}_round_{round_num}'
+    from lib.error_envelope import make_envelope as _make_env
+    envelope = _make_env(
+        'budget_exceeded',
+        detail=(f'{reading.name} used={reading.used:g} '
+                f'limit={reading.limit:g} {reading.unit}'),
+        model=rs.model,
+        context='resource-budget-gate',
+        source='orchestrator',
+        raw=f'{reading.name}={reading.used:g}/{reading.limit:g}',
+    )
+    envelope['code'] = 'task_budget_exceeded'
+    envelope['budget'] = {
+        'limit': reading.name,
+        'used': reading.used,
+        'hardLimit': reading.limit,
+        'remaining': reading.remaining,
+        'unit': reading.unit,
+        'remainingBudget': decision.remaining,
+    }
+    task['error'] = envelope
+    return True
+
+
 def check_round_gates(
     task: dict[str, Any],
     rs: Any,
     *,
     round_num: int,
     tid: str,
-    max_tool_rounds: int,
     cfg: dict[str, Any],
 ) -> bool:
-    """Evaluate per-round budget + tool-rounds gates.
+    """Evaluate the per-round token/cost budget gate.
 
     Parameters
     ----------
@@ -56,8 +106,6 @@ def check_round_gates(
         Current round index (0-based).
     tid : str
         8-char task id for logging.
-    max_tool_rounds : int
-        Configured tool-round ceiling.
     cfg : dict[str, Any]
         Task config (read: ``maxBudgetUsd``).
 
@@ -65,7 +113,7 @@ def check_round_gates(
     -------
     bool
         ``True`` when the caller should ``break`` out of the stream
-        loop (a gate fired), ``False`` to continue.
+        loop (the budget fired), ``False`` to continue.
     """
     # ── Per-round diagnostic: log finish_reason for every tool round ──
     _round_content = len((rs.assistant_msg or {}).get('content', '') or '')
@@ -78,11 +126,40 @@ def check_round_gates(
 
     # ── max_budget_usd gate (Claude Agent SDK parity) ──
     # Hard $ ceiling on accumulated cost.  0 / unset disables.
-    _max_budget = float(cfg.get('maxBudgetUsd') or 0.0)
+    try:
+        _max_budget = float(cfg.get('maxBudgetUsd') or 0.0)
+    except (TypeError, ValueError, OverflowError) as exc:
+        logger.debug('[BudgetGate] invalid maxBudgetUsd=%r: %s',
+                     cfg.get('maxBudgetUsd'), exc)
+        _max_budget = 0.0
     if _max_budget > 0:
-        from lib.cost_estimator import check_budget
+        from lib.cost_estimator import check_budget, estimate_usage_cost
+        _cost_before_gate = estimate_usage_cost(
+            rs.accumulated_usage, rs.model,
+            task.get('provider_id') or '')
+        try:
+            _soft_ratio = float(cfg.get('taskBudgetSoftRatio') or 0.8)
+        except (TypeError, ValueError, OverflowError) as exc:
+            logger.debug('[BudgetGate] invalid taskBudgetSoftRatio=%r: %s',
+                         cfg.get('taskBudgetSoftRatio'), exc)
+            _soft_ratio = 0.8
+        _soft_ratio = max(0.1, min(0.99, _soft_ratio))
+        _warned = task.setdefault('_budgetWarnings', set())
+        if (_cost_before_gate < _max_budget
+                and _cost_before_gate >= _max_budget * _soft_ratio
+                and 'estimatedCostUsd' not in _warned):
+            _warned.add('estimatedCostUsd')
+            append_event(task, build_event(
+                EventType.BUDGET_WARNING,
+                limit='estimatedCostUsd',
+                used=_cost_before_gate,
+                remaining=max(0.0, _max_budget - _cost_before_gate),
+                hardLimit=_max_budget,
+                unit='usd',
+            ))
         _exceeded, _cost, _reason = check_budget(
             task, rs.accumulated_usage, rs.model, _max_budget,
+            provider_id=task.get('provider_id') or '',
             round_num=round_num,
         )
         if _exceeded:
@@ -96,30 +173,26 @@ def check_round_gates(
                 source='orchestrator',
                 raw=f'cost_usd={_cost:.6f} max={_max_budget:.6f}',
             )
+            task['error']['code'] = 'task_budget_exceeded'
+            from lib.task_budget import evaluate_task_budget
+            _resource_remaining = evaluate_task_budget(
+                task, cfg, usage=rs.accumulated_usage,
+                api_rounds=len(rs.api_rounds)).remaining
+            _cost_remaining = max(0.0, _max_budget - _cost)
+            task['error']['budget'] = {
+                'limit': 'estimatedCostUsd',
+                'used': _cost,
+                'hardLimit': _max_budget,
+                'remaining': _cost_remaining,
+                'unit': 'usd',
+                'remainingBudget': {
+                    **_resource_remaining,
+                    'estimatedCostUsd': _cost_remaining,
+                },
+            }
             rs.exit_reason = f'budget_exceeded_round_{round_num}_${_cost:.4f}'
             append_event(task, build_event(EventType.ROUND_END,
                                            roundNum=round_num, reason='budget'))
             return True
-
-    # ── Tool round budget check ──
-    if round_num >= max_tool_rounds:
-        # Safety ceiling: tool round budget exhausted
-        rs.last_finish_reason = 'tool_rounds_exhausted'
-        from lib.error_envelope import make_envelope as _make_env
-        task['error'] = _make_env(
-            'tool_rounds_exhausted',
-            detail=f'Tool call limit reached ({max_tool_rounds} rounds).',
-            model=rs.model,
-            context='tool-budget',
-            source='orchestrator',
-            raw=f'max_tool_rounds={max_tool_rounds}',
-        )
-        logger.warning('[Task %s] conv=%s ⚠️ Tool rounds exhausted at round %d/%d',
-                       task['id'][:8], task.get('convId', ''),
-                       round_num+1, max_tool_rounds)
-        rs.exit_reason = f'tool_rounds_exhausted_{round_num}'
-        append_event(task, build_event(EventType.ROUND_END,
-                                       roundNum=round_num, reason='budget'))
-        return True
 
     return False

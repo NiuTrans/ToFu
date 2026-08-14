@@ -22,7 +22,7 @@ caller keeps the local for use in the pre-loop init that follows.
      preferences the model was made aware of).
   5. Emit ``RELATED_CONVERSATIONS`` SSE if ``task['_relatedConversations']``
      was populated by the injection (the sibling-conversation digest chip).
-  6. Pop the two prefetch futures + shutdown the ``prefetch_executor``.
+  6. Pop the project-context future + shutdown the ``prefetch_executor``.
   7. Stash ``_t_prep_done`` on the task and log the prep-duration timing line.
   8. Emit VU phase ``Autopilot：上下文就绪，正在发送请求…``.
 
@@ -47,29 +47,20 @@ from lib.tasks_pkg.system_context import (
 logger = get_logger(__name__)
 
 
-def _vu_phase_local(task: dict, detail: str) -> None:
-    """Run_task's local ``_vu_phase(detail)`` adapter, inlined for
-    self-containedness (the caller in run_task passes a captured closure
-    over ``_vu_startup``; here we bypass it because the two Section-3 VU
-    phases are known-safe stringy detail passes and do NOT need the
-    startup-window gate the captured closure applies — see run_task's own
-    docstring for _vu_phase's role).  We fall back to the run_task
-    captured closure by looking it up on the task in case the caller sets
-    it, so the extraction can share both callsite semantics."""
-    fn = task.get('_vu_phase_fn')
-    if callable(fn):
-        try:
-            fn(detail)
-            return
-        except Exception as e:
-            logger.debug('[orchestrator] vu_phase closure failed: %s', e)
-    # No closure — this is fine, the inline block also allowed vu_phase to
-    # be a plain function reference; the caller ALWAYS provides one, so a
-    # None fall-through here is a bug on the caller side, not a graceful
-    # degradation.  Log and continue (matches the swallow-and-log posture
-    # every other VU-phase site uses).
-    logger.debug('[orchestrator] vu_phase not wired on task; skipping detail=%s',
-                 detail)
+def _emit_vu_context_phase(vu_phase, detail: str, detail_key: str) -> None:
+    """Emit one context boundary through run_task's VU-only adapter.
+
+    The callback owns the ``_vu_subtask`` gate and the carrier transform; this
+    helper only keeps the expensive operation fail-open while ensuring an
+    emit-side error leaves a diagnostic trace.
+    """
+    if not callable(vu_phase):
+        return
+    try:
+        vu_phase(detail, detail_key=detail_key)
+    except Exception as e:
+        logger.debug('[orchestrator] vu context phase emit failed key=%s: %s',
+                     detail_key, e)
 
 
 def inject_context_and_emit_chips(
@@ -107,22 +98,21 @@ def inject_context_and_emit_chips(
             function shuts it down after inject.
         tid: The short task id (``task['id'][:8]``).
         t_run_start: Wall-clock start-of-run anchor (for the prep timing line).
-        vu_phase: Optional callable ``(detail: str) -> None`` — the run_task
-            local _vu_phase closure adapter. When provided, used to emit the
-            two VU phases with the run_task startup-window gate; when None,
-            the module logs at debug level and continues (matches inline
-            behaviour: the two phases are decorative and never load-bearing).
+        vu_phase: Optional callback accepting ``detail`` plus the structured
+            ``detail_key`` keyword. The run_task adapter owns the VU-only gate;
+            this helper calls it immediately before and after the expensive
+            context-injection boundary.
 
     Returns:
         ``_t_prep_done`` — the wall-clock timestamp taken at the end of
         Section 3, the anchor stream_llm_response uses for time-to-first-token.
     """
-    # 1. VU phase — enter system-context injection.
-    if callable(vu_phase):
-        try:
-            vu_phase('Autopilot：注入系统上下文（项目结构、记忆检索）…')
-        except Exception as e:
-            logger.debug('[orchestrator] vu_phase (inject) failed: %s', e)
+    # 1. Attribute the real slow boundary before entering context providers.
+    _emit_vu_context_phase(
+        vu_phase,
+        'Autopilot is injecting system context (project structure and memory)…',
+        'stream.phase.vuInjectContext',
+    )
 
     # 2. Tool-name set for injection filter.
     _tool_names = {
@@ -131,6 +121,10 @@ def inject_context_and_emit_chips(
         if isinstance(t, dict)
     }
     _tool_names.discard(None)
+    # Compaction re-entry rebuilds capability-aware providers from these names
+    # without retaining the full tool schema in ambient context.
+    task['_contextToolNames'] = sorted(_tool_names)
+    task['_contextHasRealTools'] = bool(has_real_tools)
 
     # 3. Do the injection (mutates messages in place; stashes chip metadata
     #    on task).
@@ -177,7 +171,6 @@ def inject_context_and_emit_chips(
 
     # 6. Prefetch cleanup.
     task.pop('_prefetch_project', None)
-    task.pop('_prefetch_memory', None)
     try:
         prefetch_executor.shutdown(wait=False)
     except Exception as _e:
@@ -190,12 +183,12 @@ def inject_context_and_emit_chips(
                 'model=%s) — about to build first LLM request',
                 tid, _t_prep_done - t_run_start, model)
 
-    # 8. VU phase — context ready.
-    if callable(vu_phase):
-        try:
-            vu_phase('Autopilot：上下文就绪，正在发送请求…')
-        except Exception as e:
-            logger.debug('[orchestrator] vu_phase (ready) failed: %s', e)
+    # 8. The next real backend action is request construction / dispatch.
+    _emit_vu_context_phase(
+        vu_phase,
+        'Autopilot context is ready; sending the model request…',
+        'stream.phase.vuContextReady',
+    )
 
     return _t_prep_done
 

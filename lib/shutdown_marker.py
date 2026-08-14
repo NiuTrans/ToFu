@@ -31,12 +31,13 @@ is per-install-copy isolated exactly like ``.server.lock``.
 
 from __future__ import annotations
 
+import math
 import os
 import socket
 import time
 from typing import Any
 
-from lib.json_store import read_json, write_json_atomic
+from lib.json_store import read_json, update_json_atomic, write_json_atomic
 from lib.log import audit_log, get_logger
 from lib.runtime_paths import data_root
 
@@ -61,7 +62,7 @@ _STORM_WINDOW_SECS = float(os.environ.get('TOFU_RESTART_STORM_WINDOW_SECS', '120
 
 # Reasons that count as a DELIBERATE (manual/controlled) shutdown. A marker
 # left in state="running" is, by definition, none of these — it is a kill.
-CLEAN_REASONS = frozenset({'manual', 'signal', 'restart'})
+CLEAN_REASONS = frozenset({'manual', 'signal', 'restart', 'memory_recycle'})
 
 # classify_previous_shutdown verdicts.
 VERDICT_FIRST_BOOT = 'first_boot'   # no prior marker — nothing to classify
@@ -185,22 +186,41 @@ def record_boot(ts: float | None = None) -> list[float]:
     Returns the (post-append, newest-last) list of boot timestamps. Best-effort:
     a read/write failure returns whatever we have and never blocks boot.
     """
-    ts = ts if ts is not None else time.time()
-    boots: list[float] = []
-    raw = read_json(_boots_path(), default=None)
-    if isinstance(raw, list):
-        for v in raw:
-            try:
-                boots.append(float(v))
-            except (TypeError, ValueError):
-                continue
-    boots.append(ts)
-    boots = boots[-_BOOTS_KEEP:]
     try:
-        write_json_atomic(_boots_path(), boots, fsync=True)
+        stamp = float(ts if ts is not None else time.time())
+    except (TypeError, ValueError) as e:
+        logger.warning('[shutdown_marker] invalid boot timestamp ignored: %s', e)
+        return []
+    if not math.isfinite(stamp):
+        logger.warning('[shutdown_marker] non-finite boot timestamp ignored: %r',
+                       stamp)
+        return []
+    outcome: list[float] = []
+
+    def _append(raw):
+        boots = []
+        if isinstance(raw, list):
+            for value in raw:
+                try:
+                    boots.append(float(value))
+                except (TypeError, ValueError) as e:
+                    logger.debug('[shutdown_marker] ignored malformed boot '
+                                 'timestamp %r: %s', value, e)
+                    continue
+        boots.append(stamp)
+        del boots[:-_BOOTS_KEEP]
+        outcome[:] = boots
+        return boots
+
+    try:
+        # A single locked RMW closes the read→write race between overlapping
+        # supervisors/processes.  Each successful boot contributes exactly one
+        # entry instead of the last writer silently discarding its peers.
+        update_json_atomic(
+            _boots_path(), _append, default=[], fsync=True)
     except OSError as e:
         logger.warning('[shutdown_marker] record_boot write failed (non-fatal): %s', e)
-    return boots
+    return outcome
 
 
 def is_restart_storm(boots: list[float] | None = None, *, now: float | None = None) -> bool:
@@ -222,8 +242,7 @@ def is_restart_storm(boots: list[float] | None = None, *, now: float | None = No
 
 def _is_num(v: Any) -> bool:
     try:
-        float(v)
-        return True
+        return math.isfinite(float(v))
     except (TypeError, ValueError):
         return False
 

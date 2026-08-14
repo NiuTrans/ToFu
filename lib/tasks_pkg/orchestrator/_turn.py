@@ -134,6 +134,7 @@ def _run_single_turn(
     task['error']        = None
     task['finishReason'] = None
     task['toolRounds'] = []    # fresh tool rounds per turn
+    task['programRuns'] = []   # canonical hosted-program runs per turn
 
     # Flag to tell run_task NOT to emit final 'done' event
     task['_endpoint_managed'] = True

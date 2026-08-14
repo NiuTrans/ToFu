@@ -64,6 +64,8 @@ def _extract_arxiv_id(url_or_id):
         - arxiv.org/abs/hep-th/0601001
         - https://arxiv.org/abs/2301.12345
     """
+    if not isinstance(url_or_id, str):
+        return None
     url_or_id = url_or_id.strip()
 
     m = re.match(r'^(\d{4}\.\d{4,5})(v\d+)?$', url_or_id)
@@ -71,6 +73,12 @@ def _extract_arxiv_id(url_or_id):
         return m.group(1) + (m.group(2) or '')
 
     m = re.match(r'^([a-z-]+/\d{7})(v\d+)?$', url_or_id)
+    if m:
+        return m.group(1) + (m.group(2) or '')
+
+    # Models and citation renderers commonly include the human-facing prefix.
+    m = re.match(r'^arxiv\s*:\s*([a-z-]+/\d{7}|\d{4}\.\d{4,5})(v\d+)?$',
+                 url_or_id, flags=re.IGNORECASE)
     if m:
         return m.group(1) + (m.group(2) or '')
 
@@ -83,6 +91,28 @@ def _extract_arxiv_id(url_or_id):
         return m.group(1)
 
     return None
+
+
+def normalize_arxiv_id(value) -> str:
+    """Return a bare, versionless arXiv id from model/library wire shapes.
+
+    Accepts bare ids, ``arXiv:<id>``, abs/pdf URLs, and the small dict shapes
+    emitted in research JSON. Unlike the historical ``split('v')[0]``, this
+    removes only a terminal version suffix, so the ``v`` in ``arXiv:`` cannot
+    turn a valid citation into the bogus id ``arXi``.
+    """
+    if isinstance(value, dict):
+        for key in ('arxiv_id', 'id', 'paper'):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                value = candidate
+                break
+        else:
+            return ''
+    extracted = _extract_arxiv_id(value) if isinstance(value, str) else None
+    if not extracted:
+        return ''
+    return re.sub(r'v\d+$', '', extracted, flags=re.IGNORECASE).strip()
 
 
 def _fetch_title_via_api(arxiv_id):

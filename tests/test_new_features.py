@@ -52,7 +52,9 @@ class TestAttachments:
         assert len(messages) == 3
         assert messages[2]['role'] == 'user'
         assert messages[2].get('_isMeta') is True
-        assert '<attachment>test</attachment>' in messages[2]['content']
+        texts = [b.get('text', '') for b in messages[2]['content']]
+        assert '<attachment>test</attachment>' in '\n'.join(texts)
+        assert messages[2].get('_contextComposer') is True
 
     def test_inject_attachments_does_not_touch_multimodal_prefix(self):
         from lib.tasks_pkg.attachments import inject_attachments
@@ -207,6 +209,75 @@ class TestAttachments:
         assert not hasattr(att, '_attachment_state'), (
             '_attachment_state should be removed — the trigger is now a pure '
             'message scan with no per-conv state to leak')
+
+    @staticmethod
+    def _todos(active_status='in_progress'):
+        return [
+            {'id': 'inspect', 'content': 'Inspect the failure',
+             'status': 'completed'},
+            {'id': 'fix', 'content': 'Implement the fix',
+             'status': active_status},
+            {'id': 'verify', 'content': 'Verify end to end',
+             'status': 'pending'},
+        ]
+
+    def test_todo_state_is_not_reinjected_while_matching_call_is_visible(self):
+        from lib.tasks_pkg.attachments import compute_turn_attachments
+        todos = self._todos()
+        messages = [
+            {'role': 'user', 'content': 'fix it'},
+            {'role': 'assistant', 'content': None, 'tool_calls': [{
+                'function': {'name': 'todo_write',
+                             'arguments': json.dumps({'todos': todos})},
+            }]},
+            {'role': 'tool', 'content': 'Checklist updated'},
+        ]
+        result = compute_turn_attachments(
+            messages, task={'_todos': todos}, round_num=3, conv_id='todo-live')
+        assert result == []
+
+    def test_todo_state_is_restored_after_tool_history_compaction(self):
+        from lib.tasks_pkg.attachments import compute_turn_attachments
+        todos = self._todos()
+        # This is the post-L2 shape: the task dict retained the todos, while
+        # the todo_write call/result are no longer in model-visible history.
+        messages = [
+            {'role': 'user', 'content': 'fix it'},
+            {'role': 'assistant', 'content': None, 'tool_calls': [{
+                'function': {'name': 'context_compact', 'arguments': '{}'},
+            }]},
+            {'role': 'tool', 'name': 'context_compact',
+             'content': 'summary without the checklist'},
+        ]
+        result = compute_turn_attachments(
+            messages, task={'_todos': todos}, round_num=40,
+            conv_id='todo-compacted')
+        assert len(result) == 1
+        assert '## Active Task Checklist' in result[0]
+        assert '- [x] Inspect the failure' in result[0]
+        assert '- [ ] Implement the fix ⏳' in result[0]
+        assert 'do not recreate or restart the plan' in result[0]
+
+    def test_todo_restore_deduplicates_and_refreshes_stale_state(self):
+        from lib.tasks_pkg.attachments import (compute_turn_attachments,
+                                               inject_attachments)
+        todos = self._todos()
+        task = {'_todos': todos}
+        messages = [{'role': 'user', 'content': 'fix it'}]
+        first = compute_turn_attachments(
+            messages, task=task, round_num=12, conv_id='todo-dedup')
+        assert len(first) == 1
+        inject_attachments(messages, first)
+        assert compute_turn_attachments(
+            messages, task=task, round_num=13, conv_id='todo-dedup') == []
+
+        # Host state moved forward. The old reminder must not mask the newer
+        # canonical state; one fresh, fingerprinted reminder should be added.
+        task['_todos'] = self._todos(active_status='completed')
+        refreshed = compute_turn_attachments(
+            messages, task=task, round_num=14, conv_id='todo-dedup')
+        assert len(refreshed) == 1
+        assert '- [x] Implement the fix' in refreshed[0]
 
 
 

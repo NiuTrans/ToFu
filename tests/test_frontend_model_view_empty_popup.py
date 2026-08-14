@@ -34,6 +34,8 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -73,7 +75,7 @@ global.t = win.t = (k, d) => (typeof d === 'string' ? d : k);
 global.renderMarkdown = win.renderMarkdown = (s) => String(s == null ? '' : s);
 global.Icon = win.Icon = (n) => '<svg data-icon="' + n + '"></svg>';
 
-eval(fs.readFileSync(path.join(ROOT, 'static', 'js', 'upload_preview.js'), 'utf8'));
+eval(fs.readFileSync(process.argv[4], 'utf8'));
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -112,6 +114,9 @@ def _run(mode: str = '') -> str:
         argv = ['node', harness, ROOT]
         if mode:
             argv.append(mode)
+        else:
+            argv.append('')
+        argv.append(runtime_section_path('upload_preview.js'))
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=45)
     finally:
         try:

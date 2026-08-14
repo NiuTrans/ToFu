@@ -88,6 +88,7 @@ class _Session:
         self._supports = set(supports)
         self._not_found = set(not_found)
         self.calls = []
+        self.list_cache_modes = []
         for m in ('send_ping', 'list_tools', 'send_discover', 'discover'):
             if m not in self._supports:
                 setattr(self, m, None)
@@ -101,7 +102,8 @@ class _Session:
     async def send_ping(self):
         return await self._answer('send_ping')
 
-    async def list_tools(self):
+    async def list_tools(self, *, cache_mode='use'):
+        self.list_cache_modes.append(cache_mode)
         return await self._answer('list_tools')
 
     async def send_discover(self, version):
@@ -305,6 +307,36 @@ class NoReconnectStormTest(unittest.TestCase):
         self.assertEqual(s.calls[0], 'discover',
                          f'probe order ignored server/discover: {s.calls[:3]}')
         self.assertEqual(br._reconnects, [])
+
+    def test_modern_session_never_calls_removed_ping(self):
+        """The SDK keeps send_ping for legacy mode, but invoking it on a
+        modern connection emits MCPDeprecationWarning before any wire result.
+        Negotiation already tells us the era, so do not call it at all."""
+        s = _Session(supports=('send_ping', 'list_tools'))
+        s.protocol_version = '2026-07-28'
+        br, _ = _bridge(s)
+
+        verdict = asyncio.run(br._probe_liveness(
+            'srv', s, sdk_generation=2, protocol_version='2026-07-28'))
+
+        self.assertEqual(verdict, 'alive')
+        self.assertEqual(s.calls, ['list_tools'])
+        self.assertEqual(s.list_cache_modes, ['reload'])
+        self.assertEqual(br._probe_method.get('srv'), 'list_tools')
+
+    def test_v2_auto_client_legacy_fallback_also_avoids_ping_warning(self):
+        """Client(mode='auto') warns on send_ping even after negotiating a
+        legacy peer. The recorded SDK generation, not only the wire revision,
+        must therefore select the uncached list probe."""
+        s = _Session(supports=('send_ping', 'list_tools'))
+        br, _ = _bridge(s)
+
+        verdict = asyncio.run(br._probe_liveness(
+            'srv', s, sdk_generation=2, protocol_version='2025-11-25'))
+
+        self.assertEqual(verdict, 'alive')
+        self.assertEqual(s.calls, ['list_tools'])
+        self.assertEqual(s.list_cache_modes, ['reload'])
 
     def test_a_probe_needing_arguments_is_skipped_not_called(self):
         """Regression for a defect this suite's own fixture originally hid.

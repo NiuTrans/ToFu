@@ -1,20 +1,10 @@
 """lib/memory/profile_consolidate.py — the layer-3 consolidation pass.
 
-After a conversation turn completes, scan the recent surface + the current
-bounded profile with the CHEAP model (the same one wired in
-``lib/memory/prefetch.py``) and produce candidate preference edits:
-
-  * **reinforce** — an existing preference is restated / sharpened. AUTO-applied
-    via ``apply_reinforcement`` (replace-in-place; never grows unbounded).
-  * **new** — a genuinely new durable preference OR a durable fact about who the
-    user is. AUTO-applied via ``apply_new_preference`` and surfaced to the user
-    as a quiet "updated your profile" chip. The user is INFORMED, not asked: the
-    profile is fully editable in Settings, so a wrong inference is cheaply
-    corrected there rather than gated behind an in-chat confirmation.
-  * **distil** — when the profile is over the hard cap, the model returns a
-    rewritten, shorter ``full_profile`` that preserves meaning. AUTO-applied
-    (it's a compression of what's already there, not a new fact), and it is the
-    cap's forcing function: we replace the whole body rather than append-and-grow.
+After a conversation turn completes, scan the recent surface + structured
+"My Context" document with the configured CHEAP model.  It may conservatively
+add or update one of three explicit types: identity facts, conditional work
+rules, and response preferences.  Every assistant change is recorded in a
+bounded undo log and surfaced to the user with a real ``change_id``.
 
 The pass is advisory and best-effort: any failure logs + returns an empty
 result. It is gated on the Memory toggle + a feature flag, and skipped for
@@ -22,10 +12,13 @@ trivially short conversations.
 
 Returns a list of ``learned`` dicts the orchestrator turns into
 ``preference_learned`` SSE events:
-    {'kind': 'reinforced'|'added', 'summary': str, 'pending': False, 'id': ''}
+    {'kind': 'reinforced'|'added', 'summary': str, 'pending': False,
+     'id': str, 'change_id': str, 'item_id': str, 'type': str}
 """
 
 from __future__ import annotations
+
+import json
 
 from lib.llm_json import extract_json
 from lib.log import audit_log, get_logger
@@ -49,53 +42,61 @@ except Exception as _e:  # pragma: no cover — defensive
 
 
 _SYSTEM_PROMPT = """\
-You maintain a SHORT, durable profile that helps an AI assistant be more \
-thoughtful and personal toward ONE user. It holds two kinds of durable facts:
-  1. WORKING PREFERENCES — how they like the assistant to work (language, tone, \
-verbosity, coding conventions, do's/don'ts).
-  2. ABOUT THE USER — stable facts about who they are that make the assistant \
-more considerate (their role/profession, domain or industry, the languages & \
-tech stack they work in, expertise level, recurring projects or goals, timezone/\
-locale). NOT task facts, NOT one-off requests, NOT anything about the current \
-repo/bug.
+You maintain a SHORT, durable "My Context" document for ONE user. It has
+exactly three item types:
+  1. identity — stable, explicitly stated facts about the user (role,
+     organization, expertise, durable environment).
+  2. work_rule — a reusable conditional rule with separate `condition` and
+     `action` fields (for example: condition "submitting jobs on our cluster",
+     action "use the hope MCP").
+  3. response_preference — how the user wants answers written or work presented.
 
-You are given the user's CURRENT profile and the RECENT conversation. Decide \
-what — if anything — should change. Be CONSERVATIVE: most turns yield nothing. \
-Only record something the user EXPLICITLY stated or clearly demonstrated — never \
-guess or infer sensitive attributes.
+Be VERY CONSERVATIVE. Most turns yield no action. Only learn facts the USER
+explicitly stated. Never learn from the assistant's own answer or reasoning.
+Never infer sensitive attributes. Do not save a one-off request, temporary
+state, current bug/repository fact, chat summary, model reasoning, solution
+approach, or generic lesson. Those are not user context.
 
-Use the header "Preferences" for working preferences and "About the user" for \
-identity facts.
-
-Rules:
-  - Only durable, general facts ("always reply in Chinese", "never add \
-docstrings I didn't ask for", "is a backend engineer", "works mainly in Rust"). \
-NOT "fix this bug", NOT facts about the current task/repo.
-  - If the fact is ALREADY in the profile, do nothing (return []) unless the \
-user sharpened/changed it → then a "reinforce" that REPLACES the old line.
-  - A genuinely NEW preference or identity fact → kind "new" with the right \
-"header". It is applied automatically and the user is told (they can edit it in \
-Settings), so be accurate and conservative.
-  - If told the profile is OVER its size cap, return ONE "distil" action whose \
-"full_profile" is a rewritten, SHORTER profile preserving every fact's meaning \
-(merge duplicates, drop stale, tighten wording). Markdown bullets under headers.
+If an item already exists, do nothing unless the user explicitly corrected or
+sharpened it. Updates MUST reference the exact existing `item_id`. Do not
+distil, merge, delete, or rewrite unrelated items.
 
 Return ONLY JSON:
   {"actions": [
-     {"kind": "reinforce", "old_text": "<exact unique substring of current \
-profile, usually the full bullet line>", "new_text": "- <updated bullet>"},
-     {"kind": "new", "header": "Preferences"|"About the user", "text": "<the \
-fact, no leading dash>", "evidence": "<≤1 sentence why>"},
-     {"kind": "distil", "full_profile": "<entire rewritten profile markdown>"}
+    {"kind":"new", "type":"identity"|"response_preference",
+     "text":"...", "evidence":"short explicit user statement"},
+    {"kind":"new", "type":"work_rule", "condition":"...",
+     "action":"...", "evidence":"short explicit user statement"},
+    {"kind":"update", "item_id":"ctx_...", "type":"...",
+     "text":"..."},
+    {"kind":"update", "item_id":"ctx_...", "type":"work_rule",
+     "condition":"...", "action":"..."}
   ]}
-Return {"actions": []} when nothing should change. Prefer fewer actions."""
+Return {"actions":[]} when uncertain. Prefer zero or one action."""
 
 
 def _recent_surface(messages: list, cap: int = _MAX_SURFACE_CHARS) -> str:
-    """Plain-text of the last user+assistant turns (reuses prefetch helpers)."""
-    from lib.memory.prefetch import _build_recent_turns_text
-    txt = _build_recent_turns_text(messages, k=4)
-    return txt[:cap]
+    """Plain text from recent real USER messages only.
+
+    Excluding assistant/tool/synthetic messages here is a data-boundary
+    guarantee, not merely a prompt suggestion: the learner cannot turn its own
+    reasoning, a tool result, or an injected reminder into user context.
+    """
+    from lib.memory.prefetch._query import _msg_plain_text
+
+    rows: list[str] = []
+    for message in reversed(messages):
+        if message.get('role') != 'user' or message.get('_isMeta'):
+            continue
+        text = _msg_plain_text(message).strip()
+        if not text:
+            continue
+        rows.append(f'[user] {text}')
+        if len(rows) >= 4:
+            break
+    rows.reverse()
+    surface = '\n\n'.join(rows)
+    return surface[:cap]
 
 
 def _parse_actions(content: str) -> list[dict]:
@@ -123,14 +124,12 @@ def run_profile_consolidation(messages: list, task: dict | None = None) -> list[
     # Identity scope captured onto the task at creation (the daemon thread has
     # no request context). '' → the single global profile (open/private mode).
     scope = (task or {}).get('_profileScope', '') or ''
-    profile = up.load_profile(scope)
-    over_cap = up.profile_over_cap(profile, scope)
+    context = up.context_status(scope)
 
     user_block = (
-        f'## Current profile ({up.profile_char_count(profile)} chars, '
-        f'cap {up.USER_PROFILE_CHAR_CAP}'
-        f'{", OVER CAP — return a distil action" if over_cap else ""})\n\n'
-        f'{profile or "(empty)"}\n\n'
+        f'## Current context ({context["chars"]} chars, '
+        f'cap {context["cap"]})\n\n'
+        f'{json.dumps(context["items"], ensure_ascii=False)}\n\n'
         f'## Recent conversation\n\n{surface}'
     )
 
@@ -156,38 +155,61 @@ def run_profile_consolidation(messages: list, task: dict | None = None) -> list[
             continue
         kind = (act.get('kind') or '').strip()
         try:
-            if kind == 'reinforce':
-                res = up.apply_reinforcement(act.get('old_text', ''),
-                                             act.get('new_text', ''),
-                                             scope=scope)
-                if res.get('matched') and res.get('saved'):
-                    summary = (act.get('new_text') or '').lstrip('-*').strip()
-                    learned.append({'kind': 'reinforced', 'summary': summary,
-                                    'pending': False, 'id': ''})
-                    audit_log('user_profile_learned', kind='reinforced')
-            elif kind == 'distil':
-                full = act.get('full_profile') or ''
-                if full.strip():
-                    res = up.save_profile(full, scope)
-                    if res.get('saved'):
-                        logger.info('[ProfileConsolidate] distilled profile '
-                                    '→ %d chars (over_cap=%s)',
-                                    res.get('chars'), res.get('over_cap'))
-                        audit_log('user_profile_distilled',
-                                  chars=res.get('chars'))
-            elif kind == 'new':
-                text = (act.get('text') or '').strip()
-                if not text:
+            if kind in ('update', 'reinforce'):
+                item_id = (act.get('item_id') or '').strip()
+                # Back-compat for an older consolidator response shape.
+                if not item_id and kind == 'reinforce':
+                    old = (act.get('old_text') or '').lstrip('-*').strip()
+                    matches = [i for i in up.load_context(scope)['items']
+                               if i.get('text') == old]
+                    item_id = matches[0]['id'] if len(matches) == 1 else ''
+                    act = {**act, 'text': (act.get('new_text') or '')
+                           .lstrip('-*').strip()}
+                if not item_id:
                     continue
-                header = (act.get('header') or '').strip() or 'Preferences'
-                res = up.apply_new_preference(text, header=f'## {header}',
-                                              scope=scope)
+                updates = {k: act[k] for k in
+                           ('type', 'text', 'condition', 'action') if k in act}
+                res = up.update_context_item(
+                    item_id, updates, scope, source='assistant',
+                    record_change=True)
+                if res and res.get('saved'):
+                    item = res['item']
+                    summary = (item.get('text') or
+                               f'When {item.get("condition")} → {item.get("action")}')
+                    learned.append({
+                        'kind': 'reinforced', 'summary': summary,
+                        'pending': False, 'id': res['change_id'],
+                        'change_id': res['change_id'], 'item_id': item['id'],
+                        'type': item['type'],
+                    })
+                    audit_log('user_context_learned', kind='updated')
+            elif kind == 'new':
+                item_type = (act.get('type') or '').strip()
+                if not item_type:
+                    header = (act.get('header') or '').strip().casefold()
+                    item_type = ('identity' if header == 'about the user'
+                                 else 'response_preference')
+                raw = {'type': item_type}
+                for key in ('text', 'condition', 'action'):
+                    if key in act:
+                        raw[key] = act[key]
+                existing = up.load_context(scope)['items']
+                if any(all(item.get(k) == raw.get(k) for k in raw)
+                       for item in existing):
+                    continue
+                res = up.create_context_item(
+                    raw, scope, source='assistant', record_change=True)
                 if res.get('saved'):
-                    learned.append({'kind': 'added',
-                                    'summary': text,
-                                    'pending': False,
-                                    'id': ''})
-                    audit_log('user_profile_learned', kind='added')
+                    item = res['item']
+                    summary = (item.get('text') or
+                               f'When {item.get("condition")} → {item.get("action")}')
+                    learned.append({
+                        'kind': 'added', 'summary': summary,
+                        'pending': False, 'id': res['change_id'],
+                        'change_id': res['change_id'], 'item_id': item['id'],
+                        'type': item['type'],
+                    })
+                    audit_log('user_context_learned', kind='added')
         except Exception as e:
             logger.warning('[ProfileConsolidate] action %r failed: %s', kind, e)
             continue

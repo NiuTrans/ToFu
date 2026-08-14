@@ -819,7 +819,7 @@ def _drop_epic_kickoffs(conv_id: str, board_task_id: str) -> int:
         rows = db.execute(
             'SELECT id, payload FROM message_queue WHERE conv_id=? AND kind=?',
             (conv_id, KIND_WORKFLOW)).fetchall()
-        removed = 0
+        delete_ids = []
         for r in rows:
             try:
                 p = _json.loads(r['payload']) if r['payload'] else {}
@@ -827,10 +827,16 @@ def _drop_epic_kickoffs(conv_id: str, board_task_id: str) -> int:
                 logger.debug('[Dispatch] drop-kickoff payload parse failed, skipping: %s', e)
                 continue
             if p.get('boardTaskId') == board_task_id:
-                db.execute('DELETE FROM message_queue WHERE id=?', (r['id'],))
-                removed += 1
-        if removed:
-            db.commit()
+                delete_ids.append(r['id'])
+        if not delete_ids:
+            return 0
+        from lib.database import write_transaction
+        removed = 0
+        with write_transaction(db, label='drop-stale-epic-kickoffs'):
+            for queue_id in delete_ids:
+                cursor = db.execute(
+                    'DELETE FROM message_queue WHERE id=?', (queue_id,))
+                removed += max(0, int(cursor.rowcount or 0))
         return removed
     except Exception as e:
         logger.warning('[Dispatch] drop-kickoff failed conv=%s epic=%s: %s',
@@ -854,18 +860,22 @@ def migrate_epic(project_path: str, epic: dict, new_target: str) -> dict:
         return {'ok': False, 'error': 'epic has no id'}
     try:
         from lib.conversations.project_feed import normalize_project_path
-        from lib.database import DOMAIN_CHAT, get_thread_db
+        from lib.database import (
+            DOMAIN_CHAT, db_execute_with_retry, get_thread_db)
         norm = normalize_project_path(project_path)
         db = get_thread_db(DOMAIN_CHAT)
         # Set the routing override + reopen the (stuck) claim so it re-dispatches
         # to new_target. created_by_conv is deliberately NOT in the SET list.
         import time as _time
-        db.execute(
+        cursor = db_execute_with_retry(
+            db,
             "UPDATE project_tasks SET dispatch_target=?, status='open', "
             "owner_conv_id='', lease_expires_at=0, dispatched=0, updated_at=? "
-            'WHERE id=? AND project_path=?',
-            (new_target, int(_time.time() * 1000), task_id, norm))
-        db.commit()
+            "WHERE id=? AND project_path=? AND status<>'done'",
+            (new_target, int(_time.time() * 1000), task_id, norm),
+            return_cursor=True)
+        if cursor.rowcount != 1:
+            return {'ok': False, 'error': 'migration_conflict'}
         # Drop the stale kickoff on the (dead) originator so the reconcile pass
         # stops re-draining it.
         if origin:

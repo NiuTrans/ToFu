@@ -42,7 +42,7 @@ logger = get_logger(__name__)
 # Single-target write tools gated wholesale; batch tools are partitioned
 # per-path (mirrors the read gate's two shapes).
 _GATED_SINGLE_TOOLS = ('write_file', 'apply_diff', 'insert_content')
-_GATED_BATCH_TOOLS = ('apply_diffs', 'insert_contents')
+_GATED_BATCH_TOOLS = ('edit_file', 'apply_diffs', 'insert_contents')
 
 
 def _conv_key(task: dict) -> str:

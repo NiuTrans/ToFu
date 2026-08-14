@@ -5,14 +5,7 @@ WHY
 2026-07-27 incident: sub-agent `agent-researcher-6b62ec57` ran 26,683,114
 rounds in 3.5h and wrote 53,366,229 lines = 9.1 GB into logs/app.log (96% of
 the whole file). The 9 GB was the SYMPTOM; the defect is that NOTHING in the
-production path bounds a wedged loop:
-
-  * ``SubTaskSpec.max_rounds = 0``       → "unlimited" → the 2**30 ceiling
-  * ``SubTaskSpec.timeout_seconds = 0``  → "unlimited" → the wall-clock halt
-                                            hook returns None every round
-
-Both are DATACLASS DEFAULTS, not test-fixture settings, so any caller that
-omits them gets `unlimited + unlimited`. The stub dispatcher in the incident
+production path detected semantic non-progress. The stub dispatcher in the incident
 merely made it fast (2100 rounds/s); against a real gateway the same loop
 does not stop either — it just burns money more slowly.
 
@@ -21,7 +14,7 @@ this suite) is inert until a caller passes it, and a wall-clock net that
 defaults to "off" is not a net. These tests pin BOTH ends:
 
   1. the chassis breaker is actually WIRED by SubAgent (not left at 0), and
-  2. `SubTaskSpec` can no longer express `unlimited + no timeout`.
+  2. `SubTaskSpec` no longer exposes a numeric tool-round ceiling.
 
 NEUTER evidence expected: removing the
 ``max_consecutive_no_progress_rounds=`` argument from the ``run_agent_loop``
@@ -140,24 +133,13 @@ class TestSubAgentRunawayGuard(unittest.TestCase):
                          'a default wall-clock ceiling is back — it reaps '
                          'productive long agents and cannot see tool hangs')
 
-    def test_explicit_max_rounds_still_honoured(self):
-        """The breaker must not disturb an explicit round budget.
-
-        ``counter`` sees max_rounds + 1 dispatches: the 3 LOOP rounds, plus the
-        single tool-less WRAP-UP turn a halted agent now gets so its findings
-        are written up instead of scraped out of history. ``rounds_used`` is
-        the load-bearing number and stays at exactly 3 — a round-budget
-        regression still shows up there.
-        """
-        from lib.swarm.types import SubAgentStatus
-        counter = {'n': 0}
-        agent = _mk_agent(_wedged_dispatch(counter), max_rounds=3)
-        agent._run_loop(time.time())
-        self.assertEqual(agent.result.rounds_used, 3,
-                         'explicit round budget must be honoured exactly')
-        self.assertEqual(counter['n'], 4,
-                         '3 loop rounds + 1 wrap-up turn')
-        self.assertEqual(agent.result.status, SubAgentStatus.COMPLETED.value)
+    def test_removed_max_rounds_is_strictly_rejected(self):
+        from lib.swarm.types import SubTaskSpec
+        with self.assertRaises(TypeError):
+            SubTaskSpec(role='researcher', objective='x', max_rounds=3)
+        with self.assertRaises(ValueError):
+            SubTaskSpec.from_dict({
+                'role': 'researcher', 'objective': 'x', 'max_rounds': 3})
 
     def test_productive_agent_unaffected(self):
         """An agent making real progress must reach its natural answer."""

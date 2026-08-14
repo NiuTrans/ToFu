@@ -1,6 +1,6 @@
 # Server-Built AGENT-ONLY Installers — Design
 
-> Status: DRAFT v6 (2026-08-06), epic `pt_59b62951aad2463e`.
+> Status: IMPLEMENTED v7 (2026-08-10), epic `pt_59b62951aad2463e`.
 > v2 folds in the three distribution-surface decisions (§5): the Local
 > Control display matrix, the full-client direction policy, and the
 > GitHub Releases contents. v3 folds in the owner's three review
@@ -11,9 +11,9 @@
 > problem"): SSH auto-tunnel + one-time pairing code replace the
 > address-carrying connect line as the primary flow. **v5 RETIRES the
 > pairing code (§12, owner decree "no pairing codes, zero configuration
-> burden"): the per-download attach bundle (ZIP = exe + baked
-> {token, route candidates}) IS the pairing — install = auto-attach,
-> zero input.**
+> burden"): download-time attachment data replaces pairing. **v7 removes
+> the final archive/sidecar burden: one personalized EXE contains
+> `{token, route candidates}` internally; run it directly, zero input.**
 > Splits the fused "one installer, two roles" distribution into TWO
 > components: the controlled-machine **agent** (no frontend, no server
 > stack) and the full desktop app (this machine = server + client).
@@ -675,11 +675,13 @@ v1.
   flow; the board epic transitions to a P4 acceptance gate on real
   hardware. **Needs a rebuilt agent installer** carrying `_pair.py`
   (the in-store 0.16.0 predates it).
-- **P5** (deferred, post-v1): extension-relay prototype + a measured
-  comparison against the SSH tunnel on headless-capability, setup
-  cost, and session-boundedness.
+- **P5** (landed 2026-08-10): browser-assisted loopback relay for the
+  SSO-only Codelab route. It is session-bounded by design (the signed-in
+  Tofu tab stays open), needs no SSH configuration, and never copies the
+  gateway cookie into the agent. Direct LAN/tunnel routes remain preferred
+  when available because they do not depend on a browser session.
 
-## 12. Pairing retired — the zero-config attach bundle (v5, 2026-08-05)
+## 12. Pairing and archives retired — one personalized installer (v7, 2026-08-10)
 
 > **Owner decree (2026-08-05): "do not design any pairing code; either
 > hardcode it directly into the installation package, or do not design
@@ -710,26 +712,24 @@ A pairing code typed into a dialog could never have fixed ANY of these
 — the code was redeemable only through the address that was already
 dead. The code was a configuration burden AND not the blocker.
 
-### 12.2 The v5 flow — download IS the pairing
+### 12.2 The v7 flow — download and run one EXE
 
-1. The panel's ONE action is 「下载受控端 ZIP」 →
-   `GET /api/v1/desktop/agent-bundle` (authenticated):
-   * mints a fresh per-user `agents:bridge` token AT THE CLICK (fail-open
-     when the keystore is down — an open bridge polls tokenless);
-   * builds the ordered route candidates: direct `http://<lan-ip>:<port>`
-     FIRST (only when the running bind is not loopback — the same honesty
-     guard as the LAN discovery responder), the panel's live
-     `origin + BASE_PATH` (host-pinned `?base=`) LAST;
-   * streams `TofuAgent-Setup-<ver>-win64.zip` = the generic exe (stored,
-     not re-deflated) + `tofu-agent-attach.json {token, candidates,
-     fallback_candidates}`.
-   * 409 + an automatic rebuild kick when the store's exe predates the
-     attach flow (`git_sha != HEAD`) — serving a bundle an old payload
-     would silently ignore is a lie; `agent_bundle_ready` on the status
-     payload lets the panel render the honest "rebuilding" note instead
-     of a dead button.
-2. The NSIS installer adopts `$EXEDIR\tofu-agent-attach.json` into the
-   install dir (no-op when absent — bare-exe installs keep working).
+1. The panel's ONE action is 「下载受控端安装包」 →
+   `GET /api/v1/desktop/agent-installer` (authenticated):
+   * mints a fresh caller-scoped `agents:bridge` token at the click;
+   * orders direct `http://<lan-ip>:<port>` first when the bind permits it,
+     and the host-pinned live `origin + BASE_PATH` fallback last;
+   * streams the stored NSIS executable while replacing its fixed 1000-byte
+     `TOFU_AGENT_ATTACH_V2:` trailer with compact JSON containing the token
+     and route candidates. The byte length stays constant and the server
+     never buffers or copies the 50+ MB artifact;
+   * returns 409 and kicks a rebuild if the executable lacks that physical
+     trailer. `agent_installer_ready` therefore proves the artifact itself,
+     not a source-history guess.
+2. NSIS reads the trailer from `$EXEPATH` and writes
+   `$INSTDIR\tofu-agent-attach.json` before first launch. A sidecar copy path
+   remains only so already-downloaded v5 archives still install; current UI
+   never distributes or teaches an archive.
 3. The agent's first run (`import_attach_bundle`): probes candidates →
    the discovery ladder (loopback → LAN broadcast → ssh self-tunnel) →
    fallbacks; first live `/api/health` wins; token + full route set are
@@ -741,6 +741,14 @@ dead. The code was a configuration burden AND not the blocker.
    unreachable / proxy-blocked / auth-failed / unconfigured), refreshed
    every 3 s — a window that says "controlled by…" while never
    connecting was the 2026-08-05 lie.
+5. For an SSO-fronted Codelab URL, the agent also opens a loopback-only
+   broker on `127.0.0.1:15180..15189`. The already-authenticated Tofu page
+   takes pending polls, sends them to the exact current
+   `origin + BASE_PATH + /api/desktop/poll` with browser credentials, and
+   returns only the HTTP response. The broker accepts only the configured
+   Tofu `Origin`, supports Chromium Private Network Access preflight, and
+   never receives the gateway cookie. Downloading the installer starts page
+   discovery; the native panel's 「通过浏览器连接」 action reopens it later.
 
 ### 12.3 What retired, what stays
 
@@ -750,9 +758,10 @@ first-run pairing dialog (`prompt_attach` / `prompt_attachment_flow`),
 the agent-side exchange client (`exchange_pair_code`). Stays: the
 server-side `/api/desktop/pair` + `/api/v1/desktop/pair-code` endpoints
 and the code store — SHIPPED-installer compat only (the 0.16.0 in the
-field embeds that path); no UI may mint or collect codes again. The
-connect line stays as the collapsed advanced fallback (bare-exe repair
-path). `preseed_server.json` stays as the build-time, URL-only default.
+field embeds that path); no current UI may mint or collect codes again.
+Connect-line parsing remains only as a callable legacy compatibility seam;
+web UI, tray menus, and role windows offer no token/paste workflow.
+`preseed_server.json` stays as the build-time, URL-only fallback.
 
 Also v5: `server.py` boots with a loud banner when bound loopback
 behind a cloud-IDE proxy (`VSCODE_PROXY_URI` set) — remote agents can
@@ -760,13 +769,15 @@ never attach in that state, and it previously failed silently.
 
 ### 12.4 Acceptance (supersedes §11.5 P4)
 
-Fresh panel download → unzip → run installer → **zero input** → the
+Fresh panel download → run the EXE → **zero input** → the
 panel's 这台电脑 row turns green within a minute (a `POST
-/api/desktop/poll` arrival appears in access.log); day-2 reboot
-auto-reconnects (resume walks `attach_candidates` → ladder, token kept).
-The run-from-inside-the-zip trap (Windows extracts only the exe to a
-temp dir) degrades honestly: no bundle file → discovery ladder →
-unattached role window with the link line, never a silent lie.
+/api/desktop/poll` arrival appears in access.log). On an SSO-fronted
+Codelab URL the signed-in Tofu tab remains open while the machine is under
+control; the panel and agent both state this session boundary. Day-2 reboot
+auto-reconnects after the page is opened again (resume walks
+`attach_candidates` → browser relay / ladder, token kept).
+The former run-from-inside-the-archive trap is structurally absent: there is
+only one file to download and run.
 
 ## 13. v6 — repair-aware import, self-healing poll loop, diagnostics return channel (2026-08-06)
 

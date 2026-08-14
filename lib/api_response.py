@@ -36,6 +36,7 @@ Public API
   api_no_content()                         → 204
   api_payload(payload, status=200)         → result-dict passthrough + explicit status
   api_error(error, status=400, **extras)   → 400 / custom
+  api_typed_error(kind, status=400, ...)   → 400 / custom typed envelope
   api_bad_request(error, **extras)         → 400
   api_unauthorized(error='Unauthorized')   → 401
   api_forbidden(error='Forbidden')         → 403
@@ -55,9 +56,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from flask import Response, jsonify
+from quart import Response, jsonify
 
-from lib.error_envelope import from_exception
+from lib.error_envelope import from_exception, make_envelope
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -70,12 +71,13 @@ logger = get_logger(__name__)
 # anthropic / chat-direct) before centralisation here:
 #   * ``no-cache, no-transform`` — proxies must not buffer/rewrite the body.
 #   * ``X-Accel-Buffering: no``  — disable nginx response buffering.
-#   * ``Connection: keep-alive`` — hold the socket open for the stream.
+# Connection persistence is owned by HTTP itself. Never emit ``Connection``:
+# it is a forbidden connection-specific field in HTTP/2, while HTTP/1.1 is
+# persistent by default and the streaming body already keeps the response open.
 _SSE_HEADERS = {
     'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-cache, no-transform',
     'X-Accel-Buffering': 'no',
-    'Connection': 'keep-alive',
 }
 
 
@@ -101,7 +103,10 @@ def sse_response(generator, *, extra_headers: dict | None = None,
     headers = dict(_SSE_HEADERS)
     if extra_headers:
         headers.update(extra_headers)
-    resp = Response(generator, mimetype='text/event-stream', headers=headers)
+    from lib.observability import instrument_sse
+    channel = str(headers.get('X-Tofu-Task-Kind') or 'task')[:48]
+    resp = Response(instrument_sse(generator, channel=channel),
+                    mimetype='text/event-stream', headers=headers)
     if timeout_none:
         resp.timeout = None
     return resp
@@ -257,8 +262,37 @@ def api_error(error: Any, *, status: int = 400, kind: str = '',
         payload['error'] = norm
     if extras:
         payload.update(extras)
+    # ``extras`` is intentionally flexible for compatibility metadata, but
+    # it must never turn a 4xx/5xx body into a contradictory success envelope.
+    payload['ok'] = False
     _attach_request_id(payload)
     return jsonify(payload), status
+
+
+def api_typed_error(kind: str, *, status: int = 400, message: str = '',
+                    detail: str = '', context: str = '', source: str = '',
+                    raw: str = '', severity: str | None = None,
+                    retryable: bool | None = None, hint: str | None = None,
+                    extensions: dict[str, Any] | None = None, **extras):
+    """Return an HTTP error carrying one complete closed-kind envelope.
+
+    This is the route boundary for known failure states. ``api_error`` keeps
+    accepting legacy strings/arbitrary dictionaries during migration, while
+    new code can use this helper without rebuilding typed-envelope plumbing.
+    """
+    envelope = make_envelope(
+        kind,
+        message=message,
+        detail=detail,
+        context=context,
+        source=source,
+        raw=raw,
+        severity=severity,
+        retryable=retryable,
+        hint=hint,
+        extensions=extensions,
+    )
+    return api_error(envelope, status=status, **extras)
 
 
 def api_bad_request(error: Any = 'Bad request', **extras):

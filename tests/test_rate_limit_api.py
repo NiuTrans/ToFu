@@ -3,11 +3,16 @@
 import time
 import unittest
 
+import pytest
+
 import lib.rate_limit_api as rate_limit_api
 from lib.api_keys import AuthContext
 from lib.rate_limit_api import (
     RateDecision, apply_headers, check_request, record_tokens,
 )
+
+
+pytestmark = pytest.mark.unit
 
 
 def _buckets() -> dict:

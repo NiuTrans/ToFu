@@ -242,7 +242,8 @@ const outSettled = renderFinishInfo(settled, /*isLiveTail=*/false);
 check('settled_renders_a_bar', outSettled.indexOf('message-finish') >= 0);
 check('settled_has_finish_reason_ok', outSettled.indexOf('finish-tag ok') >= 0);
 check('settled_has_token_tag', outSettled.indexOf('token-tag') >= 0);
-check('settled_has_multi_round_marker', outSettled.indexOf('msg.rounds') >= 0);
+check('settled_omits_duplicate_activity_summary',
+      outSettled.indexOf('finish-activity-tag') < 0);
 check('settled_has_cost_tag', outSettled.indexOf('cost-tag') >= 0);
 // "不得只剩模型标签": the bar carries MORE than the lone model/preset tag.
 check('settled_not_only_model_tag',

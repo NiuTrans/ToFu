@@ -14,7 +14,7 @@ content/thinking/rounds project from the message document in BOTH arms, and
 `phase` lives in `streamSessions` — the reducer-session slice the owner's
 ruling placed it in (never the document). The reconnect arm models the
 server-verified warm-resume semantics: `lib/chat_dispatch.py:636` replays
-`task['events'][cursor:]` — which INCLUDES the latest PHASE event — through
+the retained absolute-cursor event tail — which INCLUDES the latest PHASE event — through
 the same dispatch path, so `setStreamPhase` re-seeds the session exactly as
 production does on a warm reconnect. (A fresh cursorless connect accepts the
 transient "phase null until the next live PHASE event" — plan §7.4 verdict-C.)
@@ -121,7 +121,7 @@ check('live_painted', live.content.indexOf('CHECKPOINT-CONTENT') >= 0);
 
 /* ── RECONNECT arm (warm resume, server-verified semantics): a fresh bubble
  *    body, the document checkpoint, and — per lib/chat_dispatch.py:636 — the
- *    replayed event-log slice which INCLUDES the latest PHASE event, landing
+ *    replayed absolute-cursor tail which INCLUDES the latest PHASE event, landing
  *    in the same handler → setStreamPhase re-seeds the session. ── */
 freshBody();
 clearStreamSession('c1');

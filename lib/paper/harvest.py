@@ -196,10 +196,9 @@ def _existing_row_for_arxiv(arxiv_id: str, user_id: int) -> Optional[dict]:
     if not arxiv_id:
         return None
     try:
-        from lib.database._core import _pool_get, _pool_put
+        from lib.database import DOMAIN_CHAT, pooled_db
         from lib.pdf_parser._common import expected_parser_version
-        db = _pool_get()
-        try:
+        with pooled_db(DOMAIN_CHAT) as db:
             row = db.execute(
                 'SELECT id, paper_hash, title, parsed_text, page_count '
                 'FROM paper_library WHERE arxiv_id=? AND user_id=? '
@@ -207,8 +206,6 @@ def _existing_row_for_arxiv(arxiv_id: str, user_id: int) -> Optional[dict]:
                 'ORDER BY updated_at DESC LIMIT 1',
                 (arxiv_id, user_id, expected_parser_version()),
             ).fetchone()
-        finally:
-            _pool_put(db)
     except Exception as e:
         logger.warning('[Paper:Harvest] cache probe failed for %s: %s', arxiv_id, e)
         return None
@@ -239,10 +236,9 @@ def _persist_row(paper_id: str, *, title: str, arxiv_id: str, phash: str,
                                     _LIB_TITLE_CAP)
     now_ms = int(time.time() * 1000)
     try:
-        from lib.database._core import _pool_get, _pool_put
+        from lib.database import DOMAIN_CHAT, pooled_db
         from lib.database._core_schema import PAPER_LIBRARY, upsert
-        db = _pool_get()
-        try:
+        with pooled_db(DOMAIN_CHAT) as db:
             existing = db.execute(
                 'SELECT created_at, qa_history, babel_cache FROM paper_library '
                 'WHERE id=? AND user_id=?', (paper_id, user_id),
@@ -278,8 +274,6 @@ def _persist_row(paper_id: str, *, title: str, arxiv_id: str, phash: str,
             logger.info('[Paper:Harvest] persisted row %s — arxiv=%s hash=%s pages=%d',
                         paper_id[:24], arxiv_id, (phash or '')[:12], page_count)
             return True
-        finally:
-            _pool_put(db)
     except Exception as e:
         logger.error('[Paper:Harvest] persist failed for %s: %s',
                      paper_id[:24], e, exc_info=True)

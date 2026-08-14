@@ -7,8 +7,9 @@ corporate proxy 403 ``Request not allowed`` on all five endpoints).
 
 Decision flow (:func:`route_request`):
 
-  1. probe the target host WITHOUT auth (per-host 300s cache) —
-     ``ok`` (401/400/404/405/200 = app layer reached) → caller goes direct;
+  1. race the target host WITHOUT auth over direct + every configured server
+     proxy; the first application-layer success wins and the other routes
+     finish probing in the background — ``ok`` means a server route exists;
   2. ``geo_blocked`` (403) or ``network_fail`` → pick an online
      egress-capable agent in the caller's tenant (legacy ``''`` user = any
      agent); none → :class:`EgressUnavailable` with actionable guidance.
@@ -33,6 +34,7 @@ from urllib.parse import urlparse
 
 from lib.json_store import read_json
 from lib.log import get_logger
+from lib.proxy import SUBSCRIPTION_HOSTS
 from lib.ttl_cache import TTLCache
 
 logger = get_logger(__name__)
@@ -47,21 +49,37 @@ __all__ = [
 ]
 
 #: Exact-match egress whitelist (§7.1). NO suffix matching —
-#: ``api.anthropic.com.evil.com`` must never pass.
-ALLOWED_EGRESS_HOSTS = frozenset({
-    'api.anthropic.com',
-    'console.anthropic.com',
-    'platform.claude.com',
-    'claude.ai',
-    'auth.openai.com',
-    'auth0.openai.com',
-    'chatgpt.com',
-    'api.openai.com',
-})
+#: ``api.anthropic.com.evil.com`` must never pass. Aliases
+#: ``lib.proxy.SUBSCRIPTION_HOSTS`` (single source of truth — the proxy
+#: pool's ``subscription`` scope serves exactly this set).
+ALLOWED_EGRESS_HOSTS = SUBSCRIPTION_HOSTS
 
-#: Per-host direct-reachability verdicts ('ok' / 'geo_blocked' /
-#: 'network_fail'), 300s TTL — probing on every exchange would add seconds.
+#: Stable per-host verdicts. ``ok`` and ``geo_blocked`` may safely remain for
+#: five minutes; a transient proxy/network failure may not. Keeping
+#: ``network_fail`` here caused the 2026-08-10 incident where a 60s proxy
+#: cooldown recovered but routing rejected Codex for the full 300s cache TTL.
 _probe_cache = TTLCache(ttl=300, max_size=32)
+_probe_network_fail_cache = TTLCache(ttl=30, max_size=32)
+
+
+def _cached_probe_verdict(host: str) -> str:
+    return (_probe_cache.get(host)
+            or _probe_network_fail_cache.get(host)
+            or '')
+
+
+def invalidate_probe_cache() -> int:
+    """Drop every cached reachability verdict. Called by lib.proxy whenever
+    the proxy topology (pool / legacy address / bypass list) changes — a
+    verdict measured through the OLD path must never route traffic under
+    the NEW one (2026-08-07: pre-fix, a proxy change left stale
+    ``geo_blocked`` verdicts misrouting subscription traffic to desktop
+    agents for up to 300s)."""
+    n = _probe_cache.clear() + _probe_network_fail_cache.clear()
+    if n:
+        logger.info('[Egress] probe cache invalidated (%d hosts) — proxy '
+                    'topology changed', n)
+    return n
 
 #: egress_http bridge-command TTL (design §4.3: token calls are short).
 _EGRESS_HTTP_TTL_S = 120
@@ -133,26 +151,37 @@ def _check_target(url: str, target: str, loopback_port: int) -> None:
 
 
 def _probe_host(url: str) -> str:
-    """Classify direct reachability of the URL's host.
+    """Classify server reachability through the subscription route manager.
 
-    POST the real endpoint WITHOUT auth: a 401/400/404/405 proves the
-    application layer answered (network path OK — 'ok'); 403 is the
-    geo-block signature; an exception is a network failure. Cached per host.
+    Route health is owned per ``(host, concrete path)`` by
+    :mod:`lib.subscription_routes`; these small TTL caches are only a mirror
+    for the non-blocking Settings status surface and never gate requests.
     """
     host = (urlparse(url).hostname or '').lower()
-    cached = _probe_cache.get(host)
-    if cached:
-        return cached
-    verdict = 'network_fail'
-    try:
-        from lib.http_client import http_post
-        resp = http_post(url, json={}, timeout=5)
-        verdict = 'geo_blocked' if resp.status_code == 403 else 'ok'
-    except Exception as e:
-        logger.debug('[Egress] direct probe of %s failed: %s', host, e)
-    _probe_cache.set(host, verdict)
+    verdict = _probe_host_paths(url, host)
+    if verdict == 'network_fail':
+        _probe_cache.invalidate(host)
+        _probe_network_fail_cache.set(host, verdict)
+    else:
+        _probe_network_fail_cache.invalidate(host)
+        _probe_cache.set(host, verdict)
     logger.info('[Egress] probe %s → %s', host, verdict)
     return verdict
+
+
+def _probe_host_paths(url: str, host: str) -> str:
+    """Run (or reuse) the concurrent direct + all-proxy route race."""
+    from lib.proxy import (
+        subscription_route_candidates,
+        subscription_route_verdict,
+    )
+    routes = subscription_route_candidates(url)
+    if routes:
+        logger.info('[Egress] probe %s ok via %s', host, routes[0].label)
+        return 'ok'
+    verdict = subscription_route_verdict(url)
+    return verdict if verdict in ('geo_blocked', 'network_fail') \
+        else 'network_fail'
 
 
 def _online_egress_agents(user_id: str = '') -> list:
@@ -226,10 +255,18 @@ def route_candidates(url: str, *, user_id: str = '') -> list:
     # these domains — everything else is direct, always, unprobed.
     if not host_allowed(url):
         return ['direct']
-    if _probe_host(url) == 'ok':
+    verdict = _probe_host(url)
+    if verdict == 'ok':
         return ['direct']
     agents = _online_egress_agents(user_id)
     if not agents:
+        if verdict == 'network_fail':
+            raise EgressUnavailable(
+                'subscription egress is temporarily unreachable through the '
+                'configured server proxy paths and no egress-capable desktop '
+                'agent is online — every route will be re-probed after its '
+                'short circuit cooldown; for an independent fallback, start the desktop '
+                'agent with --allow-egress')
         raise EgressUnavailable(
             'server egress to this provider is blocked and no egress-capable '
             'desktop agent is online — start the desktop agent with '
@@ -480,6 +517,18 @@ def cancel_stream(cmd_id: str, agent_id: str, user_id: str = ''):
 _probe_bg_lock = threading.Lock()
 _probe_bg_fired: set = set()
 
+#: The status warm-up probe must hit the provider's REAL API endpoint, not
+#: its web root: ``chatgpt.com/`` sits behind Cloudflare bot-guard and
+#: answers 403 to a bare POST even over a healthy proxy, which classified as
+#: ``geo_blocked`` and — the cache being host-keyed and shared with
+#: real-traffic routing — blocked every Codex call for the full TTL
+#: (2026-08-10 incident: 5 min of EndpointUnreachableError while
+#: ``/backend-api/codex/responses`` itself answered 401 = reachable).
+#: Hosts absent here fall back to ``https://<host>/``.
+_BG_PROBE_URL = {
+    'chatgpt.com': 'https://chatgpt.com/backend-api/codex/responses',
+}
+
 
 def _spawn_background_probe(host: str) -> None:
     """Fire-and-forget a probe so the NEXT status poll has a cached verdict.
@@ -495,7 +544,7 @@ def _spawn_background_probe(host: str) -> None:
 
     def _run():
         try:
-            url = f'https://{host}/'
+            url = _BG_PROBE_URL.get(host, f'https://{host}/')
             # Reuse the real probe (it writes the cache).
             _probe_host(url)
         except Exception as e:
@@ -519,14 +568,24 @@ def egress_status(host: str, *, user_id: str = '') -> dict:
       ``unknown``             — no cached verdict (a background probe is
                                 fired so the next poll knows)
 
-    NEVER probes inline — reads the 300s probe cache only.
+    NEVER probes inline — reads the stable or short-lived failure cache only.
     """
-    verdict = _probe_cache.get(host) or ''
+    host = (host or '').lower()
+    from lib.subscription_routes import manager as route_manager
+    route_status = route_manager.status()
+    diagnostics = {
+        'preferred_server_route':
+            route_status.get('preferred', {}).get(host, ''),
+        'server_routes': route_status.get('routes', {}).get(host, {}),
+    }
+    verdict = _cached_probe_verdict(host)
     if not verdict:
         _spawn_background_probe(host)
-        return {'state': 'unknown', 'verdict': '', 'agents': []}
+        return {'state': 'unknown', 'verdict': '', 'agents': [],
+                **diagnostics}
     if verdict == 'ok':
-        return {'state': 'direct', 'verdict': verdict, 'agents': []}
+        return {'state': 'direct', 'verdict': verdict, 'agents': [],
+                **diagnostics}
     from lib.desktop import online_agents
     all_agents = online_agents()
     capable = [a for a in all_agents
@@ -535,14 +594,15 @@ def egress_status(host: str, *, user_id: str = '') -> dict:
     if capable:
         return {'state': 'agent', 'verdict': verdict,
                 'agents': [{'agent_id': a['agent_id'], 'name': a.get('name', '')}
-                           for a in capable]}
+                           for a in capable], **diagnostics}
     scoped_any = [a for a in all_agents
                   if not user_id or (a.get('user_id') or '') == user_id]
     if scoped_any:
         return {'state': 'agent_no_capability', 'verdict': verdict,
                 'agents': [{'agent_id': a['agent_id'], 'name': a.get('name', '')}
-                           for a in scoped_any]}
-    return {'state': 'unavailable', 'verdict': verdict, 'agents': []}
+                           for a in scoped_any], **diagnostics}
+    return {'state': 'unavailable', 'verdict': verdict, 'agents': [],
+            **diagnostics}
 
 
 def egress_http(url: str, *, method: str = 'POST', headers: dict = None,

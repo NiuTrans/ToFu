@@ -32,10 +32,6 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Install Flask→Quart shim before importing anything that pulls in routes.
-import quart as _quart
-sys.modules['flask'] = _quart
-
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -229,19 +225,18 @@ def _sites():
     ]
 
 
-# ── Legacy 4-key SSE literal that lived at each chat.py streaming site ──
+# ── Canonical HTTP/2-safe SSE fields ──
 _LEGACY_SSE_HEADERS = {
     'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-cache, no-transform',
     'X-Accel-Buffering': 'no',
-    'Connection': 'keep-alive',
 }
 
 
 def test_error_envelope_parity():
     """Each converted error site reproduces the legacy body, adding ONLY
     request_id (always allowed) and ok:False (Category C only), same status."""
-    from flask import jsonify
+    from quart import jsonify
     app = _make_app()
     sites = _sites()
 
@@ -297,8 +292,8 @@ def test_shipped_sources_converted():
 
 
 def test_sse_helper_matches_legacy_headers():
-    """sse_response()'s canonical header set is byte-identical to the 4-key
-    literal the chat.py SSE blocks used, and timeout_none disables the timeout."""
+    """sse_response() keeps the end-to-end SSE fields, omits HTTP/2-forbidden
+    Connection, and timeout_none still disables the stream timeout."""
     from lib.api_response import sse_response
     app = _make_app()
 
@@ -311,12 +306,13 @@ def test_sse_helper_matches_legacy_headers():
             for k, v in _LEGACY_SSE_HEADERS.items():
                 assert resp.headers.get(k) == v, (
                     f'SSE header {k!r}: helper={resp.headers.get(k)!r} legacy={v!r}')
+            assert resp.headers.get('Connection') is None
             # 1894 site: timeout must be disabled for the long-lived UI stream.
             resp2 = sse_response(_gen(), timeout_none=True)
             assert resp2.timeout is None
     import asyncio
     asyncio.run(_t())
-    _ok('sse_response() headers byte-equal to legacy SSE literal; timeout_none works')
+    _ok('sse_response() headers are HTTP/2-safe; timeout_none works')
 
 
 def test_chat_sse_blocks_converted():

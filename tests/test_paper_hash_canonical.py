@@ -94,9 +94,12 @@ class TestResolvePaperHash:
 # ═══ 3. SQLite end-to-end fork heal ═══
 
 class TestForkBackfillE2E:
-    """Seed the live-DB fork shape and drive the REAL backfill. The pre-heal
-    ``has_report(stored) == False`` assertion IS the negative control — it
-    proves the gate was broken for exactly this shape before the heal."""
+    """Seed the live-DB fork shape and drive the REAL bootstrap backfill.
+
+    Runtime report gates now live behind the Storage Sidecar and must not open
+    this bootstrap connection. The local row-existence checks below retain the
+    same fork/heal negative control without crossing those process owners.
+    """
 
     @pytest.fixture()
     def fresh_db(self, tmp_path):
@@ -159,9 +162,13 @@ class TestForkBackfillE2E:
 
         # ── NEUTER arm (pre-heal): the gate is FALSE for the forked paper —
         #    the user-visible bug ("已有报告却提示生成报告").
-        from lib.paper.podcast_engine import has_report
-        assert has_report(stored) is False
-        assert has_report(canonical) is True  # report IS there, wrong key
+        def _has_local_report(paper_hash):
+            return bool(db.execute(
+                'SELECT 1 FROM paper_reports WHERE paper_hash = ? LIMIT 1',
+                (paper_hash,)).fetchone())
+
+        assert _has_local_report(stored) is False
+        assert _has_local_report(canonical) is True  # report exists, wrong key
 
         stats = hb.backfill_paper_hash_canonical(db, force=True)
 
@@ -171,7 +178,7 @@ class TestForkBackfillE2E:
         ).fetchone()
         assert row['paper_hash'] == canonical
         # The gate now sees the paper's report under the (healed) library hash.
-        assert has_report(canonical) is True
+        assert _has_local_report(canonical) is True
         # Dependents are re-keyed OFF the old hash (they were seeded under
         # canonical already — the common live shape — so nothing should
         # remain under `stored` anywhere).

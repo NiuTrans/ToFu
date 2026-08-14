@@ -62,8 +62,12 @@ def build_spec(app, *, title: str = 'Tofu API',
             }
             if meta and meta.get('deprecated'):
                 op['deprecated'] = True
+            if meta:
+                op.update(meta.get('extensions', {}))
             rb = (meta.get('request_body') if meta else None)
-            if rb:
+            if rb is False:
+                pass
+            elif rb:
                 op['requestBody'] = rb
             elif method in ('POST', 'PUT', 'PATCH'):
                 op['requestBody'] = {

@@ -2,7 +2,7 @@
 
 The quality jump over the zero-LLM slide template
 (docs/PRODUCTION_PIPELINE_DESIGN.md §2.2 stage 5): each scene gets its OWN
-bounded agent loop that writes a bespoke ``index.html`` composition, instead
+agent loop that writes a bespoke ``index.html`` composition, instead
 of every scene rendering as "gradient background + one centred line".
 
 Design constraints (all deliberate):
@@ -21,8 +21,8 @@ Design constraints (all deliberate):
     failing, token budget exhausted, LLM error, abort) degrades that ONE scene
     to :func:`lib.motion_video._template.render_scene_html`. The caller always
     gets valid HTML back.
-  * **Hard cost caps** (owner 拍板 #3): ``max_rounds`` bounds the loop and
-    ``token_budget`` stops it once cumulative tokens for THIS scene exceed the
+  * **Hard cost cap** (owner 拍板 #3): ``token_budget`` stops the loop once
+    cumulative tokens for THIS scene exceed the
     budget. There is no money cap here — that belongs to the wallet layer.
 
 Default ON (owner 2026-07-27). The zero-LLM template cannot pass the
@@ -46,8 +46,6 @@ __all__ = ['author_scene', 'scene_author_enabled', 'SCENE_AUTHOR_TOOLS',
            'is_transient_fault', 'load_draft', 'save_draft',
            'DRAFT_FILENAME']
 
-#: Bounded rounds per scene (tool-eligible rounds; +1 final no-tools round).
-_DEFAULT_MAX_ROUNDS = 4
 #: Cumulative token ceiling per scene — the cost cap (拍板 #3).
 #:
 #: Raised from 60000 after measuring the shipped 0-of-8 job: two scenes blew
@@ -268,7 +266,7 @@ SCENE_AUTHOR_TOOLS = [
             # distillation; the corpus behind this tool is 29 atomic motion
             # rules, 13 multi-phase scene blueprints and 13 frame presets, each
             # with working GSAP code. WORKFLOW.md used to tell the author to
-            # "Activate hyperframes-motion", but activate_skill is a CHAT-agent
+            # "Load hyperframes-motion", but load_skill is a CHAT-agent
             # tool this loop does not have — measured skill hits: 0. This is
             # that instruction made real on the engine path.
             'name': 'craft_reference',
@@ -321,11 +319,8 @@ def save_draft(scene_dir: str, html: str) -> None:
         return
     path = os.path.join(scene_dir, DRAFT_FILENAME)
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + '.tmp'
-        with open(tmp, 'w', encoding='utf-8') as f:
-            f.write(html)
-        os.replace(tmp, path)          # atomic — a torn draft is unusable
+        from lib.json_store import write_text_atomic
+        write_text_atomic(path, html)  # atomic — a torn draft is unusable
     except OSError as e:
         logger.warning('[SceneAuthor] cannot save draft to %s: %s', path, e)
 
@@ -551,6 +546,10 @@ def _build_prompt(scene: dict, *, width: int, height: int, duration: float,
     contract = _read_guide('COMPOSITION_CONTRACT.md')
     craft = _read_guide('MOTION_CRAFT.md')
     skeleton = _read_guide('skeleton.html', limit=6000)
+    from lib.motion_video._creative_plan import (frame_packet,
+                                                  normalise_scene_plan)
+    normalise_scene_plan(scene, scene_index, total_scenes)
+    packet = frame_packet(scene)
     text = str(scene.get('text') or '').strip()
     visual = str(scene.get('visual') or '').strip()
     # The ASSET BRIEF. Without this the prompt only ever OFFERED imagery
@@ -578,6 +577,18 @@ def _build_prompt(scene: dict, *, width: int, height: int, duration: float,
             'draw an SVG instead: that role exists for imagery a composition '
             'cannot draw itself.\n'
             + '\n'.join(lines) + '\n')
+    prepared = [a for a in (scene.get('resolved_assets') or [])
+                if isinstance(a, dict) and a.get('path')]
+    if prepared:
+        brief_block += (
+            '\n## Prepared assets (verified on disk — use these exact paths)\n'
+            + '\n'.join(
+                f'  - role={a.get("role")}: {a.get("path")}\n'
+                f'    brief: {a.get("prompt", "")} '
+                for a in prepared)
+            + '\nDo not regenerate these assets. Reference every required '
+              'path in the composition; an unused prepared asset is a '
+              'failed storyboard obligation.\n')
     font_block = ''
     if theme is not None and font_rels:
         # Themed path: the film's font pairing is already staged. Name ONLY
@@ -620,13 +631,10 @@ def _build_prompt(scene: dict, *, width: int, height: int, duration: float,
             f'Never name a family you have not declared this way (PingFang SC, '
             f'Microsoft YaHei, Source Han Sans…): naming an absent face does '
             f'not get you that face, it silently falls back.\n')
-    # The DEEP CHANNEL index. Handed over WITH the prompt because a tool the
-    # model cannot enumerate is a tool it will not call: the author has to see
-    # which rules and blueprints exist before craft_reference is worth reaching
-    # for. Only the index travels here (~27 KB of name + summary + tags); the
-    # full text of an entry costs a tool call, which is the whole point of
-    # progressive disclosure. Absent corpus → empty block, and the author
-    # simply works from the distilled craft guide as before.
+    # The film planner now selects one blueprint and ``packet`` injects its
+    # full body. Shipping the whole ~27 KB catalogue beside that chosen body
+    # only dilutes the beat and burns context. Keep catalogue browsing as an
+    # explicit expert/debug escape hatch, not the production default.
     craft_block = ''
     try:
         from lib.motion_video._craft import craft_index
@@ -634,7 +642,7 @@ def _build_prompt(scene: dict, *, width: int, height: int, duration: float,
     except Exception as e:  # never let the deep channel break authoring
         logger.warning('[SceneAuthor] craft index unavailable: %s', e)
         index = ''
-    if index:
+    if index and scene.get('allow_craft_browse'):
         craft_block = (
             '## Craft corpus (deep reference — READ ONE BEFORE YOU AUTHOR)\n'
             'These are complete, working techniques with real GSAP code — the '
@@ -654,6 +662,7 @@ def _build_prompt(scene: dict, *, width: int, height: int, duration: float,
         f'- narration (spoken over this scene): {text or "(none)"}\n'
         + (f'- visual direction: {visual}\n' if visual else '')
         + brief_block
+        + packet
         + font_block
         + '\n## Hard requirements\n'
         '1. Call write_composition with the COMPLETE document, then '
@@ -662,6 +671,10 @@ def _build_prompt(scene: dict, *, width: int, height: int, duration: float,
         '(data-composition-id / data-start / data-duration / data-width / '
         'data-height, ONE paused GSAP timeline registered on '
         'window.__timelines under the SAME key as data-composition-id).\n'
+        '   The animation runtime is already staged at '
+        '"assets/gsap-3.14.2.min.js". Load that exact local file with a '
+        '<script src="assets/gsap-3.14.2.min.js"></script> tag. Never use a '
+        'CDN or network fallback: the render browser has no external network.\n'
         '3. DETERMINISM: no Date.now(), Math.random(), performance.now(), '
         'requestAnimationFrame, setInterval, or infinite repeats.\n'
         '4. Visual quality is the point. Pick ONE archetype from the craft '
@@ -692,17 +705,16 @@ def _build_prompt(scene: dict, *, width: int, height: int, duration: float,
 
 def author_scene(scene: dict, scene_dir: str, *, width: int, height: int,
                  duration: float, scene_index: int, total_scenes: int,
-                 max_rounds: int | None = None,
                  token_budget: int | None = None,
                  model: str | None = None,
                  abort_event=None,
                  theme=None,
                  extra_findings: list | None = None,
                  transient_attempts: int = _TRANSIENT_ATTEMPTS) -> dict:
-    """Author one scene's composition with a bounded agent loop.
+    """Author one scene's composition with a naturally completing agent loop.
 
-    ``max_rounds`` / ``token_budget`` accept ``None`` meaning "use this
-    module's default", and that is the ONLY way a caller should express
+    ``token_budget`` accepts ``None`` meaning "use this module's default",
+    and that is the ONLY way a caller should express
     "no preference". They used to carry the literals as defaults, so every
     call site wrote its own copy — measured 2026-07-29: ``_DEFAULT_TOKEN_BUDGET``
     was deliberately raised 60000 → 90000 after two scenes were cut off
@@ -738,15 +750,19 @@ def author_scene(scene: dict, scene_dir: str, *, width: int, height: int,
     from lib.agent_loop import AbortSignal
     from lib.motion_video._template import render_scene_html
 
-    max_rounds = _DEFAULT_MAX_ROUNDS if not max_rounds else int(max_rounds)
     token_budget = (_DEFAULT_TOKEN_BUDGET if not token_budget
                     else int(token_budget))
+    from lib.motion_video._creative_plan import normalise_scene_plan
+    normalise_scene_plan(scene, scene_index, total_scenes)
+    planned_craft = ([str(scene.get("blueprint"))]
+                     if scene.get("blueprint") else [])
 
     def _fallback(detail: str, *, rounds: int = 0, tokens: int = 0) -> dict:
         logger.info('[SceneAuthor] %s → template fallback (%s)',
                     scene.get('id'), detail)
         return {'ok': True, 'mode': 'template', 'rounds': rounds,
                 'tokens': tokens, 'detail': detail,
+                'craft_reads': list(planned_craft),
                 'html': render_scene_html(scene, width=width, height=height,
                                           duration=duration,
                                           scene_index=scene_index,
@@ -800,6 +816,7 @@ def author_scene(scene: dict, scene_dir: str, *, width: int, height: int,
                         'passes the gate as written (0 rounds, 0 tokens)',
                         scene.get('id'))
             return {'ok': True, 'mode': 'authored', 'html': resumed,
+                    'craft_reads': list(planned_craft),
                     'rounds': 0, 'tokens': 0, 'detail': 'adopted draft'}
         logger.info('[SceneAuthor] %s draft NOT adopted (%d finding(s), e.g. '
                     '%.120s) — entering the repair loop with it as the seed',
@@ -812,7 +829,7 @@ def author_scene(scene: dict, scene_dir: str, *, width: int, height: int,
         res = _author_once(
             scene, scene_dir, width=width, height=height, duration=duration,
             scene_index=scene_index, total_scenes=total_scenes,
-            max_rounds=max_rounds, token_budget=token_budget, model=model,
+            token_budget=token_budget, model=model,
             abort=abort, abort_event=abort_event, seed_html=resumed,
             theme=theme, extra_findings=extra_findings)
         total_tokens += res['tokens']
@@ -824,6 +841,8 @@ def author_scene(scene: dict, scene_dir: str, *, width: int, height: int,
                         f' (attempt {attempt})' if attempt > 1 else '')
             return {'ok': True, 'mode': 'authored', 'html': res['html'],
                     'rounds': res['rounds'], 'tokens': total_tokens,
+                    'craft_reads': list(dict.fromkeys(
+                        planned_craft + list(res.get('craft_reads') or []))),
                     'detail': ''}
 
         # Any HTML produced this attempt is kept for the next one / next run,
@@ -864,7 +883,7 @@ def author_scene(scene: dict, scene_dir: str, *, width: int, height: int,
 
 def _author_once(scene: dict, scene_dir: str, *, width: int, height: int,
                  duration: float, scene_index: int, total_scenes: int,
-                 max_rounds: int, token_budget: int, model: str | None,
+                 token_budget: int, model: str | None,
                  abort, abort_event, seed_html: str = '', theme=None,
                  extra_findings: list | None = None) -> dict:
     """ONE attempt of the author loop.
@@ -887,13 +906,20 @@ def _author_once(scene: dict, scene_dir: str, *, width: int, height: int,
 
     from lib.agent_loop import AbortSignal, run_agent_loop
 
-    state = {'html': seed_html, 'tokens': 0, 'gate_ok': False}
+    state = {'html': seed_html, 'tokens': 0, 'gate_ok': False,
+             'craft_reads': ([str(scene.get('blueprint'))]
+                             if scene.get('blueprint') else [])}
     # Stage the CJK sans face INTO this scene before prompting, so the author
     # can declare it with a scene-local @font-face. Best-effort: an
     # unreachable network leaves font_rel empty and the prompt simply omits the
     # typeface block (pre-existing fontconfig fallback behaviour).
     font_rel = ''
     font_rels: dict = {}
+    try:
+        from lib.motion_video._runtime_assets import ensure_gsap
+        ensure_gsap(scene_dir)
+    except Exception as e:
+        logger.warning('[SceneAuthor] could not stage GSAP: %s', e)
     if theme is not None:
         # Themed path: stage every weight of each role face in the film's
         # pairing. Any face that fails to stage is simply absent from
@@ -974,6 +1000,7 @@ def _author_once(scene: dict, scene_dir: str, *, width: int, height: int,
         content, usage = dispatch_chat(
             messages, max_tokens=_MAX_TOKENS_PER_ROUND, temperature=0.3,
             tools=tools, prefer_model=model,
+            strict_model=bool(model),
             log_prefix=f'[SceneAuthor:{scene.get("id")}:R{rnd}]')
         tool_calls = []
         if isinstance(usage, dict):
@@ -1110,7 +1137,7 @@ def _author_once(scene: dict, scene_dir: str, *, width: int, height: int,
     rounds = 0
     try:
         outcome = run_agent_loop(
-            abort=combined, max_tool_rounds=max_rounds,
+            abort=combined,
             round_tools=SCENE_AUTHOR_TOOLS, dispatch=_dispatch,
             execute_tool=_execute, on_round_result=_on_round,
             on_tool_round=_on_tool_round)

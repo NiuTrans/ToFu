@@ -21,8 +21,13 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
+from tests._runtime_sections import runtime_section_path
+
 REPO = Path(__file__).resolve().parent.parent
-CR_JS = REPO / "static" / "js" / "ui" / "chat_render.js"
+CR_JS = Path(runtime_section_path("ui/chat_render.js"))
+pytestmark = pytest.mark.unit
 
 
 def _extract_fn(src: str, name: str) -> str:
@@ -139,7 +144,7 @@ def test_wiring_gates_on_servermsgcount_positive():
     empty conv (count 0) falls through to the welcome/empty render, never a
     skeleton (source-level guard on the wiring, which no node harness exercises
     end-to-end)."""
-    lc = (REPO / "static" / "js" / "main" / "main_conv_lifecycle.js").read_text()
+    lc = Path(runtime_section_path("main/main_conv_lifecycle.js")).read_text()
     # The gate: `const _skMsgCount = c._serverMsgCount || 0;` then a
     # `_skMsgCount > 0 && ... renderSkeletonChat(` call.
     assert "_serverMsgCount || 0" in lc, "skeleton count must derive from _serverMsgCount"
@@ -153,7 +158,7 @@ def test_failure_degrades_to_retry_ui():
     """On fetch timeout / 404 the skeleton must be REPLACED by a Retry/NotFound
     UI (never a permanent placeholder). loadConversationMessages' error branches
     overwrite #chatInner — assert both replacement points exist."""
-    cv = (REPO / "static" / "js" / "core" / "conversations.js").read_text()
+    cv = Path(runtime_section_path("core/conversations.js")).read_text()
     assert "Failed to load conversation" in cv, "timeout branch must show a Failed/Retry UI"
     assert "Conversation Not Found" in cv, "404 branch must show a Not-Found UI"
     # Both branches write inner.innerHTML (replacing the skeleton DOM).

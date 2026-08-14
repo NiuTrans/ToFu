@@ -13,6 +13,7 @@ A divergent copy would silently lose the rebuild history.
 
 from __future__ import annotations
 
+import copy
 import threading
 import time
 from typing import Any
@@ -40,35 +41,49 @@ def save_messages(conv_id: str, messages: list[dict[str, Any]]) -> None:
     if not conv_id or not messages:
         return
 
+    # The store is a snapshot boundary.  Never trim the orchestrator's live
+    # list in-place and never retain its nested dict/list references: callers
+    # continue enriching those objects after a turn, and that must not rewrite
+    # an already-saved history behind the store's lock.
+    try:
+        stored_messages = copy.deepcopy(messages)
+    except Exception as error:
+        logger.warning('[MsgStore] conv=%s Could not snapshot messages: %s',
+                       conv_id[:8], error)
+        return
+
     # Check if there are any tool-related messages worth preserving
     has_tool_msgs = any(
-        msg.get('tool_calls') or msg.get('role') == 'tool'
-        for msg in messages
+        isinstance(msg, dict)
+        and (msg.get('tool_calls') or msg.get('role') == 'tool')
+        for msg in stored_messages
     )
     if not has_tool_msgs:
         logger.debug('[MsgStore] conv=%s No tool messages to preserve (%d msgs)',
-                     conv_id[:8], len(messages))
+                     conv_id[:8], len(stored_messages))
         return
 
     # ── Strip orphaned trailing tool_calls (aborted mid-tool-call) ──
     # If the last message has tool_calls but no tool_results follow,
     # strip it now so the stored messages are always valid.
-    while messages and messages[-1].get('tool_calls'):
-        _popped = messages.pop()
+    while (stored_messages and isinstance(stored_messages[-1], dict)
+           and stored_messages[-1].get('tool_calls')):
+        _popped = stored_messages.pop()
         logger.warning('[MsgStore] conv=%s Stripped trailing orphaned tool_calls '
                        'before save — prevents broken history on next turn',
                        conv_id[:8])
         if _popped.get('content'):
-            messages.append({'role': 'assistant', 'content': _popped['content']})
+            stored_messages.append({
+                'role': 'assistant', 'content': _popped['content']})
 
     with _store_lock:
         _store[conv_id] = {
-            'messages': messages,  # NOTE: these are the orchestrator's internal messages (mutable refs)
+            'messages': stored_messages,
             'updated_at': time.time(),
-            'msg_count': len(messages),
+            'msg_count': len(stored_messages),
         }
         logger.info('[MsgStore] conv=%s Saved %d messages (with tool history)',
-                    conv_id[:8], len(messages))
+                    conv_id[:8], len(stored_messages))
 
         # Cleanup stale entries
         if len(_store) > _MAX_ENTRIES:
@@ -95,12 +110,13 @@ def get_messages(conv_id: str) -> list[dict[str, Any]] | None:
             logger.debug('[MsgStore] conv=%s Expired (age=%.0fs)', conv_id[:8], age)
             return None
 
-        # Return a shallow copy of the list (messages themselves are dicts
-        # that won't be mutated by the caller since orchestrator builds a
-        # new list anyway)
         logger.info('[MsgStore] conv=%s Retrieved %d stored messages (age=%.0fs)',
                     conv_id[:8], entry['msg_count'], age)
-        return list(entry['messages'])
+        # Snapshot the stable internal reference while locked; deepcopy after
+        # releasing the lock so a large tool result cannot block unrelated
+        # conversations from saving or reading their histories.
+        stored_messages = entry['messages']
+    return copy.deepcopy(stored_messages)
 
 
 def clear(conv_id: str) -> None:

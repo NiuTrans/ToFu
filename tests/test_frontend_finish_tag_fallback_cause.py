@@ -53,12 +53,14 @@ import sys
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS = os.path.join(ROOT, 'static', 'js')
+JS = runtime_sections_dir()
 FINISH_INFO = os.path.join(JS, 'ui', 'finish_info.js')
 ERROR_ENVELOPE = os.path.join(JS, 'core', 'error_envelope.js')
 
@@ -270,7 +272,7 @@ def test_single_cause_formatter_no_duplicate_stripping():
                 'function fallbackKindLabel',
                 'function fallbackCauseParts'):
         assert sym in env, f'core/error_envelope.js must define {sym}'
-    assert 'window.fallbackCauseParts' in env, (
+    assert 'runtimeScope.fallbackCauseParts' in env, (
         'fallbackCauseParts must be exported for cross-file use')
 
     fi = open(FINISH_INFO).read()

@@ -319,6 +319,34 @@ class TestFinalizeStreamSuccessHelper:
                                  state=self._state(), cache_conv_id='', tag='[t]')
         assert usage['_dispatch']['model'] == slot.model
 
+    def test_codex_success_arms_unmetered_write_visibility(self, monkeypatch):
+        from lib.llm_dispatch import cache_settle
+        from lib.llm_dispatch.api import _finalize_stream_success
+
+        observed = []
+        recorded = []
+        monkeypatch.setattr(
+            cache_settle, 'observe_codex_cache',
+            lambda conv_id, usage: observed.append((conv_id, usage)))
+        monkeypatch.setattr(
+            cache_settle, 'record_stream_end',
+            lambda conv_id, **kwargs: recorded.append((conv_id, kwargs)))
+
+        slot = _make_slot(model='gpt-5.6-luna', key='codex-key')
+        slot.oauth = 'codex'
+        usage = {
+            'prompt_tokens': 5066,
+            'prompt_tokens_details': {'cached_tokens': 0},
+        }
+        _finalize_stream_success(
+            slot, usage, latency=5.0, ttft=None,
+            state=self._state(), cache_conv_id='conv-codex', tag='[t]')
+
+        assert observed == [('conv-codex', usage)]
+        assert recorded[0][0] == 'conv-codex'
+        assert recorded[0][1]['cache_profile'] == 'codex'
+        assert recorded[0][1]['pending_write'] is True
+
 
 @pytest.mark.unit
 class TestDispatchStreamAbort:

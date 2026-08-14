@@ -38,7 +38,7 @@ from .tools import *  # noqa: F401,F403
 
 build_facade(__all__, tools)
 
-# ── Per-turn prefetch (BM25 → cheap-LLM → inject) ──
+# ── Per-turn prefetch (metadata BM25 → local confidence gate) ──
 from . import prefetch
 from .prefetch import *  # noqa: F401,F403
 

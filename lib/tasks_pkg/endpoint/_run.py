@@ -27,14 +27,24 @@ from lib.tasks_pkg.endpoint_review import (
 )
 from lib.agent_verdict import is_incomplete_stop
 from lib.agent_core.events import EventType, build_event
-from lib.tasks_pkg.manager import append_event, persist_task_result
+from lib.orchestration.loop_policy import (
+    advance_zero_deliverable_streak,
+    should_inject_zero_deliverable,
+)
+from lib.tasks_pkg.manager import (
+    append_event,
+    finalize_chat_task_error,
+    notify_terminal_busy_state,
+    persist_task_result,
+    stamp_chat_task_terminal,
+)
 from lib.tasks_pkg.orchestrator import (_run_single_turn,
                                         drain_peer_messages_into)
+from lib.tasks_pkg.endpoint_prompts import WORKER_DIRECTIVE_HEADER
 
 from lib.tasks_pkg.endpoint._replan import (
     MAX_ITERATIONS,
     MAX_REPLANS,
-    MAX_ZERO_DELIVERABLE_TURNS,
     _ZERO_DELIVERABLE_DIRECTIVE,
     _build_progress_summary,
     _build_replan_input_messages,
@@ -251,7 +261,18 @@ def run_endpoint_task(task):
             # Per-phase retry counter resets at each Worker phase boundary.
             task['_premature_retry_count_phase'] = 0
 
-            turn_result = _run_single_turn(task, messages_override=messages)
+            previous_role = task.get('_contextRoleBlock')
+            task['_contextRoleBlock'] = {
+                'name': 'worker',
+                'content': WORKER_DIRECTIVE_HEADER,
+            }
+            try:
+                turn_result = _run_single_turn(task, messages_override=messages)
+            finally:
+                if previous_role is None:
+                    task.pop('_contextRoleBlock', None)
+                else:
+                    task['_contextRoleBlock'] = previous_role
 
             turn_content  = turn_result.get('content', '')
             turn_usage    = turn_result.get('usage', {})
@@ -279,10 +300,11 @@ def run_endpoint_task(task):
              turn_exploratory,
              turn_sc_names) = _count_state_changing_rounds(_latest_tool_rounds)
             cumulative_state_changing += turn_state_changing
-            if turn_state_changing == 0:
-                zero_deliverable_streak += 1
-            else:
-                zero_deliverable_streak = 0
+            zero_deliverable_streak = advance_zero_deliverable_streak(
+                zero_deliverable_streak,
+                reported=True,
+                state_changing=turn_state_changing,
+            )
             logger.info(
                 '[Endpoint] Task %s iter=%d deliverables: state_changing=%d '
                 '(%s) exploratory=%d cumulative_sc=%d zero_streak=%d',
@@ -351,7 +373,7 @@ def run_endpoint_task(task):
             # First zero-deliverable turn still goes through the critic
             # (which may genuinely need to answer a clarifying question);
             # only at ``MAX_ZERO_DELIVERABLE_TURNS`` do we bypass.
-            if zero_deliverable_streak >= MAX_ZERO_DELIVERABLE_TURNS:
+            if should_inject_zero_deliverable(zero_deliverable_streak):
                 logger.warning(
                     '[Endpoint] Task %s iter=%d — %d consecutive '
                     'zero-deliverable worker turns, bypassing Critic and '
@@ -739,16 +761,15 @@ def run_endpoint_task(task):
             e, model=task.get('model', '') or task.get('config', {}).get('model', ''),
             context='endpoint-fatal', source='endpoint',
         )
-        task['error'] = envelope
-        task['status'] = 'error'
-        task['finishReason'] = 'error'
         with task['content_lock']:
             task['content'] = accumulated_content
-        err_done = build_event(EventType.DONE, error=envelope, finishReason='error')
-        if task.get('preset'): err_done['preset'] = task['preset']
-        if task.get('model'):  err_done['model']  = task['model']
-        append_event(task, err_done)
-        persist_task_result(task)
+        finalize_chat_task_error(
+            task,
+            envelope,
+            endpoint_reason='fatal',
+            append_event_fn=append_event,
+            persist_task_result_fn=persist_task_result,
+        )
         # Even on error, any completed endpoint turns (e.g. planner + a
         # worker iteration) should still get auto-translated.
         try:
@@ -779,12 +800,11 @@ def _finalize(task, accumulated_content, total_usage, iteration,
     # task['error'] set by the failed turn.  Mirror the single-turn orchestrator
     # contract (orchestrator.py:1932) and the FATAL path below: report the
     # true terminal state and carry the error envelope onto the DONE event.
+    status, finish_reason = 'done', 'stop'
     if stop_reason == 'error':
-        task['status'] = 'error'
-        task['finishReason'] = 'error'
+        status, finish_reason = 'error', 'error'
     elif stop_reason == 'aborted':
-        task['status'] = 'aborted'
-        task['finishReason'] = 'aborted'
+        status, finish_reason = 'aborted', 'aborted'
     elif is_incomplete_stop(stop_reason):
         # ★ The loop was CUT OFF by a safety cap (max_iterations / max_replans /
         #   stuck), NOT genuinely finished — the objective is unverified.
@@ -793,21 +813,20 @@ def _finalize(task, accumulated_content, total_usage, iteration,
         #   success. Status stays 'done' (it is not an ERROR — real work may
         #   have shipped), but finishReason='incomplete' honestly flags
         #   "stopped early, needs review" for the sidebar + finish bar.
-        task['status'] = 'done'
-        task['finishReason'] = 'incomplete'
+        finish_reason = 'incomplete'
         audit_log('loop_incomplete', task_id=tid, mode='endpoint',
                   reason=stop_reason, iterations=min(iteration, MAX_ITERATIONS))
-    else:
-        task['status'] = 'done'
-        task['finishReason'] = 'stop'
     # ★ Clear _endpoint_phase once the loop is finalized.  Without this the
     #   state snapshot (see routes/chat.py) still reports endpointPhase='reviewing'
     #   after approval, which the frontend's reconnect paths misinterpret as
     #   "critic still running → start a new worker on the next turn".  The
     #   explicit 'done' phase is the authoritative signal used by
     #   connectToTask / _trySSE state-handler to reject ghost worker creation.
-    task['_endpoint_phase'] = 'done'
-    task['_endpoint_stop_reason'] = stop_reason
+    if not stamp_chat_task_terminal(
+        task, status=status, finish_reason=finish_reason,
+        endpoint_reason=stop_reason,
+    ):
+        return
 
     complete_evt = build_event(
         EventType.ENDPOINT_COMPLETE,
@@ -855,7 +874,6 @@ def _finalize(task, accumulated_content, total_usage, iteration,
     # finalize latch, so the projection is truthful the moment the status
     # flipped above. Keeps the sidebar/composer from reading "generating"
     # past the settled endpoint turn until the next incidental write.
-    from lib.tasks_pkg.manager._registry import notify_terminal_busy_state
     notify_terminal_busy_state(task)
 
     # ── Server-side auto-translate safety net (endpoint mode) ──

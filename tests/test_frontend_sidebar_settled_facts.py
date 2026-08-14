@@ -11,7 +11,8 @@ until the user opened it (loading full messages). The fix: the backend stamps
 RAW settled-turn facts into ``settings`` (surfaced onto the conv as
 ``lastFinishReason`` / ``lastMsgError`` / ``lastMsgHasOutput``), and
 ``_convStatusFlags`` gains a fallback branch that runs the SAME
-``_FINISH_ERR`` / ``_FINISH_NORMAL`` classifier when ``c.messages`` is absent.
+``_FINISH_ERR`` / ``_FINISH_NORMAL`` classifier when ``c.messages`` is absent
+or is the empty array used by real lazy sidebar shells.
 
 This harness slices the REAL shipped ``_convStatusFlags`` out of
 ``static/js/ui/conversation_list.js`` and evals it (bites the actual logic),
@@ -81,6 +82,15 @@ check('fn_exposed', typeof _convStatusFlags === 'function');
               lastMsgError: false, lastMsgHasOutput: true };
   const f = _convStatusFlags(c);
   check('interrupted_shell_incomplete', f.incomplete === true && f.errored === false);
+})();
+
+// ── real lazy shell shape uses messages:[]; it must hit the same fallback ──
+(function () {
+  const c = { id: 'i2', messages: [], _needsLoad: true,
+              lastMsgRole: 'assistant', lastFinishReason: 'interrupted',
+              lastMsgError: false, lastMsgHasOutput: true };
+  const f = _convStatusFlags(c);
+  check('empty_array_shell_incomplete', f.incomplete === true && f.errored === false);
 })();
 
 // ── error shell → errored ──
@@ -156,7 +166,7 @@ def test_settled_facts_classify_stripped_shell():
     output = _run(flags)
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'settled-facts flag failures:\n' + output
-    assert output.count('PASS') >= 6, f'expected >=6 PASS lines:\n{output}'
+    assert output.count('PASS') >= 7, f'expected >=7 PASS lines:\n{output}'
 
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
@@ -166,10 +176,10 @@ def test_fallback_branch_is_load_bearing_neuter():
     with open(SRC, encoding='utf-8') as f:
         real = _extract_flags(f.read())
 
-    # NC: remove the entire `else if (!streaming && !c.messages && ...) {...}`
+    # NC: remove the entire `else if (!streaming && !hasLoadedMessages...)`
     #     fallback block that classifies a stripped shell.
     nc = re.sub(
-        r"  else if \(!streaming && !c\.messages && c\.lastMsgRole === 'assistant'\) \{.*?\n  \}\n",
+        r"  else if \(!streaming && !hasLoadedMessages && c\.lastMsgRole === 'assistant'\) \{.*?\n  \}\n",
         "\n",
         real, flags=re.DOTALL,
     )

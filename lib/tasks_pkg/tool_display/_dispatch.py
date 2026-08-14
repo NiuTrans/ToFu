@@ -42,12 +42,19 @@ from lib.tasks_pkg.tool_display._renderers import (
     _tool_display_human_guidance,
     _tool_display_image_gen,
     _tool_display_inspect_image,
+    _tool_display_execute,
+    _tool_display_knowledge,
     _tool_display_memory,
+    _tool_display_mcp,
+    _tool_display_motion_video,
+    _tool_display_produce,
     _tool_display_project,
     _tool_display_scheduler,
+    _tool_display_search_settings,
     _tool_display_skills,
     _tool_display_swarm,
     _tool_display_todo,
+    _tool_display_tool_search,
     _tool_display_web_search,
 )
 from lib.tasks_pkg.tool_display._roots import _resolve_tool_root_name
@@ -70,8 +77,19 @@ def _build_display_dispatch_table():
 
     # Direct name matches
     table['web_search'] = _tool_display_web_search
+    table['search_knowledge'] = _tool_display_knowledge
+    table['search_tools'] = _tool_display_tool_search
+    # Hidden from the wire schema but accepted as a robust compatibility call.
+    table['execute_tools'] = _tool_display_execute
     table['fetch_url'] = _tool_display_fetch_url
     table['context_compact'] = _tool_display_compact
+
+    # Progressive MCP bridge tools are built-ins too. Route them through the
+    # MCP renderer so discovery shows its query and read/write calls show the
+    # underlying namespaced resource instead of a generic bare function name.
+    from lib.mcp.progressive import MCP_PROGRESSIVE_TOOL_NAMES
+    for name in MCP_PROGRESSIVE_TOOL_NAMES:
+        table[name] = _tool_display_mcp
 
     # Code exec tools — default to project handler (overridden at call
     # time when project is disabled).
@@ -104,9 +122,13 @@ def _build_display_dispatch_table():
     for name in MEMORY_TOOL_NAMES:
         table[name] = _tool_display_memory
 
-    # Skill tools (activate_skill — read-only progressive disclosure)
+    # Skill tools (load_skill — read-only progressive disclosure)
     for name in SKILL_TOOL_NAMES:
         table[name] = _tool_display_skills
+    # Display-only migration shim: old persisted conversations may contain
+    # activate_skill calls. It is intentionally absent from tool schemas,
+    # execution handlers, and authority catalogs, so it cannot be called.
+    table['activate_skill'] = _tool_display_skills
 
     # Conversation reference tools
     for name in CONV_REF_TOOL_NAMES:
@@ -136,6 +158,21 @@ def _build_display_dispatch_table():
     # Image inspection tool (zoom/rotate/crop viewer)
     for name in IMAGE_EDIT_TOOL_NAMES:
         table[name] = _tool_display_inspect_image
+
+    # Motion-video pipeline tools (env/storyboard/static gates/render/probe/
+    # concat/narrate/mux) — friendly labels naming the scene / files, no
+    # spurious "unregistered tool" WARNING on every call.
+    from lib.tools.motion_video import MOTION_VIDEO_TOOL_NAMES
+    for name in MOTION_VIDEO_TOOL_NAMES:
+        table[name] = _tool_display_motion_video
+
+    # High-level produce_* tools (topic → video / report / research ideas).
+    from lib.tools.produce import PRODUCE_TOOL_NAMES
+    for name in PRODUCE_TOOL_NAMES:
+        table[name] = _tool_display_produce
+
+    # Search/fetch pipeline settings knob (read with no args, tune with kwargs)
+    table['update_search_settings'] = _tool_display_search_settings
 
     # Human guidance tool
     table['ask_human'] = _tool_display_human_guidance

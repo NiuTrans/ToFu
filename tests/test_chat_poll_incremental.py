@@ -27,9 +27,8 @@ tests/test_duplicate_bubble_midturn_finish_reason.py):
   * plain GET (no incr) → byte-compatible full body, NO `fp` key;
   * incr first contact → full body + `fp`;
   * echo round-trip → fat sections omitted with `*Same` markers, meta intact;
-  * append / same-length rewrite / wholesale reset → the touched section
-    comes back full (the crc, not a length check, is what catches the last
-    two);
+  * append / mutable-tail rewrite → only a bounded toolRoundsDelta returns;
+    a boundary mismatch falls back to the full section;
   * a garbage `ifp` degrades to a full body, never a 400/500.
 
 Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/test_chat_poll_incremental.py -q
@@ -80,9 +79,10 @@ class _PollRig:
             'id': self.tid, 'convId': 'cv-incr', 'content': 'hello world',
             'thinking': 'think-1', 'error': None,
             'toolRounds': [{'tool': 'read_files', 'result': 'x' * 100}],
-            'status': 'running', 'model': 'kimi-k3',
+            'status': 'running', 'model': 'kimi-k3', '_contentEpoch': 0,
             'created_at': 1_700_000_000.0,
             'events': [], 'events_lock': threading.Lock(),
+            'content_lock': threading.Lock(),
         }
         self.task.update(task_fields)
         with tasks_lock:
@@ -141,6 +141,8 @@ def test_incr_echo_roundtrip_and_self_healing():
         fp0 = first.get('fp')
         assert fp0, f'incr response must carry fp: {first}'
         assert first.get('content') == 'hello world', first
+        assert first.get('contentEpoch') == 0, first
+        assert fp0.get('c', [None])[0] == 0, fp0
         assert first.get('toolRounds'), first
 
         # 3. Echo round-trip with NOTHING changed: fat sections omitted,
@@ -153,35 +155,65 @@ def test_incr_echo_roundtrip_and_self_healing():
         assert same.get('fp') == fp0, f'fp must re-state the current sections: {same}'
 
         # 4. Content APPEND → only content returns; the other sections stay omitted.
-        rig.task['content'] = 'hello world!!'
+        with rig.task['content_lock']:
+            rig.task['content'] = 'hello world!!'
         grown = rig.get(_ifp_q(fp0))
         assert grown.get('content') == 'hello world!!', grown
         assert grown.get('thinkingSame') is True, grown
         assert grown.get('roundsSame') is True, grown
         fp1 = grown['fp']
 
-        # 5. Round APPEND → toolRounds returns full (both rounds).
+        # 5. Round APPEND → only the new round returns, not the old 100-byte
+        #    result again on every poll.
         rig.task['toolRounds'].append({'tool': 'run_command', 'result': 'y' * 50})
         r2 = rig.get(_ifp_q(fp1))
-        assert len(r2.get('toolRounds') or []) == 2, r2
+        assert 'toolRounds' not in r2, r2
+        assert r2.get('toolRoundsDelta') == {
+            'start': 1,
+            'rows': [{'tool': 'run_command', 'result': 'y' * 50}],
+        }, r2
         assert r2.get('contentSame') is True, r2
         fp2 = r2['fp']
 
-        # 6. SAME-LENGTH last-round mutation (the elapsed-tick shape) — only a
-        #    crc, never a length check, catches this. Must come back full.
+        # 6. SAME-LENGTH last-round mutation (the elapsed-tick shape) — replace
+        #    only the mutable tail instead of re-sending the sealed prefix.
         rig.task['toolRounds'][-1]['result'] = 'y' * 49 + 'z'
         r3 = rig.get(_ifp_q(fp2))
-        assert (r3.get('toolRounds') or [None])[-1] == {'tool': 'run_command', 'result': 'y' * 49 + 'z'}, (
+        assert 'toolRounds' not in r3, r3
+        assert r3.get('toolRoundsDelta') == {
+            'start': 1,
+            'rows': [{'tool': 'run_command', 'result': 'y' * 49 + 'z'}],
+        }, (
             f'a same-length last-round mutation slipped past the fingerprint: {r3}')
+
+        # 6b. If append raced with a mutation of the echoed boundary, the
+        #     server cannot prove a safe patch base and must self-heal full.
+        fp3 = r3['fp']
+        rig.task['toolRounds'][-1]['result'] = 'q' * 50
+        rig.task['toolRounds'].append({'tool': 'read_files', 'result': 'new'})
+        raced = rig.get(_ifp_q(fp3))
+        assert len(raced.get('toolRounds') or []) == 3, raced
+        assert 'toolRoundsDelta' not in raced, raced
 
         # 7. SAME-LENGTH wholesale content rewrite (the retry/reset shape) —
         #    again crc-caught, full section returns.
-        rig.task['content'] = 'HELLO WORLD!!'
+        with rig.task['content_lock']:
+            rig.task['content'] = 'HELLO WORLD!!'
         r4 = rig.get(_ifp_q(r3['fp']))
         assert r4.get('content') == 'HELLO WORLD!!', (
             f'a same-length content rewrite slipped past the fingerprint: {r4}')
 
-        # 8. Garbage ifp → graceful FULL body (never a 400/500, never a trim).
+        # 8. RESET EPOCH with the same bytes → content must return despite an
+        #    unchanged crc, because the generation boundary authorizes shrink.
+        before_epoch = r4['fp']
+        with rig.task['content_lock']:
+            rig.task['_contentEpoch'] = 1
+        epoch_changed = rig.get(_ifp_q(before_epoch))
+        assert epoch_changed.get('content') == 'HELLO WORLD!!', epoch_changed
+        assert epoch_changed.get('contentEpoch') == 1, epoch_changed
+        assert epoch_changed['fp']['c'][0] == 1, epoch_changed
+
+        # 9. Garbage ifp → graceful FULL body (never a 400/500, never a trim).
         bad = rig.get('?incr=1&ifp=%7Boops')
         assert bad.get('content') == 'HELLO WORLD!!', bad
         assert bad.get('toolRounds'), bad
@@ -206,11 +238,14 @@ def test_incr_markers_and_fp_shape_are_source_pinned():
     every poll (or worse, drops a section the merge then keeps stale)."""
     src = open(POLL, encoding='utf-8').read()
     for marker in ("'contentSame'", "'thinkingSame'", "'roundsSame'",
+                   "'toolRoundsDelta'",
                    "'endpointTurnsSame'", "'fp'"):
         assert marker in src, f'{marker} missing from the incr poll contract'
-    fe = open(os.path.join(ROOT, 'static', 'js', 'ui', 'sse_poll_fallback.js'),
+    fe = open(os.path.join(
+        ROOT, 'frontend', 'src', 'runtime', 'app-runtime.js'),
               encoding='utf-8').read()
     for guard in ('data.contentSame', 'data.thinkingSame', 'data.roundsSame',
+                  'data.toolRoundsDelta',
                   'data.endpointTurnsSame', '_pollFP', 'ifp'):
         assert guard in fe, f'{guard} missing from the poll-loop merge guards'
 

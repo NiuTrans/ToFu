@@ -16,7 +16,8 @@ Pinned:
      OOM-respawned server must not silently narrow the bind.
   3. The packaged DESKTOP app keeps its explicit loopback pin (a laptop app
      must not start serving the LAN just because the server default moved).
-  4. The open-auth + non-loopback loud banner still exists in server.py —
+  4. The open-auth + non-loopback loud banner still exists in its boot-report
+     owner —
      the security tripwire that makes the wider default acceptable.
 
 Run:  pytest tests/test_bind_lan_default.py -q -p no:napari -o addopts=
@@ -72,7 +73,7 @@ class TestBindLanDefault:
             'laptop app must not inherit the LAN default')
 
     def test_open_auth_non_loopback_banner_survives(self):
-        src = _src('server.py')
+        src = _src('lib/server_boot_report.py')
         assert 'API is reachable on the LAN' in src, (
             'the loud open-auth + non-loopback boot banner is the security '
             'tripwire that makes the wider default acceptable — do not '

@@ -154,6 +154,26 @@ def test_current_query_empty_when_no_user_turn():
     assert _extract_current_query([_a('only assistant')]) == ''
 
 
+def test_current_query_skips_runtime_meta_and_nonhuman_inbox_rows():
+    msgs = [
+        _u('the human objective'),
+        _u('<swarm-update>agent finished</swarm-update>',
+           _isInboxInject=True, _containsHumanSteer=False),
+        _u('<system-reminder>active checklist</system-reminder>',
+           _isMeta=True),
+    ]
+    assert _extract_current_query(msgs) == 'the human objective'
+
+
+def test_current_query_keeps_inbox_row_that_contains_human_steer():
+    msgs = [
+        _u('old objective'),
+        _u('human says: prioritize latency',
+           _isInboxInject=True, _containsHumanSteer=True),
+    ]
+    assert _extract_current_query(msgs) == 'human says: prioritize latency'
+
+
 # ───────────────────────── turn boundary ─────────────────────────
 
 def test_boundary_lands_on_a_user_index_and_never_splits_a_turn():

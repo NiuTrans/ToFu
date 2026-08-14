@@ -131,6 +131,18 @@ class TestWritePath:
         assert saved['search']['fetch_timeout'] == 33
         assert saved['search']['fetch_top_n'] == 4
 
+    def test_selecting_profile_clears_legacy_profile_knobs(self, cfg_file):
+        cfg_file['path'].write_text(json.dumps({
+            'search': {'fetch_top_n': 9, 'max_chars_search': 70000,
+                       'fetch_timeout': 33},
+        }))
+        res = ss.apply_updates({'profile': 'fast'})
+        saved = _saved(cfg_file['path'])['search']
+        assert res['applied']['profile'] == 'fast'
+        assert saved['profile'] == 'fast' and saved['overrides'] == {}
+        assert 'fetch_top_n' not in saved and 'max_chars_search' not in saved
+        assert saved['fetch_timeout'] == 33
+
 
 # ═══════════════════════════════════════════════════════════
 #  3. Aliases — MB download size + domain block/unblock

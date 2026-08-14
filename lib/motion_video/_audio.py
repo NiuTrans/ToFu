@@ -19,8 +19,9 @@ paper-podcast chain's provider-agnostic TTS) and :mod:`._gates` probing:
         shortens the scene text or raises the TTS speed) — we never
         time-stretch audio.
 
-  * :func:`concat_narrations` — scene WAVs → one narration WAV (inter-scene
-    pause injection via lib.tts helpers).
+  * :func:`concat_narrations` — scene WAVs → one narration WAV. Scene WAVs
+    already fill their complete program spans, so the engine adds no second
+    inter-scene pause (callers may still request one explicitly).
   * :func:`mux_audio_video` — final silent MP4 + narration → final MP4 with
     an AAC track (optional loudnorm single pass), atomic write, probe
     verified (audio present, duration preserved).
@@ -34,7 +35,6 @@ from __future__ import annotations
 
 import os
 import re
-import tempfile
 
 from lib.log import get_logger
 
@@ -46,8 +46,9 @@ __all__ = ['NarrationAborted', 'synthesize_scene_narrations',
 #: Silence appended after each scene's narration (loose mode) so the audio
 #: never hard-cuts against the scene boundary.
 _DEFAULT_TAIL_PAD = 0.35
-#: Pause inserted between scene narrations when concatenating.
-_SCENE_PAUSE_MS = 250
+#: Scene WAVs already include tail padding up to ``target_duration``. Adding a
+#: second pause here lengthens the audio beyond the video and breaks alignment.
+_SCENE_PAUSE_MS = 0
 #: Pause inserted between chunks within one scene.
 _CHUNK_PAUSE_MS = 150
 #: Per-chunk synthesis attempts (transient provider hiccups).
@@ -88,17 +89,8 @@ def _chunk_text(text: str, max_chars: int) -> list[str]:
 
 
 def _atomic_write(path: str, data: bytes) -> None:
-    fd, tmp = tempfile.mkstemp(prefix='.mv-audio-', dir=os.path.dirname(path))
-    try:
-        with os.fdopen(fd, 'wb') as f:
-            f.write(data)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            try:
-                os.unlink(tmp)
-            except OSError as e:
-                logger.debug('[MotionVideo] tmp audio cleanup failed: %s', e)
+    from lib.json_store import write_bytes_atomic
+    write_bytes_atomic(path, data)
 
 
 def _synth_chunk_with_retry(chunk: str, *, voice, fmt, speed) -> bytes:
@@ -243,7 +235,7 @@ def synthesize_scene_narrations(
 
 def concat_narrations(wavs: list[str], out_path: str, *,
                       pause_ms: int = _SCENE_PAUSE_MS) -> dict:
-    """Concatenate scene narration WAVs into one narration track."""
+    """Concatenate scene narration WAVs into one program-aligned track."""
     import lib.tts as _tts
 
     if not wavs:
@@ -287,38 +279,41 @@ def mux_audio_video(video_path: str, audio_path: str, output: str, *,
         return {'ok': False, 'category': 'env_missing',
                 'detail': 'ffmpeg not found (run motion_video_env_check)'}
 
-    tmp_out = output + '.tmp.mp4'
-    args = [ffmpeg, '-y', '-i', video_path, '-i', audio_path,
-            '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy']
-    if loudnorm:
-        args += ['-af', 'loudnorm=I=-16:TP=-1.5:LRA=11']
-    args += ['-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', tmp_out]
-    logger.info('[MotionVideo] mux %s + %s → %s (loudnorm=%s)',
-                video_path, audio_path, output, loudnorm)
-    res = _run_cli(args, cwd=os.path.dirname(os.path.abspath(output)) or '.',
-                   timeout=timeout, abort_event=abort_event)
-    if res['category'] or res['rc'] != 0:
-        return {'ok': False, 'category': res['category'] or 'unknown',
-                'detail': res['err'][-1500:]}
-    if not os.path.isfile(tmp_out) or os.path.getsize(tmp_out) == 0:
-        return {'ok': False, 'category': 'io',
-                'detail': 'ffmpeg produced no output'}
-    os.replace(tmp_out, output)
-
-    v_probe = probe_video(video_path)
-    f_probe = probe_video(output)
-    if f_probe is None:
-        return {'ok': False, 'category': 'io',
-                'detail': 'post-mux probe failed'}
-    if not f_probe.get('has_audio'):
-        return {'ok': False, 'category': 'io',
-                'detail': 'muxed MP4 has no audio track'}
-    if v_probe:
-        dv = abs(float(f_probe.get('duration') or 0)
-                 - float(v_probe.get('duration') or 0))
-        if dv > 0.5:
+    from lib.json_store import temporary_output_path
+    with temporary_output_path(output, suffix='.tmp.mp4') as tmp_out:
+        args = [ffmpeg, '-y', '-i', video_path, '-i', audio_path,
+                '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy']
+        if loudnorm:
+            args += ['-af', 'loudnorm=I=-16:TP=-1.5:LRA=11']
+        args += ['-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart',
+                 tmp_out]
+        logger.info('[MotionVideo] mux %s + %s → %s (loudnorm=%s)',
+                    video_path, audio_path, output, loudnorm)
+        res = _run_cli(args,
+                       cwd=os.path.dirname(os.path.abspath(output)) or '.',
+                       timeout=timeout, abort_event=abort_event)
+        if res['category'] or res['rc'] != 0:
+            return {'ok': False, 'category': res['category'] or 'unknown',
+                    'detail': res['err'][-1500:]}
+        if not os.path.isfile(tmp_out) or os.path.getsize(tmp_out) == 0:
             return {'ok': False, 'category': 'io',
-                    'detail': f'muxed duration drifted {dv:.3f}s from the video'}
+                    'detail': 'ffmpeg produced no output'}
+
+        v_probe = probe_video(video_path)
+        f_probe = probe_video(tmp_out)
+        if f_probe is None:
+            return {'ok': False, 'category': 'io',
+                    'detail': 'post-mux probe failed'}
+        if not f_probe.get('has_audio'):
+            return {'ok': False, 'category': 'io',
+                    'detail': 'muxed MP4 has no audio track'}
+        if v_probe:
+            dv = abs(float(f_probe.get('duration') or 0)
+                     - float(v_probe.get('duration') or 0))
+            if dv > 0.5:
+                return {'ok': False, 'category': 'io',
+                        'detail': f'muxed duration drifted {dv:.3f}s from the video'}
+        os.replace(tmp_out, output)
     logger.info('[MotionVideo] mux done: %s', output)
     return {'ok': True, 'output': output,
             'duration': round(float(f_probe.get('duration') or 0), 3),

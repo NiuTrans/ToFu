@@ -186,6 +186,18 @@ def _fill_text_frame(tf, content: dict, theme: dict, deck: Deck) -> None:
     st = text_style(content, theme)
     paragraphs = parse_rich_text(str(content.get('text') or ''), theme)
     tf.word_wrap = bool(content.get('wrap', True))
+    # A python-pptx textbox defaults to ``spAutoFit`` (grow the SHAPE to fit
+    # text).  That silently breaks PPTD's fixed geometry in PowerPoint/WPS:
+    # text can leave the authored bounds and cover the next element even when
+    # the browser preview is clean.  Fixed boxes + native shrink-to-fit are the
+    # safe default; authors may explicitly request the two uncommon modes.
+    from pptx.enum.text import MSO_AUTO_SIZE
+    fit = str(content.get('fit') or 'shrink').strip().lower()
+    tf.auto_size = {
+        'none': MSO_AUTO_SIZE.NONE,
+        'resize': MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT,
+        'shrink': MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE,
+    }.get(fit, MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE)
     align = content.get('align') or ['left', 'top']
     halign, valign = (list(align) + ['left', 'top'])[:2]
     anchor = {'top': 1, 'middle': 3, 'bottom': 4}.get(valign, 1)
@@ -210,9 +222,11 @@ def _fill_text_frame(tf, content: dict, theme: dict, deck: Deck) -> None:
             p.line_spacing = Pt(float(lh_px))
         elif lh and float(lh) != 1.0:
             p.line_spacing = float(lh)
-        mt = para.margin_top or st.get('marginTop')
-        if mt:
-            p.space_before = Pt(float(mt))
+        mt = para.margin_top or st.get('marginTop') or 0
+        # Do not inherit theme/master paragraph spacing.  Explicit zeroes make
+        # the exported layout stable across PowerPoint, WPS and LibreOffice.
+        p.space_before = Pt(float(mt))
+        p.space_after = Pt(0)
         if para.list_kind:
             prefix = f'{para.list_index}. ' if para.list_kind == 'ol' else '• '
             if para.runs:
@@ -1020,10 +1034,11 @@ def export_pptx(deck: Deck, out_path: str, *, transition: str = 'fade',
     patched = 0
     if transition == 'fade':
         patched = _patch_fade_transitions(out_path)
-    embedded = 0
+    font_summary = {'typefaces': 0, 'parts': 0, 'bytes': 0, 'glyphs': 0,
+                    'subset': False}
     if embed_fonts:
         try:
-            embedded = _embed_fonts(out_path, deck)
+            font_summary = _embed_fonts(out_path, deck)
         except Exception as e:
             # Embedding is a polish layer — a failure here must never cost
             # the deck itself (the file names real family names, so machines
@@ -1032,7 +1047,12 @@ def export_pptx(deck: Deck, out_path: str, *, transition: str = 'fade',
                            'unembedded: %s', e, exc_info=True)
     summary = _verify(out_path)
     summary.update({'output': out_path, 'slides': len(deck.pages),
-                    'fadeTransitions': patched, 'embeddedFonts': embedded})
+                    'fadeTransitions': patched,
+                    'embeddedFonts': font_summary['typefaces'],
+                    'embeddedFontParts': font_summary['parts'],
+                    'embeddedFontBytes': font_summary['bytes'],
+                    'embeddedGlyphs': font_summary['glyphs'],
+                    'fontSubsetting': font_summary['subset']})
     logger.info('[Slides→PPTX] %s: %d slides, %d fade transitions, %d bytes',
                 out_path, len(deck.pages), patched, summary['bytes'])
     return summary
@@ -1040,8 +1060,115 @@ def export_pptx(deck: Deck, out_path: str, *, transition: str = 'fade',
 
 # ── Font embedding (fntdata) ──────────────────────────────
 
-#: fsType bits that FORBID embedding (0x0002 = restricted license).
+#: OS/2.fsType embedding permissions.
 _FSTYPE_RESTRICTED = 0x0002
+_FSTYPE_NO_SUBSETTING = 0x0100
+_FSTYPE_BITMAP_ONLY = 0x0200
+
+_FONT_SLOT_TARGETS = {
+    'regular': 400,
+    'bold': 700,
+    'italic': 400,
+    'boldItalic': 700,
+}
+
+
+def _font_family_name(value) -> str:
+    if isinstance(value, dict):
+        value = value.get('ea') or value.get('latin')
+    return str(value or 'MiSans')
+
+
+def _font_slot(*, bold: bool, italic: bool) -> str:
+    if bold and italic:
+        return 'boldItalic'
+    if bold:
+        return 'bold'
+    if italic:
+        return 'italic'
+    return 'regular'
+
+
+def _add_text_font_usage(usage: dict, content: dict, theme: dict) -> None:
+    """Accumulate the exact characters each effective family/style uses.
+
+    This deliberately mirrors :func:`_fill_text_frame`: theme style first,
+    rich-text run override second, and list markers inserted into the first
+    run.  Keeping the collector beside the exporter prevents a visually
+    unused theme/default face from bloating the package.
+    """
+    st = text_style(content, theme)
+    paragraphs = parse_rich_text(str(content.get('text') or ''), theme)
+    for para in paragraphs:
+        prefix = ''
+        if para.list_kind:
+            prefix = f'{para.list_index}. ' if para.list_kind == 'ol' else '• '
+        for ri, run in enumerate(para.runs):
+            family = _font_family_name(run.font_family
+                                       or st.get('fontFamily'))
+            slot = _font_slot(bold=bool(run.bold or st.get('bold')),
+                              italic=bool(run.italic or st.get('italic')))
+            text = (prefix if ri == 0 else '') + run.text
+            usage.setdefault(family, {}).setdefault(slot, set()).update(text)
+
+
+def _collect_font_usage(deck: Deck) -> dict:
+    """``{family: {PowerPoint slot: set(characters)}}`` actually exported."""
+    usage: dict = {}
+    for page in deck.pages:
+        for el in page.elements:
+            if not isinstance(el, dict):
+                continue
+            if el.get('elementType') == 'text':
+                _add_text_font_usage(usage, el.get('content') or {},
+                                     deck.theme)
+                continue
+            if el.get('elementType') != 'table':
+                continue
+            rows = el.get('rows') or []
+            n_rows = len(rows)
+            n_cols = max((len(r) for r in rows), default=0)
+            tstyle = table_style(el.get('style'), deck.theme)
+            # The renderer/exporter share this exact table priority chain.
+            from lib.slides.render_html import _cell_style
+            grid = [[None] * n_cols for _ in range(n_rows)]
+            covered = set()
+            for ri, row in enumerate(rows):
+                ci = 0
+                for cell in row:
+                    while (ri, ci) in covered:
+                        ci += 1
+                    if ci >= n_cols or not isinstance(cell, dict):
+                        continue
+                    grid[ri][ci] = cell
+                    rs = int(cell.get('rowSpan') or 1)
+                    cs = int(cell.get('colSpan') or 1)
+                    for dr in range(rs):
+                        for dc in range(cs):
+                            if dr or dc:
+                                covered.add((ri + dr, ci + dc))
+                    ci += cs
+            for ri in range(n_rows):
+                for ci in range(n_cols):
+                    if (ri, ci) in covered:
+                        continue
+                    cell = grid[ri][ci]
+                    if not isinstance(cell, dict):
+                        continue
+                    st = _cell_style(cell, ri, ci, n_rows, n_cols, tstyle,
+                                     deck.theme)
+                    from lib.slides.pptd import cell_content
+                    cc = cell_content(cell)
+                    content = {
+                        'text': cc.get('text') or '',
+                        'align': cc.get('align') or st.get('align')
+                                 or ['center', 'middle'],
+                        **{k: v for k, v in st.items() if k in (
+                            'color', 'fontSize', 'fontFamily', 'bold',
+                            'italic', 'lineHeight', 'letterSpacing')},
+                    }
+                    _add_text_font_usage(usage, content, deck.theme)
+    return usage
 
 
 def _glyphs_to_quadratic(glyphs, *, max_err: float = 1.0) -> dict:
@@ -1121,70 +1248,114 @@ def _converted_glyf_ttf(font_id: str, weight: int, data: bytes) -> bytes:
     font.save(buf)
     out = buf.getvalue()
     os.makedirs(cache_dir, exist_ok=True)
-    tmp = cache + '.tmp'
-    with open(tmp, 'wb') as f:
-        f.write(out)
-    os.replace(tmp, cache)
+    from lib.json_store import write_bytes_atomic
+    write_bytes_atomic(cache, out)
     logger.info('[Slides→PPTX] converted %s w%d CFF→glyf TTF (%d bytes, '
                 'cached)', font_id, weight, len(out))
     return out
 
 
 def _font_file_for_embedding(font_id: str, weight: int) -> tuple:
-    """(bytes, ok) for one registry face/weight — TrueType outlines only.
+    """``(bytes, ok, no_subsetting)`` for one face/weight.
 
     PowerPoint's embedded-font reader wants sfnt bytes with a glyf table:
-    TTF passes through, woff2 is decompressed via fonttools (an optional
-    dependency, auto-installed once when missing), CFF-only OTF is skipped
+    TTF passes through, woff2 is decompressed via fonttools (a declared
+    dependency), CFF-only OTF is skipped
     (PowerPoint rejects CFF fntdata on several versions — a skip is honest,
     a corrupted file is not).
     """
     from lib.design_sys import fonts as _fonts
     path = _fonts.ensure_font(font_id, weight)
     if not path:
-        return b'', False
+        return b'', False, False
     with open(path, 'rb') as f:
         data = f.read()
-    if path.lower().endswith('.ttf'):
-        return data, True
     try:
         from fontTools.ttLib import TTFont
-    except ImportError:
-        try:
-            import subprocess
-            import sys as _sys
-            subprocess.run([_sys.executable, '-m', 'pip', 'install', '--user',
-                            'fonttools', 'brotli'],
-                           capture_output=True, timeout=300, check=False)
-            from fontTools.ttLib import TTFont
-        except Exception as e:
-            logger.warning('[Slides→PPTX] fonttools unavailable, embedding '
-                           'skipped for %s: %s', font_id, e)
-            return b'', False
+    except ImportError as e:
+        # Export is a request path, not an environment manager. Runtime pip
+        # installation was non-deterministic, could block for five minutes,
+        # and mutated whichever interpreter happened to serve this request.
+        # fontTools is declared in requirements.txt; a broken installation
+        # degrades this optional enhancement without altering the host.
+        logger.warning('[Slides→PPTX] fontTools unavailable; font embedding '
+                       'skipped for %s (reinstall project dependencies): %s',
+                       font_id, e)
+        return b'', False, False
     try:
         import io as _io
         font = TTFont(_io.BytesIO(data))
-        if int(font['OS/2'].fsType) & _FSTYPE_RESTRICTED:
-            logger.info('[Slides→PPTX] %s fsType is restricted — skipped',
-                        font_id)
-            return b'', False
+        fs_type = int(font['OS/2'].fsType) if 'OS/2' in font else 0
+        if fs_type & (_FSTYPE_RESTRICTED | _FSTYPE_BITMAP_ONLY):
+            logger.info('[Slides→PPTX] %s fsType forbids outline embedding '
+                        '(0x%04x) — skipped', font_id, fs_type)
+            return b'', False, False
+        no_subset = bool(fs_type & _FSTYPE_NO_SUBSETTING)
         if 'glyf' not in font:
             # CFF-outline face (MiSans et al.): convert to TrueType outlines
             # via cu2qu (visually lossless at 1.0 max_err; cached after the
             # one-time conversion).
-            return _converted_glyf_ttf(font_id, weight, data), True
+            return (_converted_glyf_ttf(font_id, weight, data), True,
+                    no_subset)
         font.flavor = None
         buf = _io.BytesIO()
         font.save(buf)
-        return buf.getvalue(), True
+        return buf.getvalue(), True, no_subset
     except Exception as e:
         logger.warning('[Slides→PPTX] font conversion failed for %s: %s',
                        font_id, e)
-        return b'', False
+        return b'', False, False
 
 
-def _embed_fonts(pptx_path: str, deck: Deck) -> int:
-    """Embed the deck's used typefaces as fntdata parts. Returns count.
+def _subset_font_bytes(data: bytes, characters: set, *, cache_key: str,
+                       no_subsetting: bool = False) -> tuple:
+    """Return ``(sfnt_bytes, glyph_count, was_subset)`` for exact text.
+
+    FontTools' subsetter follows GSUB/GPOS closure by default, so contextual
+    forms, ligatures and marks required by the requested Unicode set remain.
+    Name records are kept in all languages because Office uses them while
+    resolving an embedded typeface. Fonts whose fsType says "no subsetting"
+    are embedded whole, never modified.
+    """
+    import hashlib
+    import io as _io
+    from fontTools.ttLib import TTFont
+    if no_subsetting:
+        font = TTFont(_io.BytesIO(data), lazy=True)
+        return data, len(font.getGlyphOrder()), False
+    text = ''.join(sorted(characters))
+    digest = hashlib.sha256(data + b'\0' + text.encode('utf-8')).hexdigest()
+    from lib.design_sys._store import store_root
+    cache_dir = os.path.join(store_root(), 'fonts', 'subsets')
+    cache = os.path.join(cache_dir, f'{cache_key}-{digest[:24]}.ttf')
+    if os.path.isfile(cache):
+        with open(cache, 'rb') as f:
+            out = f.read()
+        font = TTFont(_io.BytesIO(out), lazy=True)
+        return out, len(font.getGlyphOrder()), True
+
+    from fontTools import subset
+    font = TTFont(_io.BytesIO(data))
+    options = subset.Options()
+    options.name_IDs = ['*']
+    options.name_languages = ['*']
+    options.name_legacy = True
+    subsetter = subset.Subsetter(options=options)
+    subsetter.populate(text=text)
+    subsetter.subset(font)
+    font.flavor = None
+    buf = _io.BytesIO()
+    font.save(buf)
+    out = buf.getvalue()
+    glyphs = len(font.getGlyphOrder())
+    os.makedirs(cache_dir, exist_ok=True)
+    from lib.json_store import write_bytes_atomic
+    write_bytes_atomic(cache, out)
+    return out, glyphs, True
+
+
+def _embed_fonts(pptx_path: str, deck: Deck) -> dict:
+    """Embed only actually used glyphs into the actually used style slots.
 
     OOXML wiring: fntdata content-type default + presentation rels +
     ``embedTrueTypeFonts`` attr + ``<p:embeddedFontLst>`` inserted directly
@@ -1192,23 +1363,38 @@ def _embed_fonts(pptx_path: str, deck: Deck) -> int:
     a misplaced list the same way it ignores a misplaced transition).
     """
     from lib.design_sys import fonts as _fonts
-    from lib.slides.render_html import collect_families
-    wanted = collect_families(deck)
-    by_family = {f.family: f for f in _fonts.FONT_REGISTRY}
-    embeds: list = []                    # [(family, {weight: bytes})]
-    for fam in sorted(wanted):
+    usage = _collect_font_usage(deck)
+    by_family = {}
+    for face in _fonts.FONT_REGISTRY:
+        by_family[face.family] = face
+        by_family[face.id] = face
+    embeds: list = []                    # [(family, {slot: bytes}, metrics)]
+    any_subset = False
+    for fam in sorted(usage):
         face = by_family.get(fam)
         if face is None:
             continue
-        weights: dict = {}
-        for src in face.sources:
-            data, ok = _font_file_for_embedding(face.id, src.weight)
-            if ok:
-                weights[src.weight] = data
-        if weights:
-            embeds.append((fam, weights))
+        slots: dict = {}
+        glyph_counts: dict = {}
+        for slot, characters in usage[fam].items():
+            target = _FONT_SLOT_TARGETS[slot]
+            source = min(face.sources, key=lambda s: abs(s.weight - target))
+            data, ok, no_subset = _font_file_for_embedding(face.id,
+                                                            source.weight)
+            if not ok:
+                continue
+            data, glyph_count, was_subset = _subset_font_bytes(
+                data, characters,
+                cache_key=f'{face.id}-w{source.weight}-{slot}',
+                no_subsetting=no_subset)
+            slots[slot] = data
+            glyph_counts[slot] = glyph_count
+            any_subset = any_subset or was_subset
+        if slots:
+            embeds.append((fam, slots, glyph_counts))
     if not embeds:
-        return 0
+        return {'typefaces': 0, 'parts': 0, 'bytes': 0, 'glyphs': 0,
+                'subset': False}
 
     with zipfile.ZipFile(pptx_path, 'r') as z:
         items = {i.filename: z.read(i.filename)
@@ -1232,27 +1418,27 @@ def _embed_fonts(pptx_path: str, deck: Deck) -> int:
 
     font_entries = []
     new_rels = []
-    for fi, (fam, weights) in enumerate(embeds, 1):
-        # PowerPoint's embed model has exactly four slots (regular / bold /
-        # italic / boldItalic). Pick the weight nearest 400 as regular and
-        # the nearest 700 as bold — at most one each.
-        ws = sorted(weights)
-        regular = min(ws, key=lambda w: abs(w - 400))
-        bolds = [w for w in ws if w != regular]
-        picks = [('regular', regular)]
-        if bolds:
-            picks.append(('bold', min(bolds, key=lambda w: abs(w - 700))))
+    total_bytes = 0
+    total_glyphs = 0
+    total_parts = 0
+    for fi, (fam, slots_data, glyph_counts) in enumerate(embeds, 1):
         slots = []
-        for tag, weight in picks:
+        for tag in _FONT_SLOT_TARGETS:
+            if tag not in slots_data:
+                continue
             rid = f'rId{next_id}'
             next_id += 1
-            part = f'ppt/fonts/font{next_id}.fntdata'
-            items[part] = weights[weight]
+            font_num = next_id
+            part = f'ppt/fonts/font{font_num}.fntdata'
+            items[part] = slots_data[tag]
             new_rels.append(
                 f'<Relationship Id="{rid}" Type="http://schemas.'
                 f'openxmlformats.org/officeDocument/2006/relationships/font"'
-                f' Target="fonts/font{next_id}.fntdata"/>')
+                f' Target="fonts/font{font_num}.fntdata"/>')
             slots.append((tag, rid))
+            total_parts += 1
+            total_bytes += len(slots_data[tag])
+            total_glyphs += glyph_counts[tag]
         slot_xml = ''.join(
             f'<p:{tag} r:id="{rid}"/>'
             for tag, rid in slots)
@@ -1266,9 +1452,13 @@ def _embed_fonts(pptx_path: str, deck: Deck) -> int:
                         + '</Relationships>')
     items[rels_name] = rels.encode('utf-8')
 
-    if 'embedTrueTypeFonts' not in pres:
-        pres = pres.replace('<p:presentation ',
-                            '<p:presentation embedTrueTypeFonts="1" ', 1)
+    for attr in ('embedTrueTypeFonts', 'saveSubsetFonts'):
+        if _re.search(rf'\b{attr}="[^"]*"', pres):
+            pres = _re.sub(rf'\b{attr}="[^"]*"', f'{attr}="1"', pres,
+                           count=1)
+        else:
+            pres = pres.replace('<p:presentation ',
+                                f'<p:presentation {attr}="1" ', 1)
     lst = ('<p:embeddedFontLst>' + ''.join(font_entries)
            + '</p:embeddedFontLst>')
     if '<p:notesSz' in pres:
@@ -1278,19 +1468,23 @@ def _embed_fonts(pptx_path: str, deck: Deck) -> int:
                             lst + '</p:presentation>')
     items[pres_name] = pres.encode('utf-8')
 
-    tmp = pptx_path + '.tmp'
-    with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as z:
-        written = set()
-        for info in order:
-            z.writestr(info, items[info.filename])
-            written.add(info.filename)
-        for name, data in items.items():
-            if name not in written:
-                z.writestr(name, data)
-    os.replace(tmp, pptx_path)
-    logger.info('[Slides→PPTX] embedded %d typeface(s): %s', len(embeds),
-                ', '.join(f for f, _ in embeds))
-    return len(embeds)
+    from lib.json_store import atomic_output_path
+    with atomic_output_path(pptx_path) as tmp:
+        with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as z:
+            written = set()
+            for info in order:
+                z.writestr(info, items[info.filename])
+                written.add(info.filename)
+            for name, data in items.items():
+                if name not in written:
+                    z.writestr(name, data)
+    logger.info('[Slides→PPTX] embedded %d typeface(s), %d subset part(s), '
+                '%d glyphs / %d bytes: %s', len(embeds), total_parts,
+                total_glyphs, total_bytes,
+                ', '.join(f for f, _slots, _counts in embeds))
+    return {'typefaces': len(embeds), 'parts': total_parts,
+            'bytes': total_bytes, 'glyphs': total_glyphs,
+            'subset': any_subset}
 
 
 # ── Transitions + verification ────────────────────────────
@@ -1306,29 +1500,30 @@ def _patch_fade_transitions(pptx_path: str) -> int:
     after cSld/clrMapOvr, before timing/extLst — anywhere else Office
     silently ignores it)."""
     count = 0
-    tmp = pptx_path + '.tmp'
-    with zipfile.ZipFile(pptx_path, 'r') as src, \
-            zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as dst:
-        for info in src.infolist():
-            data = src.read(info.filename)
-            if _SLIDE_RE.match(info.filename):
-                text = data.decode('utf-8')
-                text = _TRANSITION_RE.sub('', text)
-                anchor = None
-                for tag in ('clrMapOvr', 'cSld'):
-                    m = re.search(rf'<p:{tag}\b[^>]*(?:/>|>.*?</p:{tag}>)',
-                                  text, re.DOTALL)
-                    if m:
-                        anchor = m
-                if anchor is None:
-                    raise ExportError(
-                        f'{info.filename}: no cSld anchor for transition')
-                text = (text[:anchor.end()] + _FADE_XML
-                        + text[anchor.end():])
-                data = text.encode('utf-8')
-                count += 1
-            dst.writestr(info, data)
-    os.replace(tmp, pptx_path)
+    from lib.json_store import atomic_output_path
+    with atomic_output_path(pptx_path) as tmp:
+        with zipfile.ZipFile(pptx_path, 'r') as src, \
+                zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as dst:
+            for info in src.infolist():
+                data = src.read(info.filename)
+                if _SLIDE_RE.match(info.filename):
+                    text = data.decode('utf-8')
+                    text = _TRANSITION_RE.sub('', text)
+                    anchor = None
+                    for tag in ('clrMapOvr', 'cSld'):
+                        m = re.search(
+                            rf'<p:{tag}\b[^>]*(?:/>|>.*?</p:{tag}>)',
+                            text, re.DOTALL)
+                        if m:
+                            anchor = m
+                    if anchor is None:
+                        raise ExportError(
+                            f'{info.filename}: no cSld anchor for transition')
+                    text = (text[:anchor.end()] + _FADE_XML
+                            + text[anchor.end():])
+                    data = text.encode('utf-8')
+                    count += 1
+                dst.writestr(info, data)
     return count
 
 
@@ -1343,6 +1538,10 @@ def _verify(pptx_path: str) -> dict:
             raise ExportError('PPTX contains no slides')
         if 'ppt/presentation.xml' not in z.namelist():
             raise ExportError('PPTX missing presentation.xml')
+        # Parse the package root as well as each slide. Font embedding edits
+        # presentation.xml directly; malformed/duplicated attributes there
+        # otherwise pass CRC and only fail when PowerPoint opens the deck.
+        ET.fromstring(z.read('ppt/presentation.xml'))
         for name in slides:
             root = ET.fromstring(z.read(name))
             order = [c.tag.rsplit('}', 1)[-1] for c in root]

@@ -94,7 +94,11 @@ _MEASURE_JS = r"""
       // The model-view button is gone (removed 2026-07-28); pin its absence.
       modelViews: slot.querySelectorAll('.tc-preview-btn').length,
       autoOwners: [...slot.querySelectorAll('.ptool-line > *, .ptool-line')]
-        .filter((el) => getComputedStyle(el).marginLeft === 'auto')
+        // getComputedStyle() exposes the USED margin in Chromium (for
+        // example "1083px"), which made the former `=== "auto"` check
+        // permanently empty. CSS Typed OM preserves the computed keyword.
+        .filter((el) => typeof el.computedStyleMap === 'function' &&
+          String(el.computedStyleMap().get('margin-left')) === 'auto')
         .map((el) => el.className),
     });
   });
@@ -160,12 +164,36 @@ def test_neuter_a_second_auto_owner_is_caught(page, live_server):
     page.wait_for_function('typeof renderToolRoundsHTML === "function"',
                            timeout=30000)
     page.evaluate(_SEED_JS)
+    before = page.evaluate(_MEASURE_JS)
+    owned_before = [row for row in before if row['autoOwners']]
+    assert owned_before and all(
+        len(row['autoOwners']) == 1 for row in owned_before
+    ), (
+        'NEUTER precondition failed: every applicable seeded row must start '
+        'with exactly one right-edge owner '
+        f"({[row['autoOwners'] for row in before]})")
+
     # Re-introduce the defect CLASS at runtime (never touches the shipped
-    # file): the row's title text becomes a second right-edge claimant
-    # alongside .ptool-row-ctl.
-    page.add_style_tag(content=(
-        '.ptool-line > .ptool-text{margin-left:auto !important}'
-    ))
+    # file). Do not name a particular title class here: richer tool renderers
+    # are allowed to change their header children. Instead, find the real
+    # direct-child owner and grant one of its siblings the same auto margin.
+    mutated = page.evaluate(r"""
+    (() => {
+      let count = 0;
+      document.querySelectorAll('#geomHost [data-prn] .ptool-line')
+        .forEach((line) => {
+          const owner = [...line.children].find((el) =>
+            el.classList.contains('ptool-row-ctl'));
+          const sibling = [...line.children].find((el) => el !== owner);
+          if (!owner || !sibling) return;
+          sibling.style.setProperty('margin-left', 'auto', 'important');
+          count += 1;
+        });
+      return count;
+    })()
+    """)
+    assert mutated >= len(owned_before), (
+        f'NEUTER could mutate only {mutated}/{len(owned_before)} applicable rows')
     rows = page.evaluate(_MEASURE_JS)
     caught = any(len(row['autoOwners']) > 1 for row in rows)
     assert caught, (

@@ -417,10 +417,10 @@ def test_extension_pointer_sweep_shipped():
     assert 'cursor INHERITS' in src
 
 
-def test_extension_version_bumped_4_8():
+def test_extension_version_bumped_for_protocol_v2():
     import json as _json
     manifest = _json.loads(_ext_src('browser_extension/manifest.json'))
-    assert manifest['version'] == '4.8.0'
+    assert tuple(int(x) for x in manifest['version'].split('.')) >= (5, 0, 0)
 
 
 def test_click_schema_documents_new_tab_follow():

@@ -72,6 +72,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from lib.log import get_logger
+from lib.task_replay import (
+    memory_replay_page,
+    sse_last_event_id_to_cursor,
+    task_event_base_cursor,
+)
 
 logger = get_logger(__name__)
 
@@ -405,15 +410,23 @@ async def build_cold_replay_response(task_id: str, last_event_id_header: str):
                             #   reconstructs the EXACT text the client
                             #   saw; on an empty/failed log it returns
                             #   the checkpoint pair unchanged.
-                            from lib.tasks_pkg.event_fold import fold_cold_state_text
-                            _fold_c, _fold_t = fold_cold_state_text(
+                            _cold_meta = {}
+                            if row_local['metadata']:
+                                try:
+                                    _cold_meta = json.loads(row_local['metadata'])
+                                except (json.JSONDecodeError, TypeError) as _e:
+                                    logger.debug('[Chat] cold-replay metadata parse failed: %s', _e)
+                            from lib.tasks_pkg.event_fold import fold_cold_state
+                            _fold_c, _fold_t, _fold_epoch = fold_cold_state(
                                 task_id, row_local['content'] or '',
-                                row_local['thinking'] or '')
+                                row_local['thinking'] or '',
+                                checkpoint_epoch=_cold_meta.get('contentEpoch') or 0)
                             state_local = build_event(
                                 EventType.STATE,
                                 content=_fold_c,
                                 thinking=_fold_t,
                                 status=row_local['status'],
+                                contentEpoch=_fold_epoch,
                             )
                             if row_local['tool_rounds']:
                                 try:
@@ -442,7 +455,9 @@ async def build_cold_replay_response(task_id: str, last_event_id_header: str):
                                               'model', 'provider_id', 'thinkingDepth',
                                               'apiRounds', 'modifiedFiles', 'modifiedFileList',
                                               'fallbackModel', 'fallbackFrom',
-                                              'fallbackReason', 'fallbackKind'):
+                                              'fallbackReason', 'fallbackKind',
+                                              'costExperiment', 'todoState',
+                                              'todoBlocked'):
                                         if m.get(k):
                                             done_evt_local[k] = m[k]
                                 except (json.JSONDecodeError, TypeError) as _e_audit:
@@ -469,12 +484,15 @@ async def build_cold_replay_response(task_id: str, last_event_id_header: str):
         # ★ Close the 5s cold-replay window (see gen_persisted above):
         #   fold the lossless per-delta task_events log; falls back to
         #   the checkpoint pair on an empty/failed log.
-        from lib.tasks_pkg.event_fold import fold_cold_state_text
-        _fold_c, _fold_t = fold_cold_state_text(
-            task_id, row['content'] or '', row['thinking'] or '')
+        meta = _extract_db_meta(row)
+        from lib.tasks_pkg.event_fold import fold_cold_state
+        _fold_c, _fold_t, _fold_epoch = fold_cold_state(
+            task_id, row['content'] or '', row['thinking'] or '',
+            checkpoint_epoch=meta.get('contentEpoch') or 0)
         state = build_event(
             EventType.STATE, content=_fold_c,
             thinking=_fold_t, status=row['status'],
+            contentEpoch=_fold_epoch,
         )
         if row['error']:
             from lib.error_envelope import from_json as _err_from_json
@@ -490,7 +508,6 @@ async def build_cold_replay_response(task_id: str, last_event_id_header: str):
             _tr = await asyncio.to_thread(load_tool_rounds_from_conversation, row['conv_id'])
             if _tr:
                 state['toolRounds'] = _tr
-        meta = _extract_db_meta(row)
         # Field lists MUST stay aligned with _extract_task_meta and the
         # chat_poll DB-path loop. See _extract_task_meta docstring.
         # ★ Same terminal-signal gate as the in-memory snapshot: a persisted row
@@ -502,13 +519,15 @@ async def build_cold_replay_response(task_id: str, last_event_id_header: str):
         _state_meta = _fsm(meta, row['status'])
         for key in ('finishReason', 'usage', 'preset', 'model',
                     'provider_id', 'thinkingDepth',
-                    'apiRounds', 'modifiedFiles', 'modifiedFileList'):
+                    'apiRounds', 'modifiedFiles', 'modifiedFileList',
+                    'costExperiment', 'todoState', 'todoBlocked'):
             if _state_meta.get(key):
                 state[key] = _state_meta[key]
         done_evt = build_event(EventType.DONE)
         for key in ('finishReason', 'usage', 'preset', 'toolSummary',
                     'model', 'provider_id', 'thinkingDepth',
-                    'apiRounds', 'modifiedFiles', 'modifiedFileList'):
+                    'apiRounds', 'modifiedFiles', 'modifiedFileList',
+                    'costExperiment', 'todoState', 'todoBlocked'):
             if meta.get(key):
                 done_evt[key] = meta[key]
         if meta.get('fallbackModel'):
@@ -547,12 +566,11 @@ class WarmResumePlan:
     resume yields (pt_04686ac6 slice 7).
 
     Attributes:
-        resume_from: The event-log index the caller resumes streaming
-            from (per the SSE spec, ``cursor + 1`` — Last-Event-ID is the
-            id of the last RECEIVED event).
-        replay_events: Copy of ``task['events'][resume_from:]`` taken
-            under ``events_lock``; the caller yields these back to the
-            client as ``id:``-tagged replay frames.
+        resume_from: Absolute next-event sequence requested by the client
+            (per SSE, ``Last-Event-ID + 1``).
+        replay_events: Retained events at/after ``resume_from``.
+        replay_frames: ``(absolute_sequence, event)`` pairs ready for SSE.
+        next_cursor: Absolute sequence immediately after ``replay_frames``.
         resume_state: The leading ``state`` event the caller emits BEFORE
             the delta replay (see the ★ comment about the frontend
             keep-longer guard adopting a full snapshot on a fresh
@@ -566,7 +584,9 @@ class WarmResumePlan:
     """
     resume_from: int
     replay_events: list
-    resume_state: dict[str, Any]
+    replay_frames: list[tuple[int, dict]]
+    next_cursor: int
+    resume_state: dict[str, Any] | None
     serviceable: bool = True
 
 
@@ -581,14 +601,15 @@ def plan_warm_resume(
     closure. Handles the two-part decision the pre-slice inline code
     made:
 
-      1. Parse ``Last-Event-ID`` to an int cursor. Empty / non-numeric
+      1. Parse ``Last-Event-ID`` into the absolute next-event cursor. Empty /
+         negative / non-numeric
          → cursor=None → no valid resume → return None (caller falls
          through to ``build_fresh_state_snapshot``).
-      2. Check ``_warm_resume_serviceable(cursor, len(task['events']))``
-         under ``events_lock``. When True: slice ``task['events']`` from
-         cursor+1, capture the resume state, return a ``WarmResumePlan``.
-         When False (cursor ahead of buffer / trimmed): return None so
-         the caller emits a full-state resync snapshot.
+      2. Page the bounded buffer by its absolute ``_eventBaseSeq`` window.
+         When the requested cursor is retained, capture the replay frames and
+         resume state atomically. When it is older than the retained base or
+         ahead of the producer boundary, return None so the caller emits a
+         full-state resync snapshot.
 
     Args:
         task: The in-memory task dict (must have ``events``,
@@ -606,30 +627,35 @@ def plan_warm_resume(
     _cursor_hdr = (last_event_id_hdr or '').strip()
     if not _cursor_hdr:
         return None
-    try:
-        _cursor = int(_cursor_hdr)
-    except (ValueError, TypeError):
+    _resume_from = sse_last_event_id_to_cursor(_cursor_hdr)
+    if _resume_from is None:
         logger.debug('[Chat] SSE stream %s ignoring invalid Last-Event-ID: %s',
                      task_id_short, _cursor_hdr)
         return None
+    _cursor = _resume_from - 1
     logger.info('[Chat] SSE stream %s reconnecting with Last-Event-ID=%d',
                 task_id_short, _cursor)
 
-    # Late import to keep chat_dispatch import-lightweight for tests
-    # (routes.chat_helpers re-exports _warm_resume_serviceable, which
-    # is a 4-line pure function so the extra module load is cheap).
-    from routes.chat_helpers import _warm_resume_serviceable
     from lib.agent_core.events import EventType, build_event
 
     with task['events_lock']:
-        if not _warm_resume_serviceable(_cursor, len(task['events'])):
-            if _cursor >= 0:
-                logger.info('[Chat] SSE stream %s Last-Event-ID=%d is ahead of '
-                            'buffer (len=%d) — full-snapshot resync',
-                            task_id_short, _cursor, len(task['events']))
+        _events = task.get('events') or []
+        _base_cursor = task_event_base_cursor(task, _events)
+        _page = memory_replay_page(
+            _events, _resume_from,
+            status=str(task.get('status') or ''),
+            done=task.get('status', 'running') != 'running',
+            base_cursor=_base_cursor,
+        )
+        if _page.cursor_reset:
+            logger.info(
+                '[Chat] SSE stream %s Last-Event-ID=%d outside retained '
+                'window [%d,%d) — full-snapshot resync',
+                task_id_short, _cursor, _base_cursor, _page.next_cursor)
             return None
-        _resume_from = _cursor + 1
-        _replay = task['events'][_resume_from:]
+        _replay = _page.events
+        _replay_frames = _page.frames
+        _next_cursor = _page.next_cursor
         # ★ VU carrier (2026-07-26 contract): a warm resume keeps the
         #   client's JS state, so the VU bubble still holds every frame up
         #   to the cursor — replaying the MISSED frames is the whole job.
@@ -641,6 +667,8 @@ def plan_warm_resume(
             return WarmResumePlan(
                 resume_from=_resume_from,
                 replay_events=_replay,
+                replay_frames=_replay_frames,
+                next_cursor=_next_cursor,
                 resume_state=None,
                 serviceable=True,
             )
@@ -652,10 +680,21 @@ def plan_warm_resume(
         #   as ONE lock hold for slice 7 since the two blocks were
         #   trivially adjacent and the extra release+reacquire was
         #   pure overhead (no other awaits between them).
+        from lib.tasks_pkg.manager import snapshot_task_text
+        _content, _thinking, _content_epoch = snapshot_task_text(task)
         _state = build_event(
-            EventType.STATE, content=task['content'],
-            thinking=task['thinking'], status=task['status'],
+            EventType.STATE, content=_content,
+            thinking=_thinking, status=task['status'],
+            contentEpoch=_content_epoch,
         )
+        # Warm replay starts AFTER the client's cursor, so phase events that
+        # were already consumed are not replayed again — but they are still
+        # the live phase right now. Ship task['phase'] in the leading state
+        # snapshot; gate on running too so a stale dict on a terminal task can
+        # never resurrect as a live-looking HUD. A shallow copy keeps later
+        # append_event rewrites from mutating the frame this connection yields.
+        if task.get('status') == 'running' and task.get('phase'):
+            _state['phase'] = dict(task['phase'])
         _created = task.get('created_at')
         if _created:
             _state['createdAt'] = int(_created * 1000)
@@ -666,6 +705,8 @@ def plan_warm_resume(
     return WarmResumePlan(
         resume_from=_resume_from,
         replay_events=_replay,
+        replay_frames=_replay_frames,
+        next_cursor=_next_cursor,
         resume_state=_state,
         serviceable=True,
     )
@@ -694,21 +735,31 @@ def build_fresh_state_snapshot(task: dict[str, Any]):
           * meta: the raw ``_extract_task_meta(task)`` dict; caller
             reuses it if the task is already terminal to synthesize
             the trailing ``done`` event.
-          * cursor: ``len(task['events'])`` — where the live-stream
-            loop should start reading from.
+          * cursor: absolute next-event sequence at the snapshot boundary —
+            where the live-stream loop should start reading from.
     """
     from lib.agent_core.events import EventType, build_event
     from lib.chat.persistence import extract_task_meta as _extract_task_meta
+    from lib.tasks_pkg.manager import snapshot_task_text
     from lib.chat.terminal_gate import (
         filtered_snapshot_meta as _filtered_snapshot_meta,
         is_terminal_status as _is_terminal_status,
     )
 
     with task['events_lock']:
+        _content, _thinking, _content_epoch = snapshot_task_text(task)
         state = build_event(
-            EventType.STATE, content=task['content'],
-            thinking=task['thinking'], status=task['status'],
+            EventType.STATE, content=_content,
+            thinking=_thinking, status=task['status'],
+            contentEpoch=_content_epoch,
         )
+        # The fresh cursor is the absolute producer boundary, so phase events
+        # appended before this connection attached will NOT replay. The snapshot is
+        # the only place that can answer "what is the turn doing now" — but
+        # only a RUNNING task has a "now"; terminal tasks must not resurrect
+        # a stale phase dict as a live-looking HUD.
+        if task.get('status') == 'running' and task.get('phase'):
+            state['phase'] = dict(task['phase'])
         _created = task.get('created_at')
         if _created:
             state['createdAt'] = int(_created * 1000)
@@ -716,6 +767,11 @@ def build_fresh_state_snapshot(task: dict[str, Any]):
             state['error'] = task['error']
         if task['toolRounds']:
             state['toolRounds'] = task['toolRounds']
+        if task.get('_todoState'):
+            from lib.tools.todo import public_todo_state
+            state['todoState'] = public_todo_state(task['_todoState'])
+        if task.get('_todo_blocked'):
+            state['todoBlocked'] = task['_todo_blocked']
         meta = _extract_task_meta(task)
         # ★ TERMINAL-SIGNAL GATE (lib/chat/terminal_gate.py) — a `state` snapshot
         #   reporting a NON-terminal status must not advertise finishReason /
@@ -763,14 +819,19 @@ def build_fresh_state_snapshot(task: dict[str, Any]):
             state['fallbackKind'] = task.get('_fallback_kind', '')
         if task.get('endpoint_mode'):
             state['endpointMode'] = True
+            if task.get('flow_mode'):
+                state['flowMode'] = True
+                state['flowProjection'] = task.get('_flow_projection', 'flow')
             state['endpointPhase'] = task.get('_endpoint_phase', 'planning')
             state['endpointIteration'] = task.get('_endpoint_iteration', 0)
+            for _key, _value in (task.get('_flow_current_turn') or {}).items():
+                state[_key] = _value
             ep_turns = task.get('_endpoint_turns')
             if ep_turns:
                 state['endpointTurns'] = ep_turns
             if task.get('_endpoint_stop_reason'):
                 state['endpointStopReason'] = task['_endpoint_stop_reason']
-        cursor = len(task['events'])
+        cursor = task_event_base_cursor(task, task['events']) + len(task['events'])
 
     return state, meta, cursor
 
@@ -787,7 +848,8 @@ def build_connect_snapshot(task: dict[str, Any]):
     VU's current content/thinking/toolRounds; the frontend applies it
     with RESET semantics (dedupes the frames already seen on the parent
     stream before the hop), then continues from the live tail
-    (``cursor == len(events)`` — replaying history would double-append).
+    (``cursor == absolute next sequence`` — replaying history would
+    double-append).
 
     Everything else defers to :func:`build_fresh_state_snapshot`
     byte-identically.
@@ -810,8 +872,14 @@ def build_connect_snapshot(task: dict[str, Any]):
                 'thinking': task.get('thinking') or '',
                 'toolRounds': list(task.get('toolRounds') or []),
             }
+            if task.get('_todoState'):
+                from lib.tools.todo import public_todo_state
+                state['replaySnapshot']['todoState'] = public_todo_state(
+                    task['_todoState'])
+            if task.get('_todo_blocked'):
+                state['replaySnapshot']['todoBlocked'] = task['_todo_blocked']
             meta = _extract_task_meta(task)
-            cursor = len(task['events'])
+            cursor = task_event_base_cursor(task, task['events']) + len(task['events'])
         return state, meta, cursor
     return build_fresh_state_snapshot(task)
 
@@ -906,8 +974,12 @@ class LiveTickAction:
             frame's type is ``'done'`` RETURNS immediately (the
             orchestrator's real done). Otherwise advances ``cursor``
             to ``next_cursor`` and continues.
-          * ``'late_done'`` — driver yields ``late_done_evt`` as
-            ``id: <next_cursor>\\ndata: <json>\\n\\n`` then RETURNS.
+          * ``'resync'`` — the absolute cursor fell outside the retained
+            rolling window; driver emits a fresh synthetic state snapshot,
+            adopts its boundary cursor, and continues.
+          * ``'late_done'`` — driver yields synthetic ``late_done_evt``
+            without an SSE id then returns. Synthetic frames never advance
+            the producer-owned event cursor.
           * ``'superseded'`` — driver just RETURNS (the newer reader
             takes over).
           * ``'keepalive'`` — driver yields ``: keepalive\\n\\n``,
@@ -918,10 +990,9 @@ class LiveTickAction:
             kind='sse_timeout').
         frames: List of ``(event_id, event)`` tuples (set only when
             kind='events').
-        next_cursor: Advance cursor value; set for 'events'
-            (post-drain new length) and 'late_done' (== len(events)
-            at time of the check — used as the ``id:`` on the
-            synthesized frame).
+        next_cursor: Absolute next-event sequence, set for 'events' and
+            'late_done'. A 'resync' deliberately leaves snapshot construction
+            to the flavor-aware route seam (normal task vs VU carrier).
         late_done_evt: Fully-populated DONE event (set only when
             kind='late_done'); baton already applied.
     """
@@ -950,17 +1021,18 @@ def next_live_tick(
     ``LiveTickAction``. Reads ``task`` under ``events_lock`` when
     slicing new events; otherwise no side effects except logging.
 
-    Decision order (matches the pre-slice inline block byte-for-byte):
+    Decision order:
       1. Elapsed > SSE_MAX_DURATION → ``sse_timeout``.
-      2. Drain new events past ``cursor``. If any → ``events``.
-      3. Task terminal AND drain was empty → ``late_done``.
-      4. Newer SSE reader present → ``superseded``.
-      5. Gap since last emit > 15s → ``keepalive``.
-      6. Else → ``sleep``.
+      2. Cursor outside retained absolute window → ``resync``.
+      3. Drain new events at/after ``cursor``. If any → ``events``.
+      4. Task terminal AND drain was empty → ``late_done``.
+      5. Newer SSE reader present → ``superseded``.
+      6. Gap since last emit > 15s → ``keepalive``.
+      7. Else → ``sleep``.
 
     Args:
         task: The in-memory task dict.
-        cursor: The current SSE-cursor (index into task['events']).
+        cursor: Absolute sequence of the next event this reader needs.
         sse_gen: The generation id captured when THIS reader opened
             (for supersede detection).
         stream_start: Wall-clock time (seconds) when the SSE stream
@@ -997,15 +1069,29 @@ def next_live_tick(
                     'polling — task is still running.')
         return LiveTickAction(kind='sse_timeout', timeout_evt=timeout_evt)
 
-    # 2. Drain new events past cursor (under lock).
+    # 2. Read one absolute-cursor page from the bounded rolling buffer.
+    # ``cursor`` is a producer sequence, never a physical list index. Once
+    # TaskRuntime trims the head, ``events`` remains max_events long while its
+    # base advances; slicing events[cursor:] would freeze forever at rollover.
     with task['events_lock']:
-        new_evts = task['events'][cursor:]
-        _cursor_before = cursor
-        _new_cursor = len(task['events'])
-    if new_evts:
-        frames = [(_cursor_before + idx, ev) for idx, ev in enumerate(new_evts)]
-        return LiveTickAction(kind='events', frames=frames,
-                              next_cursor=_new_cursor)
+        _events = task.get('events') or []
+        _base_cursor = task_event_base_cursor(task, _events)
+        _page = memory_replay_page(
+            _events, cursor,
+            status=str(task.get('status') or ''),
+            done=is_task_terminal(task),
+            base_cursor=_base_cursor,
+        )
+    if _page.cursor_reset:
+        logger.warning(
+            '[Chat] SSE stream %s live cursor=%d outside retained window '
+            '[%d,%d) — emitting full-state resync',
+            task_id_short, cursor, _base_cursor, _page.next_cursor)
+        return LiveTickAction(kind='resync')
+    if _page.events:
+        return LiveTickAction(
+            kind='events', frames=_page.frames,
+            next_cursor=_page.next_cursor)
 
     # 3. Task terminal + no new events → synthesize LATE done.
     if is_task_terminal(task):
@@ -1024,7 +1110,7 @@ def next_live_tick(
             return LiveTickAction(
                 kind='late_done',
                 late_done_evt=build_carrier_terminal_done(task),
-                next_cursor=_new_cursor)
+                next_cursor=_page.next_cursor)
         # Finalize-window latch: the orchestrator flips status to terminal
         # BEFORE the real done is appended (the autopilot hook + pre-emit
         # sync run in between). A tick landing in that window would emit a
@@ -1083,7 +1169,7 @@ def next_live_tick(
         except Exception as _stamp_err:
             logger.debug('[Chat] LATE done successor stamp failed: %s', _stamp_err)
         return LiveTickAction(kind='late_done', late_done_evt=late_done,
-                              next_cursor=_new_cursor)
+                              next_cursor=_page.next_cursor)
 
     # 4. Newer SSE reader → close this stale one.
     _gen_now = task.get('_sse_gen_id', sse_gen)
@@ -1291,31 +1377,20 @@ def execute_chat_continue(
     """
     # Late imports (matches this module's established style — keeps the
     # import graph acyclic with routes.* / lib.tasks_pkg).
-    import json as _json
-
-    from lib.api_response import api_bad_request, api_internal_error, api_not_found
+    from lib.api_response import api_bad_request, api_not_found
     from lib.chat import scan_continue_checkpoint
     from lib.database import DOMAIN_CHAT, get_thread_db
     from routes.common import DEFAULT_USER_ID
 
     db = get_thread_db(DOMAIN_CHAT)
-    row = db.execute(
-        'SELECT messages, title FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID)
-    ).fetchone()
-
-    if not row:
+    from lib.database.conversation_repository import load_conversation
+    snapshot = load_conversation(
+        db, conv_id, user_id=DEFAULT_USER_ID,
+        metadata_columns=('title',))
+    if snapshot is None:
         return ContinueOutcome(kind='error', err_resp=api_not_found('Conversation not found'))
-
-    try:
-        messages = _json.loads(row['messages'] or '[]')
-    except (_json.JSONDecodeError, TypeError) as e:
-        logger.warning('[Continue] Failed to parse messages for conv=%s: %s',
-                       conv_id[:8], e)
-        return ContinueOutcome(kind='error',
-                               err_resp=api_internal_error('Failed to parse conversation'))
-
-    title = row['title']
+    messages = snapshot.messages
+    title = snapshot['title']
 
     if not messages:
         return ContinueOutcome(kind='error',
@@ -1465,6 +1540,18 @@ def execute_chat_continue(
         cfg_payload['contentPrefix'] = _orig_full_content
     if scan['kept_rounds']:
         cfg_payload['checkpointToolRounds'] = scan['kept_rounds']
+    _checkpoint_todo_state = assistant_msg.get('todoState')
+    if not _checkpoint_todo_state:
+        for _todo_round in reversed(scan['kept_rounds']):
+            if _todo_round.get('toolName') != 'todo_write':
+                continue
+            _todo_results = _todo_round.get('results') or []
+            if (_todo_results and isinstance(_todo_results[0], dict)
+                    and _todo_results[0].get('todoState')):
+                _checkpoint_todo_state = _todo_results[0]['todoState']
+                break
+    if _checkpoint_todo_state:
+        cfg_payload['checkpointTodoState'] = _checkpoint_todo_state
     if kept_usage:
         cfg_payload['checkpointUsage'] = kept_usage
     if kept_api_rounds:

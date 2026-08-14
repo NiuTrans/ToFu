@@ -111,6 +111,68 @@ def test_page_up_pure_slice():
         _cleanup(db, conv_id)
 
 
+def test_row_window_applies_same_heavy_transport_projection_as_blob_window():
+    """Read cutover must not move multi-MB rounds out of SQL or onto the wire."""
+    rc = _rc()
+    from lib.database import DOMAIN_CHAT, get_thread_db
+    db = get_thread_db(DOMAIN_CHAT)
+    conv_id = f'wr-heavy-{uuid.uuid4().hex[:8]}'
+    msgs = _big(2)
+    msgs[-1]['toolRounds'] = [{
+        'roundNum': 1, 'toolName': 'generate_image', 'status': 'done',
+        'results': [{'imageDataUris': [{
+            'uri': 'data:image/png;base64,' + ('A' * 1_000_000),
+            'format': 'png',
+        }]}],
+    }]
+    msgs[-1]['segments'] = [{'type': 'text', 'text': 'x' * 100_000}]
+    _seed(db, conv_id, msgs)
+    try:
+        r = _fetch(db, conv_id)
+        served, changed, cleaned_full, _ = rc._windowed_served_readonly(
+            db, conv_id, r, 20, None)
+        tail = served['messages'][-1]
+        assert served['trimmed'] is True
+        assert tail['_trimmed'] is True
+        assert tail['_trimmedToolRoundCount'] == 1
+        assert 'toolRounds' not in tail and 'segments' not in tail
+        assert len(str(served)) < 20_000
+        assert changed is False and cleaned_full is None
+    finally:
+        _cleanup(db, conv_id)
+
+
+def test_projected_real_tool_round_is_not_misclassified_as_ghost():
+    """The SQL summary must keep an empty-content tool result alive.
+
+    This is the safety property that allows projection before reconcile: an
+    assistant can have no prose at all and still be a real, settled tool turn.
+    Removing toolRounds without the summary would make reconcile delete it.
+    """
+    rc = _rc()
+    from lib.database import DOMAIN_CHAT, get_thread_db
+    db = get_thread_db(DOMAIN_CHAT)
+    conv_id = f'wr-tool-only-{uuid.uuid4().hex[:8]}'
+    msgs = [
+        {'role': 'user', 'content': 'make it', '_msgId': 'u-tool'},
+        {'role': 'assistant', 'content': '', '_msgId': 'a-tool',
+         'toolRounds': [{'toolName': 'generate_image', 'status': 'done',
+                         'results': [{'ok': True, 'payload': 'X' * 500_000}]}]},
+    ]
+    _seed(db, conv_id, msgs)
+    try:
+        r = _fetch(db, conv_id)
+        served, changed, cleaned_full, _ = rc._windowed_served_readonly(
+            db, conv_id, r, 20, None)
+        assert len(served['messages']) == 2
+        tail = served['messages'][-1]
+        assert tail['_trimmedToolRoundCount'] == 1
+        assert 'toolRounds' not in tail
+        assert changed is False and cleaned_full is None
+    finally:
+        _cleanup(db, conv_id)
+
+
 def test_tail_ghost_reconciled_in_window():
     rc = _rc()
     from lib.database import DOMAIN_CHAT, get_thread_db

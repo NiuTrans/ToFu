@@ -22,6 +22,8 @@ import threading
 
 import pytest
 
+pytest_plugins = ('tests._artifact_sidecar',)
+
 # ci_serial: the CRUD round-trips write through the shared sqlite pool; under
 # the CI parallel lane's contention the writes exceeded the 30s busy timeout
 # ('database is locked', 276a5bb unit leg) while passing in ~2s uncontended.
@@ -259,7 +261,9 @@ class TestSseEvent:
             meta = create_artifact(conv_id='conv-sse2', content='# x\n',
                                    format='markdown', source='write_file')
             # No exception even when task is None
-            emit_artifact_event(None, meta)
+            result = emit_artifact_event(None, meta)
+        assert result is None
+        assert meta['id'], 'the no-task branch must receive valid artifact meta'
 
 
 # ─── Routes ───────────────────────────────────────────────────────────

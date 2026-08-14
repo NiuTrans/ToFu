@@ -42,7 +42,7 @@ from ._state import (
 # ── Client registry / poll tracking / stale cleanup ──
 from ._registry import (
     mark_poll, get_connected_clients, is_extension_connected, _cleanup_stale,
-    mark_locked_out, get_locked_out_clients,
+    mark_locked_out, get_locked_out_clients, client_user_id,
 )
 
 # ── Command dispatch & resolution (SYNC + ASYNC) ──
@@ -57,6 +57,7 @@ __all__ = [
     'get_pending_commands', 'wait_for_commands', 'wait_for_commands_async',
     'resolve_command', 'resolve_batch', 'is_extension_connected',
     'mark_locked_out', 'get_locked_out_clients',
+    'client_user_id',
     '_set_active_client', '_get_active_client',
     '_last_poll_time', '_commands', '_commands_lock',
 ]

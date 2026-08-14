@@ -3,9 +3,9 @@
 # (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity for pt_03f4cdf1 slice 9 — Section 3.5 memory prefetch gate.
 
-Scope: run_task's Section 3.5 block (~70 lines) — the BM25 + cheap-LLM
-memory prefetch that injects <relevant_memories> into `messages` when
-enabled, plus the sibling `_profileConsolidateEligible` metadata stash
+Scope: run_task's Section 3.5 block — local metadata BM25 + deterministic
+confidence gates that stash evidence for Context Composer, plus the sibling
+`_profileConsolidateEligible` metadata stash
 that gates the post-done profile-consolidation spawner in _finalize.py.
 
 Runs after Section 3 (context injection) and before the content-prefix /
@@ -31,8 +31,8 @@ Contract:
       injected_tool_calls,
   ) -> None
 
-  Mutates `task` (sets ``_profileConsolidateEligible``) and, when
-  eligible, `messages` (via ``run_memory_prefetch``). Never raises.
+  Mutates `task` only (sets ``_profileConsolidateEligible`` and selected
+  evidence). It never mutates `messages` and never raises.
 
 Failing-first — this test asserts (RED before extraction, GREEN after):
   1. Module ``lib.tasks_pkg.orchestrator._memory_prefetch`` exists and

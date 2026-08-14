@@ -45,7 +45,8 @@ def _detect_lang(text):
 
 def _norm_id(arxiv_id):
     """Strip a version suffix so ``2502.09992v3`` and ``2502.09992`` compare equal."""
-    return (arxiv_id or '').split('v')[0].strip()
+    from ..arxiv import normalize_arxiv_id
+    return normalize_arxiv_id(arxiv_id)
 
 
 def _title_tokens(s):

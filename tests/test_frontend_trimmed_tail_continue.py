@@ -6,7 +6,7 @@ by the client-side empty-guard.
 THE REPORTED BUG (owner screenshot, 2026-08-03)
 -----------------------------------------------
 "Why does the action bar show only 重新生成 (no 继续生成) before I click
-加载工具活动 (Load tool activity)?"
+加载执行过程 (Load execution process)?"
 
 ROOT CAUSE — one class, two sites. A windowed first-open serves the tail
 messages with the heavy fields STRIPPED for transport
@@ -27,8 +27,8 @@ instead of its real ``toolRounds``. Any LOCAL judgment that scans
     offer a resume at all (show:true, kind:'regenerate') is upgraded to the
     checkpoint Continue when ``_trimmed && _trimmedToolRoundCount > 0``. The
     count is a server FACT, not uncertainty — fail-closed philosophy intact.
-    A clean finish (show:false) is never touched; hydrateFullConversation
-    clears ``_trimmed`` on refill, after which the verdict computes the real
+    A clean finish (show:false) is never touched; loadMessageActivity clears
+    ``_trimmed`` on the target refill, after which the verdict computes the real
     keptRounds itself.
 
   SITE 2 (data loss — static/js/main/main_regen_continue.js):
@@ -173,7 +173,7 @@ function renderTail(msg) {
     html: html,
     btn: btn,
     title: btn ? (btn.getAttribute('title') || '') : '',
-    chip: !!frag.querySelector('.trimmed-tool-activity'),
+    activityButton: frag.querySelector('.message-activity-loader'),
   };
 }
 
@@ -184,7 +184,9 @@ function renderTail(msg) {
     toolRounds: [], finishReason: 'error', error: 'API HTTP 401',
     model: 'kimi-k3', _trimmed: true, _trimmedToolRoundCount: 9,
   });
-  check('a1_scenario_is_trimmed_shape', r.chip === true);
+  check('a1_scenario_has_activity_button',
+        !!r.activityButton && r.activityButton.tagName === 'BUTTON'
+        && !r.activityButton.hasAttribute('onclick'));
   check('a1_button_present', !!r.btn);
   check('a1_button_is_checkpoint_continue',
         r.title.indexOf('Continue generating from where it left off') !== -1);

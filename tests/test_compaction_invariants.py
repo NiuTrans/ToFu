@@ -43,6 +43,7 @@ Run:  pytest tests/test_compaction_invariants.py -v
 """
 from __future__ import annotations
 
+import contextlib
 import importlib
 import os
 import sys
@@ -337,7 +338,9 @@ class TestReactiveCompactOrdering:
              patch.object(target, 'force_compact_if_needed',
                           side_effect=_fake_force), \
              patch.object(target, '_estimate_wire_bytes', return_value=0), \
-             patch.object(target, '_estimate_total_tokens', return_value=0):
+             patch.object(target, '_estimate_total_tokens', return_value=0), \
+             patch('lib.agent_core.store.get_conversation_store'), \
+             patch('lib.tasks_pkg.manager.append_event'):
 
             task = {'id': 'r-test', 'convId': 'c1',
                     'config': {'model': 'mock-model'}}
@@ -390,7 +393,9 @@ class TestReactiveCompactOrdering:
              patch.object(target, 'force_compact_if_needed',
                           side_effect=_fake_force), \
              patch.object(target, '_estimate_wire_bytes', return_value=0), \
-             patch.object(target, '_estimate_total_tokens', return_value=0):
+             patch.object(target, '_estimate_total_tokens', return_value=0), \
+             patch('lib.agent_core.store.get_conversation_store'), \
+             patch('lib.tasks_pkg.manager.append_event'):
 
             task = {'id': 'r-test', 'convId': 'c1',
                     'config': {'model': 'mock-model'}}
@@ -407,6 +412,234 @@ class TestReactiveCompactOrdering:
         # Trigger should be 'reactive' so the inner archive (if it fired)
         # would at least be tagged correctly.
         assert captured.get('trigger') == 'reactive'
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  4b. Reactive archive back-fill (the "\u2192 0" viewer artifact fix)
+# ═══════════════════════════════════════════════════════════════════════
+
+def _optional_patch(module: str, attr: str):
+    """patch(module.attr) when the module exists, else a no-op context.
+
+    lib.context_telemetry ships with the proactive-economics batch; on a
+    tree without that batch (e.g. this fix committed standalone onto an
+    older HEAD) the patch target is absent and must simply be skipped."""
+    import importlib.util
+    if importlib.util.find_spec(module) is None:
+        return contextlib.nullcontext()
+    return patch(f'{module}.{attr}')
+
+
+@pytest.mark.unit
+class TestReactiveArchiveBackfill:
+    """The reactive pre-snapshot row is written BEFORE any compaction runs,
+    so its tokens_after/msgs_after start at 0.  These tests pin the
+    back-fill contract that stops the viewer showing "\u2192 0" forever:
+
+      * reactive_compact hands the pre-snapshot row id down via
+        ``_compaction_archive_id``;
+      * when the inner summary compacts, ITS success tail owns the UPDATE
+        (no double write from the fallback);
+      * when the summary DECLINES, reactive_compact writes the final counts
+        itself and emits compaction_done so the live marker closes;
+      * execute_compact_tool adopts the caller-supplied row on the
+        skip-archive path instead of inserting a second one.
+    """
+
+    def _reactive_target(self):
+        from lib.tasks_pkg import compaction as _comp
+        try:
+            from lib.tasks_pkg.compaction import _reactive
+            return _comp, _reactive
+        except ImportError:
+            return _comp, _comp
+
+    def test_passes_pre_snapshot_archive_id_to_force_compact(self):
+        """The pre-snapshot row id must ride ``_compaction_archive_id`` so
+        the inner post-summary UPDATE can find the row to back-fill."""
+        _comp, target = self._reactive_target()
+
+        captured = {}
+
+        def _fake_force(messages, task=None, **kwargs):
+            captured['archive_id'] = kwargs.get('_compaction_archive_id')
+            return True  # compacted → inner path owns the UPDATE
+
+        with patch.object(target, '_archive_transcript', return_value=99), \
+             patch.object(target, '_strip_images_aggressive', return_value=(0, 0)), \
+             patch.object(target, 'force_compact_if_needed',
+                          side_effect=_fake_force), \
+             patch.object(target, '_estimate_wire_bytes', return_value=0), \
+             patch.object(target, '_estimate_total_tokens', return_value=0), \
+             patch('lib.agent_core.store.get_conversation_store') as store, \
+             patch('lib.tasks_pkg.manager.append_event'):
+            task = {'id': 'r-test', 'convId': 'c1',
+                    'config': {'model': 'mock-model'}}
+            _comp.reactive_compact(
+                messages=[{'role': 'user', 'content': 'hi'}],
+                task=task,
+                error_text='prompt too long',
+            )
+
+        assert captured.get('archive_id') == 99, (
+            'reactive_compact did not pass the pre-snapshot archive id down '
+            '— the inner UPDATE cannot find the row to back-fill'
+        )
+        # Phase-3 compacted → the inner path owns the UPDATE; the fallback
+        # must NOT write a second time.
+        assert not store.return_value.update_archive_summary.called
+
+    def test_backfills_archive_when_summary_declined(self):
+        """Inner summary returned False (empty/refused): without this
+        fallback the row keeps tokens_after=0 forever.  reactive_compact
+        must write the final counts itself and close out the live marker
+        with compaction_done."""
+        _comp, target = self._reactive_target()
+
+        events = []
+        with patch.object(target, '_archive_transcript', return_value=99), \
+             patch.object(target, '_strip_images_aggressive', return_value=(0, 0)), \
+             patch.object(target, 'force_compact_if_needed', return_value=False), \
+             patch.object(target, '_head_truncate', return_value=0), \
+             patch.object(target, '_estimate_wire_bytes', return_value=0), \
+             patch.object(target, '_estimate_total_tokens', return_value=1234), \
+             patch('lib.agent_core.store.get_conversation_store') as store, \
+             patch('lib.tasks_pkg.manager.append_event',
+                   side_effect=lambda task, ev: events.append(ev)):
+            task = {'id': 'r-test', 'convId': 'c1',
+                    'config': {'model': 'mock-model'}}
+            msgs = [{'role': 'user', 'content': 'hi'},
+                    {'role': 'assistant', 'content': 'hello'}]
+            _comp.reactive_compact(
+                messages=msgs, task=task, error_text='prompt too long',
+            )
+
+        upd = store.return_value.update_archive_summary
+        upd.assert_called_once_with(99, '', 1234, len(msgs))
+        done = [e for e in events if e.get('type') == 'compaction_done']
+        assert len(done) == 1, (
+            f'expected exactly one compaction_done from the fallback, '
+            f'got {events}'
+        )
+        assert done[0]['archiveId'] == 99
+        assert done[0]['tokensAfter'] == 1234
+        assert done[0]['msgsAfter'] == len(msgs)
+
+    def test_force_compact_backfills_adopted_archive_row(self):
+        """BEHAVIOR CONTRACT (structure-agnostic on purpose): when the caller
+        passes ``_compaction_skip_archive=True`` + ``_compaction_archive_id``
+        and the summary succeeds, exactly ONE ``update_archive_summary`` hits
+        the ADOPTED row (not a fresh insert) and exactly one compaction_done
+        carries its id.  The UPDATE site itself has moved between
+        execute_compact_tool and force_compact_if_needed across refactors —
+        pin the contract, not the site."""
+        from lib.tasks_pkg.compaction._layer2 import _compact as _cmod
+
+        messages = [
+            {'role': 'system', 'content': 'sys'},
+            {'role': 'user', 'content': 'old q'},
+            {'role': 'assistant', 'content': 'old a'},
+            {'role': 'user', 'content': 'new q'},
+            {'role': 'assistant', 'content': 'new a'},
+        ]
+        events = []
+        with patch.object(_cmod, '_estimate_total_tokens', return_value=400), \
+             patch.object(_cmod, '_get_context_limit', return_value=128000), \
+             patch.object(_cmod, '_usable_context', return_value=100000), \
+             patch.object(_cmod, '_extract_current_query', return_value='q'), \
+             patch.object(_cmod, '_find_turn_boundary', return_value=3), \
+             patch.object(_cmod, '_objective_anchor_index_dyn',
+                          return_value=None), \
+             patch.object(_cmod, '_fold_recent_intra_turn',
+                          side_effect=lambda recent: (list(recent), [])), \
+             patch.object(_cmod, '_generate_query_aware_summary_dyn',
+                          return_value='SUMMARY'), \
+             patch.object(_cmod, '_extract_recently_accessed_files',
+                          return_value=[]), \
+             patch.object(_cmod, '_archive_transcript_dyn') as arch, \
+             patch('lib.tasks_pkg.compaction._tokens'
+                   '._count_tokens_authoritative',
+                   return_value=(10, 'mock')), \
+             patch('lib.agent_core.store.get_conversation_store') as store, \
+             patch('lib.tasks_pkg.cache_tracking.record_l2_compaction'), \
+             _optional_patch('lib.context_telemetry',
+                             'record_compaction_event'), \
+             patch('lib.tasks_pkg.manager.append_event',
+                   side_effect=lambda task, ev: events.append(ev)):
+            task = {'id': 'f-test', 'convId': 'c1',
+                    'config': {'model': 'mock-model'}}
+            ok = _cmod.force_compact_if_needed(
+                messages, task=task, force=True,
+                _compaction_trigger='reactive',
+                _compaction_skip_archive=True,
+                _compaction_archive_id=99,
+            )
+
+        assert ok is True
+        arch.assert_not_called()  # no second archive row on the skip path
+        upd = store.return_value.update_archive_summary
+        upd.assert_called_once()
+        args = upd.call_args[0]
+        assert args[0] == 99, f'UPDATE hit archive id {args[0]}, want 99'
+        assert 'SUMMARY' in args[1]
+        assert int(args[2]) > 0 and int(args[3]) > 0, (
+            f'back-filled counts must be the real post-compaction values, '
+            f'got tokens_after={args[2]} msgs_after={args[3]}'
+        )
+        done = [e for e in events if e.get('type') == 'compaction_done']
+        assert len(done) == 1 and done[0]['archiveId'] == 99, (
+            f'expected one compaction_done for archive 99, got {events}'
+        )
+
+    def test_execute_skip_archive_inserts_no_second_row(self):
+        """execute_compact_tool on the skip-archive path must NOT insert a
+        second archive row (the caller's pre-snapshot row is the only one)
+        and must still complete the compaction.  The adopted-row back-fill
+        itself is pinned end-to-end by the force-level contract test above."""
+        from lib.tasks_pkg.compaction._layer2 import _compact as _cmod
+
+        messages = [
+            {'role': 'system', 'content': 'sys'},
+            {'role': 'user', 'content': 'old q'},
+            {'role': 'assistant', 'content': 'old a'},
+            {'role': 'user', 'content': 'new q'},
+            {'role': 'assistant', 'content': 'new a'},
+        ]
+        meta = {}
+        with patch.object(_cmod, '_estimate_total_tokens', return_value=400), \
+             patch.object(_cmod, '_get_context_limit', return_value=128000), \
+             patch.object(_cmod, '_usable_context', return_value=100000), \
+             patch.object(_cmod, '_extract_current_query', return_value='q'), \
+             patch.object(_cmod, '_find_turn_boundary', return_value=3), \
+             patch.object(_cmod, '_objective_anchor_index_dyn',
+                          return_value=None), \
+             patch.object(_cmod, '_fold_recent_intra_turn',
+                          side_effect=lambda recent: (list(recent), [])), \
+             patch.object(_cmod, '_generate_query_aware_summary_dyn',
+                          return_value='SUMMARY'), \
+             patch.object(_cmod, '_extract_recently_accessed_files',
+                          return_value=[]), \
+             patch.object(_cmod, '_archive_transcript_dyn') as arch, \
+             patch('lib.tasks_pkg.compaction._tokens'
+                   '._count_tokens_authoritative',
+                   return_value=(10, 'mock')), \
+             patch('lib.agent_core.store.get_conversation_store'), \
+             patch('lib.tasks_pkg.cache_tracking.record_l2_compaction'), \
+             patch('lib.tasks_pkg.manager.append_event'):
+            task = {'id': 'e-test', 'convId': 'c1',
+                    'config': {'model': 'mock-model'}}
+            res = _cmod.execute_compact_tool(
+                messages, task=task,
+                keep_recent_pairs=2, preserve_budget_tokens=100,
+                _compaction_trigger='reactive',
+                _compaction_skip_archive=True,
+                _compaction_archive_id=99,
+                _result_meta=meta,
+            )
+
+        assert 'SUMMARY' in res
+        arch.assert_not_called()
+        assert meta.get('compacted') is True
 
 
 # ═══════════════════════════════════════════════════════════════════════

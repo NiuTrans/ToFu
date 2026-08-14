@@ -449,7 +449,6 @@ These directories are deliberately OUTSIDE the sweep surface. Each row states th
 | lib/memory/prefetch/_config.py | wave-1 |
 | lib/memory/prefetch/_inject.py | wave-1 |
 | lib/memory/prefetch/_query.py | wave-1 |
-| lib/memory/prefetch/_rerank.py | wave-1 |
 | lib/memory/prefetch/_run.py | wave-1 |
 | lib/memory/prefetch/_shortlist.py | wave-1 |
 | lib/memory/profile_consolidate.py | wave-1 |
@@ -654,7 +653,7 @@ These directories are deliberately OUTSIDE the sweep surface. Each row states th
 | lib/settings_panels.py | wave-3 (w3_d top-level sweep) |
 | lib/shutdown_marker.py | wave-3 (w3_d top-level sweep) |
 | lib/skills/__init__.py | wave-3 |
-| lib/skills/activate.py | wave-3 |
+| lib/skills/load.py | wave-3 (renamed from activate.py) |
 | lib/skills/catalog.py | wave-3 |
 | lib/skills/injection.py | wave-3 |
 | lib/skills/installer.py | wave-3 |
@@ -1060,7 +1059,6 @@ These directories are deliberately OUTSIDE the sweep surface. Each row states th
 | static/js/timer.js | wave-2 |
 | static/js/tofu-pet.js | wave-3 (w3_e) |
 | static/js/tofu-scene.js | wave-3 (w3_e) |
-| static/js/toolset-apply.js | wave-2 |
 | static/js/translation.js | wave-2 |
 | static/js/ui/chat_render.js | wave-2 |
 | static/js/ui/conversation_list.js | wave-2 |

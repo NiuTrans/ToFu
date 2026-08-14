@@ -18,7 +18,9 @@ import them from ``routes.translate``. New code should import from the
 import os
 import uuid
 
-from flask import Blueprint, request, send_file
+from quart import Blueprint, request
+
+from lib.quart_sync import request_files, request_form, send_file
 
 from lib.api_response import (
     api_bad_request, api_error, api_internal_error, api_not_found, api_ok,
@@ -90,9 +92,10 @@ def translate_pptx_upload():
     _cleanup_translate_tasks()
     _ensure_pptx_upload_dir()
 
-    if 'file' not in request.files:
+    files = request_files()
+    if 'file' not in files:
         return api_bad_request('No file provided')
-    file = request.files['file']
+    file = files['file']
     if not file.filename:
         return api_bad_request('No filename')
 
@@ -110,8 +113,9 @@ def translate_pptx_upload():
         return api_error(f'File too large ({len(file_bytes) // 1048576}MB, '
                         f'max {_MAX_PPTX_BYTES // 1048576}MB)', status=400)
 
-    target = request.form.get('targetLang', 'English')
-    source = request.form.get('sourceLang', '')
+    form = request_form()
+    target = form.get('targetLang', 'English')
+    source = form.get('sourceLang', '')
 
     # Save uploaded file
     task_id = str(uuid.uuid4())[:12]

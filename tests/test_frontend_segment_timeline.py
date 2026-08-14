@@ -76,7 +76,14 @@ def _extract_timeline_fns() -> str:
     sup_end = src.index('\nfunction renderToolRoundsHTML(')
     sup_chunk = src[sup_start:sup_end]
     assert '_isSupersededOrphanRound' in sup_chunk, 'extraction missed the shared predicate'
-    return chunk + '\n' + sup_chunk
+    # The timeline now consumes the shared todo-write display projection,
+    # which lives with the grouped tool renderer earlier in this file. Include
+    # the real helper so this isolated harness follows the shipped dependency
+    # graph instead of failing before any timeline contract is exercised.
+    todo_start = src.index('function _projectTodoRoundsForDisplay(')
+    todo_end = src.index('\nfunction _renderTodoBlock(', todo_start)
+    todo_chunk = src[todo_start:todo_end]
+    return todo_chunk + '\n' + chunk + '\n' + sup_chunk
 
 
 # Stubs for the collaborators the timeline helper calls. Each emits an

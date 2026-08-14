@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -35,11 +36,14 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-SRC_JS = os.path.join(ROOT, 'static', 'js', 'ui', 'chat_render.js')
+sys.path.insert(0, HERE)
+from _runtime_sections import runtime_section_path  # noqa: E402
+
+SRC_JS = runtime_section_path('ui/chat_render.js')
 # The clean-finish constant was extracted out of chat_render.js into the
 # turn-settlement module (core/turn_settlement.js) as _TS_CLEAN_FINISH_REASONS;
 # chat_render.js consumes the verdict via continueButtonForSettlement.
-SETTLEMENT_JS = os.path.join(ROOT, 'static', 'js', 'core', 'turn_settlement.js')
+SETTLEMENT_JS = runtime_section_path('core/turn_settlement.js')
 
 
 def _node_available() -> bool:

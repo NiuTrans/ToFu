@@ -93,6 +93,14 @@ def podcast_env(tmp_path, monkeypatch):
     import lib.paper.podcast_engine as PE
     import lib.paper.podcast_engine._audio as PA
     import lib.tts as T
+    from lib.storage import StorageRuntime, StorageSupervisor
+    from lib.storage.service import install_runtime_for_test
+
+    runtime = StorageRuntime(StorageSupervisor(
+        project_root=tmp_path / 'storage', backend='sqlite'),
+        auto_restart=False)
+    install_runtime_for_test(runtime)
+    runtime.start()
 
     monkeypatch.setattr(hashing, 'PAPER_DIR', str(tmp_path))
     (tmp_path / 'podcast').mkdir(exist_ok=True)
@@ -106,18 +114,19 @@ def podcast_env(tmp_path, monkeypatch):
     monkeypatch.setattr(T, '_post_speech',
                         lambda slot, text, *, voice, fmt, speed: _tiny_wav())
     monkeypatch.setattr(PA, '_transcode_to_mp3', lambda wav: None)  # WAV path
-    return tmp_path
+    try:
+        yield tmp_path
+    finally:
+        install_runtime_for_test(None)
 
 
 def _insert_report(phash, lang='zh'):
-    from lib.database import get_thread_db
-    db = get_thread_db()
-    db.execute(
-        'INSERT OR REPLACE INTO paper_reports (paper_hash, lang, report, model,'
-        ' created_at) VALUES (?, ?, ?, ?, ?)',
-        (phash, lang, '报告:成绩 86.3,上一代 83.1,规模 130 亿参数。', 'm',
-         int(time.time())))
-    db.commit()
+    from lib.storage import get_storage_client
+    get_storage_client(write=True).command('paper.report.upsert', {
+        'paper_hash': phash, 'lang': lang,
+        'report': '报告:成绩 86.3,上一代 83.1,规模 130 亿参数。',
+        'model': 'm', 'meta': {}, 'created_at': int(time.time()),
+    }, f'paper.podcast.report:{uuid.uuid4().hex}')
 
 
 def _wait_done(client, task_id, timeout=15.0):

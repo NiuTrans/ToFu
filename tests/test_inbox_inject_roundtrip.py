@@ -24,7 +24,7 @@ objective, so this test drives the REAL shipped code end to end:
      message with NO inbox sidecars — i.e. injecting the rows perturbs neither
      tool-turn continuation nor the prefix-cache bytes.
   4. FRONTEND REHYDRATE — the real shipped ``getToolRoundsFromMsg`` +
-     ``_rehydrateInjectRows`` (extracted from static/js/core.js, run in node)
+     ``_rehydrateInjectRows`` (extracted from the migrated core owner, run in node)
      reproduce the inbox/peer/steer DISPLAY rows from the reloaded sidecar, so
      the user sees them again after reload.
 
@@ -45,7 +45,9 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-CORE_JS = os.path.join(ROOT, 'static', 'js', 'core.js')
+from tests._runtime_sections import runtime_section_path
+
+CORE_JS = runtime_section_path('core.js')
 
 
 # ── Shared fixtures: a genuine 2-round tool turn + the three inject lanes ──
@@ -163,7 +165,7 @@ def _extract_rehydrate_fn() -> str:
     on window)."""
     src = open(CORE_JS, encoding='utf-8').read()
     start = src.index('function getToolRoundsFromMsg(')
-    end = src.index('if (typeof window !== "undefined") {\n  window._rehydrateInjectRows')
+    end = src.index('if (typeof window !== "undefined") {', start)
     chunk = src[start:end]
     assert '_rehydrateInjectRows' in chunk and 'getToolRoundsFromMsg' in chunk, \
         'extraction missed the rehydrate functions'
@@ -225,9 +227,12 @@ const rows2 = getToolRoundsFromMsg(reloaded);
 check('idempotent_no_double',
   rows2.filter(r => r._inboxInject).length === 1);
 
-// A message with NO sidecars returns the base array untouched (fast path).
+// A message with NO sidecars still projects visible rows, preserving row
+// objects while filtering hidden internal tool rounds.
 const plain = { role: 'assistant', content: 'hi', toolRounds: [reloaded.toolRounds[0]] };
-check('no_sidecar_passthrough', getToolRoundsFromMsg(plain) === plain.toolRounds);
+const plainRows = getToolRoundsFromMsg(plain);
+check('no_sidecar_projection_preserves_rows',
+  plainRows.length === 1 && plainRows[0] === plain.toolRounds[0]);
 
 console.log(out.join('\n'));
 """
@@ -296,8 +301,8 @@ def test_NC_without_rehydrate_rows_stay_gone():
 # chip vanishes until a manual refresh — the exact symptom, still visible
 # in-session. These legs pin the three adoption seams in the SHIPPED files.
 
-PIPE_JS = os.path.join(ROOT, 'static', 'js', 'ui', 'sse_pipeline.js')
-POLL_JS = os.path.join(ROOT, 'static', 'js', 'ui', 'sse_poll_fallback.js')
+PIPE_JS = runtime_section_path('ui/sse_pipeline.js')
+POLL_JS = runtime_section_path('ui/sse_poll_fallback.js')
 
 _LANES = ('_inboxInjects', '_peerInjects', '_userSteerInjects')
 

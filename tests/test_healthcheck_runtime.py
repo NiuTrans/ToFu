@@ -43,6 +43,8 @@ _HEALTH_OK = {
     'db_engine': 'sqlite',
     'db_responsive': True,
     'bootId': 'abc123def456',
+    'storage_ready': True,
+    'storage': {'ready': True, 'state': 'ready', 'backend': 'sqlite', 'pid': 42},
 }
 
 
@@ -170,6 +172,27 @@ def test_runtime_unhealthy_db_fails():
         srv.shutdown()
     assert r.returncode == 1
     assert 'database NOT responsive' in r.stdout
+
+
+def test_runtime_unhealthy_storage_fails():
+    payload = dict(
+        _HEALTH_OK,
+        storage_ready=False,
+        storage={
+            'ready': False,
+            'state': 'restarting',
+            'backend': 'sqlite',
+            'last_error': 'sidecar exited unexpectedly (137)',
+        },
+    )
+    srv, port = _serve(health_payload=payload)
+    try:
+        r = _run_runtime('--port', str(port))
+    finally:
+        srv.shutdown()
+    assert r.returncode == 1
+    assert 'storage sidecar NOT ready' in r.stdout
+    assert 'state=restarting' in r.stdout
 
 
 # ── Static wiring guards (NEUTER: remove the wiring → these go red) ──

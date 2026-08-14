@@ -6,6 +6,7 @@ the content-block / usage converters, and ``anthropic_response_to_openai``.
 Leaf module — no dependency on the outbound converters.
 """
 
+import copy
 import json
 
 from lib.log import get_logger
@@ -49,6 +50,12 @@ def _blocks_to_openai_message(content_blocks: list) -> dict:
                 },
             })
     msg = {'role': 'assistant'}
+    if any(isinstance(block, dict) and block.get('type') in (
+            'server_tool_use', 'tool_search_tool_result')
+           for block in content_blocks or []):
+        # Opaque protocol continuity sidecar.  It is consumed only by the
+        # Anthropic outbound converter and stripped from every other wire.
+        msg['_anthropic_content_blocks'] = copy.deepcopy(content_blocks)
     if thinking_parts:
         msg['reasoning_content'] = ''.join(thinking_parts)
     if thinking_signature:

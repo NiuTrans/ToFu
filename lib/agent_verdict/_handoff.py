@@ -40,6 +40,7 @@ logger = get_logger(__name__)
 # :data:`STATE_CHANGING_TOOLS_WITH_CODE_EXEC` instead.
 STATE_CHANGING_TOOLS = frozenset({
     'write_file',
+    'edit_file',
     'apply_diff',
     'apply_diffs',
     'insert_content',

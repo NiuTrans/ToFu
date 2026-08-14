@@ -113,10 +113,21 @@ def finalize_after_loop(
                                        roundNum=round_num, reason='final'))
         _final_content = assistant_msg.get('content') or ''
         _final_reasoning = assistant_msg.get('reasoning_content') or ''
-        if _final_content or _final_reasoning:
+        _final_responses_items = assistant_msg.get('_responses_items') or []
+        _final_anthropic_blocks = (
+            assistant_msg.get('_anthropic_content_blocks') or [])
+        if (_final_content or _final_reasoning or _final_responses_items
+                or _final_anthropic_blocks):
             _final_assistant = {'role': 'assistant', 'content': _final_content}
             if _final_reasoning:
                 _final_assistant['reasoning_content'] = _final_reasoning
+            if _final_responses_items:
+                _final_assistant['_responses_items'] = _final_responses_items
+                task['_responsesItems'] = _final_responses_items
+            if _final_anthropic_blocks:
+                _final_assistant['_anthropic_content_blocks'] = (
+                    _final_anthropic_blocks)
+                task['_anthropicContentBlocks'] = _final_anthropic_blocks
             messages.append(_final_assistant)
             logger.debug('[%s] Appended final assistant reply to messages '
                          '(%d content chars, %d reasoning chars)',
@@ -149,7 +160,8 @@ def finalize_after_loop(
                     model=model,
                     roundNum='final',
                     label=f'最终回复后 · {len(snap)}条',
-                    messages=snap)
+                    messages=snap,
+                    contextManifest=list(task.get('_contextManifest') or []))
                 # Carry the tool schema so the panel's tools section
                 # survives — showMessagesInDebug rebuilds _debugCache
                 # and drops the cached tools unless this snapshot

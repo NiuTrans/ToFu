@@ -13,17 +13,23 @@ per process.  Never duplicate this state anywhere else.
 The low-level helpers that read/mutate the cache under ``_lock`` also live
 here: ``_today``, ``_pair_key``, ``_list_siblings``, ``_load_unlocked``,
 ``_fold_namespaces_unlocked``,
-``_save_unlocked``, ``_ensure_fresh_unlocked``, ``_new_entry``.
+``_update_store_unlocked``, ``_ensure_fresh_unlocked``, ``_new_entry``.
 """
 
-import json
 import os
 import sys as _sys
 import threading
 import time
 from datetime import date
+from typing import Callable
 
 from lib.config_dir import config_path
+from lib.json_store import (
+    JsonStoreReadError,
+    locked_path,
+    read_json,
+    update_json_atomic,
+)
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -64,6 +70,18 @@ _cache = {
                       # across day rollovers and restarts)
     'loaded': False,
 }
+
+# Fingerprint of the exact inode loaded into ``_cache``. Atomic writers replace
+# the inode, so this detects another process's update even when size/mtime are
+# coincidentally unchanged. ``_FINGERPRINT_UNKNOWN`` forces one disk refresh
+# after our own transactional write (the returned document can become stale
+# immediately after the helper releases its cross-process lock).
+_FINGERPRINT_UNKNOWN = object()
+_disk_fingerprint = _FINGERPRINT_UNKNOWN
+# Semantic writes that could not reach disk. Keeping callables (rather than a
+# stale document snapshot) lets a later successful transaction replay them on
+# top of whatever another process committed while storage was unavailable.
+_pending_mutations: list[Callable[[dict, dict], None]] = []
 
 # ── Siblings lookup cache ──
 # Cached list of pair-keys (provider_id::key_name) per provider_id, re-read
@@ -162,7 +180,8 @@ def _list_siblings(provider_id: str) -> list:
     return list(by_provider.get(provider_id or 'default', []))
 
 
-def _fold_namespaces_unlocked() -> bool:
+def _fold_namespaces_unlocked(stats: dict | None = None,
+                              overrides: dict | None = None) -> bool:
     """Fold stats/overrides recorded under absorbed FACE namespaces into
     their ACCOUNT namespace. Caller must hold _lock. Returns True when the
     cache changed (the caller then persists).
@@ -203,6 +222,8 @@ def _fold_namespaces_unlocked() -> bool:
     if not mapping:
         return False
 
+    stats = _cache['stats'] if stats is None else stats
+    overrides = _cache['overrides'] if overrides is None else overrides
     changed = False
 
     def _dst_pk(src_ns, dst_ns, key_name):
@@ -213,17 +234,17 @@ def _fold_namespaces_unlocked() -> bool:
     for src_ns, dst_ns in mapping.items():
         if src_ns == dst_ns:
             continue
-        for pk in [k for k in _cache['stats']
+        for pk in [k for k in stats
                    if k.split('::', 1)[0] == src_ns]:
             dst_pk = _dst_pk(src_ns, dst_ns, pk.split('::', 1)[1])
             if dst_pk is None:
                 logger.warning('[KeyStats] namespace fold: unrecognised key '
                                'name in %s — kept as-is', pk)
                 continue
-            src_entry = _cache['stats'].pop(pk)
-            dst_entry = _cache['stats'].get(dst_pk)
+            src_entry = stats.pop(pk)
+            dst_entry = stats.get(dst_pk)
             if dst_entry is None:
-                _cache['stats'][dst_pk] = src_entry
+                stats[dst_pk] = src_entry
             else:
                 for field in ('success', 'failure', 'rate_limited',
                               'gateway_errors'):
@@ -240,14 +261,14 @@ def _fold_namespaces_unlocked() -> bool:
                 if not dst_entry.get('last_error'):
                     dst_entry['last_error'] = src_entry.get('last_error') or ''
             changed = True
-        for pk in [k for k in _cache['overrides']
+        for pk in [k for k in overrides
                    if k.split('::', 1)[0] == src_ns]:
             dst_pk = _dst_pk(src_ns, dst_ns, pk.split('::', 1)[1])
             if dst_pk is None:
                 continue
-            if dst_pk not in _cache['overrides']:
-                _cache['overrides'][dst_pk] = _cache['overrides'][pk]
-            del _cache['overrides'][pk]
+            if dst_pk not in overrides:
+                overrides[dst_pk] = overrides[pk]
+            del overrides[pk]
             changed = True
 
     if changed:
@@ -256,76 +277,187 @@ def _fold_namespaces_unlocked() -> bool:
     return changed
 
 
-def _load_unlocked():
-    """Load stats from disk. Caller must hold _lock. Handles day rollover."""
-def _load_unlocked():
-    """Load stats from disk. Caller must hold _lock. Handles day rollover."""
+def _file_fingerprint(path: str):
+    try:
+        stat = os.stat(path)
+        return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    except FileNotFoundError as error:
+        logger.debug('[KeyStats] stats file is not present yet: %s (%s)',
+                     path, error)
+        return ('missing',)
+    except OSError as error:
+        logger.debug('[KeyStats] could not fingerprint %s: %s', path, error)
+        return _FINGERPRINT_UNKNOWN
+
+
+def _normalise_document(raw, today: str) -> dict:
+    """Validate the store and apply the daily-reset contract in memory."""
+    if raw is None:
+        return {'day': today, 'stats': {}, 'overrides': {}}
+    if not isinstance(raw, dict):
+        raise JsonStoreReadError('key stats store is not an object')
+    stored_day = raw.get('day') or ''
+    if not isinstance(stored_day, str):
+        raise JsonStoreReadError('key stats store has an invalid day')
+    stats = raw.get('stats', {})
+    overrides = raw.get('overrides', {})
+    if not isinstance(stats, dict) or not isinstance(overrides, dict):
+        raise JsonStoreReadError('key stats store has invalid nested maps')
+    if any(not isinstance(key, str) or not isinstance(entry, dict)
+           for key, entry in stats.items()):
+        raise JsonStoreReadError('key stats store has an invalid stats entry')
+    if any(not isinstance(key, str) or not isinstance(value, bool)
+           for key, value in overrides.items()):
+        raise JsonStoreReadError('key stats store has an invalid override')
+    if any(
+            entry.get('exhausted_models') is not None
+            and not isinstance(entry.get('exhausted_models'), dict)
+            for entry in stats.values()):
+        raise JsonStoreReadError(
+            'key stats store has invalid per-model exhaustion data')
+
+    # Counter coercion preserves the historical tolerance for numeric strings,
+    # while rejecting valid-JSON-but-unusable values (objects, NaN, etc.) as a
+    # corrupt document. A hot-path record call must never crash halfway through
+    # because ``int(entry['success'])`` discovered a malformed leaf.
+    normalised_stats = {}
+    for key, entry in stats.items():
+        clean_entry = dict(entry)
+        for field in ('success', 'failure', 'rate_limited',
+                      'consecutive_429', 'gateway_errors'):
+            if field not in clean_entry:
+                continue
+            try:
+                value = int(clean_entry.get(field) or 0)
+            except (TypeError, ValueError, OverflowError) as error:
+                raise JsonStoreReadError(
+                    f'key stats store has invalid {field!r} counter') from error
+            if value < 0:
+                raise JsonStoreReadError(
+                    f'key stats store has negative {field!r} counter')
+            clean_entry[field] = value
+        normalised_stats[key] = clean_entry
+    return {
+        'day': today,
+        'stats': normalised_stats if stored_day == today else {},
+        'overrides': overrides,
+    }
+
+
+def _apply_document_unlocked(document: dict) -> None:
+    previous_day = _cache.get('day')
+    _cache['day'] = document['day']
+    _cache['stats'] = document['stats']
+    _cache['overrides'] = document['overrides']
+    _cache['loaded'] = True
+    if previous_day and previous_day != document['day']:
+        _last_resort_logged.clear()
+
+
+def _update_store_unlocked(
+        mutator: Callable[[dict, dict], None]) -> bool:
+    """Apply one semantic mutation to the latest on-disk document.
+
+    Caller holds ``_lock``. The JSON-store transaction adds a stable sidecar
+    flock, so separate Tofu processes sharing the config directory cannot
+    overwrite each other's counters or manual decisions. On storage failure
+    the same mutation is retained in this process's cache, while the existing
+    file is left untouched for recovery/forensics.
+    """
+    global _disk_fingerprint
     _pk = _pkg()
     today = (_pk._today() if _pk is not None else _today())
     stats_path = _stats_path()
-    if not os.path.isfile(stats_path):
-        _cache['day'] = today
-        _cache['stats'] = {}
-        _cache['overrides'] = {}
-        _cache['loaded'] = True
-        return
+    candidate = None
+
+    def _mutate(raw):
+        nonlocal candidate
+        document = _normalise_document(raw, today)
+        for pending in _pending_mutations:
+            pending(document['stats'], document['overrides'])
+        mutator(document['stats'], document['overrides'])
+        _fold_namespaces_unlocked(
+            document['stats'], document['overrides'])
+        candidate = document
+        return document
+
     try:
-        with open(stats_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        logger.warning('[KeyStats] Failed to read %s: %s — starting fresh',
-                       stats_path, e)
-        data = {}
+        document = update_json_atomic(
+            stats_path, _mutate, default=None, strict=True)
+    except (OSError, JsonStoreReadError) as error:
+        logger.warning('[KeyStats] Failed to update %s: %s — keeping the '
+                       'mutation in memory without overwriting disk',
+                       stats_path, error)
+        if candidate is not None:
+            # The locked read succeeded and only persistence failed. Preserve
+            # the exact latest document that the transaction had mutated.
+            _apply_document_unlocked(candidate)
+        elif _cache.get('day') != today:
+            _cache['day'] = today
+            _cache['stats'] = {}
+            if not isinstance(_cache.get('overrides'), dict):
+                _cache['overrides'] = {}
+            _last_resort_logged.clear()
+        if candidate is None:
+            mutator(_cache['stats'], _cache['overrides'])
+            _fold_namespaces_unlocked()
+            _cache['loaded'] = True
+        _pending_mutations.append(mutator)
+        # Keep serving the in-memory fallback while the same broken document
+        # remains in place. An atomic repair/replacement changes the inode and
+        # is detected by the next read.
+        _disk_fingerprint = _file_fingerprint(stats_path)
+        return False
 
-    stored_day = data.get('day') or ''
-    # Manual overrides PERSIST across day rollovers (and process restarts).
-    # Only the daily stats (counters + exhausted flag) reset.
-    persisted_overrides = data.get('overrides') or {}
-    if stored_day != today:
-        # Day has rolled over — reset stats but KEEP overrides so a key
-        # the user manually disabled yesterday stays disabled today.
-        logger.info(
-            '[KeyStats] Day rollover %s -> %s — resetting stats '
-            '(preserving %d manual override(s))',
-            stored_day or '(none)', today, len(persisted_overrides))
-        _cache['day'] = today
-        _cache['stats'] = {}
-        _cache['overrides'] = persisted_overrides
-        # Reset the "logged once per day" set on rollover.
-        _last_resort_logged.clear()
-        # Persist immediately so the on-disk `day` field advances even if
-        # no stats get written today.
-        _save_unlocked()
-    else:
-        _cache['day'] = stored_day
-        _cache['stats'] = data.get('stats') or {}
-        _cache['overrides'] = persisted_overrides
-    _cache['loaded'] = True
-    if _fold_namespaces_unlocked():
-        _save_unlocked()
+    _apply_document_unlocked(document)
+    _pending_mutations.clear()
+    # Another process may commit immediately after update_json_atomic releases
+    # its lock. Force the next read/decision to load the newest inode instead
+    # of attaching a potentially newer fingerprint to this returned snapshot.
+    _disk_fingerprint = _FINGERPRINT_UNKNOWN
+    return True
 
 
-def _save_unlocked():
-    """Persist cache to disk. Caller must hold _lock.
-
-    Uses ``json_store.write_json_atomic`` which writes to a UNIQUE
-    ``mkstemp`` temp file before ``os.replace``.  A fixed ``<path>.tmp``
-    name (the previous implementation) raced across processes sharing the
-    config dir: two concurrent ``_save_unlocked`` calls wrote the same
-    ``key_stats.json.tmp``, and the first ``os.replace`` consumed it so the
-    second failed with ``No such file or directory: …key_stats.json.tmp``.
-    """
-    payload = {
-        'day': _cache['day'],
-        'stats': _cache['stats'],
-        'overrides': _cache['overrides'],
-    }
+def _load_unlocked():
+    """Load a stable disk snapshot. Caller must hold ``_lock``."""
+    global _disk_fingerprint
+    _pk = _pkg()
+    today = (_pk._today() if _pk is not None else _today())
     stats_path = _stats_path()
     try:
-        from lib.json_store import write_json_atomic
-        write_json_atomic(stats_path, payload)
-    except OSError as e:
-        logger.warning('[KeyStats] Failed to persist %s: %s', stats_path, e)
+        # Read and fingerprint while holding the same stable sidecar lock used
+        # by writers. The fingerprint therefore names the document we parsed.
+        with locked_path(stats_path):
+            raw = read_json(stats_path, default=None, strict=True)
+            fingerprint = _file_fingerprint(stats_path)
+        document = _normalise_document(raw, today)
+    except (OSError, JsonStoreReadError) as error:
+        logger.warning('[KeyStats] Failed to read %s: %s — using empty '
+                       'in-memory stats without changing the file',
+                       stats_path, error)
+        if not _pending_mutations:
+            _apply_document_unlocked(
+                {'day': today, 'stats': {}, 'overrides': {}})
+        _disk_fingerprint = _file_fingerprint(stats_path)
+        return
+
+    # Replay unsaved semantic writes onto this stable external snapshot before
+    # exposing it. This also flushes them when an operator repairs/replaces a
+    # previously corrupt store and the next operation is only a read.
+    if _pending_mutations:
+        _update_store_unlocked(lambda _stats, _overrides: None)
+        return
+
+    stored_day = (raw or {}).get('day') if isinstance(raw, dict) else ''
+    if stored_day and stored_day != today:
+        logger.info('[KeyStats] Day rollover %s -> %s — resetting stats '
+                    '(preserving %d manual override(s))',
+                    stored_day, today, len(document['overrides']))
+    _apply_document_unlocked(document)
+    _disk_fingerprint = fingerprint
+    # Persist a rollover or namespace fold against the latest locked state.
+    if stored_day != today or _fold_namespaces_unlocked():
+        _update_store_unlocked(lambda _stats, _overrides: None)
 
 
 def _ensure_fresh_unlocked():
@@ -350,8 +482,12 @@ def _ensure_fresh_unlocked():
         _cache['stats'] = {}
         # DO NOT touch _cache['overrides'] — manual decisions persist.
         _last_resort_logged.clear()
-        _fold_namespaces_unlocked()
-        _save_unlocked()
+        _update_store_unlocked(lambda _stats, _overrides: None)
+        return
+    fingerprint = _file_fingerprint(_stats_path())
+    if (_disk_fingerprint is _FINGERPRINT_UNKNOWN
+            or fingerprint != _disk_fingerprint):
+        _load_unlocked()
 
 
 def _new_entry() -> dict:

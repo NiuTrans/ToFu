@@ -9,9 +9,10 @@ Two output paths:
 import collections
 import json
 import os
+import threading
 import time
 
-from lib.log import get_logger
+from lib.log import LOG_DIR, get_logger
 
 logger = get_logger(__name__)
 
@@ -25,6 +26,57 @@ _RAW_SSE_FILTER = os.environ.get('LLM_DEBUG_RAW_SSE', '').strip()
 # Anomaly buffer bounds
 _ANOMALY_RING_LINES = 400
 _ANOMALY_RING_BYTES = 256 * 1024  # 256 KB
+_ANOMALY_WRITE_LOCK = threading.Lock()
+
+
+def _anomaly_rotation_limits():
+    """Bound the always-on raw anomaly trail without install-time tuning."""
+    try:
+        max_bytes = int(os.environ.get('TOFU_RAW_SSE_ANOMALY_MAX_BYTES', '')
+                        or str(32 * 1024 * 1024))
+    except (TypeError, ValueError) as e:
+        logger.debug('[SSEDiag] invalid anomaly max-bytes setting: %s', e)
+        max_bytes = 32 * 1024 * 1024
+    try:
+        backups = int(os.environ.get('TOFU_RAW_SSE_ANOMALY_BACKUPS', '') or '2')
+    except (TypeError, ValueError) as e:
+        logger.debug('[SSEDiag] invalid anomaly backup setting: %s', e)
+        backups = 2
+    return max(1 << 20, min(1 << 30, max_bytes)), max(1, min(20, backups))
+
+
+def _rotate_anomaly_if_needed(path, incoming_bytes):
+    """Rotate one append target; caller holds ``_ANOMALY_WRITE_LOCK``."""
+    max_bytes, backups = _anomaly_rotation_limits()
+    try:
+        if os.path.getsize(path) + incoming_bytes <= max_bytes:
+            return
+    except FileNotFoundError as e:
+        logger.debug('[SSEDiag] anomaly log absent before append: %s', e)
+        return
+    except OSError as e:
+        logger.debug('[SSEDiag] anomaly size probe failed; skip rotation: %s', e)
+        return
+    try:
+        oldest = f'{path}.{backups}'
+        if os.path.exists(oldest):
+            os.remove(oldest)
+        for index in range(backups - 1, 0, -1):
+            source = f'{path}.{index}'
+            if os.path.exists(source):
+                os.replace(source, f'{path}.{index + 1}')
+        os.replace(path, f'{path}.1')
+    except OSError as exc:
+        logger.debug('[RawSSE] anomaly-log rotation failed: %s', exc)
+
+
+def _append_anomaly(path, text):
+    """Atomically append one bounded anomaly block across concurrent turns."""
+    encoded_size = len(text.encode('utf-8', errors='replace'))
+    with _ANOMALY_WRITE_LOCK:
+        _rotate_anomaly_if_needed(path, encoded_size)
+        with open(path, 'a', encoding='utf-8') as fh:
+            fh.write(text)
 
 
 def _raw_sse_enabled(model: str) -> bool:
@@ -66,7 +118,7 @@ class RawSSEDumper:
             return
         try:
             import pathlib
-            log_dir = pathlib.Path('logs')
+            log_dir = pathlib.Path(LOG_DIR)
             log_dir.mkdir(parents=True, exist_ok=True)
             self._fh = open(log_dir / 'raw_sse.log', 'a', encoding='utf-8', buffering=1)
         except Exception as e:
@@ -130,24 +182,24 @@ class RawSSEDumper:
         self._anomaly_dumped = True
         try:
             import pathlib
-            log_dir = pathlib.Path('logs')
+            log_dir = pathlib.Path(LOG_DIR)
             log_dir.mkdir(parents=True, exist_ok=True)
             path = log_dir / 'raw_sse_anomaly.log'
             ts = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
             elapsed = time.time() - self._t0_wall
             snapshot = self._body_snapshot()
-            with open(path, 'a', encoding='utf-8') as fh:
-                fh.write(f'\n{"=" * 80}\n')
-                fh.write(f'[{ts}] ANOMALY reason={reason} model={self.model} '
-                         f'trace={self.trace_id} elapsed={elapsed:.2f}s\n')
-                fh.write(f'body={json.dumps(snapshot, ensure_ascii=False)}\n')
-                fh.write(f'summary={json.dumps(summary, ensure_ascii=False, default=str)}\n')
-                fh.write(f'ring_lines={len(self._ring)} ring_bytes={self._ring_bytes}\n')
-                fh.write(f'{"-" * 80}\n')
-                for raw_line in self._ring:
-                    fh.write(raw_line)
-                    fh.write('\n')
-                fh.write(f'{"=" * 80}\n')
+            parts = [
+                f'\n{"=" * 80}\n',
+                f'[{ts}] ANOMALY reason={reason} model={self.model} '
+                f'trace={self.trace_id} elapsed={elapsed:.2f}s\n',
+                f'body={json.dumps(snapshot, ensure_ascii=False)}\n',
+                f'summary={json.dumps(summary, ensure_ascii=False, default=str)}\n',
+                f'ring_lines={len(self._ring)} ring_bytes={self._ring_bytes}\n',
+                f'{"-" * 80}\n',
+            ]
+            parts.extend(raw_line + '\n' for raw_line in self._ring)
+            parts.append(f'{"=" * 80}\n')
+            _append_anomaly(path, ''.join(parts))
             logger.warning('[RawSSE] Anomaly dump written: reason=%s trace=%s '
                            'lines=%d bytes=%d → %s',
                            reason, self.trace_id, len(self._ring),

@@ -33,6 +33,16 @@ from lib.database._pg_backup._shims import (
 logger = get_logger(__name__)
 
 
+def _restore_divergence_warn_s():
+    raw = getenv_compat('TOFU_DB_RESTORE_DIVERGENCE_WARN_S', default='21600')
+    try:
+        return min(max(int(raw), 60), 30 * 24 * 3600)
+    except (TypeError, ValueError):
+        logger.warning('[DB-Restore] invalid divergence threshold %r; using 21600s',
+                       raw)
+        return 21600
+
+
 def _select_restore_channel(base_dir):
     """§3a: pick the channel with the NEWER recoverable end (never by tier).
 
@@ -52,7 +62,7 @@ def _select_restore_channel(base_dir):
 
     # Divergence guard (only meaningful when BOTH channels exist).
     if a_ts is not None and b_ts is not None:
-        warn_s = int(getenv_compat('TOFU_DB_RESTORE_DIVERGENCE_WARN_S', default='21600'))
+        warn_s = _restore_divergence_warn_s()
         gap = abs(a_ts - b_ts)
         if gap > warn_s:
             chosen = 'tier_b' if b_ts >= a_ts else 'tier_a'

@@ -66,7 +66,7 @@ _IDEMPOTENT_TOOLS_BASE = frozenset({
 # This is separate from _IDEMPOTENT_TOOLS (dedup) — a tool can be
 # concurrent-safe (run in parallel) but not idempotent (don't cache).
 _WRITE_TOOLS_BASE = frozenset({
-    'write_file', 'apply_diff', 'apply_diffs',
+    'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
     'insert_content', 'insert_contents',
     'create_project', 'run_command',
     'create_memory', 'update_memory', 'delete_memory', 'merge_memories',
@@ -93,17 +93,16 @@ def _registry_tool_flags() -> tuple[frozenset, frozenset]:
 
 
 _WRITE_TOOLS, _IDEMPOTENT_TOOLS = _registry_tool_flags()
+_INITIAL_WRITE_TOOLS = _WRITE_TOOLS
+_INITIAL_IDEMPOTENT_TOOLS = _IDEMPOTENT_TOOLS
 
 
 def _task_partitions(task: dict[str, Any]) -> tuple[frozenset, frozenset]:
     """Per-task write/idempotent partitions: base UNION the task's custom env.
 
-    The module-level ``_WRITE_TOOLS`` / ``_IDEMPOTENT_TOOLS`` are frozen at
-    import and cover built-ins + ToolSpec plugins. Per-request custom tools
-    (``task['_tool_env']``) declare their own ``write`` / ``idempotent`` flags,
-    which would otherwise be invisible here — a custom write tool would run in
-    the parallel pool (race) and a custom read tool would never dedup. Union
-    them in at dispatch time so the partitions are correct for THIS task.
+    Registry flags are resolved live so a late plugin registration or hot
+    replacement cannot leave a stale concurrency/cache partition. Per-request
+    custom tools (``task['_tool_env']``) add their own flags afterward.
     """
     # Resolve the module-level partitions through the FACADE so a test that
     # patches ``tool_dispatch._WRITE_TOOLS`` / ``._IDEMPOTENT_TOOLS`` on the
@@ -116,8 +115,14 @@ def _task_partitions(task: dict[str, Any]) -> tuple[frozenset, frozenset]:
     except Exception as e:
         logger.debug('[tool_dispatch] facade partition resolve failed, using local: %s', e)
         _wt, _it = _WRITE_TOOLS, _IDEMPOTENT_TOOLS
-    write = set(_wt)
-    idem = set(_it)
+    live_write, live_idem = _registry_tool_flags()
+    # Tests and compatibility callers may deliberately replace the facade
+    # constants. Preserve that override; otherwise use the live registry so
+    # removed flags do not survive forever in the import-time snapshot.
+    write = set(
+        live_write if _wt is _INITIAL_WRITE_TOOLS else _wt)
+    idem = set(
+        live_idem if _it is _INITIAL_IDEMPOTENT_TOOLS else _it)
     # ── MCP tools: conservative write classification ──
     # External MCP tools carry no built-in safety partition, so by default we
     # treat every discovered MCP tool as a WRITE tool (serial dispatch +

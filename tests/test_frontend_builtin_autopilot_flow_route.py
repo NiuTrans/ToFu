@@ -45,6 +45,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -52,7 +53,10 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-SRC = os.path.join(ROOT, 'static', 'js', 'main', 'main_toolbar_ui.js')
+sys.path.insert(0, HERE)
+from _runtime_sections import runtime_section_path  # noqa: E402
+
+SRC = runtime_section_path('main/main_toolbar_ui.js')
 
 # The marker at the top of the shipped setActiveFlow — it must go STRAIGHT into
 # the normal flow path (no builtin:autopilot alias branch). The NC re-inserts a

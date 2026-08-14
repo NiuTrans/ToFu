@@ -22,6 +22,7 @@ KINDS = frozenset({
     'prompt_too_long', 'stream_only', 'model_limit',
     'tool_rounds_exhausted', 'tool_timeout',
     'premature_close', 'abnormal_stop', 'aborted', 'server_offline',
+    'server_busy',
     'internal', 'generic',
     'bad_request', 'upstream_error', 'worker_lost', 'budget_exceeded',
     'content_refused',
@@ -34,7 +35,7 @@ _WARNING_KINDS = frozenset({
     'ratelimit', 'no_slot', 'timeout', 'network', 'endpoint_unreachable',
     'tool_rounds_exhausted', 'tool_timeout',
     'premature_close', 'abnormal_stop',
-    'aborted', 'server_offline',
+    'aborted', 'server_offline', 'server_busy',
     'upstream_error', 'worker_lost', 'budget_exceeded', 'content_refused',
     'tool_not_available',
 })
@@ -43,7 +44,7 @@ _WARNING_KINDS = frozenset({
 # (transient).  The frontend uses this to gate a "Retry" button.
 _RETRYABLE_KINDS = frozenset({
     'ratelimit', 'no_slot', 'timeout', 'network', 'endpoint_unreachable',
-    'premature_close', 'abnormal_stop', 'server_offline',
+    'premature_close', 'abnormal_stop', 'server_offline', 'server_busy',
     'tool_timeout', 'upstream_error', 'worker_lost', 'content_refused',
 })
 
@@ -186,6 +187,11 @@ _TITLES: dict[str, tuple[str, str, str, str]] = {
                             '• 等待服务器恢复后页面会自动重连，并尝试拉取已生成的内容。',
                             '• When the server comes back, this page will reconnect '
                             'automatically and try to recover any content that was generated.'),
+    'server_busy':        ('⚠️ 服务器当前繁忙',
+                            'Server is temporarily busy',
+                            '• 当前运行中的任务已达到服务器容量上限。请稍后重试；无需修改 API Key 或模型设置。',
+                            '• The server is at its active-task capacity. Retry shortly; '
+                            'you do not need to change API keys or model settings.'),
     'internal':           ('⚠️ 内部错误',
                             'Internal error',
                             '• 请查看服务器日志（logs/error.log）了解详情。',

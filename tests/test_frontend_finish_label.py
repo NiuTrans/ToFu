@@ -31,12 +31,14 @@ import sys
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_PATH = os.path.join(ROOT, 'static', 'js', 'core', 'turn_settlement.js')
+JS_PATH = runtime_section_path('core/turn_settlement.js')
 
 
 def _node_available() -> bool:

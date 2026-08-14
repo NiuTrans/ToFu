@@ -241,25 +241,47 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
 @tool_registry.handler('todo_write', category='task',
                        description='Maintain the structured task checklist')
 def _handle_todo_write(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
-    """Persist the model's checklist onto ``task['_todos']`` (survives
-    compaction — it's on the task dict, not in ``messages``) and feed the
-    continuation enforcer.  The list REPLACES the prior state each call.
+    """Apply one revisioned checklist operation and finalize its receipt.
 
     Note: NOT a state-changing tool (no file mutation) — so it correctly does
     NOT reset the zero-deliverable streak; the two guards stay orthogonal.
     """
-    from lib.tools.todo import apply_todo_write
+    from lib.tools.todo import apply_todo_write_to_task, public_todo_state
 
-    todos, tool_content = apply_todo_write(fn_args)
-    task['_todos'] = todos
+    todos, tool_content, outcome = apply_todo_write_to_task(task, fn_args)
+    state = public_todo_state(outcome['state'])
+    stack = state.get('stack') or []
+    active = stack[-1] if stack else {}
+
+    breadcrumbs = []
+    for idx, frame in enumerate(stack):
+        label = 'Root task'
+        if idx:
+            parent = stack[idx - 1]
+            parent_id = frame.get('parent_todo_id')
+            parent_item = next(
+                (item for item in parent.get('todos') or []
+                 if item.get('id') == parent_id), None)
+            label = ((parent_item or {}).get('content') or parent_id
+                     or f'Level {idx + 1}')
+        breadcrumbs.append({
+            'checklist_id': frame.get('checklist_id'),
+            'label': label,
+            'revision': frame.get('revision'),
+        })
 
     total = len(todos)
     done = sum(1 for t in todos if t.get('status') == 'completed')
     in_prog = sum(1 for t in todos if t.get('status') == 'in_progress')
-    logger.info('[Executor] todo_write: %d item(s) — %d done, %d in_progress '
-                '(task=%s)', total, done, in_prog, task.get('id', '?')[:8])
+    logger.info('[Executor] todo_write: op=%s %d item(s) — %d done, '
+                '%d in_progress depth=%d revision=%s noop=%s rejected=%s '
+                '(task=%s)', outcome.get('operation'), total, done, in_prog,
+                len(stack), active.get('revision'), outcome.get('no_op'),
+                outcome.get('rejected'), task.get('id', '?')[:8])
 
-    badge = f'{done}/{total}' if total else 'cleared'
+    badge = ('rejected' if outcome.get('rejected') else
+             ('unchanged' if outcome.get('no_op') else
+              (f'{done}/{total}' if total else 'cleared')))
     meta = _build_simple_meta(
         fn_name, tool_content, source='Checklist',
         title=f'Checklist · {done}/{total} done' if total else 'Checklist cleared',
@@ -267,7 +289,21 @@ def _handle_todo_write(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
         badge=badge,
         # Structured payload so the frontend renders a live progress panel
         # off engine data, not by re-parsing the result prose.
-        extra={'todos': todos},
+        extra={
+            'todos': todos,
+            'todoState': state,
+            'todoOperation': outcome.get('operation'),
+            'todoNoop': bool(outcome.get('no_op')),
+            'todoRejected': bool(outcome.get('rejected')),
+            'todoRejectReason': outcome.get('reason') or '',
+            'todoAutoPopped': outcome.get('auto_popped') or [],
+            'todoUpdateCount': state.get('update_count', 0),
+            'todoDepth': len(stack),
+            'todoBreadcrumbs': breadcrumbs,
+            'checklistId': active.get('checklist_id'),
+            'todoRevision': active.get('revision'),
+            'rootCompleted': bool(state.get('root_completed')),
+        },
     )
     _finalize_tool_round(task, rn, round_entry, [meta])
     return tc_id, tool_content, False

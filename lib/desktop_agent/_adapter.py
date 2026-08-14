@@ -25,6 +25,7 @@ import hashlib
 import os
 import random
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -47,6 +48,8 @@ _HEALTH_TIMEOUT_S = 30
 _UPDATE_INTERVAL_S = 7 * 86400
 _UPDATE_JITTER_S = 86400
 _RESTART_BACKOFF_CAP_S = 300
+_MAX_ADAPTER_DOWNLOAD_BYTES = 256 * 1024 * 1024
+_MAX_ADAPTER_ARCHIVE_MEMBERS = 10_000
 
 _lock = threading.Lock()
 _proc: subprocess.Popen | None = None
@@ -175,32 +178,94 @@ def _sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
-def _extract_binary(archive: str, dest_dir: str) -> str:
-    """Extract the cliproxyapi binary from a zip/tar.gz into dest_dir."""
-    tmp = tempfile.mkdtemp(prefix='adapter-x-')
+def _safe_archive_name(name: str) -> bool:
+    """Cross-platform traversal check for zip/tar member names."""
+    import ntpath
+    import posixpath
+
+    portable = (name or '').replace('\\', '/')
+    return bool(name and not posixpath.isabs(portable)
+                and not ntpath.isabs(name)
+                and '..' not in portable.split('/'))
+
+
+def _is_adapter_binary(name: str) -> bool:
+    base = os.path.basename(name.replace('\\', '/'))
+    return base.lower().replace('-', '').startswith('cliproxyapi')
+
+
+def _install_binary_stream(src, declared_size: int, dest_dir: str) -> str:
+    """Copy one verified archive member and atomically replace the binary."""
+    if declared_size <= 0 or declared_size > _MAX_ADAPTER_DOWNLOAD_BYTES:
+        raise ValueError('adapter binary has an unsafe declared size')
+
+    os.makedirs(dest_dir, exist_ok=True)
+    dst = os.path.join(dest_dir,
+                       'cliproxyapi.exe'
+                       if sys.platform.startswith('win') else 'cliproxyapi')
+    fd, staged = tempfile.mkstemp(prefix='.cliproxyapi-', dir=dest_dir)
+    total = 0
     try:
-        if archive.endswith('.zip'):
-            with zipfile.ZipFile(archive) as z:
-                z.extractall(tmp)
-        else:
-            with tarfile.open(archive, 'r:gz') as t:
-                t.extractall(tmp, filter='data')
-        for dirpath, _dirs, files in os.walk(tmp):
-            for fn in files:
-                # Real release members: 'cli-proxy-api' (tar.gz) or
-                # 'CLIProxyAPI.exe' (zip) — normalise dashes before matching.
-                if fn.lower().replace('-', '').startswith('cliproxyapi'):
-                    src = os.path.join(dirpath, fn)
-                    dst = os.path.join(dest_dir,
-                                       'cliproxyapi.exe'
-                                       if sys.platform.startswith('win')
-                                       else 'cliproxyapi')
-                    shutil.move(src, dst)
-                    os.chmod(dst, 0o755)
-                    return dst
-        raise ValueError('cliproxyapi binary not found in archive')
+        with os.fdopen(fd, 'wb') as out:
+            while True:
+                chunk = src.read(1 << 20)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _MAX_ADAPTER_DOWNLOAD_BYTES:
+                    raise ValueError('adapter binary exceeds the safe size limit')
+                out.write(chunk)
+            out.flush()
+            os.fsync(out.fileno())
+        if total != declared_size:
+            raise ValueError(
+                f'adapter binary size mismatch: expected {declared_size}, got {total}')
+        os.chmod(staged, 0o755)
+        os.replace(staged, dst)
+        return dst
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        try:
+            os.unlink(staged)
+        except FileNotFoundError as exc:
+            logger.debug('[Adapter] staged binary already absent: %s', exc)
+
+
+def _extract_binary(archive: str, dest_dir: str) -> str:
+    """Install only the binary member; never materialise arbitrary paths."""
+    if archive.endswith('.zip'):
+        with zipfile.ZipFile(archive) as z:
+            members = z.infolist()
+            if len(members) > _MAX_ADAPTER_ARCHIVE_MEMBERS:
+                raise ValueError('adapter archive has too many members')
+            for member in members:
+                if not _safe_archive_name(member.filename):
+                    raise ValueError(
+                        f'unsafe adapter archive path: {member.filename!r}')
+                mode = (member.external_attr >> 16) & 0xFFFF
+                if stat.S_ISLNK(mode):
+                    raise ValueError('adapter archive contains a symbolic link')
+                if not member.is_dir() and _is_adapter_binary(member.filename):
+                    with z.open(member, 'r') as src:
+                        return _install_binary_stream(
+                            src, member.file_size, dest_dir)
+    else:
+        with tarfile.open(archive, 'r:gz') as tf:
+            for index, member in enumerate(tf, start=1):
+                if index > _MAX_ADAPTER_ARCHIVE_MEMBERS:
+                    raise ValueError('adapter archive has too many members')
+                if not _safe_archive_name(member.name):
+                    raise ValueError(
+                        f'unsafe adapter archive path: {member.name!r}')
+                if (member.issym() or member.islnk() or member.isdev()
+                        or member.isfifo()):
+                    raise ValueError('adapter archive contains a special member')
+                if member.isfile() and _is_adapter_binary(member.name):
+                    src = tf.extractfile(member)
+                    if src is None:
+                        raise ValueError('adapter binary member is unreadable')
+                    with src:
+                        return _install_binary_stream(src, member.size, dest_dir)
+    raise ValueError('cliproxyapi binary not found in archive')
 
 
 def install_binary(version: str) -> str:
@@ -228,7 +293,21 @@ def install_binary(version: str) -> str:
         archive = os.path.join(tmpdir, name)
         logger.info('[Adapter] downloading %s (%s)', name, tag)
         with _gh_get(url, timeout=600) as resp, open(archive, 'wb') as f:
+            try:
+                content_len = int(
+                    (getattr(resp, 'headers', {}) or {}).get('Content-Length') or 0)
+            except (TypeError, ValueError) as exc:
+                logger.debug('[Adapter] invalid Content-Length ignored: %s', exc)
+                content_len = 0
+            if content_len > _MAX_ADAPTER_DOWNLOAD_BYTES:
+                raise ValueError('adapter archive exceeds the 256 MiB limit')
+            downloaded = 0
             for chunk in resp.iter_content(1 << 20):
+                if not chunk:
+                    continue
+                downloaded += len(chunk)
+                if downloaded > _MAX_ADAPTER_DOWNLOAD_BYTES:
+                    raise ValueError('adapter archive exceeds the 256 MiB limit')
                 f.write(chunk)
         actual = _sha256_file(archive)
         if actual != expected:

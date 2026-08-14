@@ -61,7 +61,6 @@ def run_llm_call_with_fallback(
     round_num: int,
     tid: str,
     max_tokens: int,
-    max_tool_rounds: int,
 ) -> str:
     """Execute this round's LLM call with fallback + deferred flush.
 
@@ -88,9 +87,6 @@ def run_llm_call_with_fallback(
         8-char task id for logging.
     max_tokens : int
         Token ceiling for the call.
-    max_tool_rounds : int
-        Tool-round ceiling (fallback-layer input).
-
     Returns
     -------
     str
@@ -101,7 +97,7 @@ def run_llm_call_with_fallback(
     try:
         llm_result = _llm_call_with_fallback(
             task, body, rs.model, round_num, max_tokens,
-            rs.tool_call_happened, tool_list, max_tool_rounds,
+            rs.tool_call_happened, tool_list,
             messages, rs.preset, rs.thinking_enabled,
             rs.accumulated_usage, rs.api_rounds,
             on_tool_call_ready=stream_acc.on_tool_call_ready,

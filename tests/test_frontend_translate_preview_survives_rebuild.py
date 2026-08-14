@@ -27,12 +27,12 @@ This harness loads the REAL shipped JS under jsdom and locks three contracts:
   (c) The rebuilt `#streaming-msg`'s `data-msg-id` equals the message's
       `_msgId` for the worker / planner / critic branches.
   (d) The `connectToTask` reconnect path (sse_pipeline.js) — which rebuilds
-      `#streaming-body` via `_body.innerHTML = _html` on page-reload-into-
-      active-stream — ALSO repaints the stashed `_translatePartial` after the
-      rebuild, same as (b). Same bug-class, second code path. Guarded both at
-      the SOURCE level (the shipped reconnect block must call the repaint) and
-      at RUNTIME (a reconnect-style rebuilt body repaints the stash with no
-      new frame).
+      `#streaming-body` through `ConvView.hydrateStreaming` on page-reload-
+      into-active-stream — ALSO repaints the stashed `_translatePartial` after
+      the rebuild, same as (b). Same bug-class, second code path. Guarded both
+      at the SOURCE level (the shipped reconnect block must use the seam and
+      call the repaint) and at RUNTIME (the real seam repaints the stash with
+      no new frame).
 
 Runs the REAL shipped JS under jsdom; skips cleanly when node + jsdom aren't
 installed.
@@ -153,6 +153,7 @@ eval(fs.readFileSync(process.argv[4], 'utf8'));  // ui/streaming_render.js (_str
 eval(fs.readFileSync(process.argv[5], 'utf8'));  // ui/stream_lifecycle.js (showStreamingUIForConv)
 eval(fs.readFileSync(process.argv[6], 'utf8'));  // translation.js (engine)
 eval(fs.readFileSync(process.argv[7], 'utf8'));  // ui/translation_render.js (_renderStreamingTranslatePreview — relocated)
+eval(fs.readFileSync(process.argv[8], 'utf8'));  // conv_view.js (streaming DOM seam)
 
 // renderMessage is defined in chat_render.js (not loaded). showStreamingUIForConv
 // calls it for prior messages — stub a minimal version AFTER the evals.
@@ -262,10 +263,11 @@ for (const role of ['worker', 'planner', 'critic']) {
   // Mirror sse_pipeline.js:285 — stamp the rebuilt bubble with the msgId.
   inner2.insertAdjacentHTML('beforeend',
     _streamingBubbleHTML('worker', 'Resuming…', '12:00', assistantMsg._msgId || null));
-  // Mirror sse_pipeline.js:305 — wipe + pre-populate the body.
-  const _body = document.getElementById('streaming-body');
-  _body.innerHTML = '<div class="md-content">' + renderMarkdown(assistantMsg.content) + '</div>'
+  // Mirror sse_pipeline.js — wipe + pre-populate through the real DOM seam.
+  const reconHtml = '<div class="md-content">' + renderMarkdown(assistantMsg.content) + '</div>'
     + '<div class="stream-status"><div class="pulse"></div> Resuming…</div>';
+  check('recon_hydrates_through_convview',
+    window.ConvView.hydrateStreaming('c1', reconHtml) === true);
   check('recon_bubble_has_msgid',
     document.getElementById('streaming-msg').getAttribute('data-msg-id') === MSGID);
   // Mirror the NEW repaint the fix added right after _body.innerHTML.
@@ -306,6 +308,7 @@ def _run():
              os.path.join(JS_DIR, 'ui', 'stream_lifecycle.js'),    # argv[5]
              os.path.join(JS_DIR, 'translation.js'),               # argv[6]
              os.path.join(JS_DIR, 'ui', 'translation_render.js'),   # argv[7]
+             os.path.join(JS_DIR, 'conv_view.js'),                  # argv[8]
              ],
             capture_output=True, text=True, timeout=60,
         )
@@ -329,9 +332,11 @@ def _run():
     sse = os.path.join(JS_DIR, 'ui', 'sse_pipeline.js')
     with open(sse, encoding='utf-8') as f:
         sse_src = f.read()
-    anchor = '_body.innerHTML = _html;'
+    anchor = 'window.ConvView.hydrateStreaming(convId, _html);'
     pos = sse_src.find(anchor)
-    assert pos >= 0, 'reconnect pre-populate block not found in sse_pipeline.js'
+    assert pos >= 0, (
+        'reconnect pre-populate path no longer hydrates through ConvView in '
+        'sse_pipeline.js')
     window = sse_src[pos:pos + 900]
     assert '_renderStreamingTranslatePreview(convId, assistantMsg._msgId' in window, (
         'Risk B regression: the connectToTask reconnect block no longer repaints '

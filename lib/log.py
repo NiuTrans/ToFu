@@ -54,10 +54,10 @@ import sys
 import time
 import uuid
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from threading import Lock as _Lock
 from threading import Thread as _Thread
-from threading import local as thread_local
 
 # ── Base directory and log paths ──
 # LOG_DIR must be WRITABLE. In a frozen desktop build BASE_DIR resolves inside
@@ -162,10 +162,33 @@ LOG_FILE = APP_LOG
 #  Request ID — per-request correlation
 # ══════════════════════════════════════════
 
-_thread_ctx = thread_local()
+_request_id_var: ContextVar[str] = ContextVar('tofu_request_id', default='')
+
+
+class _RequestContextCompat:
+    """Compatibility facade for older tests/extensions using ``_thread_ctx``.
+
+    Request ids used to live in ``threading.local``.  That is unsafe for Quart:
+    many concurrent request coroutines share one event-loop thread and can
+    overwrite each other's id.  A ContextVar isolates coroutines and is copied
+    by Quart/``asyncio.to_thread`` at the intended async boundaries.  Keeping
+    this tiny property facade avoids breaking diagnostics that only clear or
+    restore ``_thread_ctx.req_id``.
+    """
+
+    @property
+    def req_id(self) -> str:
+        return _request_id_var.get()
+
+    @req_id.setter
+    def req_id(self, value: str) -> None:
+        _request_id_var.set(str(value or ''))
+
+
+_thread_ctx = _RequestContextCompat()
 
 def set_req_id(rid: str = None) -> str:
-    """Set a request ID for the current thread (called from middleware).
+    """Set a request ID for the current execution context.
 
     Args:
         rid: Explicit request ID. If None, generates a short hex UUID.
@@ -175,16 +198,16 @@ def set_req_id(rid: str = None) -> str:
     """
     if rid is None:
         rid = uuid.uuid4().hex[:8]
-    _thread_ctx.req_id = rid
+    _request_id_var.set(rid)
     return rid
 
 
 def req_id() -> str:
-    """Get the current request ID for this thread.
+    """Get the current request ID for this coroutine/thread context.
 
     Returns empty string if not in a request context (e.g. background threads).
     """
-    return getattr(_thread_ctx, 'req_id', '')
+    return _request_id_var.get()
 
 
 
@@ -291,10 +314,77 @@ _audit_lock = _Lock()
 # caller now only serialises the entry (pure CPU) and enqueues the line; a
 # dedicated daemon writer thread performs the actual disk I/O, mirroring the
 # QueueHandler/QueueListener setup in server.py. A FUSE hang blocks only the
-# writer thread. Trade-off (owner-approved): entries still queued at a
-# SIGKILL are lost; a bounded atexit drain preserves them on clean shutdown.
+# writer thread. The queue is bounded as well: otherwise a long mount outage
+# turns the isolation mechanism into an unbounded-memory/OOM path. On
+# overload the oldest queued line is discarded in favour of the newest one.
+# Trade-off (owner-approved): entries still queued at a SIGKILL are lost; a
+# bounded atexit drain preserves them on clean shutdown.
 _audit_queue = None          # queue.Queue[str], created on first async write
 _audit_writer_thread = None
+_audit_overflow_lock = _Lock()
+_audit_dropped = 0
+_audit_last_drop_report_mono = 0.0
+
+
+def _audit_queue_capacity() -> int:
+    """Return the bounded async-audit queue capacity.
+
+    A few thousand compact JSON records absorb normal write bursts while
+    keeping the worst-case memory footprint finite during a filesystem stall.
+    """
+    try:
+        capacity = int(os.environ.get('TOFU_AUDIT_LOG_QUEUE_MAX', '') or '4096')
+    except (TypeError, ValueError) as e:
+        logging.getLogger('lib.log').debug(
+            'invalid TOFU_AUDIT_LOG_QUEUE_MAX; using 4096: %s', e)
+        capacity = 4096
+    return max(128, min(100_000, capacity))
+
+
+def _audit_rotation_limits():
+    """Return bounded, dependency-free audit-log rotation settings."""
+    try:
+        max_bytes = int(os.environ.get('TOFU_AUDIT_LOG_MAX_BYTES', '')
+                        or str(64 * 1024 * 1024))
+    except (TypeError, ValueError) as e:
+        logging.getLogger('lib.log').debug(
+            'invalid TOFU_AUDIT_LOG_MAX_BYTES; using 64 MiB: %s', e)
+        max_bytes = 64 * 1024 * 1024
+    try:
+        backups = int(os.environ.get('TOFU_AUDIT_LOG_BACKUPS', '') or '4')
+    except (TypeError, ValueError) as e:
+        logging.getLogger('lib.log').debug(
+            'invalid TOFU_AUDIT_LOG_BACKUPS; using 4: %s', e)
+        backups = 4
+    return max(1 << 20, min(1 << 30, max_bytes)), max(1, min(20, backups))
+
+
+def _rotate_audit_log_if_needed(incoming_bytes: int) -> None:
+    """Size-rotate ``audit.log`` before one append; caller serializes writes."""
+    max_bytes, backups = _audit_rotation_limits()
+    try:
+        if os.path.getsize(AUDIT_LOG_FILE) + incoming_bytes <= max_bytes:
+            return
+    except FileNotFoundError as e:
+        logging.getLogger('lib.log').debug(
+            'audit log absent before append: %s', e)
+        return
+    except OSError as e:
+        logging.getLogger('lib.log').debug(
+            'audit log size probe failed; skip rotation: %s', e)
+        return
+    try:
+        oldest = f'{AUDIT_LOG_FILE}.{backups}'
+        if os.path.exists(oldest):
+            os.remove(oldest)
+        for index in range(backups - 1, 0, -1):
+            source = f'{AUDIT_LOG_FILE}.{index}'
+            if os.path.exists(source):
+                os.replace(source, f'{AUDIT_LOG_FILE}.{index + 1}')
+        os.replace(AUDIT_LOG_FILE, f'{AUDIT_LOG_FILE}.1')
+    except OSError as exc:
+        logging.getLogger('lib.log').debug(
+            '[audit] size rotation failed: %s', exc)
 
 
 def _audit_sync_writes() -> bool:
@@ -308,6 +398,7 @@ def _audit_write_line(line: str) -> None:
     """Append one JSON line to the audit file (the actual disk I/O). Reads
     the module-level paths at call time so tests can monkeypatch them."""
     os.makedirs(LOG_DIR, exist_ok=True)
+    _rotate_audit_log_if_needed(len(line.encode('utf-8', errors='replace')))
     with open(AUDIT_LOG_FILE, 'a', encoding='utf-8') as f:
         f.write(line)
 
@@ -333,13 +424,64 @@ def _ensure_audit_writer():
         return _audit_queue
     with _audit_lock:
         if _audit_queue is None:
-            q = _queue_mod.Queue()
+            q = _queue_mod.Queue(maxsize=_audit_queue_capacity())
             t = _Thread(target=_audit_writer_loop, args=(q,),
                         name='audit-log-writer', daemon=True)
             t.start()
             _audit_queue = q
             _audit_writer_thread = t
     return _audit_queue
+
+
+def _enqueue_audit_line(q: '_queue_mod.Queue', line: str) -> None:
+    """Enqueue without blocking and keep memory bounded under disk stalls.
+
+    Prefer the newest audit evidence when the queue is saturated. Races with
+    the consumer or another producer are intentionally tolerated: the caller
+    must never wait for a slow diagnostics path.
+    """
+    global _audit_dropped, _audit_last_drop_report_mono
+    try:
+        q.put_nowait(line)
+        return
+    except _queue_mod.Full:
+        pass
+
+    dropped = False
+    try:
+        q.get_nowait()
+        q.task_done()
+        dropped = True
+    except _queue_mod.Empty:
+        # The writer drained the queue between Full and get_nowait().
+        pass
+
+    try:
+        q.put_nowait(line)
+    except _queue_mod.Full:
+        # Another producer won the newly available slot. Keep the caller
+        # non-blocking; this line becomes the discarded one.
+        dropped = True
+
+    if not dropped:
+        return
+
+    # Rate-limit the overload report without ever making the audit caller
+    # wait for another producer. The main logging path has its own bounded
+    # queue, so this warning cannot recreate the same memory failure mode.
+    if not _audit_overflow_lock.acquire(blocking=False):
+        return
+    try:
+        _audit_dropped += 1
+        now = time.monotonic()
+        if now - _audit_last_drop_report_mono >= 60.0:
+            logging.getLogger('audit').warning(
+                'Audit log queue saturated; dropped %d queued record(s) '
+                'while preserving recent events', _audit_dropped)
+            _audit_dropped = 0
+            _audit_last_drop_report_mono = now
+    finally:
+        _audit_overflow_lock.release()
 
 
 @_atexit.register
@@ -389,7 +531,7 @@ def audit_log(event: str, **details) -> None:
                 exc_info=True
             )
         return
-    _ensure_audit_writer().put(line)
+    _enqueue_audit_line(_ensure_audit_writer(), line)
 
 
 # ══════════════════════════════════════════
@@ -466,7 +608,7 @@ def log_route(logger: logging.Logger, log_request_body: bool = False,
     def _entry():
         """Resolve request context + log entry; return (method, path, rid_tag)."""
         try:
-            from flask import request as flask_req
+            from quart import request as flask_req
             method = flask_req.method
             path = flask_req.path
             rid = req_id()
@@ -480,7 +622,7 @@ def log_route(logger: logging.Logger, log_request_body: bool = False,
 
         if log_request_body:
             try:
-                from flask import request as flask_req
+                from quart import request as flask_req
                 body = flask_req.get_json(silent=True)
                 if body and isinstance(body, dict):
                     safe_body = {k: ('***' if k in sensitive_fields else v) for k, v in body.items()}
@@ -619,4 +761,3 @@ def log_suppressed(logger: logging.Logger, context: str, exc: Exception = None,
     exc_type = type(exc).__name__ if exc else 'Unknown'
     exc_msg = str(exc)[:200] if exc else ''
     logger.log(level, '%s[suppressed] %s — %s: %s', prefix, context, exc_type, exc_msg)
-

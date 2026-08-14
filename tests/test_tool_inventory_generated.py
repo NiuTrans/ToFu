@@ -89,6 +89,10 @@ class TestInventoryNotStale:
             f'tool inventory is stale — run `python3 {GEN}` and commit '
             f'docs/TOOL_INVENTORY.md.\nstderr: {proc.stderr[-2000:]}'
         )
+        assert 'pthread_setaffinity_np failed' not in proc.stderr, (
+            'read-only inventory generation constructed uncapped ONNX '
+            'sessions; install the ONNX thread guard before handler imports'
+        )
 
     def test_generator_reports_every_declared_builtin(self):
         """Every built-in in the registry appears as an inventory row.

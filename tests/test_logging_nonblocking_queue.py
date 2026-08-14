@@ -8,8 +8,8 @@ thread behind slow network writes — including the sync threads serving
 ``GET /`` and the health/conversation endpoints. That turns any log storm into
 a dead frontend ("backend alive, frontend can't be served").
 
-Fix (server.py): the root logger gets a single ``QueueHandler`` whose
-``emit()`` is a non-blocking ``SimpleQueue.put()``; a background
+Fix (server.py): the root logger gets a bounded queue handler whose
+``emit()`` is a non-blocking ``put_nowait()``; a background
 ``QueueListener`` thread drains the queue and does the actual slow I/O. A
 logging caller therefore returns in microseconds regardless of how slow /
 backed-up the sinks are.
@@ -23,8 +23,8 @@ QueueListener over a deliberately SLOW handler) and asserts:
      synchronous config), the queued caller is dramatically faster — the
      load-bearing behaviour. (NEUTER: swap the queue for the direct handler
      and the same assertion FAILS, proving the queue is what carries it.)
-  3. No records are lost — after draining, every emitted record reached the
-     sink (unbounded SimpleQueue never drops).
+  3. Ordinary bounded bursts remain lossless; saturation stays memory-bounded
+     and emits one recovery summary rather than recursive tracebacks.
   4. Levels/filters and exc_info tracebacks survive the queue round-trip.
 
 Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest tests/test_logging_nonblocking_queue.py -q
@@ -35,9 +35,9 @@ import logging
 import queue as _queue_mod
 import threading
 import time
-from logging.handlers import QueueHandler, QueueListener
-
 import pytest
+
+from server import _BoundedQueueHandler, _BoundedQueueListener
 
 pytestmark = pytest.mark.unit
 
@@ -60,7 +60,7 @@ class _SlowHandler(logging.Handler):
             self.written.append(self.format(record))
 
 
-def _make_queued_logger(delay=0.02):
+def _make_queued_logger(delay=0.02, capacity=1000):
     """Reconstruct the production QueueHandler + QueueListener wiring.
 
     Mirrors server.py: the QueueHandler carries a ``%(message)s`` formatter
@@ -68,10 +68,10 @@ def _make_queued_logger(delay=0.02):
     (slow) handler owns the full layout applied once on the listener thread."""
     slow = _SlowHandler(per_record_delay=delay)
     slow.setFormatter(logging.Formatter('%(levelname)s %(message)s'))
-    q = _queue_mod.SimpleQueue()
-    qh = QueueHandler(q)
+    q = _queue_mod.Queue(maxsize=capacity)
+    qh = _BoundedQueueHandler(q)
     qh.setFormatter(logging.Formatter('%(message)s'))
-    listener = QueueListener(q, slow, respect_handler_level=True)
+    listener = _BoundedQueueListener(q, slow, respect_handler_level=True)
 
     lg = logging.getLogger('test.nonblocking.queued.%d' % id(slow))
     lg.handlers[:] = [qh]
@@ -117,13 +117,38 @@ class TestNonBlockingLogging:
             listener.stop()
 
     def test_no_records_lost_after_drain(self):
-        """Every emitted record reaches the sink once the listener drains."""
+        """Every record below the queue cap reaches the sink after drain."""
         lg, slow, listener = _make_queued_logger(delay=0.001)
         listener.start()
         for i in range(N_STORM):
             lg.warning('line %d', i)
         listener.stop()  # enqueues sentinel + joins drain thread
         assert len(slow.written) == N_STORM
+
+    def test_overload_is_bounded_and_recovery_is_summarized(self):
+        """A stopped sink cannot grow retained records past the hard cap."""
+        q = _queue_mod.Queue(maxsize=2)
+        qh = _BoundedQueueHandler(q)
+        qh.setFormatter(logging.Formatter('%(message)s'))
+        for i in range(5):
+            qh.emit(logging.LogRecord(
+                'lib.storm', logging.INFO, __file__, 1,
+                'line %d', (i,), None))
+        assert q.qsize() == 2
+        assert qh._dropped_pending == 3
+        assert qh._dropped_total == 3
+
+        # Make room for both the first recovered record and its drop summary.
+        q.get_nowait(); q.task_done()
+        q.get_nowait(); q.task_done()
+        qh.emit(logging.LogRecord(
+            'lib.storm', logging.INFO, __file__, 1,
+            'recovered', (), None))
+        records = [q.get_nowait(), q.get_nowait()]
+        messages = [record.getMessage() for record in records]
+        assert 'recovered' in messages
+        assert any('shed 3 record(s)' in msg for msg in messages)
+        assert qh._dropped_pending == 0
 
     def test_queue_is_faster_than_direct_and_neuter(self):
         """Load-bearing comparison + NEUTER.

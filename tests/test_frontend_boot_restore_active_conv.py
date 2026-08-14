@@ -18,8 +18,10 @@ import re
 import subprocess
 from pathlib import Path
 
+from tests._runtime_sections import runtime_section_path
+
 REPO = Path(__file__).resolve().parent.parent
-MAIN_JS = REPO / "static" / "js" / "main.js"
+MAIN_JS = Path(runtime_section_path('main.js'))
 
 
 def _extract_fn(src: str, name: str) -> str:

@@ -70,26 +70,20 @@ def gather_system_status(task: dict[str, Any]) -> str:
     if target_conv:
         try:
             from lib.database import DOMAIN_CHAT, get_thread_db
+            from lib.database.conversation_repository import load_conversation
             db = get_thread_db(DOMAIN_CHAT)
-            row = db.execute(
-                'SELECT title, messages, msg_count FROM conversations WHERE id=? AND user_id=1',
-                (target_conv,)
-            ).fetchone()
-            if row:
+            row = load_conversation(
+                db, target_conv, metadata_columns=('title',))
+            if row is not None:
                 title = row['title'] or '(untitled)'
                 msg_count = row['msg_count'] or 0
                 lines.append(f'\nTarget conversation: "{title}" ({msg_count} messages)')
                 # Show last 2 messages briefly
-                try:
-                    msgs = json.loads(row['messages'] or '[]')
-                    for m in msgs[-2:]:
-                        role = m.get('role', '?')
-                        content = (m.get('content') or '')[:200]
-                        if isinstance(content, list):
-                            content = '[multimodal]'
-                        lines.append(f'  [{role}] {content}')
-                except (json.JSONDecodeError, TypeError) as e:
-                    logger.debug('[Proactive] Failed to parse conv messages: %s', e)
+                for m in row.messages[-2:]:
+                    role = m.get('role', '?')
+                    content = m.get('content') or ''
+                    content = content[:200] if isinstance(content, str) else '[multimodal]'
+                    lines.append(f'  [{role}] {content}')
             else:
                 lines.append(f'\nTarget conversation {target_conv[:12]} not found.')
         except Exception as e:
@@ -188,10 +182,15 @@ def record_poll(task_id: str, decision: str, reason: str, model: str,
     by counting trailing ``llm_agreed=1`` rows.
     """
     try:
-        from lib.database import DOMAIN_SYSTEM, get_thread_db
+        from lib.database import (
+            DOMAIN_SYSTEM,
+            db_execute_with_retry,
+            get_thread_db,
+        )
         db = get_thread_db(DOMAIN_SYSTEM)
         now = datetime.now().isoformat()
-        db.execute(
+        db_execute_with_retry(
+            db,
             '''INSERT INTO proactive_poll_log
                (task_id, poll_time, decision, reason, status_snapshot, model, tokens_used,
                 execution_task_id, tier, predicate_matched, llm_agreed)
@@ -199,7 +198,6 @@ def record_poll(task_id: str, decision: str, reason: str, model: str,
             [task_id, now, decision, reason[:500], status_snapshot[:5000], model, tokens_used,
              execution_task_id, tier, predicate_matched, llm_agreed]
         )
-        db.commit()
     except Exception as e:
         logger.warning('[Proactive] Failed to record poll for task %s: %s', task_id, e, exc_info=True)
 
@@ -259,11 +257,12 @@ def apply_reconcile_poll(task: dict[str, Any], predicate_result, llm_ready,
         fallback_streak=fallback_streak)
 
     try:
-        from lib.database import DOMAIN_SYSTEM, get_thread_db
+        from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, get_thread_db
         db = get_thread_db(DOMAIN_SYSTEM)
         now = datetime.now().isoformat()
         if outcome.promoted:
-            db.execute(
+            db_execute_with_retry(
+                db,
                 "UPDATE scheduled_tasks SET condition_kind='code', "
                 'promotion_streak=?, promoted_at=?, updated_at=? WHERE id=?',
                 [outcome.new_streak, now, now, task_id])
@@ -273,7 +272,8 @@ def apply_reconcile_poll(task: dict[str, Any], predicate_result, llm_ready,
             logger.info('[Proactive:%s] ✅ Predicate PROMOTED to code (streak=%d) — '
                         'LLM drops out of future polls', task_id[:8], outcome.new_streak)
         elif outcome.demoted:
-            db.execute(
+            db_execute_with_retry(
+                db,
                 "UPDATE scheduled_tasks SET condition_kind='hybrid', "
                 "promotion_streak=0, promoted_at='', updated_at=? WHERE id=?",
                 [now, task_id])
@@ -283,11 +283,11 @@ def apply_reconcile_poll(task: dict[str, Any], predicate_result, llm_ready,
             logger.warning('[Proactive:%s] ⚠️ Predicate DEMOTED to hybrid — %s',
                            task_id[:8], outcome.note)
         elif outcome.new_streak != current_streak or outcome.new_kind != kind:
-            db.execute(
+            db_execute_with_retry(
+                db,
                 'UPDATE scheduled_tasks SET condition_kind=?, promotion_streak=?, '
                 'updated_at=? WHERE id=?',
                 [outcome.new_kind, outcome.new_streak, now, task_id])
-        db.commit()
     except Exception as e:
         logger.error('[Proactive:%s] Failed to persist reconcile transition: %s',
                      task_id[:8], e, exc_info=True)

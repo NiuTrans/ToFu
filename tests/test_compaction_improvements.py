@@ -13,6 +13,10 @@ Run:  pytest tests/test_compaction_improvements.py -m unit -v
 """
 from __future__ import annotations
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {
+    'lib/a.py', 'lib/b.py', 'lib/c.py', 'lib/server.py',
+}
+
 import json
 import os
 import sys
@@ -452,6 +456,23 @@ class TestDeltaAttachments:
 class TestCompactionPipeline:
     """Integration tests for the full compaction pipeline."""
 
+    def test_pipeline_threads_real_round_into_l2_archive(self, monkeypatch):
+        import lib.tasks_pkg.compaction._pipeline as pipeline
+
+        captured = []
+        monkeypatch.setattr(pipeline, 'micro_compact',
+                            lambda *args, **kwargs: 0)
+        monkeypatch.setattr(
+            pipeline, 'force_compact_if_needed',
+            lambda *args, **kwargs: captured.append(kwargs) or False)
+
+        pipeline.run_compaction_pipeline(
+            [{'role': 'user', 'content': 'continue'}], current_round=37,
+            task={'convId': 'round-observability', 'config': {}})
+
+        assert captured
+        assert captured[0]['_compaction_round'] == 37
+
     def test_pipeline_runs_without_error(self):
         from lib.tasks_pkg.compaction import run_compaction_pipeline
         messages = [
@@ -459,9 +480,12 @@ class TestCompactionPipeline:
             {'role': 'user', 'content': 'Hello'},
             {'role': 'assistant', 'content': 'Hi there!'},
         ]
-        # Should not raise
-        run_compaction_pipeline(messages, current_round=1,
-                               task={'convId': 'test', 'config': {'model': 'gpt-4'}})
+        before = [dict(m) for m in messages]
+        result = run_compaction_pipeline(
+            messages, current_round=1,
+            task={'convId': 'test', 'config': {'model': 'gpt-4'}})
+        assert result is None
+        assert messages == before, 'a short transcript must not be compacted'
 
     def test_pipeline_with_tool_results(self):
         from lib.tasks_pkg.compaction import MICRO_HOT_TAIL, run_compaction_pipeline
@@ -586,9 +610,11 @@ class TestReactiveCompactCleanup:
         assert 'test_task_1' not in _reactive_compact_attempts
 
     def test_cleanup_noop_for_missing_key(self):
-        from lib.tasks_pkg.llm_fallback import cleanup_reactive_compact_state
-        # Should not raise
+        from lib.tasks_pkg.llm_fallback import (
+            _reactive_compact_attempts, cleanup_reactive_compact_state)
+        before = dict(_reactive_compact_attempts)
         cleanup_reactive_compact_state('nonexistent_task')
+        assert _reactive_compact_attempts == before
 
 
 # ═══════════════════════════════════════════════════════════
@@ -622,43 +648,62 @@ class TestPostCompactReinjection:
     def test_no_task_no_crash(self):
         from lib.tasks_pkg.compaction import _reinject_system_contexts_after_compact
         messages = [{'role': 'system', 'content': 'Hello'}]
-        # Should not raise even with no task
-        _reinject_system_contexts_after_compact(messages, task=None)
+        result = _reinject_system_contexts_after_compact(messages, task=None)
+        assert result is None
+        assert messages == [{'role': 'system', 'content': 'Hello'}]
 
-    def test_detects_missing_project_context(self):
+    def test_recomposes_after_compaction(self, tmp_path, monkeypatch):
         from lib.tasks_pkg.compaction import _reinject_system_contexts_after_compact
-        # Bare system message: CC static marker is missing → should re-inject
+        from lib.tasks_pkg import system_context
+        # A successful compaction always recomposes managed context.
         messages = [{'role': 'system', 'content': 'A bare system message without the CC static block'}]
+        calls = []
+
+        def _record_injection(in_messages, project_path, project_enabled,
+                              memory_enabled, search_enabled, swarm_enabled,
+                              **kwargs):
+            calls.append({
+                'messages': in_messages,
+                'project_path': project_path,
+                'project_enabled': project_enabled,
+                'memory_enabled': memory_enabled,
+                'search_enabled': search_enabled,
+                'swarm_enabled': swarm_enabled,
+                'kwargs': kwargs,
+            })
+
+        monkeypatch.setattr(system_context, '_inject_system_contexts',
+                            _record_injection)
         task = {
             'config': {
-                'projectPath': '/tmp/test_project',
+                'projectPath': str(tmp_path),
                 'memoryEnabled': False,
                 'searchMode': '',
                 'swarmEnabled': False,
             }
         }
-        # Should detect the missing CC marker and re-inject. May fail
-        # gracefully if the project path doesn't exist, but must not crash.
-        try:
-            _reinject_system_contexts_after_compact(messages, task=task)
-        except Exception:
-            pass  # OK — project path doesn't exist in test env
+        _reinject_system_contexts_after_compact(messages, task=task)
+        assert len(calls) == 1, 'compaction did not trigger composition'
+        assert calls[0]['messages'] is messages
+        assert calls[0]['project_path'] == str(tmp_path)
+        assert calls[0]['project_enabled'] is True
+        assert calls[0]['memory_enabled'] is False
+        assert calls[0]['search_enabled'] is False
+        assert calls[0]['swarm_enabled'] is False
 
-    def test_skips_when_project_context_present(self):
-        """When the CC static block is already in the system message, no
-        re-injection happens.  The trigger marker switched from
-        ``[PROJECT CO-PILOT MODE]`` (Layout B, where CLAUDE.md was in
-        system) to ``_CC_STATIC_MARKER`` (Layout A, where CLAUDE.md is
-        in a user _isMeta msg) when Layout B was retired — see
-        compaction.py and system_context.py.
-        """
+    def test_recomposes_even_when_static_block_survived(self, monkeypatch):
+        """A surviving static block does not prove tail evidence survived."""
         from lib.tasks_pkg.compaction import _reinject_system_contexts_after_compact
+        from lib.tasks_pkg import system_context
         from lib.tasks_pkg.system_context import _CC_STATIC_MARKER
-        # The CC marker present → system prompt already injected
         sys_text = (f'Some bare prompt with the marker: '
                     f'"{_CC_STATIC_MARKER}". Pretend this is the CC static '
                     f'block.')
         messages = [{'role': 'system', 'content': sys_text}]
+        calls = []
+        monkeypatch.setattr(
+            system_context, '_inject_system_contexts',
+            lambda *args, **kwargs: calls.append((args, kwargs)))
         task = {
             'config': {
                 'projectPath': '/tmp/test_project',
@@ -667,9 +712,8 @@ class TestPostCompactReinjection:
                 'swarmEnabled': False,
             }
         }
-        original_content = messages[0]['content']
         _reinject_system_contexts_after_compact(messages, task=task)
-        assert messages[0]['content'] == original_content
+        assert len(calls) == 1
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1804,6 +1848,64 @@ class TestForceCompactReportsSummaryFailure:
         assert any(m.get('role') == 'tool'
                    and m.get('name') == _layer2._COMPACT_TOOL_NAME
                    for m in msgs)
+
+    def test_metrics_include_injected_summary_pair(self, monkeypatch):
+        """The reported after-count describes the next request, including the
+        synthetic context_compact call/result, not the intermediate list before
+        that pair is appended."""
+        from lib.tasks_pkg.compaction import _estimate_total_tokens, _layer2
+        import lib.tasks_pkg.cache_tracking as cache_tracking
+
+        summary = 'dense summary payload ' * 120
+        monkeypatch.setattr(
+            _layer2, '_generate_query_aware_summary', lambda *a, **k: summary)
+        monkeypatch.setattr(_layer2, '_archive_transcript', lambda *a, **k: None)
+        recorded = []
+        monkeypatch.setattr(
+            cache_tracking, 'record_l2_compaction',
+            lambda conv_id, **kw: recorded.append((conv_id, kw)))
+
+        msgs = self._mk_messages()
+        for msg in msgs:
+            if isinstance(msg.get('content'), str):
+                msg['content'] += ' payload' * 400
+        task = {'id': 'metrics_pair', 'convId': 'conv_metrics_pair',
+                'config': {'model': 'gpt-4'}}
+
+        result = _layer2.force_compact_if_needed(
+            msgs, task=task, force=True, keep_recent_pairs=1,
+        )
+
+        assert result is True
+        assert recorded
+        actual_after = _estimate_total_tokens(msgs)
+        _, metrics = recorded[-1]
+        assert metrics['tokens_after'] == actual_after
+        assert metrics['msgs_after'] == len(msgs)
+        assert metrics['tokens_before'] > metrics['tokens_after']
+
+    def test_archive_records_the_actual_pipeline_round(self, monkeypatch):
+        from lib.tasks_pkg.compaction import _layer2
+
+        monkeypatch.setattr(
+            _layer2, '_generate_query_aware_summary',
+            lambda *args, **kwargs: 'working state')
+        archives = []
+        monkeypatch.setattr(
+            _layer2, '_archive_transcript',
+            lambda *args, **kwargs: archives.append(kwargs) or None)
+
+        msgs = self._mk_messages()
+        result = _layer2.force_compact_if_needed(
+            msgs,
+            task={'id': 'archive-round', 'convId': 'archive-round',
+                  'config': {'model': 'gpt-4'}},
+            force=True, keep_recent_pairs=1, _compaction_round=37,
+        )
+
+        assert result is True
+        assert archives
+        assert archives[0]['round_num'] == 37
 
 
 # ═══════════════════════════════════════════════════════════

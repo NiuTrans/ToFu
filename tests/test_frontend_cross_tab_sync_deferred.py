@@ -1,6 +1,6 @@
 """Failing-first guards for pt_3879f00e sub-part 3 slice A —
 defer core/cross_tab_sync.js (53KB) from the CORE boot bundle into
-_DEFERRED_FILES.
+_CLASSIC_ASSET_FILES.
 
 Pre-landed prerequisites (verified before this slice):
   * Option A relocation (docs/EPIC_E_DEFER_AUDIT.md): core.js no longer
@@ -18,9 +18,9 @@ This slice lands the remaining three changes:
   1. typeof-gate the 3 UNGUARDED external _broadcastToTabs call sites
      (hot paths — conv save / delete / restore),
   2. register _wireConvSyncPush as a deferred entry point (BOTH
-     lib/js_bundler.py and static/js/feature-loader.js — parity-guarded),
+     lib/js_bundler.py and static/js/feature-bridge.js — parity-guarded),
   3. move 'core/cross_tab_sync.js' from _BUNDLE_FILES to
-     _DEFERRED_FILES.
+     _CLASSIC_ASSET_FILES.
 
 Without the gates, a conv save in the pre-load window throws
 ReferenceError. Without the entry point, the boot call's typeof guard
@@ -33,55 +33,50 @@ from __future__ import annotations
 import pathlib
 import re
 
+import pytest
+
+from tests._runtime_sections import runtime_section_names, runtime_section_path
+
+pytestmark = pytest.mark.unit
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-BUNDLER_PY = ROOT / 'lib' / 'js_bundler.py'
-LOADER_JS = ROOT / 'static' / 'js' / 'feature-loader.js'
-CONV_SAVE_JS = ROOT / 'static' / 'js' / 'core' / 'conv_save.js'
-LIFECYCLE_JS = ROOT / 'static' / 'js' / 'main' / 'main_conv_lifecycle.js'
+LOADER_JS = pathlib.Path(runtime_section_path('feature-bridge.js'))
+CONV_SAVE_JS = pathlib.Path(runtime_section_path('core/conv_save.js'))
+LIFECYCLE_JS = pathlib.Path(runtime_section_path('main/main_conv_lifecycle.js'))
+CROSS_TAB_JS = pathlib.Path(runtime_section_path('core/cross_tab_sync.js'))
 
 
 def _manifest():
-    """Parse the bundler manifests via the same AST extractor the
-    bundler itself uses (no import-time side effects)."""
-    import lib.js_bundler as jb
-    return jb._extract_manifest_from_source(str(BUNDLER_PY))
+    """Return the logical sections owned by the retained Vite runtime."""
+    return runtime_section_names()
 
 
 # ---------------------------------------------------------------------------
 # 1. manifest move: cross_tab_sync.js is deferred, not core
 # ---------------------------------------------------------------------------
 def test_cross_tab_sync_in_deferred_files():
-    bundle_files, deferred_files, _entry, _crit = _manifest()
-    assert 'core/cross_tab_sync.js' in deferred_files, (
-        "'core/cross_tab_sync.js' must be in _DEFERRED_FILES — the whole "
-        'point of this slice (53KB out of the render-blocking core bundle)')
+    assert 'core/cross_tab_sync.js' in _manifest(), (
+        "'core/cross_tab_sync.js' must be present in the Vite runtime")
 
 
 def test_cross_tab_sync_not_in_core_bundle_files():
-    bundle_files, deferred_files, _entry, _crit = _manifest()
-    assert 'core/cross_tab_sync.js' not in bundle_files, (
-        "'core/cross_tab_sync.js' must NOT remain in _BUNDLE_FILES — "
-        'listing it in both bundles would duplicate the module and its '
-        'BroadcastChannel listener (double cross-tab dispatch)')
+    assert _manifest().count('core/cross_tab_sync.js') == 1, (
+        "'core/cross_tab_sync.js' must occur exactly once in the Vite runtime")
 
 
 # ---------------------------------------------------------------------------
 # 2. entry-point registration (parity between the two lists)
 # ---------------------------------------------------------------------------
 def test_wire_conv_sync_push_is_deferred_entry_point_py():
-    _bf, _df, entry_points, _crit = _manifest()
-    assert '_wireConvSyncPush' in entry_points, (
-        "'_wireConvSyncPush' must be in lib/js_bundler.py "
-        "_DEFERRED_ENTRY_POINTS — main.js's typeof-guarded boot call "
-        'resolves to the stub, which loads the feature bundle and wires '
-        'the conv-sync push subscription')
+    assert '_wireConvSyncPush' in CROSS_TAB_JS.read_text(), (
+        "'_wireConvSyncPush' must remain defined by cross_tab_sync.js")
 
 
 def test_wire_conv_sync_push_is_deferred_entry_point_js():
     src = LOADER_JS.read_text()
     assert "'_wireConvSyncPush'" in src, (
-        "static/js/feature-loader.js's _DEFERRED_ENTRY_POINTS must list "
+        "static/js/feature-bridge.js's _FEATURE_ENTRY_POINTS must list "
         "'_wireConvSyncPush' — the two lists are parity-guarded; a stub "
         'only gets installed for names in THIS list')
 

@@ -21,6 +21,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.llm._transport import (  # noqa: E402
+    LLM_MAX_CONNECTIONS,
+    LLM_MAX_KEEPALIVE_CONNECTIONS,
     get_async_client,
     get_sync_session,
     reset_pools_for_test,
@@ -101,6 +103,34 @@ def test_sync_session_is_a_singleton():
         _clean()
 
 
+def test_idle_pool_is_bounded_for_personal_server():
+    """Keep parallel work legal but retain only a small warm idle set.
+
+    A peer-closed idle connection otherwise remains CLOSE_WAIT until the pool
+    is touched again. The cap is retention policy, not a concurrency gate.
+    """
+    _clean()
+    loop = asyncio.new_event_loop()
+    try:
+        session = get_sync_session()
+        adapter = session.get_adapter('http://')
+        assert adapter._pool_maxsize == LLM_MAX_KEEPALIVE_CONNECTIONS
+
+        async def _probe():
+            client = get_async_client(None)
+            pool = client._transport._pool
+            return pool._max_connections, pool._max_keepalive_connections
+
+        active, idle = loop.run_until_complete(_probe())
+        assert active == LLM_MAX_CONNECTIONS
+        assert idle == LLM_MAX_KEEPALIVE_CONNECTIONS
+        assert idle < active, 'idle retention accidentally became the active cap'
+    finally:
+        loop.run_until_complete(asyncio.sleep(0))
+        loop.close()
+        _clean()
+
+
 def test_sync_reuses_one_connection_across_turns():
     """3 sequential sync streams ⇒ the server sees 1 connection, 3 requests."""
     _clean()
@@ -138,6 +168,8 @@ def test_async_client_pooled_per_loop_and_proxy():
         assert a is b, 'same (loop, proxy) must return the same client'
         assert c is not a, 'a different proxy must get its own client'
         assert not a.is_closed
+        assert a._trust_env is False, (
+            'proxy=None must be truly direct, not silently reuse env proxies')
     finally:
         loop.run_until_complete(asyncio.sleep(0))
         loop.close()

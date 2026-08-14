@@ -8,6 +8,7 @@ Public API
   parse_body(force=False)                              → dict (always)
   require_str(body, field, *, strip=True, max_len=None, allow_empty=False)
   optional_str(body, field, *, default='', strip=True, max_len=None)
+  query_str(args, field, *, default='', strip=True)
   require_int(body, field, *, min=None, max=None)
   optional_int(body, field, *, default=None, min=None, max=None)
   require_bool(body, field)
@@ -36,6 +37,7 @@ using their own ad-hoc checks; this module covers the 90% case of
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from typing import Any, Optional
 
 # Encoded tokens that betray a still-percent-encoded value: a path separator
@@ -75,7 +77,7 @@ def decode_proxy_path_arg(name: str = 'path', *,
     """
     from urllib.parse import unquote
 
-    from flask import request
+    from quart import request
     raw = (request.args.get(name) or '').strip()
     if not raw:
         return default
@@ -134,16 +136,14 @@ def parse_body(*, force: bool = False) -> dict:
 
     Notes
     -----
-    Production routes run under the Flask→Quart shim from ``server.py``
-    which patches ``request.get_json()`` to be sync-safe. This function
-    invokes it directly. In test environments, install the shim before
-    importing routes (see ``tests/test_request_parser.py`` for the
-    pattern).
+    Legacy synchronous routes run in Quart's executor and cross the request
+    body boundary through :mod:`lib.quart_sync`. New async routes should use
+    :func:`async_parse_body`.
     """
-    from flask import request
+    from lib.quart_sync import request_json
     from lib.log import get_logger
     try:
-        data = request.get_json(force=force, silent=True)
+        data = request_json(force=force, silent=True)
     except Exception as e:
         # Outside-request-context, malformed Content-Type, etc. Don't
         # silently swallow — log so misuse is debuggable. We still return
@@ -170,29 +170,10 @@ async def async_parse_body(*, force: bool = False) -> dict:
     Same contract as ``parse_body``: always returns a dict; empty body → {};
     top-level non-dict JSON → raises ``BadRequest``.
     """
-    import inspect
-
-    from flask import request
+    from quart import request
     from lib.log import get_logger
     try:
-        # server.py's flask→quart shim monkey-patches Request.get_json to be
-        # SYNC-safe (returns the parsed VALUE, not a coroutine). Calling that in
-        # an async handler would strand an un-awaited coroutine and yield an
-        # empty body. The shim stashes the genuine async original on the patched
-        # method as ``_genuine_async_get_json``.
-        #
-        # NOTE: ``request`` is a LocalProxy — ``type(request)`` is the proxy
-        # class (no get_json), so we read the attribute off the BOUND method
-        # ``request.get_json`` (which the proxy forwards to the real Request),
-        # not off ``type(request)``.
-        _genuine = getattr(request.get_json, '_genuine_async_get_json', None)
-        if _genuine is not None:
-            data = await _genuine(request._get_current_object()
-                                  if hasattr(request, '_get_current_object') else request,
-                                  force=force, silent=True)
-        else:
-            result = request.get_json(force=force, silent=True)
-            data = await result if inspect.iscoroutine(result) else result
+        data = await request.get_json(force=force, silent=True)
     except Exception as e:
         get_logger(__name__).debug(
             '[request_parser] async_parse_body get_json raised %s: %s',
@@ -243,6 +224,20 @@ def optional_str(body: dict, field: str, *,
         raise BadRequest(f'{field} too long (max {max_len} chars)',
                           field=field)
     return val
+
+
+def query_str(args: Mapping[str, Any], field: str, *,
+              default: str = '', strip: bool = True) -> str:
+    """Read one optional query-string value from an injected mapping.
+
+    Flask/Quart query values are strings, but focused adapters and tests may
+    supply generic mappings. Non-string values therefore use ``default``
+    instead of leaking coercion policy into each route module.
+    """
+    val = args.get(field)
+    if not isinstance(val, str):
+        return default
+    return val.strip() if strip else val
 
 
 # ── Integer accessors ──────────────────────────────────────────
@@ -383,7 +378,7 @@ def optional_dict(body: dict, field: str, *,
 
 __all__ = [
     'BadRequest', 'parse_body', 'async_parse_body', 'decode_proxy_path_arg',
-    'require_str', 'optional_str',
+    'require_str', 'optional_str', 'query_str',
     'require_int', 'optional_int',
     'require_bool', 'optional_bool',
     'require_list', 'optional_list',

@@ -806,18 +806,17 @@ def _agent_safe_preseed_url(server_url: str, target: str) -> str:
     first-run connect dialog is suppressed because an attachment exists
     (measured 2026-08-02: the first agent installer was built from a
     server-local request and shipped ``preseed http://127.0.0.1:15000``).
-    Baking NOTHING makes the first run ask for the connect line — one
-    paste, always right. The full target is untouched (byte-identical):
-    its primary install case is the server's own machine (local_source),
-    where a loopback preseed is exactly correct.
+    Baking NOTHING lets the personalized download attachment remain the one
+    source of truth. The full target is untouched: its primary install case
+    is the server's own machine (local_source), where a loopback preseed is
+    exactly correct.
     """
     if target != 'agent' or not server_url:
         return server_url
     if store.is_loopback_url(server_url):
         logger.warning('[WinBuild] dropping loopback preseed %r for the '
                        'agent target — a remote controlled machine would '
-                       'attach to its own loopback and never ask for a '
-                       'connect line', server_url)
+                       'attach to its own loopback', server_url)
         return ''
     return server_url
 
@@ -878,6 +877,14 @@ def wrap_payload(payload_tar: str, version: str, sha: str, log_fh, *,
     if not os.path.isfile(out_file):
         raise RuntimeError(f'makensis produced no {name}')
 
+    # Reserve the fixed download-time attachment slot AFTER makensis has
+    # finished. The installer reads it from $EXEPATH; the route replaces it
+    # while streaming, so the user receives one directly runnable .exe (no
+    # sidecar JSON and no ZIP).
+    if target == 'agent':
+        from .agent_installer import append_empty_slot
+        append_empty_slot(out_file)
+
     dest = os.path.join(store._store_dir(), name)
     shutil.copy2(out_file, dest)
     size = os.path.getsize(dest)
@@ -890,6 +897,8 @@ def wrap_payload(payload_tar: str, version: str, sha: str, log_fh, *,
         'filename': name, 'size': size, 'sha256': h.hexdigest(),
         'source': 'built', 'version': version, 'kind': nt['kind'],
         'fetched_at': time.time(), 'git_sha': sha,
+        **({'attach_format': 'nsis-overlay-v1'}
+           if target == 'agent' else {}),
         **({'preseed': {'url': server_url}} if server_url else {}),
     })
     logger.info('[WinBuild] installer built: %s (%d bytes)', name, size)

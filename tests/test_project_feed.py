@@ -45,6 +45,7 @@ def _clean_feed(flask_app):
     with flask_app.app_context():
         db = get_thread_db(DOMAIN_CHAT)
         db.execute('DELETE FROM project_events')
+        db.execute("DELETE FROM scoped_sequences WHERE namespace='project_events'")
         db.commit()
     yield
 
@@ -475,7 +476,7 @@ def test_NC1_seq_constant_breaks_monotonicity(flask_app):
 
     _patch_restore(
         _FEED_SRC,
-        "seq = (row['m'] if row and row['m'] is not None else 0) + 1",
+        "seq = allocate_scoped_sequence(\n                db, 'project_events', project_path)",
         "seq = 1  # NC-1",
         run,
     )

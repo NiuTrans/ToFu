@@ -42,9 +42,6 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import quart as _quart  # noqa: E402
-sys.modules['flask'] = _quart
-
 import pytest  # noqa: E402
 
 pytestmark = pytest.mark.unit
@@ -182,7 +179,6 @@ def _neuter_legacy_and_subrun():
     try:
         code = (
             "import sys; sys.path.insert(0, %r)\n"
-            "import quart; sys.modules['flask']=quart\n"
             "import tests.test_queue_msgid_preservation as T\n"
             "try:\n"
             "    T.test_legacy_path_preserves_msgId()\n"

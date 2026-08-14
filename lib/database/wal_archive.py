@@ -25,6 +25,7 @@ import os
 import shutil
 import sys
 import threading
+import uuid
 
 from lib.env_compat import getenv_compat
 from lib.log import get_logger
@@ -33,6 +34,30 @@ logger = get_logger(__name__)
 
 _DEFAULT_TIMEOUT_S = 30
 _FAILCOUNT_FILE = '.tofu_wal_archive_fails'
+
+
+def _bounded_env_int(name, default, minimum, maximum):
+    raw = getenv_compat(name, default=str(default))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning('[WAL-Archive] invalid %s=%r; using %d',
+                       name, raw, default)
+        return default
+    if value < minimum or value > maximum:
+        clamped = min(max(value, minimum), maximum)
+        logger.warning('[WAL-Archive] %s=%d outside [%d,%d]; clamped to %d',
+                       name, value, minimum, maximum, clamped)
+        return clamped
+    return value
+
+
+def _safe_segment_name(name):
+    """PG supplies a basename via %f; never let a caller escape wal/."""
+    return bool(name and name not in ('.', '..')
+                and os.path.basename(name) == name
+                and '/' not in name and '\\' not in name
+                and '\x00' not in name)
 
 
 def _wal_dir():
@@ -55,7 +80,7 @@ def _copy_with_timeout(src, dst, timeout_s):
     next attempt (idempotent temp name per pid).
     """
     result = {'ok': False, 'err': None}
-    tmp = dst + '.tmp.%d' % os.getpid()
+    tmp = dst + '.tmp.%d.%s' % (os.getpid(), uuid.uuid4().hex)
 
     def _do_copy():
         try:
@@ -63,7 +88,20 @@ def _copy_with_timeout(src, dst, timeout_s):
             if os.path.getsize(tmp) != os.path.getsize(src):
                 result['err'] = 'size mismatch after copy'
                 return
+            # Returning success lets PostgreSQL recycle the source WAL.  The
+            # archive copy must therefore cross a real durability boundary,
+            # not merely reach the kernel/FUSE page cache.
+            with open(tmp, 'rb') as copied:
+                os.fsync(copied.fileno())
             os.replace(tmp, dst)   # atomic publish
+            try:
+                directory_fd = os.open(os.path.dirname(dst), os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError as exc:
+                logger.debug('[WAL-Archive] directory fsync unsupported: %s', exc)
             result['ok'] = True
         except Exception as e:  # noqa: BLE001 — reported via result, logged by caller
             logger.debug('[WAL-Archive] copy %s→%s failed in worker: %s', src, dst, e)
@@ -104,9 +142,13 @@ def _bump_failcount(wal_dir, reset=False):
 
 def archive_segment(src_path, seg_name):
     """Archive one completed WAL segment. Returns process exit code (0 ok)."""
-    timeout_s = int(getenv_compat('TOFU_DB_WAL_ARCHIVE_TIMEOUT',
-                                  default=str(_DEFAULT_TIMEOUT_S)))
-    max_fails = int(getenv_compat('TOFU_DB_WAL_ARCHIVE_MAX_FAILS', default='10'))
+    if not _safe_segment_name(seg_name):
+        logger.critical('[WAL-Archive] refusing unsafe segment name %r', seg_name)
+        return 1
+    timeout_s = _bounded_env_int(
+        'TOFU_DB_WAL_ARCHIVE_TIMEOUT', _DEFAULT_TIMEOUT_S, 1, 600)
+    max_fails = _bounded_env_int(
+        'TOFU_DB_WAL_ARCHIVE_MAX_FAILS', 10, 1, 10_000)
     try:
         wal_dir = _wal_dir()
     except Exception as e:
@@ -146,6 +188,9 @@ def archive_segment(src_path, seg_name):
 
 def restore_segment(seg_name, dst_path):
     """Restore one WAL segment for PITR replay. Returns exit code (0 ok)."""
+    if not _safe_segment_name(seg_name):
+        logger.warning('[WAL-Restore] refusing unsafe segment name %r', seg_name)
+        return 1
     try:
         wal_dir = _wal_dir()
     except Exception as e:

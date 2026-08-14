@@ -41,3 +41,14 @@ from . import advanced
 from .advanced import *  # noqa: F401,F403
 
 build_facade(__all__, advanced)
+
+# ── Native protocol/page/session/adapter surface (protocol v2) ──
+from . import access, adapters, page, protocol, sessions
+from .access import *  # noqa: F401,F403
+from .adapters import *  # noqa: F401,F403
+from .page import *  # noqa: F401,F403
+from .protocol import *  # noqa: F401,F403
+from .sessions import *  # noqa: F401,F403
+
+for _module in (protocol, access, sessions, page, adapters):
+    build_facade(__all__, _module)

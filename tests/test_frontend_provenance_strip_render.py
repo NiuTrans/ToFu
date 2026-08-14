@@ -7,7 +7,7 @@ static/js/ui/tool_rounds.js) showed three rendering defects (user screenshot):
 
   1. Memory descriptions were clipped server-side to 120 chars, so the
      expanded panel could never show the full text. (Backend fix in
-     lib/memory/prefetch.py — the frontend now just renders whatever it gets,
+     lib/memory/prefetch/ — the frontend now just renders whatever it gets,
      so this harness asserts the strip emits the FULL description it is given.)
   2. Preference bullets carry lightweight markdown (`**bold**`, `*italic*`,
      `` `code` ``). They were piped through bare escapeHtml(), so the literal

@@ -28,7 +28,8 @@ _LOCKED_OUT_TTL_S = 900
 _LOCKED_OUT_MAX = 32
 
 
-def mark_poll(client_id=None, chrome_major=0, user_id='', ext_version=''):
+def mark_poll(client_id=None, chrome_major=0, user_id='', ext_version='',
+              protocol_version=None, capabilities=None, profile=''):
     """Record a poll from a client (or anonymous legacy client).
 
     Args:
@@ -48,7 +49,16 @@ def mark_poll(client_id=None, chrome_major=0, user_id='', ext_version=''):
             one. A poll that SUCCEEDED also clears any locked-out note for
             the client — the cure (re-downloaded preseeded zip) arrived.
     """
+    from lib.browser.protocol import normalize_capabilities
+
     now = time.time()
+    try:
+        negotiated_version = max(1, int(protocol_version or 1))
+    except (ValueError, TypeError) as exc:
+        logger.debug('[Browser] invalid protocol version; using v1: %s', exc)
+        negotiated_version = 1
+    negotiated_caps = sorted(normalize_capabilities(
+        capabilities, protocol_version=negotiated_version))
     _state._last_poll_time = now
     if client_id:
         with _clients_lock:
@@ -56,7 +66,10 @@ def mark_poll(client_id=None, chrome_major=0, user_id='', ext_version=''):
                 _clients[client_id] = {'first_seen': now, 'last_poll': now, 'name': '',
                                        'poll_count': 1, 'chrome_major': chrome_major or 0,
                                        'user_id': str(user_id or ''),
-                                       'ext_version': str(ext_version or '')}
+                                       'ext_version': str(ext_version or ''),
+                                       'protocol_version': negotiated_version,
+                                       'capabilities': negotiated_caps,
+                                       'profile': str(profile or '')[:80]}
                 logger.info('[Browser] New client registered: %s (total clients: %d)',
                             client_id[:12], len(_clients))
             else:
@@ -66,6 +79,14 @@ def mark_poll(client_id=None, chrome_major=0, user_id='', ext_version=''):
                     _clients[client_id]['chrome_major'] = chrome_major
                 if ext_version:
                     _clients[client_id]['ext_version'] = str(ext_version)
+                # wait_for_commands() records the same poll a second time
+                # without protocol fields. Preserve the capability handshake
+                # from the HTTP entry instead of downgrading it to v1.
+                if protocol_version is not None or capabilities is not None:
+                    _clients[client_id]['protocol_version'] = negotiated_version
+                    _clients[client_id]['capabilities'] = negotiated_caps
+                if profile:
+                    _clients[client_id]['profile'] = str(profile)[:80]
                 # Re-registration may arrive on a different credential; the
                 # latest authenticated identity wins (same as desktop).
                 _clients[client_id]['user_id'] = str(user_id or '')
@@ -148,7 +169,10 @@ def get_connected_clients(user_id=None):
              'chrome_major': info.get('chrome_major', 0),
              'first_seen': info.get('first_seen', 0),
              'user_id': info.get('user_id', ''),
-             'ext_version': info.get('ext_version', '')}
+             'ext_version': info.get('ext_version', ''),
+             'protocol_version': int(info.get('protocol_version') or 1),
+             'capabilities': list(info.get('capabilities') or []),
+             'profile': info.get('profile', '')}
             for cid, info in _clients.items()
             if now - info['last_poll'] < 15
         ]

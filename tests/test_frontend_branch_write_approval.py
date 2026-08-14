@@ -30,6 +30,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -37,8 +38,11 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-BRANCH_STREAM = os.path.join(ROOT, 'static', 'js', 'branch_stream.js')
-BRANCH_JS = os.path.join(ROOT, 'static', 'js', 'branch.js')
+sys.path.insert(0, HERE)
+from _runtime_sections import runtime_section_path  # noqa: E402
+
+BRANCH_STREAM = runtime_section_path('branch_stream.js')
+BRANCH_JS = runtime_section_path('branch.js')
 
 
 def _read(path: str) -> str:

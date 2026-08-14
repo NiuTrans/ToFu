@@ -1,0 +1,104 @@
+{
+  "key": "glm",
+  "brand": "glm",
+  "category": "official",
+  "name": "GLM (Zhipu AI)",
+  "base_url": "https://open.bigmodel.cn/api/paas/v4",
+  "balance_url": "https://open.bigmodel.cn/api/paas/v4/dashboard/billing/subscription",
+  "models": [
+    {
+      "model_id": "glm-5.3",
+      "capabilities": ["text", "thinking"],
+      "rpm": 60,
+      "context_window": 1000000,
+      "pricing": {
+        "input": 3.45,
+        "output": 13.81,
+        "currency": "USD",
+        "cacheWriteMul": 1.0,
+        "cacheReadMul": 0.1,
+        "name": "GLM-5.3"
+      }
+    },
+    {
+      "model_id": "glm-5.2",
+      "capabilities": ["text", "thinking"],
+      "rpm": 60,
+      "context_window": 1000000,
+      "pricing": {
+        "input": 3.45,
+        "output": 13.81,
+        "currency": "USD",
+        "cacheWriteMul": 1.0,
+        "cacheReadMul": 0.1,
+        "name": "GLM-5.2"
+      }
+    },
+    {
+      "model_id": "glm-5.1",
+      "capabilities": ["text", "thinking"],
+      "rpm": 60,
+      "context_window": 1000000,
+      "pricing": {
+        "input": 3.45,
+        "output": 13.81,
+        "currency": "USD",
+        "cacheWriteMul": 1.0,
+        "cacheReadMul": 0.1,
+        "name": "GLM-5.1"
+      }
+    },
+    {
+      "model_id": "glm-5",
+      "capabilities": ["text", "thinking"],
+      "rpm": 60,
+      "pricing": {
+        "input": 3.45,
+        "output": 13.81,
+        "currency": "USD",
+        "cacheWriteMul": 1.0,
+        "cacheReadMul": 0.1,
+        "name": "GLM-5"
+      }
+    },
+    {
+      "model_id": "glm-4.7",
+      "capabilities": ["text", "thinking", "cheap"],
+      "rpm": 60,
+      "pricing": {
+        "input": 0.69,
+        "output": 0.69,
+        "currency": "USD",
+        "cacheWriteMul": 1.0,
+        "cacheReadMul": 0.1,
+        "name": "GLM-4.7"
+      }
+    },
+    {
+      "model_id": "glm-4.5-air",
+      "capabilities": ["text", "cheap"],
+      "rpm": 120,
+      "pricing": {
+        "input": 0.28,
+        "output": 1.1,
+        "currency": "USD",
+        "cacheWriteMul": 1.0,
+        "cacheReadMul": 0.1,
+        "name": "GLM-4.5 Air"
+      }
+    },
+    {
+      "model_id": "glm-4.5-flash",
+      "capabilities": ["text", "cheap"],
+      "rpm": 200,
+      "pricing": {
+        "input": 0.0,
+        "output": 0.0,
+        "currency": "USD",
+        "cacheWriteMul": 0.0,
+        "cacheReadMul": 0.0,
+        "name": "GLM-4.5 Flash"
+      }
+    }
+  ]
+}

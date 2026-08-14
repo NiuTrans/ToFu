@@ -41,11 +41,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = runtime_sections_dir()
 
 
 def _node_deps_available() -> bool:
@@ -133,7 +135,13 @@ function makeStreamingDom() {
   calls.syncConversationToServer = 0; calls.finalizeStreaming = 0;
   conversations.length = 0;
   const am = { role: 'assistant', content: 'the complete answer', thinking: '', toolRounds: [], _msgId: 'm1' };
-  conversations.push({ id: 'c1', title: 'T', messages: [{ role: 'user', content: 'hi' }, am], activeTaskId: 't1' });
+  conversations.push({
+    id: 'c1', title: 'T', messages: [{ role: 'user', content: 'hi' }, am],
+    activeTaskId: 't1',
+    _authoritativeActiveTaskIds: new Set(['t1', 'other-live-task']),
+    _authoritativeAttachableTaskIds: new Set(['t1', 'other-live-task']),
+    _vuCarrierTaskIds: new Set(['unrelated-carrier']),
+  });
   activeConvId = 'c1';
   activeStreams.set('c1', { controller: {} });
   makeStreamingDom();
@@ -143,6 +151,18 @@ function makeStreamingDom() {
     calls.finalizeStreaming_msg === am);
   check('normal_content_preserved', am.content === 'the complete answer');
   check('normal_clears_activeTaskId', conversations[0].activeTaskId === null);
+  check('normal_retires_terminal_authoritative_task',
+    !conversations[0]._authoritativeActiveTaskIds.has('t1'));
+  check('normal_preserves_other_authoritative_tasks',
+    conversations[0]._authoritativeActiveTaskIds.has('other-live-task'));
+  check('normal_retires_terminal_attach_target',
+    !conversations[0]._authoritativeAttachableTaskIds.has('t1'));
+  check('normal_preserves_other_attach_targets',
+    conversations[0]._authoritativeAttachableTaskIds.has('other-live-task'));
+  check('normal_preserves_unrelated_carrier',
+    conversations[0]._vuCarrierTaskIds.has('unrelated-carrier'));
+  check('normal_records_terminal_tombstone',
+    conversations[0]._terminalTaskIds.has('t1'));
 }
 
 // ── 2. OFFLINE FALLBACK: server died; trailing assistant holds only the
@@ -168,6 +188,26 @@ function makeStreamingDom() {
   check('offline_local_cache_written', calls.ConvCache_put >= 1);
 }
 
+// ── 3. A best-effort message cleanup throws AFTER the stream map is removed.
+//        The terminal pin must already be cleared, or reconnect loops will
+//        resurrect this completed task forever. ──
+{
+  conversations.length = 0;
+  const am = { role: 'assistant', content: '', thinking: '', toolRounds: [], _msgId: 'm1' };
+  const c = { id: 'c1', title: 'T', messages: [{ role: 'user', content: 'hi' }, am], activeTaskId: 't1' };
+  conversations.push(c);
+  activeConvId = 'c1';
+  activeStreams.set('c1', { controller: {} });
+  makeStreamingDom();
+  win._streamBoundToMsg = global._streamBoundToMsg = () => false;
+  win._classifyGhostTailJS = global._classifyGhostTailJS = () => { throw new Error('malformed legacy tail'); };
+  let threw = false;
+  try { finishStream('c1'); } catch (_e) { threw = true; }
+  check('cleanup_fault_injected', threw);
+  check('cleanup_fault_stream_removed', !activeStreams.has('c1'));
+  check('cleanup_fault_pin_still_cleared', c.activeTaskId === null && !!c._activeTaskClearedAt);
+}
+
 console.log(out.join('\n'));
 """
 
@@ -190,7 +230,7 @@ def _run():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'finishStream-no-put failures:\n' + output
-    assert output.count('PASS') >= 8, f'expected >=8 PASS lines, got:\n{output}'
+    assert output.count('PASS') >= 17, f'expected >=17 PASS lines, got:\n{output}'
 
     # ── Source guards: the full-conv PUT + its 3 skip-guards are GONE. ──
     with open(os.path.join(JS_DIR, 'ui', 'stream_lifecycle.js'), encoding='utf-8') as f:

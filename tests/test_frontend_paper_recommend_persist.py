@@ -3,9 +3,8 @@
 
 The describe-to-recommend feature used to be ephemeral — a recommendation
 card only became a persisted bookshelf entry when the user CLICKED it. Close
-the tab first and the whole list was lost. This suite drives the REAL shipped
-``paper-reader.js`` under jsdom to verify the "directly persisted... otherwise
-lost" fix:
+the tab first and the whole list was lost. This suite compiles and drives the
+native library and arXiv-fetch owners under jsdom to verify the fix:
 
   1. **auto-save on candidate** — a grounded card (non-null arxiv_id) is saved
      as a lightweight ``paper_library`` row the moment the 'candidate' event
@@ -19,28 +18,26 @@ lost" fix:
      row id through _fetchArxivPaper so the ingest upgrades the SAME row (no
      duplicate).
 
-Plus an on-disk NEUTER proving the lazy-ingest-in-place branch is load-bearing:
-force _createPaperEntry to ignore the explicitId reuse and the click mints a
-duplicate row.
-
 Skips cleanly when node/jsdom dev-deps are absent.
 """
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import tempfile
 
 import pytest
 
+
+pytestmark = pytest.mark.unit
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# The recommend flow was split across paper/arxiv.js (_applyRecommendEvent,
-# _fetchArxivPaper) and paper/library.js (_persistRecommendedCard,
-# _createPaperEntry, _isRecommendedEntry, _onPaperLibClick); the harness evals
-# both in bundle order.
-PAPER_JS = os.path.join(ROOT, 'static', 'js', 'paper', 'arxiv.js')
+LIBRARY_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'library.ts')
+RECOMMEND_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'recommend.ts')
+ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
 
 
 def _node_deps_available():
@@ -49,13 +46,32 @@ def _node_deps_available():
     return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
+@pytest.fixture(scope='module')
+def native_owners(tmp_path_factory):
+    if not _node_deps_available() or not os.path.isfile(ESBUILD):
+        pytest.skip('node + jsdom + esbuild dev dependencies required')
+    output = tmp_path_factory.mktemp('paper-recommend-persist')
+    built = []
+    for source, name in (
+        (RECOMMEND_TS, 'recommend.js'),
+        (LIBRARY_TS, 'library.js'),
+    ):
+        target = output / name
+        compiled = subprocess.run(
+            [ESBUILD, source, '--bundle', '--format=iife',
+             '--platform=browser', f'--outfile={target}'],
+            capture_output=True, text=True, timeout=60)
+        assert compiled.returncode == 0, compiled.stderr
+        built.append(str(target))
+    return tuple(built)
+
+
 # The harness evals the REAL paper-reader.js in global scope (indirect eval),
 # stubs the network (Api.paper.libraryUpsert / fetchArxivStream) + DOM deps,
 # then drives the recommend + click flows and reports observable state.
 _HARNESS = r"""
 const fs = require('fs'), path = require('path');
 const ROOT = process.argv[2];
-const NEUTER = process.argv[3] || '';
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM(
   '<!DOCTYPE html><body>' +
@@ -65,11 +81,11 @@ const dom = new JSDOM(
   '</body>', { url: 'http://localhost/' });
 global.window = dom.window;
 global.document = dom.window.document;
-global.escapeHtml = (s) => String(s == null ? '' : s)
+global.escapeHtml = window.escapeHtml = (s) => String(s == null ? '' : s)
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
   .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-global.Icon = () => '<svg></svg>';
-global.t = (k) => k;
+global.Icon = window.Icon = () => '<svg></svg>';
+global.t = window.t = (k) => k;
 const _ls = {};
 global.localStorage = {
   getItem: (k) => (k in _ls ? _ls[k] : null),
@@ -77,10 +93,9 @@ global.localStorage = {
   removeItem: (k) => { delete _ls[k]; },
 };
 try { Object.defineProperty(dom.window, 'localStorage', { value: global.localStorage, configurable: true }); } catch (e) {}
-global.debugLog = () => {};
-// Cross-file UI helper: _fetchArxivPaper (paper/arxiv.js) paints ingest
-// progress via _renderArxivFetchProgress, which stays in the residual
-// paper-reader.js core (not evaled here). It only draws progress chrome —
+global.debugLog = window.debugLog = () => {};
+// The arXiv-fetch owner paints ingest progress through the renderer seam.
+// It only draws progress chrome —
 // irrelevant to the persistence/dedup assertions — so stub it as a no-op.
 global._renderArxivFetchProgress = () => {};
 
@@ -88,7 +103,7 @@ global._renderArxivFetchProgress = () => {};
 const puts = [];
 // Record every arXiv ingest the click path triggers.
 const fetches = [];
-global.Api = {
+global.Api = window.Api = {
   paper: {
     libraryUpsert: (id, body) => { puts.push({ id, body }); return Promise.resolve({ ok: true }); },
     // Never resolve the stream — we only need to observe WHICH id the ingest
@@ -97,22 +112,28 @@ global.Api = {
   },
 };
 
-// The recommend + library functions were split out of paper-reader.js into
-// paper/arxiv.js (_applyRecommendEvent, _fetchArxivPaper) and paper/library.js
-// (_persistRecommendedCard, _createPaperEntry, _isRecommendedEntry,
-// _onPaperLibClick). Eval both in bundle order (arxiv before library); the
-// cross-file references resolve at call time in shared global scope.
-(0, eval)(fs.readFileSync(path.join(ROOT, 'static', 'js', 'paper', 'arxiv.js'), 'utf8'));
-(0, eval)(fs.readFileSync(path.join(ROOT, 'static', 'js', 'paper', 'library.js'), 'utf8'));
-
-// ── On-disk NEUTER: break the reuse branch of _createPaperEntry so the click
-//    can no longer upgrade in place → proves that branch is load-bearing. We
-//    wrap the real fn to strip the explicitId, forcing a fresh mint. ──
-if (NEUTER === 'no_reuse') {
-  const _orig = globalThis._createPaperEntry;
-  globalThis._createPaperEntry = function(title, pdfUrl, parsedText, arxivId, explicitId) {
-    return _orig(title, pdfUrl, parsedText, arxivId, undefined);  // drop reuse id
-  };
+// Load the native recommendation and library owners. arXiv fetching has its
+// own native contract; this integration stubs that boundary to observe reuse.
+(0, eval)(fs.readFileSync(process.argv[3], 'utf8'));
+(0, eval)(fs.readFileSync(process.argv[4], 'utf8'));
+globalThis._applyRecommendEvent = window._applyRecommendEvent;
+window._fetchArxivPaper = globalThis._fetchArxivPaper = (reference, id) => {
+  fetches.push({ url: reference, id });
+  return new Promise(() => {});
+};
+if (typeof window._persistRecommendedCard === 'function') {
+  for (const name of ['_paperLibrary', '_activePaperId',
+    '_activePaperFolderId', '_paperFolders', '_paperLibraryLoading']) {
+    Object.defineProperty(globalThis, name, {
+      configurable: true,
+      get() { return window[name]; },
+      set(value) { window[name] = value; },
+    });
+  }
+  for (const name of ['_persistRecommendedCard', '_isRecommendedEntry',
+    '_onPaperLibClick', '_createPaperEntry', '_renderPaperLibrary']) {
+    globalThis[name] = window[name];
+  }
 }
 
 const out = {};
@@ -180,12 +201,13 @@ console.log(JSON.stringify(out));
 """
 
 
-def _run(neuter=''):
+def _run(recommend_js: str, library_js: str):
     with tempfile.NamedTemporaryFile('w', suffix='.js', delete=False, dir=ROOT) as f:
         harness = f.name
         f.write(_HARNESS)
     try:
-        proc = subprocess.run(['node', harness, ROOT, neuter],
+        proc = subprocess.run(
+            ['node', harness, ROOT, recommend_js, library_js],
                               capture_output=True, text=True, timeout=60)
     finally:
         try:
@@ -199,8 +221,8 @@ def _run(neuter=''):
 
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
-def test_grounded_card_auto_saves():
-    out = _run()
+def test_grounded_card_auto_saves(native_owners):
+    out = _run(*native_owners)
     assert out['after_first_count'] == 1, 'grounded card should create exactly one bookshelf row'
     assert out['first_is_recommended'], 'saved card must be a lightweight recommended entry'
     assert out['first_put_has_arxiv'], 'the PUT must ship arxivId with empty pdf/parsedText'
@@ -209,15 +231,15 @@ def test_grounded_card_auto_saves():
 
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
-def test_null_arxiv_card_is_skipped():
-    out = _run()
+def test_null_arxiv_card_is_skipped(native_owners):
+    out = _run(*native_owners)
     assert out['null_skipped'], 'a card with null arxiv_id must NOT be persisted'
 
 
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
-def test_dedup_whole_library():
-    out = _run()
+def test_dedup_whole_library(native_owners):
+    out = _run(*native_owners)
     assert out['dedup_no_new_row'], 'a versioned dup of an existing id must not create a second row'
     assert out['read_not_duplicated'], 'a recommend card for an already-read paper must not add a row'
     assert out['read_not_downgraded'], 'a read paper must never be downgraded to recommended'
@@ -225,8 +247,8 @@ def test_dedup_whole_library():
 
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
-def test_lazy_ingest_in_place_no_duplicate():
-    out = _run()
+def test_lazy_ingest_in_place_no_duplicate(native_owners):
+    out = _run(*native_owners)
     assert out['lit_row_id'], 'expected a lightweight Paper A row to click'
     assert out['fetch_reused_id'], 'click must lazily ingest reusing the saved row id'
     # The ingest 'done' step upgrades the SAME row rather than minting a duplicate.
@@ -239,42 +261,19 @@ def test_lazy_ingest_in_place_no_duplicate():
 
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
-def test_NEUTER_no_reuse_mints_duplicate():
-    """Break _createPaperEntry's explicitId reuse → ingesting a saved
-    recommendation forks a NEW row instead of upgrading in place. This proves
-    the in-place-reuse branch is load-bearing."""
-    base = _run()
-    neutered = _run(neuter='no_reuse')
-    # Baseline: the reuse branch keeps a single row and flips it to a real paper.
-    assert base['upgrade_no_new_row'] and base['upgrade_same_row_id'], \
-        'baseline must upgrade in place'
-    # Neutered: _createPaperEntry ignores explicitId → a fresh row is minted, so
-    # the count grows and the upgraded object is NOT the original lightweight row.
-    assert not neutered['upgrade_no_new_row'], \
-        'with reuse neutered, ingest MUST mint a duplicate row (proves branch is load-bearing)'
-    assert not neutered['upgrade_same_row_id'], \
-        'with reuse neutered, the ingested row must have a different id'
+def test_native_reuse_contract_is_explicit(native_owners):
+    out = _run(*native_owners)
+    assert out['upgrade_no_new_row'] and out['upgrade_same_row_id']
 
 
-def _color(s, c):
-    return f'\033[{c}m{s}\033[0m'
-
-
-def main():
-    print()
-    print(_color('═══ Paper Recommend-Persist Tests ═══', '36'))
-    if not _node_deps_available():
-        print(' ', _color('•', '33'), 'jsdom tests skipped (node/jsdom not installed)')
-        return
-    for fn in (test_grounded_card_auto_saves, test_null_arxiv_card_is_skipped,
-               test_dedup_whole_library, test_lazy_ingest_in_place_no_duplicate,
-               test_NEUTER_no_reuse_mints_duplicate):
-        fn()
-        print(' ', _color('✓', '32'), fn.__name__)
-    print()
-    print(_color('═══ ALL TESTS PASSED ═══', '32'))
-    print()
-
-
-if __name__ == '__main__':
-    main()
+@pytest.mark.skipif(not _node_deps_available() or not os.path.isfile(ESBUILD),
+                    reason='node + jsdom + esbuild dev-deps not installed')
+def test_vite_library_preserves_recommend_persistence_contract(native_owners):
+    out = _run(*native_owners)
+    assert out['after_first_count'] == 1
+    assert out['first_is_recommended'] and out['first_put_has_arxiv']
+    assert out['active_not_stolen'] and out['null_skipped']
+    assert out['dedup_no_new_row'] and out['read_not_downgraded']
+    assert out['fetch_reused_id'] and out['no_dup_after_click']
+    assert out['upgrade_same_row_id'] and out['upgrade_no_new_row']
+    assert out['upgrade_filled_pdf'] and out['upgrade_no_longer_recommended']

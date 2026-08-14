@@ -62,49 +62,75 @@ def _msg():
 
 
 class _Cursor:
-    def __init__(self, rowcount):
+    def __init__(self, rowcount, row=None):
         self.rowcount = rowcount
+        self._row = row
+
+    def fetchone(self):
+        return self._row
 
 
 class _FakeTxnConn:
     def __init__(self, current_rev=3):
         self.current_rev = current_rev
 
-    async def execute(self, sql, params=()):
+    def execute(self, sql, params=()):
         s = ' '.join(sql.split())
         if s.startswith('UPDATE conversations SET messages='):
-            return _Cursor(1 if params[2] == self.current_rev else 0)
+            return _Cursor(1 if params[-1] == self.current_rev else 0)
+        if s.startswith('SELECT rev FROM conversations'):
+            return _Cursor(0, {'rev': self.current_rev})
         return _Cursor(1)
 
+    def begin(self):
+        pass
 
-class _FakeTxnCtx:
-    def __init__(self, conn):
-        self.conn = conn
+    def commit(self):
+        pass
 
-    async def __aenter__(self):
-        return self.conn
-
-    async def __aexit__(self, *exc):
-        return False
+    def rollback(self):
+        pass
 
 
 def _patch_db(monkeypatch, *, fresh_per_call=True, rev=3):
-    """Patch the async DB seams the backfill imports at call time.
+    """Patch the repository seams the backfill imports at call time.
 
-    ``fresh_per_call``: return a NEW copy of the messages each fetch so
+    ``fresh_per_call``: return a NEW copy of the messages each load so
     concurrent convs don't share mutable segment dicts.
     """
     import lib.database as dbmod
-    import lib.database.aio as aiomod
+    import lib.database.conversation_repository as repo
 
-    async def _fetchone(sql, params=(), **kw):
+    def _load(_db_conn, conv_id, **_kwargs):
         msgs = [_msg()] if fresh_per_call else _shared
-        return {'messages': json.dumps(msgs), 'rev': rev}
+        return repo.ConversationSnapshot(
+            metadata={
+                'id': conv_id,
+                'user_id': 1,
+                'rev': rev,
+                'msg_count': len(msgs),
+                'messages_rows_rev': None,
+                'updated_at': 1,
+                'settings': '{}',
+            },
+            # Match a real repository load: callers may mutate the returned
+            # message tree without changing the stored fixture for a sibling
+            # conversation.
+            messages=json.loads(json.dumps(msgs)),
+            source='legacy_blob',
+        )
+
+    def _replace(_db_conn, _conv_id, _messages, *, expected_rev=None,
+                 **_kwargs):
+        if expected_rev is not None and int(expected_rev) != rev:
+            return repo.ConversationWriteResult(False, None)
+        return repo.ConversationWriteResult(True, rev)
 
     _shared = [_msg()]
-    monkeypatch.setattr(dbmod, 'async_fetchone', _fetchone, raising=False)
-    monkeypatch.setattr(aiomod, 'async_transaction',
-                        lambda: _FakeTxnCtx(_FakeTxnConn(rev)), raising=False)
+    monkeypatch.setattr(dbmod, 'get_thread_db',
+                        lambda *_a, **_k: _FakeTxnConn(rev))
+    monkeypatch.setattr(repo, 'load_conversation', _load)
+    monkeypatch.setattr(repo, 'replace_messages', _replace)
 
 
 def _reset_semaphore():
@@ -261,8 +287,11 @@ def _server_src():
 
 
 def test_loopwatch_emits_structured_stall_audit():
-    src = _server_src()
-    assert "audit_log('event_loop_stall'" in src, \
+    import inspect
+    from lib.server_loop_watchdog import LoopWatchdog
+
+    src = inspect.getsource(LoopWatchdog._stall_watch)
+    assert 'audit_log(' in src and "'event_loop_stall'" in src, \
         'LoopWatch must emit a structured event_loop_stall audit entry'
     assert '_extract_loop_top_frame(' in src, \
         'the stall path must name the culprit top frame'
@@ -270,7 +299,11 @@ def test_loopwatch_emits_structured_stall_audit():
 
 
 def test_loop_blocking_guard_is_optin_and_rate_limited():
-    src = _server_src()
+    import inspect
+    from lib.server_loop_debug import LoopDebugGuard, SlowCallbackRateLimit
+
+    src = inspect.getsource(LoopDebugGuard)
+    src += inspect.getsource(SlowCallbackRateLimit)
     # The sub-stall detector exists...
     assert 'slow_callback_duration' in src and 'set_debug(True)' in src, \
         'the on-loop blocking guard (slow-callback detector) must be present'

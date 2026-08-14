@@ -11,12 +11,46 @@ Covers:
 """
 
 import unittest
+from pathlib import Path
 
 from lib.orchestration import (
     build_autopilot_definition, build_endpoint_definition,
     first_executed_role, initial_phase_for_flow,
 )
 from lib.orchestration_endpoint_adapter import EndpointEventAdapter
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class ExecutionProjectionOwnershipTest(unittest.TestCase):
+    def test_projection_has_one_physical_owner_outside_validator(self):
+        projection = (ROOT / 'lib/orchestration/_execution_projection.py').read_text()
+        validator = (ROOT / 'lib/orchestration/_validate.py').read_text()
+        engine = (ROOT / 'lib/orchestration_engine.py').read_text()
+        replan = (ROOT / 'lib/orchestration_replan_runtime.py').read_text()
+        adapter = (ROOT / 'lib/orchestration_endpoint_adapter.py').read_text()
+        inspection = (ROOT / 'lib/orchestration/definition_inspection.py').read_text()
+
+        self.assertIn('def render_role_brief(', projection)
+        self.assertIn('def initial_phase_for_flow(', projection)
+        self.assertNotIn('def render_role_brief(', validator)
+        self.assertNotIn('def initial_phase_for_flow(', validator)
+        self.assertIn(
+            'from lib.orchestration._execution_projection import render_role_brief',
+            replan,
+        )
+        self.assertNotIn('render_role_brief', engine)
+        self.assertIn(
+            'from lib.orchestration._execution_projection import _PLANNER_ROLES',
+            adapter,
+        )
+        self.assertIn(
+            'from lib.orchestration._execution_projection import initial_phase_for_flow',
+            inspection,
+        )
+        self.assertLess(projection.count('\n'), 140)
+        self.assertLess(validator.count('\n'), 400)
 
 
 class FirstRoleTest(unittest.TestCase):

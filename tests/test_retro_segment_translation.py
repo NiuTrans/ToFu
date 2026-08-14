@@ -19,6 +19,7 @@ fake DB (shared by the segment read AND the commit's CAS write) makes the end-to
 end stamp observable without a real database.
 """
 
+import copy
 import json
 
 import lib.translate.runtime as rt
@@ -65,8 +66,12 @@ class _FakeConn:
         if s.startswith('SELECT messages FROM conversations'):
             self._pending = ('sel1', None)
             return self
+        if s.startswith('SELECT rev FROM conversations'):
+            self._pending = ('rev', None)
+            return self
         if s.startswith('UPDATE conversations SET messages'):
-            new_messages, new_updated, _cid, _uid, cas_rev = params
+            new_messages, new_updated = params[:2]
+            cas_rev = params[-1]
             if cas_rev != self.rev:
                 return _Cursor(0)               # CAS miss
             self.messages_json = new_messages
@@ -83,9 +88,17 @@ class _FakeConn:
                         rev=self.rev)
         if kind == 'sel1':
             return _Row(messages=self.messages_json)
+        if kind == 'rev':
+            return _Row(rev=self.rev)
         return None
 
+    def begin(self):
+        pass
+
     def commit(self):
+        pass
+
+    def rollback(self):
         pass
 
 
@@ -105,6 +118,26 @@ def _install(monkeypatch, conn, register_task=True):
     monkeypatch.setattr(rt, '_translate_freetext', _fake_tf)
     import lib.database as _db
     monkeypatch.setattr(_db, 'get_thread_db', lambda domain=None: conn)
+    import lib.database.conversation_repository as repo
+
+    def _load(_db_conn, conv_id, **_kwargs):
+        if conv_id != conn.conv_id:
+            return None
+        return repo.ConversationSnapshot(
+            metadata={'rev': conn.rev},
+            messages=json.loads(conn.messages_json),
+            source='test_repository')
+
+    def _replace(_db_conn, conv_id, messages, *, expected_rev=None, **_kwargs):
+        if conv_id != conn.conv_id or expected_rev != conn.rev:
+            return repo.ConversationWriteResult(applied=False, rev=None)
+        conn.messages_json = json.dumps(copy.deepcopy(messages))
+        conn.rev += 1
+        return repo.ConversationWriteResult(applied=True, rev=conn.rev)
+
+    monkeypatch.setattr(repo, 'load_conversation', _load)
+    monkeypatch.setattr(repo, 'replace_messages', _replace)
+    monkeypatch.setattr(repo, 'conversation_rows_authoritative', lambda: False)
     import lib.push as _push
     monkeypatch.setattr(_push, 'push_event', lambda *a, **k: None, raising=False)
     if register_task:

@@ -41,11 +41,13 @@ import re
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-CONV_JS = os.path.join(ROOT, 'static', 'js', 'core', 'conversations.js')
+CONV_JS = runtime_section_path('core/conversations.js')
 
 
 def _keep_local_region(src: str) -> str:

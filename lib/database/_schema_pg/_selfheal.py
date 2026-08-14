@@ -24,6 +24,14 @@ logger = get_logger(__name__)
 # Keep this to load-bearing columns whose absence makes a subsystem throw
 # (a broad audit belongs in the parity test, not the boot path).
 _CRITICAL_COLUMNS = {
+    # Row-store reads name this marker directly. A version-current database
+    # missing it must rerun the guarded conversations ALTER instead of failing
+    # every window read with UndefinedColumn.
+    'conversations': ('messages_rows_rev',),
+    # Window reads select this column directly. NULL values are valid during
+    # online backfill, but a physically missing column must force DDL repair.
+    'conversation_messages': (
+        'meta_light', 'translation_state', 'message_ts', 'billing_meta'),
     'project_tasks': (
         'blocked_until', 'block_count', 'block_reason',
         'wait_paths', 'dispatch_target', 'write_set', 'blocked_by',
@@ -126,17 +134,53 @@ def _backfill_search_text(conn):
     """
     import json
     from lib.conversations import build_search_text
+    from lib.database._access_policy import rows_authority_configured
 
     cur = conn._conn.cursor()
-    cur.execute("SELECT id, messages FROM conversations WHERE search_text = '' AND msg_count > 0")
+    authority = rows_authority_configured()
+    if authority:
+        cur.execute(
+            "SELECT id, msg_count, rev, messages_rows_rev FROM conversations "
+            "WHERE search_text = '' AND msg_count > 0")
+    else:
+        cur.execute(
+            "SELECT id, messages FROM conversations "
+            "WHERE search_text = '' AND msg_count > 0")
     rows = cur.fetchall()
     updated = 0
-    for row_id, messages_raw in rows:
-        try:
-            messages = json.loads(messages_raw) if isinstance(messages_raw, str) else messages_raw
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.debug('[DB] Failed to parse messages for conv %s: %s', row_id, e)
-            continue
+    for row in rows:
+        row_id = row[0]
+        if authority:
+            expected_count = int(row[1] or 0)
+            rev = int(row[2] or 0)
+            marker = -1 if row[3] is None else int(row[3])
+            cur.execute(
+                'SELECT meta FROM conversation_messages '
+                'WHERE conv_id = %s ORDER BY seq', (row_id,))
+            message_rows = cur.fetchall()
+            if marker != rev or len(message_rows) != expected_count:
+                raise RuntimeError(
+                    'normalized transcript is incomplete during PostgreSQL '
+                    f'search backfill: conv={row_id}')
+            messages = []
+            try:
+                for message_row in message_rows:
+                    raw = message_row[0]
+                    messages.append(
+                        json.loads(raw) if isinstance(raw, str) else raw)
+            except (json.JSONDecodeError, TypeError) as e:
+                raise RuntimeError(
+                    'invalid normalized transcript during PostgreSQL search '
+                    f'backfill: conv={row_id}') from e
+        else:
+            messages_raw = row[1]
+            try:
+                messages = (json.loads(messages_raw)
+                            if isinstance(messages_raw, str)
+                            else messages_raw)
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.debug('[DB] Failed to parse messages for conv %s: %s', row_id, e)
+                continue
         st = build_search_text(messages)
         if st:
             cur.execute(

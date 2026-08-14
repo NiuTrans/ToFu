@@ -2,30 +2,10 @@
 
 import asyncio
 import os
-import sys
 import tempfile
 import unittest
 
 import pytest
-
-
-def _install_shim():
-    import quart
-    sys.modules['flask'] = quart
-    for attr in ('json', 'globals', 'helpers', 'wrappers', 'ctx'):
-        qs = f'quart.{attr}'
-        if qs in sys.modules:
-            sys.modules[f'flask.{attr}'] = sys.modules[qs]
-    from quart.wrappers import Request as _QR
-    import inspect
-    if inspect.iscoroutinefunction(_QR.get_json):
-        _orig = _QR.get_json
-
-        def _sync(self, *a, **kw):
-            import asyncio as _a
-            coro = _orig(self, *a, **kw)
-            return _a.run(coro)
-        _QR.get_json = _sync
 
 
 def _new_loop_run(coro):
@@ -46,7 +26,6 @@ class UsageRouteTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        _install_shim()
         cls._tmp = tempfile.TemporaryDirectory()
 
         from lib import api_keys
@@ -64,7 +43,8 @@ class UsageRouteTest(unittest.TestCase):
         os.environ['TUNNEL_TOKEN'] = 'test-tunnel-no-real'
 
         from quart import Quart
-        cls.app = Quart(__name__)
+        cls.app = Quart(__name__, static_folder=None)
+        cls.app.config.setdefault('PROVIDE_AUTOMATIC_OPTIONS', True)
         cls.app.config['TESTING'] = True
         from routes.api_v1.auth import (
             attach_rate_headers, bearer_auth_before_request,
@@ -178,6 +158,9 @@ class UsageRouteTest(unittest.TestCase):
             self.assertIn('# TYPE tofu_usage_requests_total counter', body)
             self.assertIn('tofu_usage_tokens_total', body)
             self.assertIn('tofu_active_keys', body)
+            self.assertIn('tofu_db_commits_total', body)
+            self.assertIn('tofu_sqlite_writer_waiting', body)
+            self.assertIn('tofu_sqlite_writer_timeouts_total', body)
             # Should be valid Prometheus exposition — every metric line
             # has either `name value` or `name{labels} value`.
             for line in body.splitlines():

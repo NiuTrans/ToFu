@@ -34,6 +34,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -41,7 +42,10 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+sys.path.insert(0, HERE)
+from _runtime_sections import runtime_section, runtime_section_path  # noqa: E402
+
+SEND_BUTTON = runtime_section_path('ui/send_button.js')
 
 
 def _node_available() -> bool:
@@ -54,7 +58,7 @@ def _run_node(name: str, harness_src: str, min_pass: int) -> str:
         f.write(harness_src)
     try:
         proc = subprocess.run(
-            ['node', harness, os.path.join(JS_DIR, 'ui', 'send_button.js')],
+            ['node', harness, SEND_BUTTON],
             capture_output=True, text=True, timeout=60,
         )
     finally:
@@ -240,20 +244,24 @@ def test_user_stop_rollback_marks_pending_sync_on_poor_network():
 # Wiring ratchets (source scans over the three pipelines + the button seam).
 # ═══════════════════════════════════════════════════════════════════
 def _src(rel: str) -> str:
-    with open(os.path.join(JS_DIR, rel), encoding='utf-8') as f:
-        return f.read()
+    return runtime_section(rel)
 
 
 def test_send_pipeline_startup_stop_wiring():
     src = _src(os.path.join('main', 'main_send_pipeline.js'))
-    assert 'conv._genStartCtrl = _sendAbortCtrl;' in src, \
-        'send must stamp the startup controller on the conv for the POST window'
-    assert 'conv._genStartStop === _sendAbortCtrl' in src, \
-        'send catch must fire user-stop on the OWNER-TAGGED flag'
+    lifecycle = os.path.join(ROOT, 'frontend', 'src', 'core', 'send-startup.ts')
+    with open(lifecycle, encoding='utf-8') as f:
+        lifecycle_src = f.read()
+    assert 'createSendStartupLease(conv, { timeoutMs: 90000 })' in src, \
+        'send must delegate startup ownership to the typed lifecycle module'
+    assert '_sendStart.stoppedByUser()' in src, \
+        'send catch must read the typed OWNER-TAGGED user-stop decision'
     assert '_userStopDuringStartup(conv, convId, { userMsg, userMsgIdx, rescue: true })' in src, \
         'send user-stop branch must delegate to the shared rollback helper'
-    assert 'if (conv._genStartCtrl === _sendAbortCtrl || conv._genStartStop === _sendAbortCtrl)' in src, \
-        'send finally must identity-clear only ITS OWN markers (a newer send survives)'
+    assert '_sendStart.finish();' in src, \
+        'send finally must release the typed lifecycle lease'
+    assert 'owner._genStartCtrl === controller || stoppedByUser()' in lifecycle_src, \
+        'the lease must identity-clear only ITS OWN markers (a newer send survives)'
 
 
 def test_regen_pipeline_startup_stop_wiring():

@@ -41,6 +41,7 @@ fully-downloaded ``.part`` file.
 
 from __future__ import annotations
 
+import ntpath
 import os
 import time
 
@@ -51,6 +52,7 @@ from lib.runtime_paths import data_root
 logger = get_logger(__name__)
 
 _MANIFEST_NAME = 'manifest.json'
+_RESERVED_NAMES = frozenset({_MANIFEST_NAME, _MANIFEST_NAME + '.lock'})
 
 
 def _store_dir() -> str:
@@ -71,6 +73,39 @@ def _store_dir() -> str:
 
 def _manifest_path() -> str:
     return os.path.join(_store_dir(), _MANIFEST_NAME)
+
+
+def artifact_path(filename: str) -> str | None:
+    """Return the local path for one safe, direct-child artifact name.
+
+    Release metadata is remote input.  A glob such as ``*win64.exe`` also
+    matches ``../Tofu-win64.exe``, so basename validation must happen before
+    either the downloader or the pruning path touches the filesystem.
+    Windows drive/UNC forms are rejected even when the server currently runs
+    on POSIX, keeping manifests portable across installations.
+    """
+    if not isinstance(filename, str) or not filename or filename != filename.strip():
+        return None
+    if (filename in ('.', '..') or filename.casefold() in _RESERVED_NAMES
+            or filename.endswith('.part') or '/' in filename
+            or '\\' in filename or '\x00' in filename
+            or any(ord(ch) < 32 for ch in filename)):
+        return None
+    if (os.path.isabs(filename) or ntpath.isabs(filename)
+            or ntpath.splitdrive(filename)[0]
+            or os.path.basename(filename) != filename
+            or ntpath.basename(filename) != filename):
+        return None
+    try:
+        # Leave room for the downloader's temporary ``.part`` suffix on
+        # filesystems with the usual 255-byte component limit.
+        if len(os.fsencode(filename)) > 240:
+            return None
+    except (TypeError, UnicodeEncodeError) as error:
+        logger.debug('[DesktopDist] rejected unencodable artifact name %r: %s',
+                     filename, error)
+        return None
+    return os.path.join(_store_dir(), filename)
 
 
 def load_manifest() -> dict:
@@ -103,7 +138,12 @@ def save_manifest(m: dict) -> None:
 
 def artifacts() -> dict:
     """``{filename: entry}`` for every recorded artifact."""
-    return load_manifest().get('artifacts') or {}
+    raw = load_manifest().get('artifacts') or {}
+    return {
+        name: entry for name, entry in raw.items()
+        if isinstance(entry, dict) and artifact_path(name) is not None
+        and entry.get('filename') == name
+    }
 
 
 def resolve_file(filename: str) -> str | None:
@@ -113,22 +153,24 @@ def resolve_file(filename: str) -> str | None:
     manifest-key match plus an on-disk existence check. Anything containing
     path material is refused before the filesystem is consulted.
     """
-    if (not filename or '/' in filename or '\\' in filename
-            or filename in ('.', '..')):
+    path = artifact_path(filename)
+    if path is None:
         return None
     entry = artifacts().get(filename)
     if not entry:
         return None
-    path = os.path.join(_store_dir(), filename)
-    return path if os.path.isfile(path) else None
+    # Serving through a symlink would let a writable artifact directory
+    # expose an arbitrary host file.  Mirrored/built artifacts are regular
+    # files installed with os.replace, so symlinks are never legitimate.
+    return path if os.path.isfile(path) and not os.path.islink(path) else None
 
 
 def record_artifact(entry: dict) -> None:
     """Insert/replace one artifact entry (atomic read-modify-write)."""
-    name = entry.get('filename')
-    if not name:
-        logger.warning('[DesktopDist] record_artifact called without a '
-                       'filename: %r', entry)
+    name = entry.get('filename') if isinstance(entry, dict) else None
+    if artifact_path(name) is None:
+        logger.warning('[DesktopDist] refused unsafe artifact filename: %r',
+                       name)
         return
 
     def _mut(m):
@@ -151,26 +193,86 @@ def remove_not_in(keep_names, *, sources=('mirrored',)) -> list:
     BUILT artifact is never pruned by the mirror just because no release
     asset shares its name. Returns the removed filenames.
     """
-    m = load_manifest()
-    arts = m.get('artifacts') or {}
     keep = set(keep_names or [])
-    removed = []
-    for name, entry in list(arts.items()):
-        if name in keep:
-            continue
-        if (entry or {}).get('source', 'mirrored') not in sources:
-            continue
-        path = os.path.join(_store_dir(), name)
-        try:
-            if os.path.isfile(path):
-                os.remove(path)
-        except OSError as e:
-            logger.warning('[DesktopDist] could not remove stale artifact '
-                           '%s: %s', path, e)
-        del arts[name]
-        removed.append(name)
+    source_set = frozenset(sources or ())
+    removed: list[str] = []
+    retired_files: dict[str, tuple[int, int, int, int]] = {}
+
+    def _remove_entries(manifest):
+        if not isinstance(manifest, dict):
+            manifest = {}
+        arts = manifest.get('artifacts')
+        if not isinstance(arts, dict):
+            arts = {}
+            manifest['artifacts'] = arts
+        for name, entry in list(arts.items()):
+            if name in keep:
+                continue
+            source = ((entry or {}).get('source', 'mirrored')
+                      if isinstance(entry, dict) else 'mirrored')
+            if source not in source_set:
+                continue
+            path = artifact_path(name)
+            if path is not None:
+                try:
+                    stat = os.lstat(path)
+                    retired_files[name] = (
+                        stat.st_dev, stat.st_ino, stat.st_size,
+                        stat.st_mtime_ns)
+                except FileNotFoundError as error:
+                    logger.debug('[DesktopDist] stale artifact already absent '
+                                 '%s: %s', path, error)
+                    pass
+                except OSError as error:
+                    logger.warning('[DesktopDist] could not inspect stale '
+                                   'artifact %s: %s', path, error)
+            del arts[name]
+            removed.append(name)
+        return manifest if removed else None
+
+    # Commit metadata first.  If the manifest write fails, no artifact has
+    # been removed and the previous store remains fully servable.
+    update_json_atomic(_manifest_path(), _remove_entries,
+                       default={'artifacts': {}})
+
+    if retired_files:
+        def _delete_still_retired(manifest):
+            current = (manifest.get('artifacts')
+                       if isinstance(manifest, dict) else {})
+            if not isinstance(current, dict):
+                current = {}
+            for name, identity in retired_files.items():
+                # A concurrent record won the name back: never delete it.
+                if name in current:
+                    continue
+                path = artifact_path(name)
+                if path is None:
+                    continue
+                try:
+                    stat = os.lstat(path)
+                    current_identity = (
+                        stat.st_dev, stat.st_ino, stat.st_size,
+                        stat.st_mtime_ns)
+                    # The downloader publishes via os.replace.  If the inode
+                    # changed after the metadata transaction, this is a new
+                    # artifact awaiting its own record_artifact call.
+                    if current_identity == identity:
+                        os.remove(path)
+                except FileNotFoundError as error:
+                    logger.debug('[DesktopDist] retired artifact already absent '
+                                 '%s: %s', path, error)
+                    pass
+                except OSError as error:
+                    logger.warning('[DesktopDist] could not remove stale '
+                                   'artifact %s: %s', path, error)
+            return None
+
+        # Reacquire the manifest lock for the deletion check, closing the
+        # record_artifact/remove_not_in race across threads and processes.
+        update_json_atomic(_manifest_path(), _delete_still_retired,
+                           default={'artifacts': {}})
+
     if removed:
-        save_manifest(m)
         logger.info('[DesktopDist] pruned stale artifacts: %s', removed)
     return removed
 
@@ -205,8 +307,9 @@ def find_for_platform(os_key: str, arch: str = '',
                  and a.get('kind', 'full') == kind
                  and a.get('os') == _os and a.get('arch') == _arch
                  and a.get('filename')
-                 and os.path.isfile(
-                     os.path.join(_store_dir(), a['filename']))]
+                and (artifact_path(a['filename']) is not None)
+                and os.path.isfile(artifact_path(a['filename']))
+                and not os.path.islink(artifact_path(a['filename']))]
         if not cands:
             continue
         cands.sort(key=lambda a: (
@@ -252,15 +355,24 @@ def _version_key(version) -> tuple:
 
 def mark_refresh(tag: str, *, error: str | None = None) -> None:
     """Record a mirror outcome. ``error=None`` means full success."""
-    m = load_manifest()
-    if tag:
-        m['tag'] = tag
-    if error is None:
-        m['refreshed_at'] = time.time()
-        m['last_error'] = None
-    else:
-        m['last_error'] = {'at': time.time(), 'error': error}
-    save_manifest(m)
+    now = time.time()
+
+    def _mutate(manifest):
+        if not isinstance(manifest, dict):
+            manifest = {}
+        if not isinstance(manifest.get('artifacts'), dict):
+            manifest['artifacts'] = {}
+        if tag:
+            manifest['tag'] = tag
+        if error is None:
+            manifest['refreshed_at'] = now
+            manifest['last_error'] = None
+        else:
+            manifest['last_error'] = {'at': now, 'error': error}
+        return manifest
+
+    update_json_atomic(_manifest_path(), _mutate,
+                       default={'artifacts': {}})
 
 
 def manifest_age_s() -> float | None:
@@ -281,7 +393,7 @@ def last_error_age_s() -> float | None:
 
 
 __all__ = [
-    '_store_dir', 'load_manifest', 'save_manifest', 'artifacts',
+    '_store_dir', 'artifact_path', 'load_manifest', 'save_manifest', 'artifacts',
     'is_loopback_url',
     'resolve_file', 'record_artifact', 'remove_not_in', 'find_for_platform',
     'mark_refresh', 'manifest_age_s', 'last_error_age_s',

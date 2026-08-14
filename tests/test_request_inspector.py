@@ -40,9 +40,10 @@ _TARGET = os.path.join(ROOT, 'lib', 'tasks_pkg', 'request_inspector.py')
 
 def _seed(task_id, events):
     """Persist (type, payload) events with sequential ids; returns task_id."""
-    from lib.tasks_pkg.event_log import append_persistent_event
+    from lib.tasks_pkg.event_log import append_persistent_event, flush_pending
     for eid, (etype, payload) in enumerate(events):
         append_persistent_event(task_id, eid, payload | {'type': etype})
+    flush_pending(task_id)  # write-behind lane: drain before asserting
     return task_id
 
 
@@ -160,6 +161,103 @@ def test_attempts_join_multi_call_round(task_a):
     assert [a['tag'] for a in r2['attempts']] == ['R2']
 
 
+def test_operation_count_dedupes_cumulative_snapshots():
+    """Two cumulative snapshots must report two operations, not 1 + 2."""
+    tid = f'ri-ops-{uuid.uuid4().hex[:8]}'
+    first = _snap('request', 1, n_msgs=0, tools=0)
+    first['messages'] = [
+        {'role': 'assistant', 'tool_calls': [
+            {'id': 'call-1', 'function': {'name': 'web_search',
+                                          'arguments': '{}'}},
+        ]},
+    ]
+    second = _snap('request', 2, n_msgs=0, tools=0)
+    second['messages'] = first['messages'] + [
+        {'role': 'tool', 'tool_call_id': 'call-1', 'content': 'done'},
+        {'role': 'assistant', 'tool_calls': [
+            {'id': 'call-2', 'function': {'name': 'read_files',
+                                          'arguments': '{}'}},
+        ]},
+    ]
+    _seed(tid, [
+        ('messages_snapshot', first),
+        ('messages_snapshot', second),
+    ])
+    try:
+        from lib.tasks_pkg.request_inspector import fold_request_log
+        fold = fold_request_log(tid)
+        assert fold['operationCount'] == 2
+        assert fold['operationCountAvailable'] is True
+        assert fold['operationCountApproximate'] is False
+    finally:
+        _cleanup(tid)
+
+
+def test_operation_count_dedupes_same_id_across_endpoint_turns():
+    """A historical call copied into another phase is still one operation."""
+    tid = f'ri-ops-turn-{uuid.uuid4().hex[:8]}'
+    planner = _snap('request', 1, n_msgs=0, tools=0)
+    planner['turn'] = 'planning'
+    planner['messages'] = [
+        {'role': 'assistant', 'tool_calls': [
+            {'id': 'shared-call', 'function': {'name': 'search',
+                                               'arguments': '{}'}},
+        ]},
+    ]
+    worker = _snap('request', 1, n_msgs=0, tools=0)
+    worker['turn'] = 'working'
+    worker['messages'] = planner['messages']
+    _seed(tid, [
+        ('messages_snapshot', planner),
+        ('messages_snapshot', worker),
+    ])
+    try:
+        from lib.tasks_pkg.request_inspector import fold_request_log
+        fold = fold_request_log(tid)
+        assert fold['operationCount'] == 1
+        assert fold['operationCountApproximate'] is False
+    finally:
+        _cleanup(tid)
+
+
+def test_operation_count_supports_anthropic_and_marks_missing_ids():
+    tid = f'ri-ops-a-{uuid.uuid4().hex[:8]}'
+    snap = _snap('request', 1, n_msgs=0, tools=0)
+    snap['messages'] = [
+        {'role': 'assistant', 'content': [
+            {'type': 'tool_use', 'id': 'toolu-1', 'name': 'search',
+             'input': {}},
+            {'type': 'tool_use', 'name': 'legacy_without_id', 'input': {}},
+        ]},
+        {'role': 'user', 'content': [
+            {'type': 'tool_result', 'tool_use_id': 'toolu-1',
+             'content': 'done'},
+        ]},
+    ]
+    _seed(tid, [('messages_snapshot', snap)])
+    try:
+        from lib.tasks_pkg.request_inspector import fold_request_log
+        fold = fold_request_log(tid)
+        assert fold['operationCount'] == 2
+        assert fold['operationCountApproximate'] is True
+    finally:
+        _cleanup(tid)
+
+
+def test_operation_count_is_unavailable_without_message_snapshots():
+    """Structural lifecycle events alone cannot prove that zero tools ran."""
+    tid = f'ri-ops-none-{uuid.uuid4().hex[:8]}'
+    _seed(tid, [('endpoint_phase', {'phase': 'working'})])
+    try:
+        from lib.tasks_pkg.request_inspector import fold_request_log
+        fold = fold_request_log(tid)
+        assert fold['eventsAvailable'] is True
+        assert fold['operationCount'] == 0
+        assert fold['operationCountAvailable'] is False
+    finally:
+        _cleanup(tid)
+
+
 def test_legacy_rows_classified_by_shim(task_legacy):
     from lib.tasks_pkg.request_inspector import fold_request_log
     fold = fold_request_log(task_legacy)
@@ -185,6 +283,7 @@ def test_unknown_task_honest_empty():
     assert fold['eventsAvailable'] is False
     assert fold['requests'] == [] and fold['states'] == []
     assert fold['requestCount'] == 0
+    assert fold['operationCountAvailable'] is False
 
 
 def test_streaming_noise_never_hides_recent_rounds():
@@ -221,6 +320,8 @@ def test_streaming_noise_never_hides_recent_rounds():
     append_persistent_event(
         tid, base + 2,
         _usage_event(88, 'R88')[1] | {'type': 'round_usage'})
+    from lib.tasks_pkg.event_log import flush_pending
+    flush_pending(tid)  # write-behind lane: drain before asserting
     try:
         rows = _read_events(tid)
         assert rows, 'no rows returned'
@@ -336,8 +437,15 @@ def test_list_conv_tasks_exact_tallies(task_a, task_legacy):
 
 def test_routes_registered_on_v1_blueprint():
     from quart import Quart
+    from werkzeug.datastructures import ImmutableDict
 
     from routes.api_v1.tasks import api_v1_tasks_bp
+    # Quart 0.19's defaults predate the Flask 3.1 key read by
+    # ``add_url_rule``. Production's app factory supplies it; this bare test
+    # app needs the same compatibility default before construction.
+    if 'PROVIDE_AUTOMATIC_OPTIONS' not in Quart.default_config:
+        Quart.default_config = ImmutableDict({**Quart.default_config,
+                                              'PROVIDE_AUTOMATIC_OPTIONS': True})
     app = Quart(__name__)
     app.register_blueprint(api_v1_tasks_bp)
     rules = {str(r) for r in app.url_map.iter_rules()}
@@ -461,6 +569,39 @@ def test_swarm_agent_emission_end_to_end():
         agent2 = SimpleNamespace(**{**agent.__dict__,
                                     'parent_task': {'id': ''}})
         assert _emit_request_snapshot(agent2, 1) == ''
+    finally:
+        _cleanup(iid, parent_id)
+
+
+def test_swarm_agent_emission_continues_after_persisted_tail():
+    """A rehydrated agent must append, not restart at event id zero."""
+    from types import SimpleNamespace
+
+    from lib.swarm.agent import _emit_request_snapshot
+    from lib.tasks_pkg.event_log import flush_pending, read_events
+    from lib.tasks_pkg.request_inspector import get_request_payload
+
+    parent_id = f'ri-resume-{uuid.uuid4().hex[:8]}'
+    iid = f'{parent_id}#agent:agent-browser-visual'
+    _seed(iid, [('messages_snapshot', _snap('request', 1, n_msgs=2))])
+    agent = SimpleNamespace(
+        parent_task={'id': parent_id, 'convId': 'c1', 'provider_id': ''},
+        spec=SimpleNamespace(role='browser', id='visual'),
+        agent_id='agent-browser-visual',
+        model='m-agent',
+        thinking_enabled=True,
+        messages=[{'role': 'user', 'content': 'resumed'}],
+    )
+    try:
+        assert _emit_request_snapshot(agent, 1) == iid
+        flush_pending(iid)
+        rows = read_events(iid)
+        assert [r['event_id'] for r in rows] == [0, 1]
+        # Storage may delta-project the raw second row. The public inspector
+        # read must rebuild it and apply last-write-wins for this resumed
+        # logical round.
+        payload = get_request_payload(iid, 1, turn='swarm-agent')
+        assert payload['messages'][0]['content'] == 'resumed'
     finally:
         _cleanup(iid, parent_id)
 

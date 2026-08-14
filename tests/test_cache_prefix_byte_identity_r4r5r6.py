@@ -297,7 +297,8 @@ def test_add_cache_breakpoints_preserves_task_id():
     that re-feeds the SAME body dict keeps the latch decision stable on attempt
     2+. If it popped here, attempt 2 would fall back to the live global TTL and
     flip the marker → the mrne3bqe hazard. The key is stripped only at the wire
-    boundary (prepare_request), guarded by test_prepare_request_pops_task_id."""
+    boundary (prepare_request), guarded by
+    test_prepare_request_strips_task_id_without_mutating_caller."""
     snap = list(_sequence(n_rounds=8, empty_round=4))[5][1]
     _lib.CACHE_EXTENDED_TTL = True
     body = build_body(_MODEL, copy.deepcopy(snap), max_tokens=2048,
@@ -312,11 +313,11 @@ def test_add_cache_breakpoints_preserves_task_id():
 
 
 @pytest.mark.unit
-def test_prepare_request_pops_task_id_at_wire_boundary():
+def test_prepare_request_strips_task_id_without_mutating_caller():
     """The wire-serialization boundary (prepare_request) is where ``_task_id`` is
-    consumed, so the internal marker never leaks onto the OpenAI wire. It reads
-    the latch off the body FIRST, then pops. Confirms the pop moved OUT of
-    add_cache_breakpoints (10cd77c) to exactly one place."""
+    stripped, so the internal marker never leaks onto the OpenAI wire. The
+    caller's canonical dict must retain it because stream_chat reuses that same
+    object on a transport retry."""
     from lib.llm._sse_core import prepare_request
 
     snap = list(_sequence(n_rounds=8, empty_round=4))[5][1]
@@ -325,10 +326,12 @@ def test_prepare_request_pops_task_id_at_wire_boundary():
                       thinking_enabled=True, thinking_depth='medium',
                       tools=_tools(), stream=True)
     body['_task_id'] = 'taskWire'
-    prepare_request(body, log_prefix='[test]')
-    assert '_task_id' not in body, (
-        'prepare_request must strip _task_id at the wire boundary so it never '
-        'reaches the OpenAI serialization / gateway')
+    plan = prepare_request(body, log_prefix='[test]')
+    assert '_task_id' not in plan.body, (
+        'prepare_request must strip _task_id from the wire envelope')
+    assert body.get('_task_id') == 'taskWire', (
+        'prepare_request mutated the caller body; attempt 2 would lose the '
+        'task-stable cache TTL latch')
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

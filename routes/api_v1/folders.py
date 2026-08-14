@@ -17,7 +17,7 @@ from __future__ import annotations
 import secrets
 import time
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.api_response import (
     api_bad_request, api_created, api_not_found, api_ok,

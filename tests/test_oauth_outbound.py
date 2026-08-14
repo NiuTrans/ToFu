@@ -67,16 +67,45 @@ class TestClaudeResolve(unittest.TestCase):
 class TestCodexResolve(unittest.TestCase):
 
     def test_identity_headers_and_account_id(self):
+        body = {'messages': [], '_conv_id': 'private-conversation-id'}
         with mock.patch('lib.oauth.codex.codex_get_valid_token',
                         return_value='access-tok'), \
              mock.patch('lib.oauth.token_store.load_token',
                         return_value={'account_id': 'acc-xyz'}):
-            key, hdrs, _out = outbound.resolve_oauth_request('codex', {'messages': []}, None)
+            key, hdrs, _out = outbound.resolve_oauth_request(
+                'codex', body, None)
         self.assertEqual(key, 'access-tok')
         self.assertEqual(hdrs['originator'], 'codex-tui')
         self.assertTrue(hdrs['User-Agent'].startswith('codex-tui/0.146.0'))
         self.assertEqual(hdrs['OpenAI-Beta'], 'responses=experimental')
         self.assertEqual(hdrs['chatgpt-account-id'], 'acc-xyz')
+        self.assertRegex(
+            hdrs['session-id'],
+            r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+        self.assertNotIn('private-conversation-id', hdrs['session-id'])
+        self.assertEqual(hdrs['thread-id'], hdrs['session-id'])
+        self.assertEqual(hdrs['x-client-request-id'], hdrs['session-id'])
+        self.assertNotIn('session_id', hdrs)
+        from lib.llm.responses_outbound import openai_body_to_responses
+        wire, _reverse = openai_body_to_responses(
+            {'model': 'gpt-5.6-luna', **body}, profile='codex')
+        self.assertEqual(wire['prompt_cache_key'], hdrs['session-id'])
+
+    def test_cache_affinity_headers_are_stable_per_conversation(self):
+        def resolve(conv_id):
+            with mock.patch('lib.oauth.codex.codex_get_valid_token',
+                            return_value='access-tok'), \
+                 mock.patch('lib.oauth.token_store.load_token',
+                            return_value={}):
+                return outbound.resolve_oauth_request(
+                    'codex', {'messages': [], '_conv_id': conv_id}, None)[1]
+
+        first = resolve('conv-a')
+        same = resolve('conv-a')
+        different = resolve('conv-b')
+
+        self.assertEqual(first['session-id'], same['session-id'])
+        self.assertNotEqual(first['session-id'], different['session-id'])
 
     def test_no_token_raises(self):
         with mock.patch('lib.oauth.codex.codex_get_valid_token', return_value=None):
@@ -134,6 +163,24 @@ class TestProvisioning(unittest.TestCase):
         cfg = self._load()
         self.assertEqual(sum(1 for p in cfg['providers'] if p['id'] == 'oauth_codex'), 1)
 
+    def test_cached_catalog_replaces_static_codex_table(self):
+        dynamic = [{
+            'model_id': 'gpt-from-live-catalog',
+            'capabilities': ['text', 'thinking'],
+            'thinking_default': True,
+            'catalog_visibility': 'list',
+        }]
+        with mock.patch(
+                'lib.oauth.codex_catalog.cached_codex_provider_models',
+                return_value=dynamic):
+            self._run(outbound.provision_oauth_provider, 'codex')
+        managed = next(p for p in self._load()['providers']
+                       if p['id'] == 'oauth_codex')
+        self.assertEqual(managed['catalog_source'], 'remote_cache')
+        self.assertEqual([m['model_id'] for m in managed['models']],
+                         ['gpt-from-live-catalog'])
+        self.assertTrue(managed['models'][0]['stream_only'])
+
     def test_deprovision_removes_only_managed(self):
         self._run(outbound.provision_oauth_provider, 'claude')
         removed = self._run(outbound.deprovision_oauth_provider, 'claude')
@@ -159,12 +206,49 @@ class TestProvisioning(unittest.TestCase):
         # Latest verified flagships (Anthropic 2025-11-24 / CLIProxyAPI v7
         # codex registry, synced 2026-07-31). Unknown plan → full pro table.
         self.assertIn('claude-opus-4-5-20251101', claude_ids)
+        self.assertIn('claude-sonnet-4-6', claude_ids)
+        self.assertIn('claude-opus-5', claude_ids)
         self.assertIn('gpt-5.4', codex_ids)
         self.assertIn('gpt-5.3-codex-spark', codex_ids)
         # The retired pre-S1 list must stay retired.
         self.assertNotIn('gpt-5.2-codex', codex_ids)
-        # Claude models must keep the thinking capability.
-        self.assertTrue(all('thinking' in m['capabilities'] for m in claude['models']))
+        # Registry parity: all thinking-capable Claude entries advertise it;
+        # legacy 3.5 Haiku correctly does not.
+        self.assertTrue(all('thinking' in m['capabilities']
+                            for m in claude['models']
+                            if m['model_id'] != 'claude-3-5-haiku-20241022'))
+        haiku35 = next(m for m in claude['models']
+                       if m['model_id'] == 'claude-3-5-haiku-20241022')
+        self.assertNotIn('thinking', haiku35['capabilities'])
+
+    def test_reconcile_repairs_missing_and_removes_orphan(self):
+        self._run(outbound.provision_oauth_provider, 'claude')
+
+        def token(provider):
+            return ({'access_token': 'codex-token', 'plan_type': 'team'}
+                    if provider == 'codex' else None)
+
+        with mock.patch('lib.oauth.token_store.load_token', side_effect=token):
+            result = self._run(outbound.reconcile_oauth_providers)
+        cfg = self._load()
+        ids = [p['id'] for p in cfg['providers']]
+        self.assertNotIn('oauth_claude', ids)
+        self.assertIn('oauth_codex', ids)
+        self.assertIn('user_prov', ids)
+        self.assertTrue(result['codex']['provider_ready'])
+        codex = next(p for p in cfg['providers'] if p['id'] == 'oauth_codex')
+        self.assertNotIn('gpt-5.3-codex-spark',
+                         [m['model_id'] for m in codex['models']])
+
+    def test_reconcile_is_noop_when_projection_is_current(self):
+        token = {'access_token': 'tok', 'plan_type': 'pro'}
+        with mock.patch('lib.oauth.token_store.load_token', return_value=token):
+            self._run(outbound.reconcile_oauth_providers)
+            with mock.patch.object(outbound, '_activate_oauth_config_change') as activate, \
+                 mock.patch('lib.json_store.write_json_atomic') as write:
+                self._run(outbound.reconcile_oauth_providers)
+        activate.assert_not_called()
+        write.assert_not_called()
 
 
 if __name__ == '__main__':

@@ -21,7 +21,7 @@ The load-bearing behaviour, and what each test below pins:
      point of the merge: minimum cognitive load.
   2. The desktop instruction comes from the BACKEND's ``setup_state``, because
      only the server process can see ``sys.frozen``. The three states render
-     three DIFFERENT instructions, and only the remote one offers a token.
+     three DIFFERENT instructions; remote setup is one personalized installer.
   3. A connected capability renders NO instruction at all.
 
 DISCIPLINE (charter: "禁止在测试 harness 里手抄生产判据")
@@ -42,10 +42,12 @@ from pathlib import Path
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parent.parent
-JS_DIR = ROOT / "static" / "js"
+JS_DIR = Path(runtime_sections_dir())
 INDEX_HTML = ROOT / "index.html"
 
 
@@ -82,13 +84,21 @@ def _find_defining_file(symbol: str) -> Path:
     outcomes are separately diagnosable.
     """
     needle = f"function {symbol}("
-    hits = [p for p in sorted(JS_DIR.rglob("*.js"))
-            # Dotfiles too: the bundler's atomic-rename temp files are
-            # `.bundle-<hash>.<rand>.js` — visible mid-build, and scanning
-            # one reads a HALF-WRITTEN copy of every symbol (false red,
-            # measured 2026-08-04 on a live bundle rebuild).
-            if not p.name.startswith((".", "bundle-", "feature-"))
-            and needle in p.read_text(encoding="utf-8")]
+    hits = []
+    for p in sorted(JS_DIR.rglob("*.js")):
+        # Dotfiles too: the bundler's atomic-rename temp files are visible
+        # mid-build. Other atomic writers use tempfile's `tmp*.js` shape.
+        # Neither is shipped source, and a temp can vanish between rglob and
+        # read (the previous comprehension made that normal race fail the
+        # whole suite with FileNotFoundError).
+        if p.name.startswith((".", "bundle-", "feature-", "tmp")):
+            continue
+        try:
+            text = p.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            continue
+        if needle in text:
+            hits.append(p)
     if not hits:
         raise AssertionError(
             f"IMPLEMENTATION GONE: no file defines `{needle}`. If the merged "
@@ -123,7 +133,7 @@ def _slice_fn(symbol: str) -> str:
 _SHIPPED_SYMBOLS = (
     "_lcT", "_lcEsc", "_lcSetStatus", "_lcSetSwitch", "_lcSetAbout",
     "_lcBrowserSetupState", "_lcRenderBrowser", "_lcRenderDesktop",
-    "_lcMintToken", "_lcConnectLine", "_lcUpdateBadge",
+    "_lcUpdateBadge",
     "_lcOpenExtensionsPage",
     # The download instruction is authored ONCE and reached from three places
     # (the pre-detection floor, a failed status call, the detected `download`
@@ -141,14 +151,12 @@ _SHIPPED_SYMBOLS = (
     # The poll-signature gate (2026-08-03): _lcRenderDesktop calls it to
     # decide whether a repaint is warranted at all.
     "_lcDesktopSignature",
-    # The awaiting-agent hint is prepended in both attach branches, and
-    # the bundle block / connect-line details / wiring are authored once
-    # and reached from both — the splice needs all of them or every test
-    # goes ReferenceError. (2026-08-05 owner decree: the pairing-code UX
-    # is RETIRED — the credential rides the per-download bundle ZIP, so
-    # no branch may ask the user to type anything.)
-    "_lcAwaitingAgentHtml", "_lcAgentAttachBlockHtml", "_lcAgentBundleUrl",
-    "_lcBindWarnHtml", "_lcConnectDetailsHtml", "_lcWireAttach",
+    # The awaiting-agent hint and one-file installer block are shared by
+    # both attach branches. Pairing/connect-line helpers intentionally do
+    # not exist on the user-facing surface.
+    "_lcAwaitingAgentHtml", "_lcAgentInstallerBlockHtml",
+    "_lcAgentInstallerUrl",
+    "_lcBindWarnHtml", "_lcRelayHintText", "_lcRelayHintHtml",
     # The diagnostics inbox (2026-08-06): the renderers call
     # _lcDiagInboxHtml/_lcWireDiag in both attach branches, and the wire
     # calls _lcDiagRefreshRecent — unspliced they ReferenceError every test.
@@ -186,7 +194,8 @@ def _shipped(extra_neuter=None) -> str:
         neutered = extra_neuter(body)
         assert neutered != body, "NEUTER substitution did not apply"
         body = neutered
-    return body
+    return ('var runtimeScope = typeof window !== "undefined" '
+            '? window : globalThis;\n' + body)
 
 
 # Markup mirroring the shipped modal's two capability rows.
@@ -273,15 +282,9 @@ HARNESS = textwrap.dedent("""
         steps: el.querySelectorAll('.lc-step').length,
         text: el.textContent.trim(),
         hasMintButton: !!el.querySelector('#lcMintBtn'),
-        // The connect line survives ONLY inside the collapsed advanced
-        // details — never as a top-level action (2026-08-04 decree).
-        mintInsideDetails: !!el.querySelector('.lc-details #lcMintBtn'),
-        // The bundle ZIP is the ONE primary attach action in every branch
-        // that attaches anything (2026-08-05 decree — the pairing code is
-        // retired; the credential rides the download). lcPairBtn must
-        // NEVER come back.
-        hasBundleButton: !!el.querySelector('#lcAgentBundleBtn'),
-        bundleInAgentRole: !!el.querySelector('.lc-role #lcAgentBundleBtn'),
+        hasInstallerButton: !!el.querySelector('#lcAgentInstallerBtn'),
+        installerInAgentRole: !!el.querySelector(
+          '.lc-role #lcAgentInstallerBtn'),
         hasPairButton: !!el.querySelector('#lcPairBtn'),
         // Owner decree 2026-08-04: no surface may send the user to open an
         // ssh tunnel by hand.
@@ -309,46 +312,34 @@ HARNESS = textwrap.dedent("""
       }};
     }}
 
-    // The bundle-primary capture (2026-08-05 owner decree): with a built
-    // agent artifact AND a bundle-ready store, the attach action is the
-    // credential-carrying ZIP — never a typed pairing code. Kept SEPARATE
-    // from the bare-payload capture above so the fallback-branch pins keep
-    // their pre-bundle meaning.
+    // Ready one-file installer capture, separate from the build-in-flight
+    // states above.
     const AGENT_DLS = [{{ os: 'windows', arch: 'x86_64',
                          label: 'Windows agent installer',
                          filename: 'TofuAgent-Setup-0.15.2-win64.exe',
                          url: SRV + '/api/v1/desktop/download/TofuAgent-Setup-0.15.2-win64.exe',
                          hosted: 'server', size: 53000000,
                          kind: 'agent' }}];
-    const desktopBundle = {{}};
+    const desktopInstaller = {{}};
     for (const st of ['local_source', 'remote']) {{
       document.getElementById('lcDesktopSetup').innerHTML = '';
       _lcRenderDesktop({{ connected: false, setup_state: st,
                          download_url: DL, server_url: SRV, downloads: DLS,
                          agent_downloads: AGENT_DLS,
-                         agent_bundle_ready: true }});
+                         agent_installer_ready: true }});
       const el = document.getElementById('lcDesktopSetup');
-      const bundleA = el.querySelector('#lcAgentBundleBtn');
-      desktopBundle[st] = {{
-        hasBundleButton: !!bundleA,
-        bundleInAgentRole: !!el.querySelector('.lc-role #lcAgentBundleBtn'),
-        bundleHref: bundleA ? bundleA.getAttribute('href') : '',
-        mintInsideDetails: !!el.querySelector('.lc-details #lcMintBtn'),
+      const installerA = el.querySelector('#lcAgentInstallerBtn');
+      desktopInstaller[st] = {{
+        hasInstallerButton: !!installerA,
+        installerInAgentRole: !!el.querySelector(
+          '.lc-role #lcAgentInstallerBtn'),
+        installerHref: installerA ? installerA.getAttribute('href') : '',
+        hasConnectLine: !!el.querySelector('#lcMintBtn'),
         hasPairButton: !!el.querySelector('#lcPairBtn'),
         hasDiagInbox: !!el.querySelector('.lc-diag #lcDiagSubmit'),
         mentionsManualTunnel: /隧道地址|ssh 隧道|ssh-tunnel/i.test(el.textContent),
       }};
     }}
-    // A bare secret is unusable: the line must carry the server address too.
-    document.getElementById('lcDesktopSetup').innerHTML = '';
-    _lcRenderDesktop({{ connected: false, setup_state: 'remote',
-                       download_url: DL, server_url: SRV }});
-    document.getElementById('lcMintBtn').onclick();
-    const mintedLine = await new Promise((res) => setTimeout(() => {{
-      const b = document.getElementById('lcTokenBox');
-      res(b ? b.textContent : '');
-    }}, 0));
-
     // Same for the BROWSER row: connected / on-disk folder / remote download.
     const browser = {{}};
     const bcases = {{
@@ -405,7 +396,9 @@ HARNESS = textwrap.dedent("""
       note: (document.getElementById('lcExtOpenNote') || {{textContent: ''}}).textContent,
     }}), 0));
 
-    console.log(JSON.stringify({{ desktop, browser, mintedLine, openClick, desktopBundle }}));
+    console.log(JSON.stringify({{ desktop, browser, openClick,
+                                 desktopInstaller }}));
+    process.exit(0);
     }})();
 """)
 
@@ -441,7 +434,7 @@ def _run_proxied(shipped: str) -> dict:
 
 def test_scan_surface_report(capsys):
     """Print which symbols were located and where, before any assertion."""
-    located = {s: str(_find_defining_file(s).relative_to(ROOT))
+    located = {s: str(_find_defining_file(s).relative_to(JS_DIR))
                for s in _SHIPPED_SYMBOLS}
     with capsys.disabled():
         print("\n[scan surface] shipped renderers spliced from:")
@@ -510,35 +503,28 @@ def test_the_three_states_give_three_different_instructions():
 
 
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
-def test_bundle_is_the_primary_attach_in_every_branch():
-    """2026-08-05 owner decree: the pairing code is RETIRED — the ONE
-    primary attach action is the per-download bundle ZIP (credential +
-    route candidates baked at the click, zero user input). The minted
-    connect line survives only inside the collapsed advanced details
-    (fallback for the bare exe), and NO surface may resurrect the pair
-    button or send the user to open an ssh tunnel by hand."""
+def test_one_file_installer_is_the_primary_attach_in_every_branch():
+    """One runnable .exe is the whole setup; auth never reaches the UI."""
     res = _run(_shipped())
-    out = res["desktopBundle"]
+    out = res["desktopInstaller"]
     for st in ("local_source", "remote"):
-        assert out[st]["hasBundleButton"] is True, (
-            f"setup_state={st} lost its bundle button — the only "
+        assert out[st]["hasInstallerButton"] is True, (
+            f"setup_state={st} lost its installer button — the only "
             f"zero-config attach path")
-        assert '/api/v1/desktop/agent-bundle' in out[st]["bundleHref"], (
-            f"setup_state={st}: the bundle button must point at the "
-            f"agent-bundle endpoint; got {out[st]['bundleHref']!r}")
-        assert out[st]["mintInsideDetails"] is True, (
-            f"setup_state={st}: the connect line must live inside the "
-            f"collapsed advanced details, never as a top-level action")
+        assert '/api/v1/desktop/agent-installer' in \
+            out[st]["installerHref"], (
+            f"setup_state={st}: installer points at "
+            f"{out[st]['installerHref']!r}")
+        assert out[st]["hasConnectLine"] is False, (
+            f"setup_state={st}: connect-line auth leaked back into setup")
         assert out[st]["hasPairButton"] is False, (
             f"setup_state={st}: the pairing-code button is RETIRED — "
             f"it must never come back")
         assert out[st]["mentionsManualTunnel"] is False, (
             f"setup_state={st} still instructs a manual ssh tunnel — the "
             f"2026-08-04 decree forbids it on every surface")
-    # The documented tunnel blind spot (ssh -L presents as loopback):
-    # local_source's AGENT role block carries the bundle action visibly.
-    assert out["local_source"]["bundleInAgentRole"] is True, (
-        "the agent role block lost its bundle button — the office-machine "
+    assert out["local_source"]["installerInAgentRole"] is True, (
+        "the agent role block lost its installer button — the office-machine "
         "case has no zero-config flow again")
     # The pair button is dead in the bare-payload branches too.
     bare = res["desktop"]
@@ -678,8 +664,8 @@ def test_NEUTER_ignoring_setup_state_collapses_the_three_paths():
     texts = {st: out[st]["text"] for st in ("tray", "local_source", "remote")}
     assert len(set(texts.values())) == 1, (
         "NEUTER should have collapsed every state to one instruction")
-    # And the specific consequence: a tray user gets told to mint a token.
-    assert out["tray"]["hasMintButton"] is True
+    # And the specific consequence: a tray user gets remote-install guidance.
+    assert out["tray"]["text"] == out["remote"]["text"]
 
 
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
@@ -751,18 +737,12 @@ def test_only_the_states_that_need_the_app_show_a_download_link():
 
 
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
-def test_the_minted_line_carries_the_server_address():
-    """One copy must be enough — a naked token is unusable.
-
-    Nothing on the user's machine knows which server to poll, so the token
-    alone leaves them holding a secret with nowhere to put it. Drives the REAL
-    mint handler and reads what actually lands in the box.
-    """
-    line = _run(_shipped())["mintedLine"]
-    assert "T" in line, "the minted token must appear in the line"
-    assert "tofu.example.com" in line, (
-        f"the connect line must carry the server address the agent has to "
-        f"reach, not just the secret; got {line!r}")
+def test_no_authentication_or_connection_line_is_taught():
+    out = _run(_shipped())
+    for st, info in out["desktop"].items():
+        assert info["hasMintButton"] is False, (
+            f"setup_state={st} exposed credential setup")
+        assert "连接行" not in info["text"] and "配对码" not in info["text"]
 
 
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
@@ -846,20 +826,6 @@ def test_NEUTER_dropping_the_platform_matched_links_is_caught():
 
 
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
-def test_NEUTER_reverting_to_a_bare_token_is_caught():
-    """Make the connect line the token alone → the address is gone.
-
-    This is exactly the shape that shipped first: 32 characters of secret and
-    no indication of where it goes.
-    """
-    out = _run(_shipped(
-        lambda s: s.replace("return srv ? (srv + '  ' + token) : token;",
-                            "return token;")
-    ))
-    assert "tofu.example.com" not in out["mintedLine"], (
-        "NEUTER did not reduce the line to a bare token")
-
-
 # ── 5. Usability: never invite a click that grants nothing ─────────────
 # The original bug was a toggle that lit up while the tool registry shipped
 # ZERO tools. Moving it into a nicer modal does not fix that — a switch the
@@ -1045,7 +1011,26 @@ LC_FILE_HARNESS = textwrap.dedent("""
     _lcUpdateBadge();
     out.neverProbed = snap();
 
+    // (e) Production concatenates local-control.js after main.js into one
+    //     script. Function declarations hoist, but `_lcReach = …` executes
+    //     only when control reaches the later module. main.js calls
+    //     updateSubmenuCounts() during boot, so the badge must tolerate that
+    //     pre-initialization window instead of aborting the whole boot IIFE.
+    out.beforeReachInit = (() => {{
+      const saved = _lcReach;
+      _lcReach = undefined;
+      try {{
+        _lcUpdateBadge();
+        return {{ ok: true, badgeText: badge().textContent }};
+      }} catch (e) {{
+        return {{ ok: false, error: String(e) }};
+      }} finally {{
+        _lcReach = saved;
+      }}
+    }})();
+
     console.log(JSON.stringify(out));
+    process.exit(0);
 """)
 
 
@@ -1137,6 +1122,22 @@ def test_an_unprobed_capability_is_not_reported_as_broken():
 
 
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
+def test_badge_is_safe_before_local_control_state_initializes():
+    """Hoisted badge code must not abort main.js before sidebar init.
+
+    The production artifact is one concatenated script: the function
+    declaration from local-control.js is callable while main.js executes, but
+    local-control.js's ``var _lcReach = …`` assignment has not run yet. A read
+    through that undefined state used to throw, aborting ``initActiveTasks``;
+    folders vanished and history rows became inert in the half-booted UI.
+    """
+    out = _run_file()
+    assert out["beforeReachInit"]["ok"] is True, (
+        "_lcUpdateBadge crashed before local-control state initialization: "
+        f"{out['beforeReachInit'].get('error', '')}")
+
+
+@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NEUTER_gating_both_directions_traps_the_user():
     """Restore the symmetric gate → revoking becomes impossible again."""
     out = _run_file(lambda s: s.replace(
@@ -1152,8 +1153,8 @@ def test_NEUTER_gating_both_directions_traps_the_user():
 def test_NEUTER_counting_unreachable_capabilities_as_live_is_caught():
     """Drop the staleness split → the badge overstates what the AI has."""
     out = _run_file(lambda s: s.replace(
-        "var stale = ((bOn && _lcReach.browser === false) ? 1 : 0)\n"
-        "            + ((dOn && _lcReach.desktop === false) ? 1 : 0);",
+        "var stale = ((bOn && reach.browser === false) ? 1 : 0)\n"
+        "            + ((dOn && reach.desktop === false) ? 1 : 0);",
         "var stale = 0;"))
     assert out["enabledThenDropped"]["badgeStale"] is False, (
         "NEUTER did not collapse the badge back to a plain count")
@@ -1224,14 +1225,16 @@ def test_no_orphaned_local_control_strings():
     render points anywhere — the guidance existed only in the dictionary.
     Scans the whole surface (html + non-i18n js) rather than one file.
     """
-    i18n = (JS_DIR / "i18n.js").read_text(encoding="utf-8")
+    locale_dir = ROOT / "frontend" / "src" / "i18n" / "locales"
+    zh = json.loads((locale_dir / "zh.json").read_text(encoding="utf-8"))
+    en = json.loads((locale_dir / "en.json").read_text(encoding="utf-8"))
     html = INDEX_HTML.read_text(encoding="utf-8")
     js_sources = "\n".join(
         p.read_text(encoding="utf-8") for p in sorted(JS_DIR.rglob("*.js"))
         if "i18n" not in p.name
         and not p.name.startswith((".", "bundle-", "feature-")))
-    declared = set(re.findall(r"^\s*'((?:local|browser)\.[A-Za-z0-9_]+)':",
-                              i18n, re.M))
+    declared = {key for key in set(zh) & set(en)
+                if key.startswith(('local.', 'browser.'))}
     assert declared, "scan surface empty — the regex stopped matching"
     orphans = sorted(k for k in declared
                      if k not in html and k not in js_sources)

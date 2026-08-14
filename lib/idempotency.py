@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import functools
 import json
+import threading
 
 from lib.log import get_logger
 from lib.ttl_cache import TTLCache
@@ -35,23 +36,11 @@ logger = get_logger(__name__)
 
 
 def _response_classes() -> tuple:
-    """Return all Response classes we need to recognise.
-
-    The flask→quart shim might not be installed (tests, headless tools,
-    etc.). Either way, both real Flask Response and Quart Response can
-    appear in route return values, so we need to ``isinstance``-check
-    against both. Cached at module-import time.
-    """
+    """Return the native Quart response class without importing the app."""
     classes = []
     try:
-        from flask import Response as _FR
-        classes.append(_FR)
-    except Exception as e:
-        logger.debug('[Idempotency] flask.Response unavailable: %s', e)
-    try:
         from quart import Response as _QR
-        if _QR not in classes:
-            classes.append(_QR)
+        classes.append(_QR)
     except Exception as e:
         logger.debug('[Idempotency] quart.Response unavailable: %s', e)
     return tuple(classes) or (object,)
@@ -61,25 +50,43 @@ _RESPONSE_CLASSES = _response_classes()
 
 
 def _get_request():
-    """Resolve the active request, working with both Quart and the
-    Flask→Quart shim. We don't import ``request`` at module load because
-    server.py replaces ``sys.modules['flask']`` with quart at runtime;
-    importing the proxy here at module load gives us the wrong proxy in
-    test contexts where the shim isn't installed.
-    """
-    try:
-        from quart import request
-        return request
-    except Exception as e:
-        logger.debug('[Idempotency] quart.request unavailable, falling back to flask: %s', e)
-        from flask import request  # type: ignore
-        return request
+    """Resolve the active native Quart request lazily."""
+    from quart import request
+    return request
 
 _DEFAULT_TTL = 86400  # 24h
 _DEFAULT_MAX = 10_000
 
 _cache = TTLCache(ttl=_DEFAULT_TTL, max_size=_DEFAULT_MAX,
                    name='idempotency')
+
+# A cache lookup alone is not enough for idempotency: two duplicate requests
+# can miss before the first handler has returned and both execute the side
+# effect.  Keep a tiny per-key single-flight registry so the first request is
+# the owner and concurrent duplicates wait for its response to enter the
+# replay cache.  Entries exist only while a handler is running, so this map is
+# bounded by request concurrency rather than the 24-hour cache cardinality.
+_inflight_lock = threading.Lock()
+_inflight: dict[str, threading.Event] = {}
+
+
+def _claim_inflight(cache_key: str) -> tuple[bool, threading.Event]:
+    """Return ``(is_owner, event)`` for one idempotency cache key."""
+    with _inflight_lock:
+        event = _inflight.get(cache_key)
+        if event is not None:
+            return False, event
+        event = threading.Event()
+        _inflight[cache_key] = event
+        return True, event
+
+
+def _release_inflight(cache_key: str, event: threading.Event) -> None:
+    """Wake duplicates after the owner cached (or failed to cache) a result."""
+    with _inflight_lock:
+        if _inflight.get(cache_key) is event:
+            _inflight.pop(cache_key, None)
+    event.set()
 
 
 def _cache_key(idem_key: str) -> str:
@@ -199,10 +206,12 @@ def _replay(blob: dict):
 def idempotent_post():
     """Decorator: cache the response for ``Idempotency-Key`` POSTs.
 
-    Works on both sync and ``async def`` route handlers. No-op when the
-    header is absent. Must be applied AFTER the route decorator (so the
-    cache check runs inside the request context). Entries use the module
-    TTL (``_DEFAULT_TTL``, 24h) — the cache has no per-entry TTL.
+    Works on both sync and ``async def`` route handlers. Concurrent requests
+    carrying the same key are single-flighted: only the owner executes the
+    handler; duplicates wait and replay its cached 2xx response. No-op when
+    the header is absent. Must be applied AFTER the route decorator (so the
+    cache check runs inside the request context). Entries use the module TTL
+    (``_DEFAULT_TTL``, 24h) — the cache has no per-entry TTL.
     """
     def _maybe_cache(rv, ck):
         try:
@@ -219,6 +228,8 @@ def idempotent_post():
         if is_async:
             @functools.wraps(fn)
             async def async_wrapper(*args, **kwargs):
+                import asyncio
+
                 req = _get_request()
                 try:
                     idem = (req.headers.get('Idempotency-Key') or '').strip()
@@ -228,18 +239,37 @@ def idempotent_post():
                 if not idem:
                     return await fn(*args, **kwargs)
                 ck = _cache_key(idem)
-                cached = _cache.get(ck)
-                if cached is not None:
-                    logger.info('[Idempotency] HIT key=%s — replaying',
-                                idem[:8])
-                    try:
-                        return _replay(cached)
-                    except Exception as e:
-                        logger.warning('[Idempotency] replay failed for %s: %s',
-                                       idem[:8], e)
-                rv = await fn(*args, **kwargs)
-                _maybe_cache(rv, ck)
-                return rv
+                while True:
+                    cached = _cache.get(ck)
+                    if cached is not None:
+                        logger.info('[Idempotency] HIT key=%s — replaying',
+                                    idem[:8])
+                        try:
+                            return _replay(cached)
+                        except Exception as e:
+                            logger.warning('[Idempotency] replay failed for %s: %s',
+                                           idem[:8], e)
+                    owner, event = _claim_inflight(ck)
+                    if owner:
+                        break
+                    # Never block the ASGI event loop on a threading.Event.
+                    await asyncio.to_thread(event.wait)
+
+                try:
+                    # Close the miss→claim race with an owner that completed
+                    # between our first cache read and _claim_inflight().
+                    cached = _cache.get(ck)
+                    if cached is not None:
+                        try:
+                            return _replay(cached)
+                        except Exception as e:
+                            logger.warning('[Idempotency] replay failed for %s: %s',
+                                           idem[:8], e)
+                    rv = await fn(*args, **kwargs)
+                    _maybe_cache(rv, ck)
+                    return rv
+                finally:
+                    _release_inflight(ck, event)
             return async_wrapper
 
         @functools.wraps(fn)
@@ -253,18 +283,36 @@ def idempotent_post():
             if not idem:
                 return fn(*args, **kwargs)
             ck = _cache_key(idem)
-            cached = _cache.get(ck)
-            if cached is not None:
-                logger.info('[Idempotency] HIT key=%s — replaying cached '
-                            'response', idem[:8])
-                try:
-                    return _replay(cached)
-                except Exception as e:
-                    logger.warning('[Idempotency] replay failed for %s: %s '
-                                   '— re-running handler', idem[:8], e)
-            rv = fn(*args, **kwargs)
-            _maybe_cache(rv, ck)
-            return rv
+            while True:
+                cached = _cache.get(ck)
+                if cached is not None:
+                    logger.info('[Idempotency] HIT key=%s — replaying cached '
+                                'response', idem[:8])
+                    try:
+                        return _replay(cached)
+                    except Exception as e:
+                        logger.warning('[Idempotency] replay failed for %s: %s '
+                                       '— re-running handler', idem[:8], e)
+                owner, event = _claim_inflight(ck)
+                if owner:
+                    break
+                event.wait()
+
+            try:
+                # Close the miss→claim race with an owner that completed just
+                # before this request installed itself as the next owner.
+                cached = _cache.get(ck)
+                if cached is not None:
+                    try:
+                        return _replay(cached)
+                    except Exception as e:
+                        logger.warning('[Idempotency] replay failed for %s: %s '
+                                       '— re-running handler', idem[:8], e)
+                rv = fn(*args, **kwargs)
+                _maybe_cache(rv, ck)
+                return rv
+            finally:
+                _release_inflight(ck, event)
 
         return wrapper
 

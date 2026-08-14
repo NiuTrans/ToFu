@@ -32,11 +32,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-_UPLOAD_SRC = os.path.join(ROOT, 'static', 'js', 'upload.js')
+_UPLOAD_SRC = runtime_section_path('upload.js')
 
 
 def _node_deps_available() -> bool:

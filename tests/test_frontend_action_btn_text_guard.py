@@ -19,7 +19,7 @@ still worth guarding, and it is bigger than one button:
     square — text needs room, the square has none.
 
 This guard is therefore GENERAL and scans every shipped JS file. It is resolved
-by the bundle manifest (``lib/js_bundler._BUNDLE_FILES + _DEFERRED_FILES``) —
+by the bundle manifest (``lib/js_bundler._BUNDLE_FILES + _CLASSIC_ASSET_FILES``) —
 the single source of truth for what actually reaches a user — NOT by a
 hardcoded file path, so it survives the next module split and never scans code
 that no user can reach.
@@ -45,6 +45,7 @@ Pure source-level (no node/jsdom needed).
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import re
 
 import pytest
@@ -53,7 +54,7 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+FRONTEND_SRC = Path(ROOT) / 'frontend' / 'src'
 
 # A <button> opening tag + its inner content. Shipped JS emits these as HTML
 # strings inside template literals / concatenations.
@@ -63,19 +64,12 @@ _CLASS_RE = re.compile(r'class="(?P<cls>[^"]*)"')
 _SIZE_OVERRIDE_RE = re.compile(r'(?:width|height)\s*:\s*auto')
 
 
-def _shipped_js_files() -> list[str]:
-    """Every shipped JS file, in bundle order, resolved via the manifest.
-
-    This is the 'resolved by symbol, not a dead selector' scope: the manifest
-    is the SSOT for what ships, so the scan follows the code through splits.
-    """
-    from lib.js_bundler import _BUNDLE_FILES, _DEFERRED_FILES
-    out = []
-    for rel in list(_BUNDLE_FILES) + list(_DEFERRED_FILES):
-        p = os.path.join(JS_DIR, rel)
-        if os.path.isfile(p):
-            out.append(p)
-    return out
+def _shipped_js_files() -> list[Path]:
+    """Scan the Vite source graph rather than the retired classic manifest."""
+    return sorted(
+        path for path in FRONTEND_SRC.rglob('*')
+        if path.is_file() and path.suffix in {'.js', '.ts'}
+    )
 
 
 def _inner_has_visible_text(inner: str) -> bool:
@@ -115,8 +109,8 @@ def find_text_buttons_with_bare_action_btn(source: str, rel: str) -> list[tuple[
 def _scan_all_shipped() -> list[tuple[str, list[str], str]]:
     out = []
     for path in _shipped_js_files():
-        rel = os.path.relpath(path, JS_DIR).replace(os.sep, '/')
-        with open(path, encoding='utf-8') as f:
+        rel = path.relative_to(FRONTEND_SRC).as_posix()
+        with path.open(encoding='utf-8') as f:
             out.extend(find_text_buttons_with_bare_action_btn(f.read(), rel))
     return out
 

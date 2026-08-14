@@ -17,9 +17,8 @@ Three P0-class frontend fixes, one suite each:
   ③ scheduler.js was an entirely dead panel (schedulerBadge/schedulerPanel/
     proactiveCount exist in NO template; toggleSchedulerPanel uncalled;
     _applySchedulerUI toggled a nonexistent badge). Removed: the file, its
-    _DEFERRED_FILES entry, _applySchedulerUI + its call site, and the
-    toolset-apply revert-family entry. The scheduler TOOL itself is
-    server-side always-on and unaffected.
+    _CLASSIC_ASSET_FILES entry and _applySchedulerUI + its call site. The scheduler
+    TOOL itself is server-side always-on and unaffected.
 
 Each check carries a byte-reverting NEUTER.
 
@@ -46,7 +45,6 @@ CORE_JS = os.path.join(ROOT, 'static', 'js', 'core.js')
 COST_JS = os.path.join(ROOT, 'static', 'js', 'core', 'cost.js')
 IMAGE_GEN_JS = os.path.join(ROOT, 'static', 'js', 'image-gen.js')
 MAIN_JS = os.path.join(ROOT, 'static', 'js', 'main.js')
-TOOLSET_JS = os.path.join(ROOT, 'static', 'js', 'toolset-apply.js')
 BUNDLER = os.path.join(ROOT, 'lib', 'js_bundler.py')
 SCHEDULER_JS = os.path.join(ROOT, 'static', 'js', 'scheduler.js')
 
@@ -246,12 +244,9 @@ def test_abort_implies_cancel_precondition_still_holds():
 def test_scheduler_dead_ui_fully_removed():
     assert not os.path.exists(SCHEDULER_JS), 'static/js/scheduler.js still exists'
     bundler = _read(BUNDLER)
-    assert "'scheduler.js'," not in bundler, 'scheduler.js still in _DEFERRED_FILES'
+    assert "'scheduler.js'," not in bundler, 'scheduler.js still in _CLASSIC_ASSET_FILES'
     main = _read(MAIN_JS)
     assert '_applySchedulerUI' not in main, 'main.js still defines/calls _applySchedulerUI'
-    toolset = _read(TOOLSET_JS)
-    assert '_applySchedulerUI' not in toolset, (
-        'toolset-apply.js still references the removed _applySchedulerUI')
 
 
 def test_NEUTER_scheduler_scans_fire_on_old_shape():

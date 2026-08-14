@@ -42,10 +42,19 @@ def server_module():
 
 def _force_auto_on_fuse(server, monkeypatch):
     """Neutralise the FUSE + mode short-circuits so the headroom path is reached."""
-    monkeypatch.delenv('TOFU_MLOCK', raising=False)
+    monkeypatch.setenv('TOFU_MLOCK', 'auto')
     monkeypatch.delenv('TOFU_MLOCK_MAX_USAGE_PCT', raising=False)
     monkeypatch.delenv('TOFU_MLOCK_MIN_LIMIT_GB', raising=False)
     monkeypatch.setattr(server, '_tofu_path_is_fuse', lambda _p: True)
+
+
+def test_default_is_off(server_module, monkeypatch):
+    """A future allocation spike must not become unreclaimable by default."""
+    monkeypatch.delenv('TOFU_MLOCK', raising=False)
+    monkeypatch.setattr(server_module, '_tofu_path_is_fuse', lambda _p: True)
+    do_it, reason = server_module._tofu_should_mlock()
+    assert do_it is False
+    assert 'disabled' in reason
 
 
 def test_skips_on_contended_shared_cgroup(server_module, monkeypatch):

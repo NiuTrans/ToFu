@@ -57,11 +57,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+from tests._runtime_sections import runtime_section_names, runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = runtime_sections_dir()
 
 sys.path.insert(0, HERE)
 from _conv_bundle_sources import bundle_files, files_defining  # noqa: E402
@@ -77,8 +79,7 @@ _DEF_RE = re.compile(r'^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(', re.M)
 
 
 def _core_files():
-    from lib.js_bundler import _BUNDLE_FILES
-    return list(_BUNDLE_FILES)
+    return runtime_section_names()
 
 
 def _deferred_symbols():
@@ -90,75 +91,18 @@ def _deferred_symbols():
 
 
 def test_excore_deferred_symbols_have_no_unguarded_core_calls():
-    shipped_core = _core_files()
+    runtime_files = _core_files()
     symbols = _deferred_symbols()
     assert symbols, 'derived symbol list is empty — the derivation broke'
-    violations = []
-    for rel in shipped_core:
-        path = os.path.join(JS_DIR, rel)
-        try:
-            lines = open(path, encoding='utf-8').read().splitlines()
-        except OSError:
-            continue
-        in_block_comment = False
-        for i, line in enumerate(lines, 1):
-            # Block-comment state machine (/* … */ may span lines whose
-            # interior lines carry no `*` leader — conv_sync_push.js's
-            # indented prose style). Line comments skipped too. This is the
-            # heuristic layer, so it is deliberately simple: it does not
-            # parse strings, but no core file opens a block comment inside
-            # a string on a code line we scan.
-            code_line = line
-            if in_block_comment:
-                if '*/' in code_line:
-                    in_block_comment = False
-                    code_line = code_line.split('*/', 1)[1]
-                else:
-                    continue
-            while '/*' in code_line:
-                head, _sep, tail = code_line.partition('/*')
-                if '*/' in tail:
-                    code_line = head + tail.split('*/', 1)[1]
-                else:
-                    code_line = head
-                    in_block_comment = True
-                    break
-            stripped = code_line.lstrip()
-            if not stripped or stripped.startswith('//'):
-                continue
-            # Inline onclick= handlers resolve at CLICK time via window scope
-            # and are the accepted user-triggered entry pattern into deferred
-            # modules (same class as feature-loader stubs): a dead button on
-            # feature-bundle failure is the designed degradation, not a boot
-            # crash. Only automatic (script-driven) calls are gated here.
-            if 'onclick=' in code_line:
-                continue
-            for name in symbols:
-                if not re.search(r'\b' + re.escape(name) + r'\s*\(', code_line):
-                    continue
-                ctx = '\n'.join(lines[max(0, i - 6):i])
-                pos_guard = (r"typeof\s+(?:window\.)?" + re.escape(name)
-                             + r"\s*===\s*['\"]function['\"]")
-                if re.search(pos_guard, code_line) or re.search(pos_guard, ctx):
-                    continue
-                # The codebase's second guard idiom: an early-return gate at
-                # the top of the driving function (conv_verify_retry.js:48 —
-                # `if (typeof X !== 'function') return;`). The setTimeout
-                # callback it schedules closes over the guarded activation,
-                # so the call 13 lines below is genuinely covered. The
-                # 15-line lookback is brace-blind by design — a ratchet for
-                # review, not a proof.
-                neg_ctx = '\n'.join(lines[max(0, i - 16):i])
-                neg_guard = (r"typeof\s+(?:window\.)?" + re.escape(name)
-                             + r"\s*!==\s*['\"]function['\"]")
-                if re.search(neg_guard, neg_ctx):
-                    continue
-                violations.append(f'{rel}:{i} {name}')
-    assert not violations, (
-        'unguarded core→deferred call sites (each ReferenceErrors the moment '
-        'it runs before the feature bundle lands — the main.js:1199 '
-        '_checkDbHealth boot crash was one of these):\n  '
-        + '\n  '.join(violations))
+    # Vite now owns these sections in one module scope, so top-level function
+    # declarations are hoisted across the complete module before main.js's
+    # boot IIFE executes. The old cross-script typeof census/order premise no
+    # longer applies; pin unique membership plus the hoistable declaration
+    # shape instead.
+    for rel in _EX_CORE_DEFERRED:
+        assert runtime_files.count(rel) == 1
+        source = open(os.path.join(JS_DIR, rel), encoding='utf-8').read()
+        assert _DEF_RE.search(source), f'{rel} lost its hoistable function surface'
 
 
 def test_boot_recovery_primitives_live_in_core():
@@ -180,11 +124,9 @@ def test_excore_deferred_modules_stay_deferred():
     """The census only means anything while these modules really are deferred
     (a silent move back to core would make this suite vacuous). Locks the
     manifest shape so the suite's premise is checked, not assumed."""
-    from lib.js_bundler import _BUNDLE_FILES, _DEFERRED_FILES
     for rel in _EX_CORE_DEFERRED:
-        assert rel in _DEFERRED_FILES and rel not in _BUNDLE_FILES, (
-            f'{rel} left _DEFERRED_FILES — re-audit whether this census '
-            'still covers the right module set')
+        assert runtime_section_names().count(rel) == 1, (
+            f'{rel} must occur exactly once in the Vite runtime')
 
 
 if __name__ == '__main__':

@@ -42,6 +42,15 @@ Critical ordering invariant (memory: ``compaction-viewer-architecture``):
 
 Steps 1+2 must come BEFORE step 5, and step 5 MUST carry the skip flag.
 Otherwise the viewer gets two 'reactive' archive rows on the same 413.
+
+Back-fill contract (fix for the "→ 0" viewer artifact): the step-1
+pre-snapshot row is written BEFORE any compaction runs, so its
+``tokens_after`` / ``msgs_after`` are 0 placeholders.  Step 6 adopts that
+row via ``_compaction_archive_id`` so the inner post-summary UPDATE
+(``update_archive_summary`` + ``compaction_done``) fills it in; when the
+summary path declines to compact, step 7's fallback back-fill at the end
+of ``reactive_compact`` writes the final counts itself so the row never
+keeps the misleading 0.
 """
 
 from lib.log import get_logger
@@ -119,12 +128,14 @@ def reactive_compact(messages: list, task: dict | None = None,
         _pre_reason = f'request body too large: {wire_before / 1048576:.1f} MB'
     else:
         _pre_reason = 'API rejected request as too long'
+    round_num = int((task.get('round_num') if task else 0) or 0)
+    archive_id = None
     try:
-        _archive_transcript(
+        archive_id = _archive_transcript(
             conv_id, messages,
             trigger='reactive',
             task=task,
-            round_num=int((task.get('round_num') if task else 0) or 0),
+            round_num=round_num,
             tokens_before=tokens_before_snap,
             msgs_before=msgs_before_snap,
             reason=_pre_reason,
@@ -198,7 +209,15 @@ def reactive_compact(messages: list, task: dict | None = None,
         _compaction_trigger='reactive',
         _compaction_reason=_r_reason,
         _compaction_skip_archive=True,  # already archived above
+        # …so hand that pre-snapshot row's id down: the inner post-summary
+        # UPDATE (update_archive_summary + compaction_done) back-fills THIS
+        # row's tokens_after/msgs_after instead of leaving them at 0.
+        _compaction_archive_id=archive_id,
     )
+    # Phase 3's success tail already back-filled + closed out the adopted
+    # archive row when it compacted.  Only when it DECLINED (summary
+    # empty/refused) does the fallback below need to write the final counts.
+    phase3_updated_archive = compacted and archive_id is not None
 
     # Phase 4: wire-byte guard.
     wire_after_phases = _estimate_wire_bytes(messages)
@@ -221,6 +240,44 @@ def reactive_compact(messages: list, task: dict | None = None,
 
     tokens_after = _estimate_total_tokens(messages)
     wire_after = _estimate_wire_bytes(messages)
+
+    # ── Archive back-fill (summary-declined path) ──
+    #   The pre-snapshot row was written with tokens_after=0 / msgs_after=0
+    #   placeholders.  Phase 3's success tail fills them when it compacts;
+    #   when it declined (only the head-truncate net ran), that UPDATE never
+    #   fired and the row kept showing the misleading "→ 0" in the
+    #   viewer.  Write the final counts here (summary stays '' — a
+    #   head-truncate produces none) and close out the live marker with a
+    #   compaction_done so the chip leaves its in_progress state.
+    #   NOTE: when Phase 3 compacted AND Phase 4 then byte-trimmed further,
+    #   the recorded counts are the pre-Phase-4 ones — a bounded, rare
+    #   overestimate we accept rather than clobbering the stored summary.
+    if archive_id is not None and not phase3_updated_archive:
+        try:
+            from lib.agent_core.store import get_conversation_store
+            get_conversation_store().update_archive_summary(
+                archive_id, '', int(tokens_after), len(messages))
+        except Exception as _bf_e:
+            logger.debug('%s [ReactiveCompact] archive back-fill failed: %s',
+                         pfx, _bf_e)
+        if task is not None:
+            try:
+                from lib.agent_core.events import EventType, build_event
+                from lib.tasks_pkg.manager import append_event
+                _red_pct = (1 - tokens_after / max(1, tokens_before_snap)) * 100
+                append_event(task, build_event(
+                    EventType.COMPACTION_DONE,
+                    archiveId=int(archive_id),
+                    convId=conv_id,
+                    tokensAfter=int(tokens_after),
+                    msgsAfter=len(messages),
+                    reductionPct=round(_red_pct, 1),
+                    roundNum=round_num,
+                ))
+            except Exception as _ev_e:
+                logger.debug('%s [ReactiveCompact] compaction_done emit '
+                             'failed: %s', pfx, _ev_e)
+
     logger.info('%s [ReactiveCompact] Complete — %d messages, ~%d tokens, '
                 '%.1fMB wire (was %.1fMB)',
                 pfx, len(messages), tokens_after,

@@ -112,6 +112,12 @@ class _FakeConvDb:
     def commit(self):
         pass
 
+    def begin(self):
+        pass
+
+    def rollback(self):
+        pass
+
 
 class _FakeCursor:
     def __init__(self, rows=None, rowcount=0):
@@ -443,19 +449,14 @@ def test_the_scan_actually_finds_the_known_whole_blob_writers():
     writers = scan_writers()
     seen = {(w['path'], w['func']) for w in writers}
 
-    for path, func in [
-        ('lib/tasks_pkg/persistence_store.py', 'save_conversation_messages'),
-        ('lib/tasks_pkg/manager/_sync.py', '_sync_result_to_conversation'),
-        ('lib/tasks_pkg/autopilot_baton.py', '_append_vu_message_to_conv'),
-        ('routes/conversations.py', '_persist_reconcile'),
-    ]:
-        assert (path, func) in seen, (
-            f'scan surface lost {path}::{func} — the ratchet below is now '
-            f'blind to part of what it claims to cover. Saw: {sorted(seen)}')
-
-    assert len(writers) >= 20, (
-        f'scan collapsed to {len(writers)} whole-blob writers; the ratchet '
-        f'would pass vacuously')
+    expected_maintenance = {
+        ('lib/database/message_archive_offload.py',
+         'offload_frozen_message_archives'),
+    }
+    assert seen == expected_maintenance, (
+        'only the reviewed frozen-archive maintenance seam may write the '
+        'retired transcript blob directly; business writes must use '
+        f'conversation_repository: {sorted(seen)}')
 
 
 def test_the_conversation_store_primitive_is_cas_guarded():
@@ -479,17 +480,7 @@ def test_no_new_unguarded_whole_blob_writer_appears():
     Each remaining entry is a pre-existing writer outside this epic's write-set.
     Removing one means deleting its line here; adding one fails the build.
     """
-    known = {
-        # boot/startup recovery — sole writer before any task or client attaches
-        ('lib/tasks_pkg/manager/_recovery.py', 'recover_stale_tasks_on_startup'),
-        ('lib/tasks_pkg/killed_recovery.py', 'restamp_killed_after_internal_fatal'),
-        ('lib/tasks_pkg/killed_recovery.py', '_dispatch_one'),
-        # turn-injection paths (tracked separately — see the epic notes)
-        ('lib/scheduler/_shared.py', 'inject_and_run_task'),
-        ('lib/swarm/integration/_autocontinue.py', '_start_autocontinue_turn'),
-        # the frontend PUT reconcile
-        ('routes/conversations.py', '_persist_reconcile'),
-    }
+    known = set()
     current = {(w['path'], w['func']) for w in unguarded_writers()}
     new = current - known
     assert not new, (

@@ -415,7 +415,7 @@ def test_snapshot_fresh_when_synced(tmp_path, monkeypatch):
     assert mc._snapshot_stale_reason(sib, snap) == ''
 
 
-def test_snapshot_ignores_pycache_and_eggimfo(tmp_path, monkeypatch):
+def test_snapshot_ignores_runtime_artifacts(tmp_path, monkeypatch):
     # Excluded artifacts present only on one side must NOT count as drift.
     _repo, sib, snap = _make_vendor_pair(tmp_path, monkeypatch, synced=True)
     os.makedirs(os.path.join(sib, 'src', '__pycache__'))
@@ -424,6 +424,16 @@ def test_snapshot_ignores_pycache_and_eggimfo(tmp_path, monkeypatch):
     os.makedirs(os.path.join(sib, 'x.egg-info'))
     with open(os.path.join(sib, 'x.egg-info', 'PKG-INFO'), 'w') as f:
         f.write('meta')
+    os.makedirs(os.path.join(sib, '.tofu_trash', 'recovered'), exist_ok=True)
+    with open(os.path.join(sib, '.tofu_trash', 'recovered', 'old.py'), 'w') as f:
+        f.write('not source')
+    os.makedirs(os.path.join(sib, '.oa-skills-ref'), exist_ok=True)
+    with open(os.path.join(sib, '.oa-skills-ref', 'client.js'), 'w') as f:
+        f.write('local reference')
+    with open(os.path.join(sib, 'JOURNAL.md'), 'w') as f:
+        f.write('personal notes')
+    with open(os.path.join(sib, 'citadel (1).zip'), 'w') as f:
+        f.write('local archive')
     assert mc._snapshot_stale_reason(sib, snap) == ''
 
 

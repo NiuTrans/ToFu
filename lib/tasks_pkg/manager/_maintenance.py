@@ -389,17 +389,17 @@ def find_orphan_running_results(limit: int = 200) -> list[dict]:
     max_age = _orphan_result_max_age_secs()
     if max_age <= 0:
         return []
-    from lib.database import DOMAIN_CHAT, get_thread_db
+    from lib.database import DOMAIN_CHAT, pooled_db
     now_ms = int(time.time() * 1000)
     cutoff = now_ms - max_age * 1000
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        rows = db.execute(
-            "SELECT task_id, conv_id, completed_at FROM task_results "
-            "WHERE status='running' AND completed_at IS NOT NULL "
-            "  AND completed_at < ? ORDER BY completed_at ASC LIMIT ?",
-            (cutoff, limit),
-        ).fetchall()
+        with pooled_db(DOMAIN_CHAT) as db:
+            rows = db.execute(
+                "SELECT task_id, conv_id, completed_at FROM task_results "
+                "WHERE status='running' AND completed_at IS NOT NULL "
+                "  AND completed_at < ? ORDER BY completed_at ASC LIMIT ?",
+                (cutoff, limit),
+            ).fetchall()
     except Exception as e:
         logger.warning('[Manager] orphan-result scan failed: %s', e, exc_info=True)
         return []

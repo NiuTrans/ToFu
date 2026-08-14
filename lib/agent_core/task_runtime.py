@@ -73,46 +73,22 @@ import time
 from typing import Any, Callable, Optional
 
 from lib.ids import short_id
-from lib.log import get_logger
+from lib.log import get_logger, req_id, set_req_id
+from lib.task_replay import (
+    TASK_REPLAY_EVENT_SEQUENCE_FIELD,
+    TASK_REPLAY_EVENT_TYPE_FIELD,
+    missing_replay_page,
+    task_memory_replay_page,
+    task_terminal_event_type,
+)
 
 logger = get_logger(__name__)
 
 
 def _make_envelope(error, *, context: str, source: str) -> Optional[dict]:
-    """Normalize error to an envelope dict (or None).
-
-    Every shape becomes a COMPLETE envelope (``kind`` + string ``message``)
-    because the frontend's ``isErrorEnvelope`` requires both — an incomplete
-    dict (e.g. ``{'kind': 'worker_lost', 'detail': …}``) used to fall through
-    to the renderer's unknown-shape branch and display as 'Unknown error'
-    plus a JSON blob.
-    """
-    if error is None:
-        return None
-    if isinstance(error, dict):
-        if isinstance(error.get('kind'), str) and isinstance(error.get('message'), str):
-            return error  # complete envelope — pass through verbatim
-        from lib.error_envelope import make_envelope as _make_env
-        return _make_env(error.get('kind') or 'generic',
-                         detail=str(error.get('detail') or '')[:300],
-                         context=context,
-                         source=error.get('source') or source,
-                         raw=str(error)[:300])
-    if isinstance(error, BaseException):
-        from lib.error_envelope import from_exception as _err_from_exc
-        return _err_from_exc(error, context=context, source=source)
-    if isinstance(error, str):
-        # A string naming a REGISTERED kind (e.g. finish(error='worker_lost')
-        # — the documented stall-reap contract) builds that kind's envelope;
-        # anything else is a raw reason string shown verbatim under 'generic'.
-        from lib.error_envelope import KINDS as _KINDS, make_envelope as _make_env
-        if error in _KINDS:
-            return _make_env(error, context=context, source=source)
-        return _make_env('generic', detail=error, context=context,
-                         source=source, raw=error)
-    from lib.error_envelope import make_envelope as _make_env
-    return _make_env('generic', detail=str(error)[:300], context=context,
-                     source=source, raw=str(error)[:300])
+    """Compatibility seam around the package-owned normalizer."""
+    from lib.error_envelope import normalize_envelope
+    return normalize_envelope(error, context=context, source=source)
 
 
 def _epoch_ms(seconds) -> Optional[int]:
@@ -159,6 +135,7 @@ class TaskRuntime:
     """
 
     def __init__(self, kind: str, *, ttl: int = 3600,
+                 max_tasks: int = 1024, max_events: int = 2048,
                  push_channel: Optional[str] = None,
                  error_source: str = '',
                  stall_timeout: float = 0):
@@ -166,6 +143,12 @@ class TaskRuntime:
         Args:
             kind: Task kind identifier (e.g. 'chat', 'paper-report').
             ttl: Seconds to retain finished tasks for late pollers.
+            max_tasks: Maximum retained task records per kind. Running tasks
+                are never evicted; terminal records are removed oldest-first
+                when a new task reaches this capacity.
+            max_events: Maximum replay events retained per task. Sequence
+                numbers remain absolute after old events are trimmed and poll
+                responses mark a cursor reset when a client fell behind.
             push_channel: WebSocket push channel name. If set, all events
                 are also pushed via lib.agent_core.push.push_event(channel, task_id, event).
                 If None, defaults to ``kind``.
@@ -179,6 +162,8 @@ class TaskRuntime:
         """
         self.kind = kind
         self.ttl = ttl
+        self.max_tasks = max(1, int(max_tasks or 1))
+        self.max_events = max(1, int(max_events or 1))
         self.stall_timeout = float(stall_timeout or 0)
         self.push_channel = push_channel if push_channel is not None else kind
         self.error_source = error_source or f'task_runtime.{kind}'
@@ -197,6 +182,10 @@ class TaskRuntime:
         if not task_id:
             task_id = short_id(n=12)
         _now = time.time()
+        request_id = req_id()
+        task_meta = dict(meta or {})
+        if request_id:
+            task_meta.setdefault('requestId', request_id)
         task = {
             'id': task_id,
             'kind': self.kind,
@@ -205,6 +194,8 @@ class TaskRuntime:
             # only a worker that passes degraded= to finish() populates it.
             'artifact_quality': None,
             'events': [],
+            '_eventBaseSeq': 0,
+            '_eventNextSeq': 0,
             'events_lock': threading.Lock(),
             'abort_event': threading.Event(),
             'result': None,
@@ -214,10 +205,48 @@ class TaskRuntime:
             # is well-defined for a task that has not emitted anything yet.
             'updated_at': _now,
             'finished_at': None,
-            'meta': meta or {},
+            'meta': task_meta,
+            # Correlation is captured at ingress before work moves to a pool.
+            # It is deliberately task data, not a Prometheus label.
+            '_requestId': request_id,
         }
+        capacity_evicted = []
+        over_capacity = False
         with self._lock:
+            if task_id not in self._tasks and len(self._tasks) >= self.max_tasks:
+                terminal = sorted(
+                    (item for item in self._tasks.values()
+                     if item.get('status') in ('done', 'error', 'aborted')),
+                    key=lambda item: float(item.get('finished_at')
+                                           or item.get('created_at') or 0),
+                )
+                while terminal and len(self._tasks) >= self.max_tasks:
+                    victim = terminal.pop(0)
+                    victim_id = str(victim.get('id') or '')
+                    if victim_id and self._tasks.pop(victim_id, None) is not None:
+                        capacity_evicted.append(victim_id)
+                over_capacity = len(self._tasks) >= self.max_tasks
             self._tasks[task_id] = task
+        if capacity_evicted:
+            logger.info(
+                '[TaskRuntime:%s] capacity cleanup removed %d task(s): %s',
+                self.kind, len(capacity_evicted),
+                ','.join(item[:8] for item in capacity_evicted[:8]),
+            )
+            try:
+                from lib.observability import record_registry_eviction
+                record_registry_eviction(
+                    self.kind, 'capacity', len(capacity_evicted))
+            except Exception as exc:
+                logger.debug('[TaskRuntime:%s] capacity metric skipped: %s',
+                             self.kind, exc)
+        if over_capacity:
+            # Active work is authoritative and cannot be dropped to satisfy a
+            # memory target. Surface this exceptional spill; the next terminal
+            # create/TTL sweep returns the registry below its retention cap.
+            logger.warning(
+                '[TaskRuntime:%s] registry over capacity=%d; all retained '
+                'tasks are active', self.kind, self.max_tasks)
         logger.debug('[TaskRuntime:%s] created task %s', self.kind, task_id[:8])
         return task
 
@@ -245,8 +274,9 @@ class TaskRuntime:
         ordering: a caller that persists the event to a durable log (chat's
         ``append_persistent_event``) passes it here so the log is never behind
         what the client has already received — a cold reconnect can then
-        reconstruct the COMPLETE stream. Best-effort: a callback exception is
-        logged but never blocks the push (a DB blip must not stall the stream).
+        reconstruct the COMPLETE stream. Legacy non-terminal persistence stays
+        best-effort; an authoritative turn/attempt frame is withheld on any
+        callback failure because its persistent cursor is the protocol.
 
         Tolerant of legacy task dicts inserted directly into ``_tasks``
         (e.g. older test code) that may not have all the standard fields.
@@ -254,12 +284,68 @@ class TaskRuntime:
         task = self.get(task_id)
         if not task:
             return None
+        # Standard event envelope. These fields are additive and stable across
+        # live WebSocket delivery, SSE and cursor replay.
+        event.setdefault('taskId', task_id)
+        request_id = task.get('_requestId') or (task.get('meta') or {}).get('requestId')
+        if request_id:
+            event.setdefault('requestId', request_id)
         # The stall-reap clock: every event is proof of life.
         task['updated_at'] = time.time()
+        trimmed = 0
         with task['events_lock']:
-            event['seq'] = len(task['events'])
-            task['events'].append(event)
-            seq = event['seq']
+            events = task.setdefault('events', [])
+            try:
+                hinted_next_seq = int(task.get('_eventNextSeq'))
+            except (TypeError, ValueError, OverflowError) as exc:
+                logger.debug('[TaskRuntime:%s] invalid next event sequence '
+                             'task=%s: %s', self.kind, task_id[:8], exc)
+                hinted_next_seq = -1
+            # A retained event's wire ``seq`` is more authoritative than the
+            # private hint. Reconcile on every append so a legacy/recovered
+            # task with stale metadata cannot mint a duplicate or future id.
+            if events:
+                try:
+                    next_seq = int(events[-1].get(
+                        TASK_REPLAY_EVENT_SEQUENCE_FIELD)) + 1
+                except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+                    logger.debug('[TaskRuntime:%s] legacy event sequence '
+                                 'fallback task=%s: %s',
+                                 self.kind, task_id[:8], exc)
+                    base_seq = task.get('_eventBaseSeq', 0)
+                    try:
+                        next_seq = max(0, int(base_seq)) + len(events)
+                    except (TypeError, ValueError, OverflowError) as exc:
+                        logger.debug('[TaskRuntime:%s] invalid event base '
+                                     'task=%s: %s', self.kind, task_id[:8], exc)
+                        next_seq = len(events)
+            else:
+                next_seq = hinted_next_seq if hinted_next_seq >= 0 else 0
+            event[TASK_REPLAY_EVENT_SEQUENCE_FIELD] = next_seq
+            events.append(event)
+            seq = next_seq
+            task['_eventNextSeq'] = seq + 1
+            if len(events) > self.max_events:
+                trimmed = len(events) - self.max_events
+                del events[:trimmed]
+            if events:
+                try:
+                    task['_eventBaseSeq'] = int(events[0].get(
+                        TASK_REPLAY_EVENT_SEQUENCE_FIELD, seq + 1 - len(events)))
+                except (AttributeError, TypeError, ValueError) as exc:
+                    logger.debug('[TaskRuntime:%s] invalid retained base '
+                                 'sequence task=%s: %s',
+                                 self.kind, task_id[:8], exc)
+                    task['_eventBaseSeq'] = seq + 1 - len(events)
+            else:
+                task['_eventBaseSeq'] = seq + 1
+        if trimmed:
+            try:
+                from lib.observability import record_task_event_eviction
+                record_task_event_eviction(self.kind, trimmed)
+            except Exception as exc:
+                logger.debug('[TaskRuntime:%s] event eviction metric skipped: %s',
+                             self.kind, exc)
         # Auto-transition pending → running on first event. Skip silently
         # for legacy dicts that have no 'status' key.
         if task.get('status') == 'pending':
@@ -272,6 +358,18 @@ class TaskRuntime:
             try:
                 before_push(seq)
             except Exception as e:
+                terminal = event.get(TASK_REPLAY_EVENT_TYPE_FIELD) in (
+                    'done', 'error', 'aborted', 'interrupted')
+                # v2 events have a stronger contract than the legacy task
+                # channel: every frame is durable before visibility, not just
+                # the terminal one.  A stale/superseded attempt therefore
+                # withholds its late delta instead of leaking it to clients.
+                authoritative = bool(event.get('attemptId'))
+                if terminal or authoritative:
+                    logger.error('[TaskRuntime:%s] authoritative persistence failed; '
+                                 'withholding push task=%s seq=%s: %s',
+                                 self.kind, task_id[:8], seq, e)
+                    return seq
                 logger.debug('[TaskRuntime:%s] before_push failed task=%s: %s',
                              self.kind, task_id[:8], e)
         if self.push_channel:
@@ -328,8 +426,7 @@ class TaskRuntime:
             quality = task.get('artifact_quality')
 
         terminal_event = {
-            'type': 'done' if final_status == 'done' else (
-                'aborted' if final_status == 'aborted' else 'error'),
+            TASK_REPLAY_EVENT_TYPE_FIELD: task_terminal_event_type(final_status),
             'status': final_status,
         }
         if envelope:
@@ -407,9 +504,11 @@ class TaskRuntime:
 
         Response shape (matches the legacy implementations):
             {
+                'format': 'tofu.task-replay/v1',
                 'ok': True,
                 'events': [...new events...],
                 'next_cursor': N,
+                'cursor': {'requested': N, 'next': N, 'reset': bool},
                 'status': 'pending'|'running'|'done'|'error'|'aborted',
                 'done': bool,
                 'createdAt': int,   # true job start, epoch MILLISECONDS
@@ -442,45 +541,69 @@ class TaskRuntime:
         """
         task = self.get(task_id)
         if not task:
-            return {'ok': False, 'error': 'not_found',
-                    'events': [], 'next_cursor': cursor, 'done': True}
+            return missing_replay_page(cursor).payload()
         self.reap_if_stalled(task)
 
-        with task['events_lock']:
-            new_events = task['events'][cursor:]
-            new_cursor = len(task['events'])
+        page = task_memory_replay_page(task, cursor)
+        terminal = page.done
+        try:
+            from lib.observability import record_replay
+            record_replay(
+                'sse', self.kind, len(page.events), reset=page.cursor_reset)
+        except Exception as exc:
+            logger.debug('[TaskRuntime:%s] replay metric skipped task=%s: %s',
+                         self.kind, task_id[:8], exc)
 
-        terminal = task['status'] in ('done', 'error', 'aborted')
-        resp = {
-            'ok': True,
-            'events': new_events,
-            'next_cursor': new_cursor,
-            'status': task['status'],
-            'done': terminal,
+        extras = {
+            'taskId': task_id,
             'createdAt': _epoch_ms(task.get('created_at')),
             # Falls back to created_at so a task with no events yet still
             # reports a liveness clock — 'now' is never a safe default here.
             'updatedAt': _epoch_ms(task.get('updated_at')
                                    or task.get('created_at')),
         }
+        request_id = task.get('_requestId') or (task.get('meta') or {}).get('requestId')
+        if request_id:
+            extras['requestId'] = request_id
         # The making-model is part of the artifact's identity (paper podcast/
         # video panels badge it; the backend cache/dedup keys ride it) — a
         # live poll must be able to adopt it, not just a lookup re-attach.
         # Emitted only when the worker named one, so kinds that have no
         # model concept keep their frames unchanged.
         if task.get('model'):
-            resp['model'] = task['model']
+            extras['model'] = task['model']
         if terminal:
-            resp['finishedAt'] = _epoch_ms(task.get('finished_at'))
+            extras['finishedAt'] = _epoch_ms(task.get('finished_at'))
             # Product-quality axis, emitted only when the kind assessed it.
             # A poller that reads status alone still sees 'done' — by design.
             if task.get('artifact_quality'):
-                resp['artifact_quality'] = task['artifact_quality']
+                extras['artifact_quality'] = task['artifact_quality']
             if task['error']:
-                resp['error'] = task['error']
+                extras['error'] = task['error']
             elif task['result'] is not None:
-                resp['result'] = task['result']
-        return resp
+                extras['result'] = task['result']
+        return page.payload(extras)
+
+    def retention_stats(self) -> dict[str, int | float]:
+        """Return bounded registry/event occupancy without exposing task ids."""
+        with self._lock:
+            tasks = list(self._tasks.values())
+        event_count = 0
+        for task in tasks:
+            lock = task.get('events_lock')
+            if lock is None:
+                event_count += len(task.get('events') or [])
+                continue
+            with lock:
+                event_count += len(task.get('events') or [])
+        return {
+            'tasks': len(tasks),
+            'max_tasks': self.max_tasks,
+            'ttl_seconds': self.ttl,
+            'events': event_count,
+            'max_events_per_task': self.max_events,
+            'over_capacity': max(0, len(tasks) - self.max_tasks),
+        }
 
     # ── Spawning ───────────────────────────────────────────────
 
@@ -495,7 +618,33 @@ class TaskRuntime:
         worker's responsibility to call runtime.append_event(...) and
         runtime.finish(...) appropriately.
         """
+        task = self.get(task_id)
+        worker_request_id = ''
+        if task is not None:
+            worker_request_id = str(
+                task.get('_requestId')
+                or (task.get('meta') or {}).get('requestId')
+                or ''
+            )
+        queued_at = time.monotonic()
+
         def _wrapper():
+            try:
+                from lib.observability import record_task_queue_wait
+                record_task_queue_wait(
+                    self.kind, max(0.0, time.monotonic() - queued_at))
+            except Exception as exc:
+                logger.debug('[TaskRuntime:%s] queue-wait metric skipped: %s',
+                             self.kind, exc)
+            # The asyncio branch deliberately runs in a fresh Context so a
+            # Quart request/app context (and its DB connection) cannot leak
+            # into a long-lived worker. Re-seed only the inert correlation id
+            # captured at task creation: provider, tool and exception logs then
+            # remain joinable to the originating HTTP request without copying
+            # any request-scoped resources into the pool thread.
+            previous_request_id = req_id()
+            if worker_request_id:
+                set_req_id(worker_request_id)
             try:
                 fn(*args, **kwargs)
             except Exception as e:
@@ -515,6 +664,11 @@ class TaskRuntime:
                 except Exception as _ctd_err:
                     logger.debug('[TaskRuntime:%s] release_connection failed task=%s: %s',
                                  self.kind, task_id[:8], _ctd_err)
+                # Executor threads are reused. Restore the context that was
+                # present before this unit of work (normally empty in the
+                # deliberately fresh Context) so correlation never bleeds into
+                # the next unrelated background task.
+                set_req_id(previous_request_id)
 
         try:
             loop = asyncio.get_running_loop()
@@ -523,8 +677,20 @@ class TaskRuntime:
             loop = None
 
         if loop and loop.is_running():
+            # ``asyncio.to_thread`` copies the caller's ContextVars by
+            # default. When spawn() is called by a Quart route that includes
+            # the request/app context, the worker then mistakes itself for a
+            # request and ``get_thread_db`` stores its connection on copied
+            # ``g``. Request teardown cannot see that copied context and the
+            # worker's close_thread_db() cannot see the g-bound connection:
+            # an uncommitted SQLite write can therefore hold the global writer
+            # lane forever. Run the worker inside a deliberately fresh context
+            # while retaining to_thread's tracked executor lifecycle.
+            import contextvars
+            worker_context = contextvars.Context()
+
             async def _async_wrapper():
-                await asyncio.to_thread(_wrapper)
+                await asyncio.to_thread(worker_context.run, _wrapper)
             bg = asyncio.ensure_future(_async_wrapper())
             self._bg_tasks.add(bg)
             bg.add_done_callback(self._bg_tasks.discard)
@@ -563,6 +729,12 @@ class TaskRuntime:
             logger.info('[TaskRuntime:%s] cleaned %d stale tasks: %s',
                         self.kind, len(expired),
                         [t[:8] for t in expired[:8]])
+            try:
+                from lib.observability import record_registry_eviction
+                record_registry_eviction(self.kind, 'ttl', len(expired))
+            except Exception as exc:
+                logger.debug('[TaskRuntime:%s] eviction metric skipped: %s',
+                             self.kind, exc)
         return len(expired)
 
     # ── Stats ──────────────────────────────────────────────────

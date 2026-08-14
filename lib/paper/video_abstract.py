@@ -453,6 +453,7 @@ def start_video_abstract(paper_hash: str, *, lang: str = 'zh',
     from lib.motion_video.engine import run_motion_task
     from lib.motion_video.runtime import (
         _motion_index_get,
+        _motion_claim_task,
         _motion_index_register,
         _motion_runtime,
         _motion_task_id,
@@ -496,18 +497,35 @@ def start_video_abstract(paper_hash: str, *, lang: str = 'zh',
                 'errors': budget_errors[:6]}
 
     task_id = _motion_task_id()
-    _motion_index_register(dedup_key, task_id)
     workdir = os.path.join(motion_root(), 'jobs', task_id)
-    os.makedirs(workdir, exist_ok=True)
     scenes_path = os.path.join(workdir, 'scenes.json')
+    task = None
+    joined_task_id = None
+    task_kwargs = {
+        'srt_path': '', 'workdir': workdir, 'voice': voice, 'speed': speed,
+        'alignment': alignment, 'narration': narration, 'quality': quality,
+        'parallel': parallel, 'width': 1080, 'height': 1440,
+        'scenes_path': scenes_path,
+    }
+    if force:
+        # Force explicitly supersedes a live identity. Create first so index
+        # pruning can never mistake the replacement for an orphan.
+        task = _new_motion_task(task_id, **task_kwargs)
+        _motion_index_register(dedup_key, task_id)
+    else:
+        task, joined_task_id = _motion_claim_task(
+            dedup_key, task_id, **task_kwargs)
+    if joined_task_id:
+        logger.info('[Paper:Video] concurrent dedup join: %s (paper=%s)',
+                    joined_task_id, paper_hash[:8])
+        return {'ok': True, 'task_id': joined_task_id, 'deduped': True,
+                'scenes': 0, 'source_kind': 'joined'}
+
+    os.makedirs(workdir, exist_ok=True)
     with open(scenes_path, 'w', encoding='utf-8') as f:
         json.dump(scenes, f, ensure_ascii=False, indent=1)
 
-    task = _new_motion_task(
-        task_id, srt_path='', workdir=workdir, voice=voice, speed=speed,
-        alignment=alignment, narration=narration, quality=quality,
-        parallel=parallel, width=1080, height=1440,
-        scenes_path=scenes_path)
+    assert task is not None
     task['burn_in'] = burn_in
     task['burn_in_fontsdir'] = ''
     task['paper_hash'] = paper_hash

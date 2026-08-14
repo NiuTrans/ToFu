@@ -9,7 +9,7 @@ which the status-poll endpoint surfaces to the frontend.
 from lib.log import get_logger
 
 from .conversations import _analyse_conversations, _extract_convs_for_date
-from .storage import _save_report, _update_job
+from .storage import _save_generated_report, _update_job
 
 logger = get_logger(__name__)
 
@@ -44,10 +44,10 @@ def _generate_in_background(date_str, force):
             # Delegate to the empty-convs path of _analyse_conversations so
             # carryover + manual-state preservation (_merge_manual_state) are
             # applied consistently instead of a bare tasks-only merge here.
-            result = _analyse_conversations([], date_str)
+            result = _analyse_conversations([], date_str, preserve_manual=False)
             if (result.get('streams') or result.get('tomorrow')
                     or result.get('tasks')):
-                _save_report(date_str, result)
+                _save_generated_report(date_str, result)
             _update_job(date_str, 'done')
             logger.info('[DailyReport] Background generation %s: no convs found', date_str)
             return
@@ -62,7 +62,8 @@ def _generate_in_background(date_str, force):
         # Manual-state preservation (status overrides, TODO check-offs,
         # manual TODOs, legacy _todo tasks) is centralized in
         # _analyse_conversations → _merge_manual_state.
-        result = _analyse_conversations(convs, date_str)
+        result = _analyse_conversations(
+            convs, date_str, preserve_manual=False)
 
         # Phase 3: Save
         _update_job(date_str, 'generating', progress={
@@ -70,7 +71,7 @@ def _generate_in_background(date_str, force):
         })
 
         if (result.get('streams') or result.get('tomorrow')) and not result.get('error'):
-            _save_report(date_str, result)
+            _save_generated_report(date_str, result)
         elif result.get('error'):
             logger.warning('[DailyReport] Background generation %s: not saving error result: %s',
                            date_str, result['error'])

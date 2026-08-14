@@ -83,7 +83,6 @@ from lib.paper.recommend_engine._ground import (  # noqa: E402,F401
 
 # ── Research: system prompt, research constants, JSON parse, agentic seam ──
 from lib.paper.recommend_engine._research import (  # noqa: E402,F401
-    _MAX_RECOMMEND_TOOL_ROUNDS,
     _RECOMMEND_SYSTEM,
     _RESEARCH_VERTICAL,
     _parse_llm_json,
@@ -103,7 +102,6 @@ __all__ = [
     # ── constants surfaced for callers & tests ──
     '_RECOMMEND_SYSTEM',
     '_RESEARCH_VERTICAL',
-    '_MAX_RECOMMEND_TOOL_ROUNDS',
     '_GROUND_ATTEMPT_MULTIPLIER',
     '_GROUND_SEARCH_DEPTH',
     '_STOPWORDS',

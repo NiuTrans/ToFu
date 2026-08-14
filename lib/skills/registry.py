@@ -8,8 +8,8 @@ sub-files. Skills are a DIFFERENT NOUN from memories:
   * memories are MODEL-authored experience notes (flat ``*.md``), discovered
     by BM25 search / prefetch;
   * skills are USER-installed capability packs, discovered by the
-    always-visible ``<available_skills>`` system-prompt index and activated
-    on demand (see ``lib/skills/injection.py`` + ``lib/skills/activate.py``).
+    always-visible ``<available_skills>`` index and loaded for the current task
+    on demand (see ``lib/skills/injection.py`` + ``lib/skills/load.py``).
 
 Physical homes (post-split, see ``lib/memory/storage/_dirs.py``):
 
@@ -39,10 +39,9 @@ def list_skills(project_path: str | None = None,
                 extra_paths: list[str] | None = None) -> list[dict]:
     """List every installed skill package across the global store + roots.
 
-    De-duplicated by id with the server-side global store winning, then the
-    primary root, then each extra root — the SAME collision order
-    ``list_all_memories`` uses, so the transitional union in
-    ``list_all_memories`` stays byte-identical.
+    De-duplicated by id with the primary project winning, then each extra
+    workspace root, then the server-side global store. A project-local skill
+    can therefore intentionally override a general global workflow.
 
     Returns a list of skill dicts (memory-shaped, ``is_package=True``).
     """
@@ -62,13 +61,6 @@ def list_skills(project_path: str | None = None,
         # Ensure the post-split layout before scanning (idempotent).
         run_storage_migrations(project_path, extra_paths)
 
-        for mem in _list_skill_packages_in_dir(
-                _server_global_skills_dir(), scope='global'):
-            if mem['id'] in seen_ids:
-                continue
-            seen_ids.add(mem['id'])
-            skills.append(mem)
-
         for root in roots:
             proj_dir = os.path.join(root, PROJECT_SKILLS_SUBDIR)
             for mem in _list_skill_packages_in_dir(proj_dir, scope='project'):
@@ -76,6 +68,12 @@ def list_skills(project_path: str | None = None,
                     continue
                 seen_ids.add(mem['id'])
                 skills.append(mem)
+        for mem in _list_skill_packages_in_dir(
+                _server_global_skills_dir(), scope='global'):
+            if mem['id'] in seen_ids:
+                continue
+            seen_ids.add(mem['id'])
+            skills.append(mem)
     return skills
 
 

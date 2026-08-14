@@ -14,12 +14,13 @@ import json
 import time
 from datetime import datetime
 
-from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
+from lib.database import DOMAIN_CHAT, get_thread_db
 from lib.error_envelope import to_json as _err_to_json
 from lib.log import get_logger
 from lib.tasks_pkg.auto_translate import _maybe_auto_translate_assistant
 
 from lib.tasks_pkg.manager._state import (
+    CHECKPOINT_CONV_BLOB_MAX_BYTES,
     CHECKPOINT_MIN_DELTA_CHARS,
     _conv_latest_task,
     _conv_latest_task_lock,
@@ -27,7 +28,11 @@ from lib.tasks_pkg.manager._state import (
     tasks,
     tasks_lock,
 )
-from lib.tasks_pkg.manager._events import _assign_message_ids, _new_assistant_slot
+from lib.tasks_pkg.manager._events import (
+    _assign_message_ids,
+    _new_assistant_slot,
+    snapshot_task_text,
+)
 # The SINGLE SOURCE OF TRUTH for "carrier task, not user-visible work" — shared
 # with /api/chat/active, the restart guard and the sidebar. BOTH conv-sync paths
 # below consult it so they can never drift apart (they once did: the terminal
@@ -43,6 +48,58 @@ from lib.tasks_pkg.manager._persist import (
 )
 
 logger = get_logger(__name__)
+
+
+def _conversation_blob_bytes(db, conv_id):
+    """Return stored transcript bytes without transferring the transcript.
+
+    The SQL is deliberately backend-specific: PostgreSQL's JSONB-aware
+    ``pg_column_size`` reports the TOAST value size, while SQLite stores JSON as
+    text and can use ``length``. A failed probe returns ``None`` so checkpoint
+    durability fails open to the historical full mirror.
+    """
+    try:
+        from lib.database import _BACKEND
+        expr = ('pg_column_size(messages)' if _BACKEND == 'pg'
+                else 'length(messages)')
+        row = db.execute(
+            f'SELECT {expr} AS blob_bytes FROM conversations '
+            'WHERE id=? AND user_id=1', (conv_id,)).fetchone()
+        if row is None:
+            return None
+        value = (row['blob_bytes'] if hasattr(row, 'keys') else row[0])
+        return max(0, int(value or 0))
+    except Exception as e:
+        logger.debug('[Checkpoint] conv=%s blob-size probe failed: %s',
+                     (conv_id or '')[:8], e)
+        return None
+
+
+def _defer_large_conversation_checkpoint(db, task):
+    """Whether task_results should be the sole *mid-stream* checkpoint.
+
+    The task row, thin segments and lossless event log are written before this
+    predicate is consulted. A true terminal/finalize checkpoint is never
+    deferred, so conversations.messages still converges even if the normal
+    terminal sync immediately following it encounters an unrelated failure.
+    """
+    cap = int(CHECKPOINT_CONV_BLOB_MAX_BYTES or 0)
+    if cap <= 0:
+        return False
+    from lib.chat.terminal_gate import is_terminal_status
+    if is_terminal_status(task.get('status')) or task.get('_finalize_started_at'):
+        return False
+    size = _conversation_blob_bytes(db, task.get('convId', ''))
+    if size is None or size <= cap:
+        return False
+    if not task.get('_largeConvCheckpointDeferredLogged'):
+        task['_largeConvCheckpointDeferredLogged'] = True
+        logger.info('[Checkpoint] conv=%s task=%s using lean mid-stream '
+                    'checkpoint: transcript=%d bytes > cap=%d; task_results + '
+                    'segments + events remain durable, full blob converges at terminal',
+                    (task.get('convId') or '')[:8], (task.get('id') or '')[:8],
+                    size, cap)
+    return True
 
 
 # ── Inbox-inject sidecar lanes (swarm / peer / user-steer / stall-nudge) ─────
@@ -99,11 +156,14 @@ def _persist_inject_sidecars(task, last_msg):
 # of a whole-value overwrite.
 _TERMINAL_OWNED_FIELDS = (
     'content', 'thinking', 'error',
-    'toolRounds',
+    'toolRounds', 'programRuns',
     'finishReason', 'usage', 'preset', 'toolSummary',
     'model', 'provider_id', '_taskId',
+    '_responsesItems',
+    '_anthropicContentBlocks',
     'fallbackModel', 'fallbackFrom', 'fallbackReason', 'fallbackKind',
     'apiRounds', 'modifiedFiles', 'modifiedFileList', 'cost',
+    'costExperiment', 'todoState', 'todoBlocked',
     '_memoryPrefetch', '_preferencesApplied', '_relatedConversations',
     '_preferencesLearned', '_gitSha',
     '_inboxInjects', '_peerInjects', '_userSteerInjects', '_stallNudges',
@@ -216,7 +276,7 @@ def _update_proactive_execution_status(task):
     """Update the proactive scheduler task's execution status when its agentic task completes."""
     task_id = task.get('id', '')
     try:
-        from lib.database import DOMAIN_SYSTEM, get_thread_db
+        from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, get_thread_db
         db = get_thread_db(DOMAIN_SYSTEM)
         # Find any proactive task whose last_execution_task_id matches this task
         row = db.execute(
@@ -231,11 +291,11 @@ def _update_proactive_execution_status(task):
         exec_status = 'ok' if status == 'done' and not task.get('error') else 'error'
         now = datetime.now().isoformat()
 
-        db.execute(
+        db_execute_with_retry(
+            db,
             'UPDATE scheduled_tasks SET last_execution_status=?, updated_at=? WHERE id=?',
             [exec_status, now, sched_id]
         )
-        db.commit()
         logger.info('[Proactive:%s] Execution %s completed with status=%s',
                     sched_id[:8], task_id[:8], exec_status)
     except Exception as e:
@@ -354,18 +414,14 @@ def _reconcile_orphan_placeholder_on_settle(task):
     db = None
     try:
         db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT messages, updated_at, settings, rev FROM conversations '
-            'WHERE id=? AND user_id=1', (conv_id,)).fetchone()
-        if not row:
+        from lib.database.conversation_repository import load_conversation
+        snapshot = load_conversation(
+            db, conv_id, metadata_columns=('updated_at', 'settings'))
+        if snapshot is None:
             return
-        _row_updated_at = row['updated_at']
-        _row_rev = row['rev']  # Phase 4 W-settle: CAS on rev (single-shot)
-        try:
-            messages = json.loads(row[0] or '[]')
-        except (json.JSONDecodeError, TypeError):
-            logger.debug('[SettleReconcile] conv=%s messages JSON parse failed', conv_id[:8])
-            return
+        _row_updated_at = snapshot['updated_at']
+        _row_rev = snapshot['rev']  # Phase 4 W-settle: CAS on rev (single-shot)
+        messages = snapshot.messages
         if not messages:
             return
 
@@ -383,7 +439,8 @@ def _reconcile_orphan_placeholder_on_settle(task):
         # Clear the pinned activeTaskId (this task is done) in the same write.
         settings_json = None
         try:
-            s = json.loads(row[2] or '{}') if row[2] else {}
+            raw_settings = snapshot.get('settings')
+            s = json.loads(raw_settings or '{}') if raw_settings else {}
             if s.get('activeTaskId'):
                 s['activeTaskId'] = None
                 settings_json = json.dumps(s, ensure_ascii=False)
@@ -392,46 +449,29 @@ def _reconcile_orphan_placeholder_on_settle(task):
 
         from lib.conversations import build_search_text
         search_text = build_search_text(cleaned)
-        messages_json = json_dumps_pg(cleaned)
         now_ms = int(time.time() * 1000)
-        # CAS guard: only write if no concurrent update landed since our SELECT.
+        metadata = {
+            'msg_count': len(cleaned),
+            'search_text': search_text,
+            'updated_at': now_ms,
+        }
         if settings_json is not None:
-            cur = db.execute(
-                '''UPDATE conversations
-                   SET messages=?, msg_count=?, settings=?, search_text=?, updated_at=?
-                   WHERE id=? AND user_id=1 AND rev=?''',
-                (messages_json, len(cleaned), settings_json, search_text, now_ms,
-                 conv_id, _row_rev))
-        else:
-            cur = db.execute(
-                '''UPDATE conversations
-                   SET messages=?, msg_count=?, search_text=?, updated_at=?
-                   WHERE id=? AND user_id=1 AND rev=?''',
-                (messages_json, len(cleaned), search_text, now_ms,
-                 conv_id, _row_rev))
-        db.commit()
-        if (getattr(cur, 'rowcount', 0) or 0) <= 0:
+            metadata['settings'] = settings_json
+        from lib.database.conversation_repository import replace_messages
+        result = replace_messages(
+            db, conv_id, cleaned, expected_rev=_row_rev,
+            metadata=metadata, full=True)
+        if not result.applied:
             logger.debug('[SettleReconcile] conv=%s CAS miss — concurrent write won (safe)',
                          conv_id[:8])
             return
-        try:
-            from lib.conversations import update_conversation_fts
-            update_conversation_fts(db, conv_id, search_text)
-        except Exception as e:
-            logger.debug('[SettleReconcile] conv=%s FTS update skipped: %s', conv_id[:8], e)
-        # Phase 5 dual-write (flag-gated, inert when off): reconcile drops a
-        # message mid-array (re-sequences) — full rebuild mirror.
-        from lib.database.messages_rows import mirror_write_and_commit
-        mirror_write_and_commit(db, conv_id, cleaned, now_ms=now_ms, full=True)
         logger.info('[SettleReconcile] conv=%s swept orphaned placeholder at task-end '
                     '(%d\u2192%d msgs, dropped-before-first-token)',
                     conv_id[:8], len(messages), len(cleaned))
         try:
             from lib.conversations import notify_conv_changed
             from lib.tasks_pkg.manager._registry import task_user_id
-            _rev_row = db.execute('SELECT rev FROM conversations WHERE id=? AND user_id=1',
-                                  (conv_id,)).fetchone()
-            notify_conv_changed(conv_id, rev=(_rev_row[0] if _rev_row else None),
+            notify_conv_changed(conv_id, rev=result.rev,
                                 user_id=task_user_id(task))
         except Exception as e:
             logger.debug('[SettleReconcile] conv=%s notify skipped: %s', conv_id[:8], e)
@@ -493,6 +533,12 @@ def _sync_result_to_conversation(task, meta):
 
     Runs in a separate try/except so failures don't affect task_results persistence.
     """
+    # v2 turns are the transcript authority. The task event bridge persists
+    # their projection; a parallel legacy message write would create a second
+    # identity and duplicate the visible bubble on reload.
+    if task.get('_turnProtocolV2'):
+        return
+
     conv_id = task.get('convId', '')
     task_id_short = task['id'][:8]
     pfx = f'[SyncConv {task_id_short}]'
@@ -601,12 +647,10 @@ def _sync_result_to_conversation(task, meta):
     db = None
     try:
         db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT messages, updated_at, rev FROM conversations WHERE id=? AND user_id=1',
-            (conv_id,)
-        ).fetchone()
-
-        if not row:
+        from lib.database.conversation_repository import load_conversation
+        snapshot = load_conversation(
+            db, conv_id, metadata_columns=('updated_at',))
+        if snapshot is None:
             logger.warning('%s conv=%s Conversation not found in DB — cannot sync result back', pfx, conv_id)
             return
 
@@ -618,13 +662,9 @@ def _sync_result_to_conversation(task, meta):
         # still stamp ``updated_at`` in the SET clause (freshness/ordering) but
         # it is NO LONGER the CAS token. ``row`` is a sqlite3.Row / psycopg
         # DictRow — named access works for both backends.
-        _row_updated_at = row['updated_at']
-        _row_rev = row['rev']
-        try:
-            messages = json.loads(row[0] or '[]')
-        except (json.JSONDecodeError, TypeError):
-            logger.error('%s conv=%s Failed to parse existing messages JSON', pfx, conv_id, exc_info=True)
-            return
+        _row_updated_at = snapshot['updated_at']
+        _row_rev = snapshot['rev']
+        messages = snapshot.messages
 
         if not messages:
             logger.warning('%s conv=%s Conversation has 0 messages — cannot sync result back', pfx, conv_id)
@@ -857,6 +897,15 @@ def _sync_result_to_conversation(task, meta):
                 if len(tool_rounds) > len(_existing_tr) or (not _existing_has_tc and _new_has_tc):
                     last_msg['toolRounds'] = tool_rounds
                     _tr_updated = True
+            if task.get('programRuns'):
+                last_msg['programRuns'] = task['programRuns']
+                _tr_updated = True
+            if meta.get('todoState'):
+                last_msg['todoState'] = meta['todoState']
+                _tr_updated = True
+            if meta.get('todoBlocked'):
+                last_msg['todoBlocked'] = meta['todoBlocked']
+                _tr_updated = True
             # Always update finishReason/metadata (frontend may not have received done event)
             if meta.get('finishReason') and not last_msg.get('finishReason'):
                 last_msg['finishReason'] = meta['finishReason']
@@ -937,6 +986,15 @@ def _sync_result_to_conversation(task, meta):
         # final 'stop' arrived) is superseded.
         if tool_rounds:
             last_msg['toolRounds'] = tool_rounds
+        if task.get('programRuns'):
+            # Canonical PTC state. ``toolRounds`` keeps a display projection for
+            # old clients, while programRuns preserves protocol identity,
+            # limits and child verdicts without synthetic round semantics.
+            last_msg['programRuns'] = task['programRuns']
+        if meta.get('todoState'):
+            last_msg['todoState'] = meta['todoState']
+        if meta.get('todoBlocked'):
+            last_msg['todoBlocked'] = meta['todoBlocked']
         # ★ segments (epic pt_cb8f98b0cb9b47fb, step 2): persist the THIN
         #   timeline onto the message dict too (round-trips through the
         #   conversations.messages JSON column). Co-persisted with toolRounds
@@ -984,6 +1042,11 @@ def _sync_result_to_conversation(task, meta):
             last_msg['model'] = meta['model']
         if meta.get('provider_id'):
             last_msg['provider_id'] = meta['provider_id']
+        if meta.get('_responsesItems'):
+            last_msg['_responsesItems'] = meta['_responsesItems']
+        if meta.get('_anthropicContentBlocks'):
+            last_msg['_anthropicContentBlocks'] = (
+                meta['_anthropicContentBlocks'])
         if meta.get('taskId'):
             last_msg['_taskId'] = meta['taskId']
         if meta.get('fallbackModel'):
@@ -999,6 +1062,8 @@ def _sync_result_to_conversation(task, meta):
             last_msg['modifiedFiles'] = meta['modifiedFiles']
         if meta.get('modifiedFileList'):
             last_msg['modifiedFileList'] = meta['modifiedFileList']
+        if meta.get('costExperiment'):
+            last_msg['costExperiment'] = meta['costExperiment']
 
         # ── Cost snapshot (persisted at sync time, not lazily fetched) ──
         # Cost depends only on usage + model + provider + the pricing table
@@ -1040,6 +1105,43 @@ def _sync_result_to_conversation(task, meta):
         except Exception as _ce:
             logger.warning('%s conv=%s Cost stamp failed (non-fatal): %s',
                            pfx, conv_id[:8] if conv_id else '?', _ce)
+
+        # ── A/B outcome snapshot ──
+        # Built only after the authoritative cost stamp above, so a missing
+        # price is recorded as unpriced instead of being confused with zero.
+        try:
+            from lib.cost_experiments import build_cost_experiment_outcome
+            _assignment = (task.get('_costExperiment')
+                           or meta.get('costExperiment'))
+            _outcome = build_cost_experiment_outcome(
+                _assignment,
+                usage=last_msg.get('usage'),
+                cost=last_msg.get('cost'),
+                api_rounds=last_msg.get('apiRounds'),
+                finish_reason=last_msg.get('finishReason'),
+                error=last_msg.get('error') or task.get('error'),
+                elapsed_ms=(time.time() - task.get('created_at', time.time())) * 1000,
+                compactions=task.get('_costExperimentCompactions', 0),
+                model=last_msg.get('model') or task.get('model') or '',
+                provider_id=(last_msg.get('provider_id')
+                             or task.get('provider_id') or ''),
+                task=task,
+            )
+            if _outcome:
+                last_msg['costExperiment'] = _outcome
+                task['costExperiment'] = _outcome
+                _round_tag = {
+                    'experiment_id': _outcome.get('experiment_id'),
+                    'arm': _outcome.get('arm'),
+                }
+                for _rd in last_msg.get('apiRounds') or []:
+                    if isinstance(_rd, dict) and _outcome.get('arm'):
+                        _rd.setdefault('costExperiment', _round_tag)
+        except Exception as _xe:
+            logger.warning('%s conv=%s Cost experiment outcome failed '
+                           '(non-fatal): %s', pfx,
+                           conv_id[:8] if conv_id else '?', _xe,
+                           exc_info=True)
 
         # Backfill stable per-message IDs.  Newly created messages get a
         # UUID; existing messages keep theirs.  Index-free addressing is
@@ -1111,9 +1213,6 @@ def _sync_result_to_conversation(task, meta):
                             'verdict moved onto the surviving row)',
                             pfx, conv_id, _twins_folded)
 
-        # Serialize and write back — json_dumps_pg strips null bytes from
-        # raw data AND removes \u0000 escapes from the JSON text.
-        messages_json = json_dumps_pg(messages)
         now_ms = int(time.time() * 1000)
 
         # ── Also clear activeTaskId from settings so subsequent reloads
@@ -1175,12 +1274,14 @@ def _sync_result_to_conversation(task, meta):
         # genuinely won (skip — never shrink); otherwise we graft our assembled
         # assistant onto the fresh tail and re-CAS (up to 3×). Mirrors the
         # bounded loop _sync_partial_to_conversation already has.
-        #     Raw db.execute()+commit (not db_execute_with_retry) because the
-        #     retry helper masks rowcount, and we need it to detect CAS-miss.
+        #     The repository exposes the CAS result without leaking transaction
+        #     choreography back into this business workflow.
         MAX_TERMINAL_CAS = 3
         _cas_succeeded = False
         search_text = build_search_text(messages)
         for _cas_attempt in range(MAX_TERMINAL_CAS):
+            _twins_folded = 0
+            _frags_marked = 0
             # Same-task twin fold, per attempt (idempotent), BEFORE the
             # fragment mark — mirrors reconcile_conversation_messages' pass
             # order: a folded keeper's freshly-gained finishReason must not
@@ -1223,45 +1324,38 @@ def _sync_result_to_conversation(task, meta):
                     logger.info('%s conv=%s Marked %d superseded incomplete fragment(s) '
                                 'finishReason=aborted at terminal sync',
                                 pfx, conv_id, _frags_marked)
-            messages_json = json_dumps_pg(messages)
             search_text = build_search_text(messages)
             now_ms = int(time.time() * 1000)
             # CAS on rev (NOT updated_at): the trigger bumps rev, so a concurrent
             # translate/checkpoint write between our SELECT and this UPDATE
             # advances rev and we MISS here (re-read below) instead of silently
             # clobbering it. ``rev`` NEVER appears in SET — the trigger owns it.
+            metadata = {
+                'updated_at': now_ms,
+                'msg_count': len(messages),
+                'search_text': search_text,
+            }
             if settings_json:
-                cur = db.execute(
-                    '''UPDATE conversations
-                       SET messages=?, updated_at=?, msg_count=?, settings=?, search_text=?
-                       WHERE id=? AND user_id=1 AND rev=?''',
-                    (messages_json, now_ms, len(messages), settings_json, search_text, conv_id, _row_rev)
-                )
-            else:
-                cur = db.execute(
-                    '''UPDATE conversations
-                       SET messages=?, updated_at=?, msg_count=?, search_text=?
-                       WHERE id=? AND user_id=1 AND rev=?''',
-                    (messages_json, now_ms, len(messages), search_text, conv_id, _row_rev)
-                )
-            db.commit()
-            _cas_succeeded = (getattr(cur, 'rowcount', 0) or 0) > 0
+                metadata['settings'] = settings_json
+            from lib.database.conversation_repository import replace_messages
+            result = replace_messages(
+                db, conv_id, messages, expected_rev=_row_rev,
+                metadata=metadata,
+                # Terminal reconciliation can fold/re-sequence more than the
+                # tip. A full row refresh makes that mutation exact.
+                full=bool(_twins_folded or _frags_marked),
+            )
+            _cas_succeeded = result.applied
             if _cas_succeeded:
                 break
             # CAS miss — re-read the fresh row to decide retry vs frontend-won.
-            _fresh = db.execute(
-                'SELECT messages, updated_at, rev FROM conversations WHERE id=? AND user_id=1',
-                (conv_id,)).fetchone()
-            if not _fresh:
+            _fresh = load_conversation(
+                db, conv_id, metadata_columns=('updated_at',))
+            if _fresh is None:
                 break
             _fresh_updated_at = _fresh['updated_at']
             _fresh_rev = _fresh['rev']
-            try:
-                _fresh_messages = json.loads(_fresh[0] or '[]')
-            except (json.JSONDecodeError, TypeError):
-                logger.warning('%s conv=%s CAS-retry re-read parse failed — abandoning retry',
-                               pfx, conv_id)
-                break
+            _fresh_messages = _fresh.messages
             if not _fresh_messages:
                 break
             _fresh_tail = _fresh_messages[-1]
@@ -1320,17 +1414,7 @@ def _sync_result_to_conversation(task, meta):
             logger.info('%s conv=%s terminal CAS miss %d/%d — re-read fresh row '
                         'and re-applying the final answer',
                         pfx, conv_id, _cas_attempt + 1, MAX_TERMINAL_CAS)
-        # FTS index is only updated when CAS succeeds.  Updating FTS for a
-        # write we lost would leave search hits pointing at content we
-        # never persisted — search results would surface dead data.
         if _cas_succeeded:
-            from lib.conversations import update_conversation_fts
-            update_conversation_fts(db, conv_id, search_text)
-            # Phase 5 dual-write (flag-gated, inert when off): terminal
-            # append/graft onto the tail — incremental tail mirror.
-            from lib.database.messages_rows import mirror_write_and_commit
-            mirror_write_and_commit(db, conv_id, messages,
-                                    now_ms=int(time.time() * 1000))
             # ── Phase-1 parity stamp (the never-landed write) ──
             # Freeze the EXACT terminal assistant dict we just committed to
             # conversations.messages so orchestrator.py can ship it verbatim as
@@ -1423,8 +1507,9 @@ def checkpoint_task_partial(task, force=False):
     conversation switch. Callers pass force=True only when the round itself
     carries state worth durably storing.
     """
-    content_len = len(task.get('content') or '')
-    thinking_len = len(task.get('thinking') or '')
+    content, thinking, content_epoch = snapshot_task_text(task)
+    content_len = len(content)
+    thinking_len = len(thinking)
     task_id_short = task['id'][:8]
     conv_id = task.get('convId', '')
 
@@ -1454,15 +1539,23 @@ def checkpoint_task_partial(task, force=False):
         logger.warning('[Checkpoint %s] segment assembly failed (non-fatal): %s',
                        task_id_short, _seg_e, exc_info=True)
 
+    _checkpoint_owned = True
     try:
         # See _tool_rounds_have_dedicated_home: skip the duplicate blob for
         # tasks whose toolRounds are checkpointed into conversations.messages
         # by _sync_partial_to_conversation on the same cadence.
         tr_json = None if _tool_rounds_have_dedicated_home(task) else json.dumps(_merged_tr, ensure_ascii=False)
-        meta = {}
+        meta = {'contentEpoch': content_epoch}
+        if task.get('_turnProtocolV2'):
+            meta['turnProtocolV2'] = True
+            meta['turnId'] = task.get('_turnId') or ''
+            meta['attemptId'] = task.get('_attemptId') or ''
         if task.get('model'): meta['model'] = task['model']
         if task.get('preset'): meta['preset'] = task['preset']
         if task.get('thinkingDepth'): meta['thinkingDepth'] = task['thinkingDepth']
+        if task.get('_todoState'):
+            from lib.tools.todo import public_todo_state
+            meta['todoState'] = public_todo_state(task['_todoState'])
         meta_json = json.dumps(meta, ensure_ascii=False) if meta else None
         # ★ Thin segments for the checkpoint row (same discipline as
         #   persist_task_result step 2). Rehydrated on read via the co-persisted
@@ -1478,10 +1571,11 @@ def checkpoint_task_partial(task, force=False):
                            task_id_short, _sj_e, exc_info=True)
         # Error envelope is JSON-serialised at the wire — see persist_task_result.
         _cp_error_json = _err_to_json(task['error']) if task.get('error') is not None else None
-        _upsert_task_row(task, conv_id, content=task.get('content') or '',
-                         thinking=task.get('thinking') or '', status='running',
-                         error_json=_cp_error_json, tr_json=tr_json, meta_json=meta_json,
-                         segments_json=_cp_segments_json)
+        _checkpoint_owned = _upsert_task_row(
+            task, conv_id, content=content,
+            thinking=thinking, status='running',
+            error_json=_cp_error_json, tr_json=tr_json, meta_json=meta_json,
+            segments_json=_cp_segments_json)
         logger.debug('[Checkpoint %s] conv=%s Saved partial: content=%dchars thinking=%dchars',
                      task_id_short, conv_id, content_len, thinking_len)
     except Exception as e:
@@ -1497,6 +1591,12 @@ def checkpoint_task_partial(task, force=False):
             logger.warning('[Checkpoint %s] conv=%s ⚠️ CHECKPOINT NOT PERSISTED — %s',
                            task_id_short, conv_id,
                            terminal_state_log_summary(task, persisted=False))
+
+    if _checkpoint_owned is False:
+        logger.warning('[Checkpoint %s] conv=%s stale checkpoint stopped at '
+                       'recovery/terminal fence; conversation sync suppressed',
+                       task_id_short, conv_id)
+        return False
 
     # Also sync partial content into the conversation's messages in DB
     # For endpoint mode, skip — endpoint.py handles multi-turn sync
@@ -1566,6 +1666,9 @@ def _sync_partial_to_conversation(task):
     written with it: a terminal field without its identity anchor is a row that
     cannot be recognised as its own completed turn. See the P1a block.
     """
+    if task.get('_turnProtocolV2'):
+        return
+
     conv_id = task.get('convId', '')
     content = task.get('content') or ''
     thinking = task.get('thinking') or ''
@@ -1614,6 +1717,20 @@ def _sync_partial_to_conversation(task):
     # ★ Merge checkpoint toolRounds for continue flow
     tool_rounds = _merge_tool_rounds(task)
 
+    # The task_results/segments checkpoint has already committed before this
+    # mirror is called. For a huge transcript, do not pull that entire value
+    # into Python and rewrite it every ~5 seconds. Recovery and reconnect read
+    # the task-owned stores; terminal sync performs the one full convergence
+    # write. The size probe itself returns one integer and is safe on every
+    # checkpoint cadence.
+    try:
+        _probe_db = get_thread_db(DOMAIN_CHAT)
+        if _defer_large_conversation_checkpoint(_probe_db, task):
+            return
+    except Exception as e:
+        logger.debug('[Checkpoint] conv=%s lean-checkpoint gate failed open: %s',
+                     conv_id[:8], e)
+
     # Bounded CAS retry — under contention with the frontend or other writers
     # we re-read and try again rather than silently dropping the checkpoint.
     MAX_CAS = 3
@@ -1621,23 +1738,16 @@ def _sync_partial_to_conversation(task):
     for attempt in range(MAX_CAS):
         try:
             db = get_thread_db(DOMAIN_CHAT)
-            row = db.execute(
-                'SELECT messages, updated_at, rev FROM conversations WHERE id=? AND user_id=1',
-                (conv_id,)
-            ).fetchone()
-            if not row:
+            from lib.database.conversation_repository import load_conversation
+            snapshot = load_conversation(db, conv_id)
+            if snapshot is None:
                 return
-
-            try:
-                messages = json.loads(row[0] or '[]')
-            except (json.JSONDecodeError, TypeError) as exc:
-                logger.warning('[Manager] Unparseable conversation messages for conv=%s: %s', conv_id, exc)
-                return
+            messages = snapshot.messages
 
             if not messages:
                 return
 
-            cur_rev = row[2]  # Phase 4 W-partial: CAS on rev (loop re-reads each attempt)
+            cur_rev = snapshot['rev']  # loop re-reads each attempt
 
             # ── ID-FIRST location (mirrors the terminal sync) ──
             # A queued next-turn user message may sit as a trailing pending row
@@ -1746,6 +1856,13 @@ def _sync_partial_to_conversation(task):
                     last_msg['toolRounds'] = tool_rounds
                     mutated = True
 
+            if task.get('_todoState'):
+                from lib.tools.todo import public_todo_state
+                _todo_state = public_todo_state(task['_todoState'])
+                if last_msg.get('todoState') != _todo_state:
+                    last_msg['todoState'] = _todo_state
+                    mutated = True
+
             # Structural metadata that is meaningful BEFORE final completion.
             # Backend is authoritative for these; only fill if frontend hasn't.
             for src_key, dst_key in (
@@ -1755,6 +1872,7 @@ def _sync_partial_to_conversation(task):
                 ('modifiedFiles', 'modifiedFiles'),
                 ('modifiedFileList', 'modifiedFileList'),
                 ('apiRounds', 'apiRounds'),
+                ('programRuns', 'programRuns'),
                 ('_memoryPrefetch', '_memoryPrefetch'),
                 ('_preferencesApplied', '_preferencesApplied'),
                 ('_relatedConversations', '_relatedConversations'),
@@ -1886,7 +2004,6 @@ def _sync_partial_to_conversation(task):
             if not mutated:
                 return
 
-            messages_json = json_dumps_pg(messages)
             now_ms = int(time.time() * 1000)
             # Partial checkpoints write ONLY reload-critical columns
             # (messages/updated_at/msg_count). search_text/FTS is a
@@ -1896,23 +2013,18 @@ def _sync_partial_to_conversation(task):
             # mid-stream value is superseded on completion (and indexing a
             # not-yet-final tail points search hits at unsettled content).
             # Indexing is owned SOLELY by the terminal sync.
-            cur = db.execute(
-                'UPDATE conversations SET messages=?, updated_at=?, msg_count=? '
-                'WHERE id=? AND user_id=1 AND rev=?',
-                (messages_json, now_ms, len(messages), conv_id, cur_rev)
+            from lib.database.conversation_repository import replace_messages
+            result = replace_messages(
+                db, conv_id, messages, expected_rev=cur_rev,
+                metadata={'updated_at': now_ms, 'msg_count': len(messages)},
+                refresh_search=False,
             )
-            db.commit()
-            rowcount = getattr(cur, 'rowcount', None)
-            if rowcount == 0:
+            if not result.applied:
                 # CAS miss — retry with a fresh read.
                 logger.debug('[Checkpoint] conv=%s CAS miss attempt %d/%d — re-reading',
                              conv_id[:8], attempt + 1, MAX_CAS)
                 time.sleep(0.02 * (attempt + 1))
                 continue
-            # Phase 5 dual-write (flag-gated, inert when off): checkpoint
-            # mutates/appends the tail — incremental tail mirror.
-            from lib.database.messages_rows import mirror_write_and_commit
-            mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms)
             logger.debug('[Checkpoint] conv=%s Synced partial: content=%d→%d thinking=%d→%d tools=%d',
                          conv_id, existing_content_len, len(content),
                          existing_thinking_len, len(thinking), len(tool_rounds or []))
@@ -1925,5 +2037,3 @@ def _sync_partial_to_conversation(task):
     if last_err is not None:
         logger.debug('[Checkpoint] conv=%s gave up after %d attempts: %s',
                      conv_id, MAX_CAS, last_err)
-
-

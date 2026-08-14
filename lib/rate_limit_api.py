@@ -97,19 +97,95 @@ _state: dict[str, dict] = {}
 # under TOFU_RATE_LIMIT_BACKEND=db the cap holds ACROSS replicas (behind an
 # N-replica load balancer an in-process cap would silently become rpm×N — the
 # exact "cap scales with replica count" failure the shared store was built to
-# prevent). Cap via TOFU_OPEN_MODE_RPM (default 120/min); 0 disables.
+# prevent). Cap resolution (see _open_mode_rpm): an explicit
+# TOFU_OPEN_MODE_RPM always wins; when UNSET the cap auto-arms at
+# _OPEN_MODE_REMOTE_RPM only if remote open-mode peers are admitted
+# (TOFU_OPEN_MODE_ALLOW_REMOTE=1) — a loopback-only install ships uncapped,
+# because the only IPs the bucket could ever see are the operator's own.
 _OPEN_MODE_ENDPOINT = 'open_mode'  # (endpoint, ip) key namespace in the store
+
+# Auto-armed ceiling for the remote-open configuration. Sized against
+# EXPENSIVE calls only — ambient poll/status reads are exempt (see
+# _OPEN_MODE_EXEMPT_SUBSTRINGS) and a human-driven UI issues single-digit
+# expensive calls per minute, so 120 leaves real headroom for a small team
+# sharing one egress IP behind NAT.
+_OPEN_MODE_REMOTE_RPM = 120
+
+# Ambient poll/status reads that NEVER consume the open-mode budget.
+#
+# The cap exists to stop a remote IP hammering EXPENSIVE surfaces (LLM /
+# chat / search / generate). Behind a reverse proxy (VS Code port-forward,
+# ngrok, …) every UI client shares ONE direct peer IP, so the operator's own
+# ambient polling is indistinguishable from that hammer by IP alone: the UI
+# probes browser/desktop status every ~3s and drives the TaskRuntime poll
+# seam at 1.2–2.5s while a job runs — the default 120/min budget was gone
+# before any real interaction (owner incident 2026-08-14: two filter clicks
+# in the knowledge panel = 429). These paths are cheap read-only probes by
+# construction (all /poll routes are GET cursor reads), so they are exempt.
+# The exemption is path-scoped on purpose: sibling mutation paths under the
+# same prefix (e.g. /api/v1/browser/commands) stay capped. Operators can
+# extend the list via TOFU_OPEN_MODE_EXEMPT_PATHS (comma-separated path
+# substrings) without a redeploy.
+_OPEN_MODE_EXEMPT_SUBSTRINGS = (
+    '/api/v1/browser/status',
+    '/api/v1/desktop/status',
+    '/api/v1/dispatch/model-health',
+    '/poll/',
+)
+
+
+def _request_path_or_none() -> str:
+    """Best-effort request path; '' when no request context is active."""
+    try:
+        from quart import request
+        return request.path or ''
+    except Exception as e:
+        logger.debug('[RateLimit] request path unavailable: %s', e)
+        return ''
+
+
+def _open_mode_extra_exempt() -> tuple:
+    """Operator-supplied extra exempt substrings (env, live-read)."""
+    import os
+    raw = os.environ.get('TOFU_OPEN_MODE_EXEMPT_PATHS', '') or ''
+    return tuple(p.strip() for p in raw.split(',') if p.strip())
+
+
+def _open_mode_path_exempt(path: str) -> bool:
+    """Whether ``path`` is an ambient read exempt from the open-mode bucket."""
+    if path.endswith('/poll'):
+        return True
+    subs = _OPEN_MODE_EXEMPT_SUBSTRINGS + _open_mode_extra_exempt()
+    return any(s in path for s in subs)
 
 
 def _open_mode_rpm() -> int:
-    """Per-IP requests-per-minute ceiling for open-mode requests, from env."""
+    """Resolve the per-IP RPM ceiling for open-mode requests.
+
+    An explicit ``TOFU_OPEN_MODE_RPM`` always wins, in both directions: a
+    positive value arms the cap even on loopback-only installs (operator
+    wants a dam), ``0`` disarms it even with remote peers admitted. When
+    UNSET the cap AUTO-ARMS only when the operator opted into remote
+    open-mode peers (``TOFU_OPEN_MODE_ALLOW_REMOTE``, via
+    ``lib.auth_mode.open_mode_allows_remote``) — without that opt-in the
+    synthetic grant only ever reaches loopback peers, so the bucket's only
+    possible tenant is the operator's own UI tabs and pollers sharing one
+    bucket: the cap protects nothing and purely throttles the owner (owner
+    incident 2026-08-14: ambient UI polling ate 120/min → 606 self-429s/day).
+    Behind a same-host tunnel the cap has no discriminating power either
+    (every public request presents as loopback) — the documented protection
+    there is TUNNEL_TOKEN / private mode, never IP throttling.
+    """
     import os
-    try:
-        n = int(os.environ.get('TOFU_OPEN_MODE_RPM', '') or '120')
-    except (ValueError, TypeError) as e:
-        logger.debug('[RateLimit] TOFU_OPEN_MODE_RPM parse failed, using default: %s', e)
-        n = 120
-    return max(0, n)
+    raw = (os.environ.get('TOFU_OPEN_MODE_RPM', '') or '').strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except (ValueError, TypeError) as e:
+            logger.debug('[RateLimit] TOFU_OPEN_MODE_RPM=%r parse failed, '
+                         'falling back to the auto default: %s', raw, e)
+    from lib.auth_mode import open_mode_allows_remote
+    return _OPEN_MODE_REMOTE_RPM if open_mode_allows_remote() else 0
 
 
 def _state_for(key_id: str, rpm_limit: int, tpd_limit: int) -> dict:
@@ -207,12 +283,22 @@ def check_open_mode_request(*, request_cost: int = 1,
     Keyed by the direct client IP (never a spoofable forwarded header) and
     delegated to the SHARED ``lib.rate_limit_store`` counter (a sliding
     60s window), so under ``TOFU_RATE_LIMIT_BACKEND=db`` the cap holds across
-    replicas rather than becoming ``rpm × N``. When ``TOFU_OPEN_MODE_RPM`` is 0
-    the cap is disabled and every request is allowed (legacy behaviour).
+    replicas rather than becoming ``rpm × N``. When the resolved ceiling is
+    0 (explicit ``TOFU_OPEN_MODE_RPM=0``, or unset with no remote peers —
+    see :func:`_open_mode_rpm`) the cap is disabled and every request is
+    allowed.
     ``request_cost`` collapses to one recorded event per request (the store is
     event-count based, not token-bucket); a cost > 1 is treated as a single
     slot — acceptable for the coarse open-mode ceiling. ``client_ip`` is
     resolved from the request when not supplied.
+
+    Ambient poll/status reads (UI heartbeat probes — browser/desktop
+    status, the GET ``/poll`` cursor seam, model-health rows) are EXEMPT
+    from the bucket: behind a reverse proxy all clients share one peer IP,
+    and the operator's own UI polling must not eat the anti-hammer budget
+    (see ``_OPEN_MODE_EXEMPT_SUBSTRINGS``; extend via
+    ``TOFU_OPEN_MODE_EXEMPT_PATHS``). Static assets and ``/api/health``
+    never reach this check at all (public-path short-circuit upstream).
 
     Fail-open: the store itself degrades to ``(True, 0)`` on any DB error, so
     a throttle failure never takes down the server.
@@ -220,9 +306,15 @@ def check_open_mode_request(*, request_cost: int = 1,
     rpm = _open_mode_rpm()
     if rpm <= 0:
         return RateDecision(allowed=True)
+    path = _request_path_or_none()
+    if path and _open_mode_path_exempt(path):
+        # Ambient status/poll reads never consume the anti-hammer budget —
+        # they are the operator's own UI heartbeat, not a hammering signal.
+        logger.debug('[RateLimit] open-mode ambient read exempt: %s', path)
+        return RateDecision(allowed=True)
     if client_ip is None:
         try:
-            from flask import request
+            from quart import request
             client_ip = (request.remote_addr or 'unknown').split('%', 1)[0]
         except Exception as e:
             logger.debug('[RateLimit] open-mode client_ip unavailable: %s', e)

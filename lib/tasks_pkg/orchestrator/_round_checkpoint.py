@@ -66,7 +66,7 @@ def run_round_checkpoint_and_close(
     _now = time.time()
     if _now - rs.last_checkpoint_ts >= 5:
         try:
-            checkpoint_task_partial(task)
+            checkpoint_task_partial(task, force=True)
             rs.last_checkpoint_ts = _now
         except Exception as e:
             logger.warning('[%s] Checkpoint after round %d failed (non-fatal): %s',

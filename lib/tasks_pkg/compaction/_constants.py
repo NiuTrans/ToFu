@@ -85,8 +85,47 @@ _SUMMARY_TRIGGER_RATIO = 0.90
 Layer 2 summary is lossy; delay firing until we're truly close to the wall.
 With 1M context that's still 100k tokens of headroom."""
 
+_DEFAULT_WORKING_SET_TOKENS = 128_000
+"""Economic ceiling for the repeatedly replayed prompt working set.
+
+The context-window trigger above is a correctness guard: on a 1M model it
+does not compact until roughly 778K input tokens.  That is safe but extremely
+expensive for agent loops, where the same prefix is submitted dozens of times
+and cache reads still have a non-zero price.  The working-set ceiling is a
+second, lower trigger whose purpose is cost and latency rather than avoiding a
+hard context overflow.
+
+128K is deliberately large enough for a coding hot tail plus structured
+summary, while bounding a 1M-capable model's repeated input.  User sign-off is
+the 2026-08-08 request to maximize context-cache efficiency and reduce cost;
+the read site emits a one-time ``audit_log('config_change', approved_by='user')``.
+Override per request with ``compaction.workingSetTokens`` or process-wide with
+``TOFU_WORKING_CONTEXT_TOKENS``.  Set either to ``0`` to restore the former
+context-window-only behavior.
+"""
+
 _SUMMARY_MAX_TOKENS = 3000
 """Maximum output tokens for the summary LLM call."""
+
+_AUTO_COMPACT_MIN_PAYBACK_ROUNDS = 1.0
+"""Maximum cache-read rounds allowed for proactive L2 to break even.
+
+Automatic L2 rewrites the request prefix, so the following request may pay a
+fresh cache write for the compacted prefix.  Admit it only when the token cost
+of that rewrite is recovered by the smaller prompt within one future round.
+This is evaluated from the active model's cache write/read multipliers and the
+current warm-cache observation.  Manual/reactive compaction remains governed
+by user intent or context-window correctness and bypasses the economic gate.
+"""
+
+_AUTO_COMPACT_MIN_REDUCTION_RATIO = 0.05
+"""Minimum projected token reduction for automatic Layer-2 compaction.
+
+Cache observations can be cold or temporarily unavailable. A basic yield
+floor therefore precedes cache-price accounting: an automatic lossy summary
+that cannot remove at least 5% of the request is declined regardless of cache
+state. Manual/reactive ``force=True`` paths bypass this gate.
+"""
 
 _SUMMARY_INPUT_CHAR_CAP = 64_000
 """Hard ceiling on the summary LLM's INPUT size, in characters (§10.1).
@@ -459,10 +498,14 @@ _IMAGE_TOKENS_DEFAULT = _IMAGE_TOKENS_HIGH  # conservative default
 # micro_compact (Layer 1) will compress them later when they become cold.
 _BUDGET_EXEMPT_TOOLS = frozenset({
     'read_files',
+    # A loaded workflow must remain intact for the active task. L1 replaces
+    # it with a compact ID/hash receipt once it becomes cold.
+    'load_skill',
 })
 
 TOOL_RESULT_MAX_CHARS: dict[str, int] = {
     'read_files':    0,          # exempt — see _BUDGET_EXEMPT_TOOLS
+    'load_skill':    0,          # task-lifetime workflow; L1 owns receipt
     'grep_search':   30_000,
     'find_files':    20_000,
     'list_dir':      15_000,

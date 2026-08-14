@@ -45,11 +45,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+CHAT_RENDER = runtime_section_path('ui/chat_render.js')
 
 
 def _node_deps_available() -> bool:
@@ -302,9 +304,8 @@ def _run(neuter: str = 'none'):
     # reads `_explicitBottomLatch`, which lives in ui/streaming_render.js since
     # the render decomposition; eval'ing chat_render alone gave a bare
     # ReferenceError that reads like a product bug but is pure harness drift.
-    from tests._conv_bundle_sources import sources_defining
-    deps = sources_defining('_explicitBottomLatch')
-    target = os.path.join(JS_DIR, 'ui', 'chat_render.js')
+    deps = [runtime_section_path('ui/streaming_render.js')]
+    target = CHAT_RENDER
     src_paths = [p for p in deps if p != target] + [target]
 
     harness = os.path.join(HERE, '_bg_refresh_harness.js')

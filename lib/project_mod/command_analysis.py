@@ -21,7 +21,7 @@ on this module, not the reverse.
 
 import os
 import re
-from collections import Counter
+from collections import Counter, namedtuple
 
 from lib.log import get_logger
 from lib.project_mod.config import DANGEROUS_PATTERNS
@@ -515,6 +515,65 @@ _REDIRECT_PATTERN = _re.compile(r'[12]?>>?(?!&)')
 
 # sed with in-place flag
 _SED_INPLACE = _re.compile(r'\bsed\b.*\s-i')
+
+
+_ShellWord = namedtuple(
+    '_ShellWord', ['text', 'start', 'end', 'squote', 'dquote'])
+
+
+def _shell_words(s):
+    """Split one shell segment into unquoted words with source offsets.
+
+    Guards and rewriters share this parser so quoted patterns such as
+    ``grep "not found"`` cannot be interpreted differently by a fallback
+    path. Shell separators are handled by :func:`_split_pipeline_spans`;
+    callers pass one resulting segment here.
+    """
+    out = []
+    i, n = 0, len(s)
+    while i < n:
+        while i < n and s[i] in ' \t':
+            i += 1
+        if i >= n:
+            break
+        start = i
+        buf = []
+        squote = dquote = False
+        while i < n and s[i] not in ' \t':
+            char = s[i]
+            if char == '\\' and not squote:
+                if i + 1 < n:
+                    buf.append(s[i + 1])
+                    i += 2
+                else:
+                    i += 1
+                continue
+            if char == "'" and not dquote:
+                squote = True
+                i += 1
+                while i < n and s[i] != "'":
+                    buf.append(s[i])
+                    i += 1
+                i += 1
+                continue
+            if char == '"' and not squote:
+                dquote = True
+                i += 1
+                while i < n and s[i] != '"':
+                    if (s[i] == '\\' and i + 1 < n
+                            and s[i + 1] in '$`"\\\n'):
+                        buf.append(s[i + 1])
+                        i += 2
+                        continue
+                    buf.append(s[i])
+                    i += 1
+                i += 1
+                continue
+            buf.append(char)
+            i += 1
+        out.append(_ShellWord(
+            ''.join(buf), start, i, squote, dquote))
+    return out
 
 
 def _split_pipeline(cmd):
@@ -1028,6 +1087,14 @@ _INHERENT_RECURSIVE = frozenset({
     'find', 'rg', 'ag', 'ack', 'fd', 'fdfind', 'tree', 'du', 'ncdu', 'cloc',
 })
 
+# Commands that remain useful in run_command pipelines but can wedge forever
+# on a hostile FUSE/NFS traversal. grep has its stronger transparent engine;
+# direct find segments get a native streaming timeout wrapper.
+_BOUNDED_SCAN_BINARIES = frozenset({'find'})
+_SCAN_PREFIX_KEYWORDS = frozenset({'if', 'while', 'until', '!', 'time'})
+_SCAN_WRAPPERS = frozenset({'command', 'builtin', 'exec'})
+_ENV_ASSIGNMENT_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
+
 _TIMEOUT_WRAPPER_RE = re.compile(r'^timeout\b')
 
 
@@ -1075,6 +1142,61 @@ def _scan_targets_for_segment(parts, recursive_flagged):
     return True, positionals
 
 
+def _scan_binary_word_index(words):
+    """Return the command-word index after benign shell prefixes."""
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if (not word.squote and not word.dquote
+                and (_ENV_ASSIGNMENT_RE.match(word.text)
+                     or word.text in _SCAN_PREFIX_KEYWORDS)):
+            i += 1
+            continue
+        break
+    if i < len(words) and words[i].text.split('/')[-1] in _SCAN_WRAPPERS:
+        i += 1
+        while i < len(words) and words[i].text.startswith('-'):
+            i += 1
+    return i
+
+
+def _bound_scan_segments(command, timeout_binary, seconds):
+    """Wrap direct recursive scanner segments with a native timeout.
+
+    The rewrite is span-based and leaves the rest of the shell program
+    untouched, so pipelines remain streaming and downstream backpressure
+    still works. Returns ``(rewritten, count)``. Unknown/wrapped shapes fail
+    open; the ancestor/FUSE-root refusal remains the outer safety boundary.
+    """
+    try:
+        seconds = max(1, int(seconds))
+    except (TypeError, ValueError) as exc:
+        logger.debug('[CommandAnalysis] invalid scanner timeout %r: %s',
+                     seconds, exc)
+        return command, 0
+    if not command or not timeout_binary:
+        return command, 0
+    insertions = []
+    for start, end in _split_pipeline_spans(command):
+        segment = command[start:end]
+        words = _shell_words(segment)
+        index = _scan_binary_word_index(words)
+        if index >= len(words):
+            continue
+        base = words[index].text.split('/')[-1]
+        if base not in _BOUNDED_SCAN_BINARIES:
+            continue
+        insertion_at = start + words[index].start
+        timeout_prefix = (
+            f'{timeout_binary} --verbose --signal=TERM '
+            f'--kill-after=2s {seconds}s ')
+        insertions.append((insertion_at, timeout_prefix))
+    rewritten = command
+    for at, text in sorted(insertions, reverse=True):
+        rewritten = rewritten[:at] + text + rewritten[at:]
+    return rewritten, len(insertions)
+
+
 def _unbounded_recursive_scan_target(command, cwd=None):
     """Return the offending target when *command* is an unbounded recursive
     scan of a workspace ancestor or a FUSE-mount root — else None.
@@ -1092,7 +1214,7 @@ def _unbounded_recursive_scan_target(command, cwd=None):
             continue
         while _re.match(r'^\w+=\S*\s', seg):
             seg = _re.sub(r'^\w+=\S*\s+', '', seg, count=1)
-        parts = _unwrap_command_parts(seg.split())
+        parts = _unwrap_command_parts([w.text for w in _shell_words(seg)])
         if not parts:
             continue
         base_cmd = parts[0].split('/')[-1]
@@ -1206,9 +1328,12 @@ def _strip_redirection_tokens(tokens):
 def _grep_segment_reads_filesystem(parts):
     """True when a grep-family segment reads files: explicit file/dir
     operands, or a recursive walk (``-r``/``-R``, target optional — grep
-    then scans the cwd). *parts* is redirection-stripped, parts[0] is the
-    binary. A grep with only a pattern (stdin filter) returns False.
+    then scans the cwd). *parts* may contain strings or :class:`_ShellWord`
+    values; argv boundaries are authoritative. A grep with only a pattern
+    (stdin filter) returns False.
     """
+    parts = [part.text if isinstance(part, _ShellWord) else part
+             for part in parts]
     positionals = []
     saw_pattern_flag = False
     recursive = False
@@ -1268,7 +1393,7 @@ def _grep_filesystem_segment(command):
             continue
         while _re.match(r'^\w+=\S*\s', seg):
             seg = _re.sub(r'^\w+=\S*\s+', '', seg, count=1)
-        parts = _unwrap_command_parts(seg.split())
+        parts = _unwrap_command_parts([w.text for w in _shell_words(seg)])
         if not parts:
             continue
         if any(t.startswith('<<') for t in parts):

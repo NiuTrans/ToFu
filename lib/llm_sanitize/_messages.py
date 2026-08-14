@@ -100,9 +100,9 @@ def _strip_empty_text_blocks(messages: list) -> list:
     only fires when EVERY block is empty, so the phantom block sailed through
     and 4,337 retries burned on a deterministic rejection).
 
-    Producers are the context-injection wrap seams (``_refresh_tail_block``,
-    ``_refresh_detail_block``, ``_append_user_profile_block``, memory
-    ``inject_relevant_memories``) which wrap ``content`` into
+    Legacy producers include context-injection wrap seams
+    (``_refresh_tail_block``, ``_refresh_detail_block``,
+    ``_append_user_profile_block``) which wrap ``content`` into
     ``[{text: content}]`` unconditionally, plus any frontend-sent multimodal
     message with an empty caption block. This is the single chokepoint that
     heals EVERY producer, present and future.
@@ -237,6 +237,9 @@ def _drop_empty_assistant_messages(messages: list) -> list:
 #     (``attachments.inject_attachments``);
 #   * the coalesced swarm/peer/steer inbox user message
 #     (``orchestrator._swarm_inbox.drain_and_inject_inbox``).
+#   * Context Composer's managed head/tail carriers (relevant memories,
+#     current date, project state, round attachments); and
+#   * Autopilot's trailing simulated-user role directive.
 # Logging those at INFO was pure noise that also LOOKED like a bug being
 # re-patched forever. Any OTHER pair is an unexpected producer (send-race
 # duplicate user rows, error-ghost adjacency, endpoint leaks) and alarms at
@@ -244,6 +247,7 @@ def _drop_empty_assistant_messages(messages: list) -> list:
 _SYNTHETIC_PAIR_PREFIXES = ('<system-reminder>', '<swarm-update>')
 _SYNTHETIC_PAIR_MARKERS = (
     '[PROJECT CO-PILOT MODE]',
+    '[USER CONTEXT]',
     '[USER PREFERENCE PROFILE]',
     '## Recently Modified Files',
     '[Peer message from',
@@ -253,6 +257,14 @@ _SYNTHETIC_PAIR_MARKERS = (
 def _is_synthetic_context_msg(msg) -> bool:
     """True when a message is a synthetic-context injection whose same-role
     adjacency is BY DESIGN (see the seam list above)."""
+    # Prefer producer-owned structure to text sniffing. Context Composer and
+    # Autopilot already stamp their cache-friendly trailing user carriers;
+    # ignoring those fields made every current_date/relevant_memories/
+    # round_attachments and ORIGINAL OBJECTIVE directive look like a broken
+    # producer even though this merge is their documented final assembly seam.
+    if (msg.get('_contextComposer') or msg.get('_isMeta')
+            or msg.get('_isVuDirective')):
+        return True
     content = msg.get('content')
     head = ''
     if isinstance(content, str):

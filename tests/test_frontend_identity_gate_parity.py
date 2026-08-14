@@ -62,6 +62,7 @@ import tempfile
 import pytest
 
 from tests._jsdom import JS_DIR, ROOT, node_deps_available, run_harness
+from tests._runtime_sections import runtime_section_names
 
 pytestmark = pytest.mark.unit
 
@@ -74,7 +75,7 @@ _XTS = os.path.join(JS_DIR, 'core', 'cross_tab_sync.js')
 _CSP = os.path.join(JS_DIR, 'conv_sync_push.js')
 
 # The delegation call every gate must use (whitespace-normalized match).
-_DELEGATION = 'window._frameIsOurs(frame.userId)'
+_DELEGATION = 'runtimeScope._frameIsOurs(frame.userId)'
 
 
 def _read(path):
@@ -197,7 +198,7 @@ def test_delegation_is_fail_open_AND_reports():
         assert n_deleg >= 1, f'{rel}: no delegation found'
         for m in re.finditer(re.escape(_DELEGATION), src):
             before = src[max(0, m.start() - 320):m.start()]
-            assert 'typeof window._frameIsOurs === "function"' in before, (
+            assert 'typeof runtimeScope._frameIsOurs === "function"' in before, (
                 f'{rel}: delegation is not guarded by a typeof check — an '
                 'unavailable predicate must fail OPEN, not throw')
         # Each delegation must be paired with a report on the else branch.
@@ -219,7 +220,7 @@ def test_reporter_exists_and_is_one_shot():
     src = _read(os.path.join(JS_DIR, 'core', 'identity_gate_tripwire.js'))
     assert 'function reportIdentityGateUnavailable(' in src, (
         'the fail-open tripwire is missing from its module')
-    assert 'window.reportIdentityGateUnavailable = ' in src, (
+    assert 'runtimeScope.reportIdentityGateUnavailable = ' in src, (
         'the tripwire must be exported for the consumer gates to call')
     body = src.split('function reportIdentityGateUnavailable(', 1)[1] \
               .split('\n}', 1)[0]
@@ -245,7 +246,7 @@ def test_single_implementation_keeps_all_four_rules():
         'both sides must be String()-normalized')
     assert re.search(r"my === ''\s*\|\|\s*theirs === ''", body), (
         "unscoped-either-side rule ('' means accept-all) missing")
-    assert 'window._frameIsOurs = _frameIsOurs' in src, (
+    assert 'runtimeScope._frameIsOurs = _frameIsOurs' in src, (
         'the single implementation must be exported for the gates to delegate to')
 
 
@@ -254,23 +255,12 @@ def test_single_implementation_keeps_all_four_rules():
 # ══════════════════════════════════════════════════════════════════════
 
 def _bundler_list(name):
-    """Parse a top-level list literal out of lib/js_bundler.py.
-
-    Reads the REAL source (not a hand-copied mirror) so the invariant below
-    can never drift from what the bundler actually ships.
-    """
-    src = _read(os.path.join(PROJECT_ROOT, 'lib', 'js_bundler.py'))
-    m = re.search(name + r'\s*=\s*[\[(]', src)
-    if not m:
-        return None
-    start, depth, i = m.end(), 1, m.end()
-    while depth > 0 and i < len(src):
-        if src[i] in '[(':
-            depth += 1
-        elif src[i] in '])':
-            depth -= 1
-        i += 1
-    return re.findall(r"'([^']+\.js)'", src[start:i])
+    """Expose the retained Vite runtime's generated source order."""
+    if name == '_BUNDLE_FILES':
+        return list(runtime_section_names())
+    if name == '_CLASSIC_ASSET_FILES':
+        return []
+    return None
 
 
 def _build_order_violations(bundle, deferred):
@@ -295,7 +285,7 @@ def _build_order_violations(bundle, deferred):
             'which every multi-user gate delegates to (fail-open when absent)')
     elif predicate in deferred:
         violations.append(
-            f'{predicate} was moved into _DEFERRED_FILES. Deferring the '
+            f'{predicate} was moved into _CLASSIC_ASSET_FILES. Deferring the '
             'PREDICATE is the dangerous direction: an eager consumer receives '
             'frames while _frameIsOurs is still undefined → gate degrades to '
             'accept-all with zero test signal.')
@@ -321,7 +311,7 @@ def _build_order_violations(bundle, deferred):
             if consumer not in bundle:
                 violations.append(
                     f'{consumer} is neither in _BUNDLE_FILES nor '
-                    '_DEFERRED_FILES — the build-order invariant can no '
+                    '_CLASSIC_ASSET_FILES — the build-order invariant can no '
                     'longer be verified')
                 continue
             c_idx = bundle.index(consumer)
@@ -352,7 +342,7 @@ def test_predicate_loads_before_every_delegating_consumer():
         pt_5f25b1d17c9048f1).
     """
     bundle = _bundler_list('_BUNDLE_FILES')
-    deferred = _bundler_list('_DEFERRED_FILES') or []
+    deferred = _bundler_list('_CLASSIC_ASSET_FILES') or []
     assert bundle, 'could not parse _BUNDLE_FILES from lib/js_bundler.py'
     violations = _build_order_violations(bundle, deferred)
     assert violations == [], '\n'.join(violations)
@@ -408,7 +398,7 @@ def test_tripwire_loads_before_everything_it_watches():
     watches and before every gate that reports to it.
     """
     bundle = _bundler_list('_BUNDLE_FILES')
-    deferred = _bundler_list('_DEFERRED_FILES') or []
+    deferred = _bundler_list('_CLASSIC_ASSET_FILES') or []
     assert bundle, 'could not parse _BUNDLE_FILES from lib/js_bundler.py'
 
     tripwire = 'core/identity_gate_tripwire.js'
@@ -639,28 +629,28 @@ def test_all_four_entry_points_honour_the_gate():
 # (label, file, exact text to strip, which gate group must then fail)
 _NEUTER_CASES = [
     ('notify', _XTS,
-     '''if (typeof window._frameIsOurs === "function") {
-      if (!window._frameIsOurs(frame.userId)) return;
-    } else if (typeof window.reportIdentityGateUnavailable === "function") {
-      window.reportIdentityGateUnavailable("_onConvNotifyPush");
+     '''if (typeof runtimeScope._frameIsOurs === "function") {
+      if (!runtimeScope._frameIsOurs(frame.userId)) return;
+    } else if (typeof runtimeScope.reportIdentityGateUnavailable === "function") {
+      runtimeScope.reportIdentityGateUnavailable("_onConvNotifyPush");
     }
 
     const convId = frame.convId;''',
      '''const convId = frame.convId;'''),
     ('folders', _XTS,
-     '''if (typeof window._frameIsOurs === "function") {
-      if (!window._frameIsOurs(frame.userId)) return;
-    } else if (typeof window.reportIdentityGateUnavailable === "function") {
-      window.reportIdentityGateUnavailable("_onFoldersChangedPush");
+     '''if (typeof runtimeScope._frameIsOurs === "function") {
+      if (!runtimeScope._frameIsOurs(frame.userId)) return;
+    } else if (typeof runtimeScope.reportIdentityGateUnavailable === "function") {
+      runtimeScope.reportIdentityGateUnavailable("_onFoldersChangedPush");
     }
 
     const deletedId = frame.deletedFolderId;''',
      '''const deletedId = frame.deletedFolderId;'''),
     ('rewrite', _CSP,
-     '''if (typeof window._frameIsOurs === "function") {
-      if (!window._frameIsOurs(frame.userId)) return;
-    } else if (typeof window.reportIdentityGateUnavailable === "function") {
-      window.reportIdentityGateUnavailable("_onConvSyncPush");
+     '''if (typeof runtimeScope._frameIsOurs === "function") {
+      if (!runtimeScope._frameIsOurs(frame.userId)) return;
+    } else if (typeof runtimeScope.reportIdentityGateUnavailable === "function") {
+      runtimeScope.reportIdentityGateUnavailable("_onConvSyncPush");
     }''',
      ''''''),
 ]
@@ -764,8 +754,8 @@ def test_NEUTER_silent_fail_open_is_caught():
         pytest.skip('node + jsdom dev-deps not installed')
 
     src = _read(_XTS)
-    report_call = ('} else if (typeof window.reportIdentityGateUnavailable === "function") {\n'
-                   '      window.reportIdentityGateUnavailable("_onConvNotifyPush");\n'
+    report_call = ('} else if (typeof runtimeScope.reportIdentityGateUnavailable === "function") {\n'
+                   '      runtimeScope.reportIdentityGateUnavailable("_onConvNotifyPush");\n'
                    '    }')
     assert report_call in src, 'reporter anchor not found in _onConvNotifyPush'
     neutered_src = src.replace(report_call, '}', 1)

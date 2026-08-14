@@ -5,7 +5,7 @@ BUTTON that expands a checkbox list (checked = offered to the model);
 toggling a row PUTs the FULL disabled list to the backend, and the badge
 shows enabled/total once anything is disabled.
 
-Harness renders the REAL shipped static/js/settings/mcp.js over jsdom with
+Harness renders the REAL retained Vite ``settings/mcp.js`` section over jsdom with
 a fake Api (recording the PUT payload). Skips cleanly without node+jsdom.
 
 NEGATIVE CONTROL (patches a COPY; shipped file stays byte-identical):
@@ -21,11 +21,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = runtime_sections_dir()
 _MCP_SRC = os.path.join(JS_DIR, 'settings', 'mcp.js')
 
 
@@ -108,7 +110,10 @@ _renderMcpCatalog();
 html = document.getElementById('mcpCatalogGrid').innerHTML;
 check('panel_rendered', html.indexOf('mcp-tool-panel') !== -1);
 check('row_submit_present', html.indexOf('submit_job') !== -1);
-check('row_stop_unchecked', /<input type="checkbox" onchange[^>]*stop_job/.test(html));
+const stopInput = Array.from(document.querySelectorAll(
+  '#mcpCatalogGrid input[type="checkbox"]')).find(input =>
+    (input.getAttribute('data-tofu-action-change') || '').includes('stop_job'));
+check('row_stop_unchecked', stopInput && !stopInput.checked);
 check('enabled_header', html.indexOf('mcp.toolsEnabledOf') !== -1);
 
 // ── Case C: toggling a row PUTs the FULL disabled list ──

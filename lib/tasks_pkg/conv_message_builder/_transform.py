@@ -438,11 +438,18 @@ def _build_assistant_messages(msg: dict) -> list[dict]:
     rounds = msg.get('toolRounds') or []
     final_content = msg.get('content') or ''
     final_thinking = msg.get('thinking') or ''
+    final_responses_items = msg.get('_responsesItems') or []
+    final_anthropic_blocks = msg.get('_anthropicContentBlocks') or []
 
     # ── Short-circuit: no tool rounds → single plain assistant message ──
     if not rounds:
-        if final_content:
-            return [{'role': 'assistant', 'content': final_content}]
+        if final_content or final_responses_items or final_anthropic_blocks:
+            built = {'role': 'assistant', 'content': final_content}
+            if final_responses_items:
+                built['_responses_items'] = final_responses_items
+            if final_anthropic_blocks:
+                built['_anthropic_content_blocks'] = final_anthropic_blocks
+            return [built]
         # No rounds, no content — but a legacy `toolSummary` placeholder
         # may still describe what the assistant did. Use it as the body
         # so the model sees something instead of an empty turn.
@@ -489,7 +496,19 @@ def _build_assistant_messages(msg: dict) -> list[dict]:
     if structured is not None:
         # Append the final assistant text (if any) as a trailing message.
         if final_content:
-            structured.append({'role': 'assistant', 'content': final_content})
+            final_msg = {'role': 'assistant', 'content': final_content}
+            if final_responses_items:
+                final_msg['_responses_items'] = final_responses_items
+            if final_anthropic_blocks:
+                final_msg['_anthropic_content_blocks'] = final_anthropic_blocks
+            structured.append(final_msg)
+        elif final_responses_items or final_anthropic_blocks:
+            structured.append({'role': 'assistant', 'content': '',
+                               **({'_responses_items': final_responses_items}
+                                  if final_responses_items else {}),
+                               **({'_anthropic_content_blocks':
+                                   final_anthropic_blocks}
+                                  if final_anthropic_blocks else {})})
         return structured
 
     # ── Fallback: legacy / incomplete rounds → summary JSON placeholder ──

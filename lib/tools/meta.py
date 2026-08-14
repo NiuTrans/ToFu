@@ -253,6 +253,23 @@ def _build_apply_diff(meta, fn_name, fn_args, tool_content, path):
         meta['writeOk'] = ok
 
 
+def _build_edit_file(meta, fn_name, fn_args, tool_content, path):
+    """Build mixed replace/insert batch metadata for ``edit_file``."""
+    _build_apply_diff(meta, fn_name, fn_args, tool_content, path)
+    edits = fn_args.get('edits')
+    if not isinstance(edits, list):
+        return
+    operations = [
+        e.get('operation', '?') for e in edits if isinstance(e, dict)
+    ]
+    meta['editOperations'] = operations
+    summaries = meta.get('editSummaries')
+    if isinstance(summaries, list):
+        valid_edits = [e for e in edits if isinstance(e, dict)]
+        for summary, edit in zip(summaries, valid_edits):
+            summary['operation'] = edit.get('operation', '?')
+
+
 def _build_run_command(meta, fn_name, fn_args, tool_content, path):
     cmd = fn_args.get('command', '')
     # ★ Must anchor to END — command output may itself contain [exit code: N]
@@ -436,6 +453,7 @@ _META_BUILDERS = {
     'list_dir':     _build_list_dir,
     'find_files':   _build_find_files,
     'write_file':   _build_write_file,
+    'edit_file':    _build_edit_file,
     'apply_diff':   _build_apply_diff,
     'apply_diffs':  _build_apply_diff,
     'run_command':  _build_run_command,

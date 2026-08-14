@@ -27,10 +27,14 @@ elements:
 - elementId: title
   elementType: text
   bounds: [48, 60, 800, 120]
+  # allowOverlap: true         # ONLY for intentional decorative typography;
+                               # never use it to silence accidental collisions
   content:
     style: "$title"            # optional theme style
     align: [left, middle]      # [left|center|right, top|middle|bottom]
     wrap: true                 # false for single-line labels
+    fit: shrink                # default: fixed bounds + PowerPoint native shrink
+                               # none | resize (resize may change authored geometry)
     fontSize: 40               # overrides the style
     color: "$ink"
     lineHeight: 1.2
@@ -140,6 +144,12 @@ elements:
 3. `$token` must exist: colors = bg/ink/primary/accent/muted/hairline,
    textStyles = title/body/caption/bignum, tableStyles = default.
 4. Text is a COMPLETE phrase — rewrite to fit, never truncate mid-thought.
+   Text boxes default to `fit: shrink`; do not use `resize` when later content
+   depends on the box boundary.
 5. `columnWidths`/`rowHeights` sum to 1 (±0.02), one rowHeights entry per row.
 6. Charts use the `chart` element (bar/column/line/pie); complex
    structural diagrams are still built from shapes/lines.
+7. Every callout line/arrow/dot must terminate on a clearly visible image
+   feature that proves its label. If the exact target is uncertain, omit the
+   callout and use an outside caption instead. Use matching ids such as
+   `anno-line-1`, `anno-dot-1`, `anno-text-1` so QA can trace the group.

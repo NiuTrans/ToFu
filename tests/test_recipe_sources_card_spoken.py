@@ -171,10 +171,10 @@ def test_primary_research_query_carries_week_freshness(monkeypatch):
                         freshness='': (calls.append((q, freshness)),
                                        list(_CARDS))[1])
     rec._run_research({'topic': '核聚变净能量增益', 'lang': 'zh'})
-    assert calls and calls[0][1] == 'week', (
-        f'primary query freshness is {calls[0][1]!r}, not week')
-    # The background angle stays un-freshness-gated (evergreen grounding).
-    assert len(calls) >= 2 and calls[1][1] == ''
+    assert any(freshness == 'week' for _, freshness in calls), calls
+    # Official candidates and background stay unfiltered because first-party
+    # product URLs often have no publication date.
+    assert any(freshness == '' for _, freshness in calls), calls
 
 
 def test_week_starved_primary_retries_without_freshness(monkeypatch):
@@ -193,9 +193,11 @@ def test_week_starved_primary_retries_without_freshness(monkeypatch):
     art = rec._run_research({'topic': '为什么天空是蓝色的', 'lang': 'zh'})
     assert art['freshness_used'] == 'none'
     assert art['cards'], 'fallback retry returned no cards'
-    assert calls[0][1] == 'week'
-    assert calls[1] == (calls[0][0], ''), (
-        'the unfiltered retry must re-run the SAME primary query')
+    fresh_queries = [query for query, freshness in calls
+                     if freshness == 'week']
+    assert len(fresh_queries) == 1
+    assert (fresh_queries[0], '') in calls, (
+        'the unfiltered retry must re-run the SAME current-state query')
 
 
 def test_week_rich_primary_does_not_retry(monkeypatch):
@@ -211,9 +213,12 @@ def test_week_rich_primary_does_not_retry(monkeypatch):
     monkeypatch.setattr(rec, '_web_search', fake_search)
     art = rec._run_research({'topic': '核聚变净能量增益', 'lang': 'zh'})
     assert art['freshness_used'] == 'week'
-    # primary ran exactly once (week), then only the background query follows
-    primaries = [c for c in calls if c[0] == '核聚变净能量增益']
-    assert len(primaries) == 1 and primaries[0][1] == 'week'
+    # The current-state query ran exactly once with the week profile; official
+    # and background are separate unfiltered lanes.
+    current_queries = [query for query, freshness in calls
+                       if freshness == 'week']
+    assert len(current_queries) == 1
+    assert (current_queries[0], '') not in calls
 
 
 def test_script_prompt_carries_current_date(monkeypatch):

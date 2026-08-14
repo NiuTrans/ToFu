@@ -29,7 +29,7 @@ defeat the point of the migration.
 
 from __future__ import annotations
 
-from flask import Blueprint, redirect, request
+from quart import Blueprint, redirect, request
 
 from lib.log import get_logger
 

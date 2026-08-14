@@ -13,7 +13,7 @@ from typing import Any
 
 from lib.log import get_logger
 
-from lib.error_envelope._build import make_envelope
+from lib.error_envelope._build import make_envelope, normalize_envelope
 from lib.error_envelope._constants import KINDS
 
 logger = get_logger(__name__)
@@ -21,20 +21,18 @@ logger = get_logger(__name__)
 
 def to_json(envelope: dict[str, Any] | str | None) -> str | None:
     """Serialise an envelope (or legacy string) for DB storage."""
-    if envelope is None:
+    normalized = normalize_envelope(
+        envelope, context='error:persistence', source='lib.error_envelope')
+    if normalized is None:
         return None
-    if isinstance(envelope, str):
-        # Legacy or short-circuit emit — wrap on the way out so the
-        # database row is always a JSON object.
-        envelope = make_envelope('generic', detail=envelope[:200], raw=envelope)
     try:
-        return json.dumps(envelope, ensure_ascii=False)
+        return json.dumps(normalized, ensure_ascii=False)
     except (TypeError, ValueError) as e:
         logger.warning('[ErrorEnvelope] to_json failed: %s — falling back to string', e)
         return json.dumps(make_envelope(
             'internal',
             detail=f'Envelope serialise failed: {e}',
-            raw=str(envelope)[:200],
+            raw=str(normalized)[:200],
         ), ensure_ascii=False)
 
 
@@ -51,7 +49,8 @@ def from_json(s: str | dict | None) -> dict[str, Any] | None:
     if s is None or s == '':
         return None
     if isinstance(s, dict):
-        return s
+        return normalize_envelope(
+            s, context='error:persistence', source='lib.error_envelope')
     if not isinstance(s, str):
         logger.debug('[ErrorEnvelope] from_json got unexpected type=%s', type(s).__name__)
         return make_envelope('generic', detail=str(s)[:200], raw=str(s))
@@ -62,10 +61,9 @@ def from_json(s: str | dict | None) -> dict[str, Any] | None:
         try:
             obj = json.loads(s)
             if isinstance(obj, dict) and 'kind' in obj:
-                # Already an envelope — pass through.  Re-validate kind.
-                if obj.get('kind') not in KINDS:
-                    obj['kind'] = 'generic'
-                return obj
+                return normalize_envelope(
+                    obj, context='error:persistence',
+                    source='lib.error_envelope')
             # JSON object that isn't a typed envelope (e.g. raw error
             # body from some other layer) — wrap.
             return make_envelope('generic', detail=s[:200], raw=s)
@@ -78,7 +76,9 @@ def from_json(s: str | dict | None) -> dict[str, Any] | None:
 
 
 def is_envelope(obj: Any) -> bool:
-    """True iff ``obj`` looks like a typed error envelope."""
+    """True iff ``obj`` is valid and renderable as a typed envelope."""
     return (isinstance(obj, dict)
             and isinstance(obj.get('kind'), str)
-            and obj.get('kind') in KINDS)
+            and obj.get('kind') in KINDS
+            and isinstance(obj.get('message'), str)
+            and bool(obj.get('message')))

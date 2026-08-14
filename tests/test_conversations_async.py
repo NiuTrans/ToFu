@@ -141,9 +141,11 @@ class TestAsyncConversationCrud:
     def test_list_convs_meta_only(self, flask_client, a_conv):
         resp = flask_client.get('/api/v1/conversations?meta=1')
         assert resp.status_code == 200
-        # meta payload is a JSON object/array served from the meta cache;
-        # just assert it parses and the ETag header is present.
-        assert resp.get_json() is not None
+        # The monotonic DB rev is part of the sidebar sync protocol. Without
+        # it the browser falls back to skew-prone wall-clock comparisons.
+        row = next(c for c in resp.get_json() if c['id'] == a_conv)
+        assert isinstance(row.get('rev'), int)
+        assert row['rev'] >= 0
         assert 'ETag' in resp.headers
 
     def test_list_convs_meta_prefetch(self, flask_client, a_conv):
@@ -155,6 +157,26 @@ class TestAsyncConversationCrud:
         assert data['prefetched'] is not None
         assert data['prefetched']['id'] == a_conv
         assert len(data['prefetched']['messages']) == 2
+
+    def test_list_convs_meta_prefetch_windowed(self, flask_client, a_conv):
+        """Startup prefetch must not deserialize/ship the full transcript.
+
+        No ``window`` above intentionally pins legacy compatibility. The
+        first-party shape below asks for one tail row and must carry enough
+        absolute-count/cursor metadata for the browser to page upward without
+        ever mistaking the slice for the complete conversation.
+        """
+        resp = flask_client.get(
+            f'/api/v1/conversations?meta=1&prefetch={a_conv}&window=1')
+        assert resp.status_code == 200
+        prefetched = resp.get_json()['prefetched']
+        assert prefetched['windowed'] is True
+        assert prefetched['trimmed'] is True
+        assert prefetched['totalCount'] == 2
+        assert prefetched['firstLoadedSeq'] == 1
+        assert prefetched['lastLoadedSeq'] == 1
+        assert prefetched['hasMore'] is True
+        assert [m['content'] for m in prefetched['messages']] == ['hi from async']
 
 
 

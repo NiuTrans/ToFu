@@ -1,7 +1,7 @@
 """Guards for the deep craft channel (epic pt_db5602172ac44b11 item ③).
 
 The defect these lock down: ``WORKFLOW.md`` told the scene author to
-"Activate hyperframes-motion", but ``activate_skill`` is a CHAT-agent tool and
+"Load hyperframes-motion", but ``load_skill`` is a CHAT-agent tool and
 the headless author's toolset is fixed — measured skill hits: **0**. The craft
 corpus (29 rules + 13 blueprints + 13 frame presets) sat in a catalog entry
 nobody had installed, so every film was authored from the ~20 KB distilled
@@ -100,8 +100,8 @@ def test_craft_reference_is_dispatched_by_the_author_loop():
         'be told the tool is unknown')
 
 
-def test_workflow_guide_does_not_leave_a_dead_activate_instruction():
-    """The guide may mention activate_skill only while naming the engine path.
+def test_workflow_guide_does_not_leave_a_dead_load_instruction():
+    """The guide may mention load_skill only while naming the engine path.
 
     The original sentence pointed the author at a chat-only tool with no
     caveat. Rewriting it to cover both paths is the fix; silently deleting the
@@ -110,7 +110,7 @@ def test_workflow_guide_does_not_leave_a_dead_activate_instruction():
     # Markdown has no comment syntax to strip (charter #24 targets code scans).
     with open('lib/motion_video/guide/WORKFLOW.md', encoding='utf-8') as f:
         body = f.read()
-    if 'activate_skill' not in body:
+    if 'load_skill' not in body:
         return  # mention removed entirely — also acceptable
     assert 'craft_reference' in body, (
         'WORKFLOW.md still tells an author to activate a skill without '
@@ -119,18 +119,15 @@ def test_workflow_guide_does_not_leave_a_dead_activate_instruction():
 
 # ── the author can see what to ask for ────────────────────
 
-def test_prompt_carries_the_craft_index(corpus):
+def test_prompt_carries_the_mandatory_selected_blueprint(corpus):
     prompt = _build_prompt({'id': 'scene-001', 'text': '开场', 'visual': 'x'},
                            width=1080, height=1440, duration=5.0,
                            scene_index=1, total_scenes=6)
-    assert 'Craft corpus' in prompt, (
-        'the index does not travel with the prompt — a tool the model cannot '
-        'enumerate is a tool it will not call')
-    assert 'alpha-rule' in prompt
-    assert 'beta-blueprint' in prompt, (
-        'blueprints are missing — a stale `break` in the index loop starves '
-        'the author of every multi-phase scene template')
-    assert 'sample-preset' in prompt
+    assert 'Mandatory frame packet' in prompt
+    assert 'hook-counter-burst' in prompt
+    assert 'Craft corpus' not in prompt, (
+        'the whole catalogue should not consume context after the film plan '
+        'has already selected and injected one blueprint')
 
 
 def test_index_covers_all_three_bodies_of_knowledge(corpus):
@@ -155,7 +152,7 @@ def test_every_advertised_entry_resolves_to_real_text(corpus):
     assert not dead, (
         f'advertised entries resolve to nothing: {dead} — pointing an author '
         f'at an unreachable rule is the same defect as the dead '
-        f'activate_skill instruction')
+        f'load_skill instruction')
 
 
 def test_dead_index_entry_is_filtered_out(corpus):
@@ -227,11 +224,17 @@ def test_craft_reads_survives_every_author_return_path():
     from tests._source_scan import strip_comments
     src = strip_comments(inspect.getsource(_scene_author.author_scene),
                          lang='python')
-    returns = src.count("'tokens': state['tokens']")
-    carries = src.count("'craft_reads':")
-    assert returns == carries, (
-        f'{returns} return sites carry tokens but only {carries} carry '
-        f'craft_reads — some paths would report the channel unused')
+    # ``author_scene`` now funnels every degraded outcome through _fallback,
+    # while the successful and zero-spend-adoption paths return directly.
+    # Pin those three exits rather than counting an implementation detail from
+    # the nested ``_author_once`` function (the old scan looked for
+    # ``state['tokens']`` in the wrong function and could pass vacuously at
+    # 0 == 0).
+    assert "'craft_reads': list(planned_craft)" in src
+    assert "planned_craft + list(res.get('craft_reads') or [])" in src
+    assert src.count("'craft_reads':") >= 3, (
+        'fallback, adopted-draft and authored returns must all expose the '
+        'automatically injected blueprint')
 
 
 # ── degradation is never fatal ────────────────────────────

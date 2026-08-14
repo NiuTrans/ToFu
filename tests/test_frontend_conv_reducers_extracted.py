@@ -54,6 +54,7 @@ def _unit(fn):
 
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from tests._runtime_sections import runtime_section, runtime_section_names
 
 
 _REDUCERS = (
@@ -66,8 +67,7 @@ _REDUCERS = (
 
 
 def _read(rel_path: str) -> str:
-    with open(os.path.join(_ROOT, rel_path), encoding='utf-8') as f:
-        return f.read()
+    return runtime_section(rel_path.removeprefix('static/js/'))
 
 
 @_unit
@@ -83,7 +83,7 @@ def test_conv_reducers_leaf_module_exists_and_declares_five():
             f'static/js/core/conv_reducers.js must define {name} '
             f'via `function {name}(...)` — extraction incomplete'
         )
-        assert f'window.{name} = {name}' in src, (
+        assert f'runtimeScope.{name} = {name}' in src, (
             f'static/js/core/conv_reducers.js must expose window.{name} '
             f'= {name} so downstream typeof-guarded reads still resolve'
         )
@@ -111,14 +111,14 @@ def test_bundle_manifest_loads_reducers_before_conversations():
     ``core/conv_reducers.js`` BEFORE ``core/conversations.js`` so the
     concatenated core bundle preserves the correct load order.
     """
-    src = _read('lib/js_bundler.py')
-    reducer_idx = src.find("'core/conv_reducers.js'")
-    conv_idx = src.find("'core/conversations.js'")
-    assert reducer_idx > 0, (
+    owners = runtime_section_names()
+    reducer_idx = owners.index('core/conv_reducers.js')
+    conv_idx = owners.index('core/conversations.js')
+    assert reducer_idx >= 0, (
         "lib/js_bundler.py::_BUNDLE_FILES must include "
         "'core/conv_reducers.js' — bundler ratchet skipped"
     )
-    assert conv_idx > 0, (
+    assert conv_idx >= 0, (
         "lib/js_bundler.py::_BUNDLE_FILES must still include "
         "'core/conversations.js'"
     )

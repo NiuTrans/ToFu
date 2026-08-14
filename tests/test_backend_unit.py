@@ -200,15 +200,26 @@ class TestBuildBody:
     def test_gpt5_reasoning_effort_ladder(self):
         """GPT-5 family is a reasoning model driven by the OpenAI-native
         ``reasoning_effort`` string. build_body maps Tofu's depth ladder onto
-        minimal/low/medium/high, and the ``ultra`` tier only survives on
-        GPT-5.6+ (older GPT-5.x clamp it to high). No thinking/enable_thinking
-        block is ever emitted for GPT."""
+        the concrete generation's supported rungs. Current Codex models use
+        none/low/medium/high/xhigh and GPT-5.6 adds max. No
+        thinking/enable_thinking block is ever emitted for GPT."""
         from lib.llm import build_body
 
-        # GPT-5.6 accepts the full ladder incl. ultra.
-        cases_56 = {'off': 'minimal', 'low': 'low', 'medium': 'medium',
-                    'high': 'high', 'xhigh': 'high', 'max': 'high',
-                    'ultra': 'ultra'}
+        cases_54 = {'off': 'none', 'low': 'low', 'medium': 'medium',
+                    'high': 'high', 'xhigh': 'xhigh', 'max': 'xhigh',
+                    'ultra': 'xhigh'}
+        for depth, expected in cases_54.items():
+            body = build_body('gpt-5.4', self.DUMMY_MSGS,
+                              max_tokens=4096,
+                              thinking_enabled=(depth != 'off'),
+                              thinking_depth=depth, stream=False)
+            assert body.get('reasoning_effort') == expected, (depth, body)
+
+        # GPT-5.6's public top rung is max. Tofu's historical ``ultra`` label
+        # is accepted only as a compatibility alias to that official value.
+        cases_56 = {'off': 'none', 'low': 'low', 'medium': 'medium',
+                    'high': 'high', 'xhigh': 'xhigh', 'max': 'max',
+                    'ultra': 'max'}
         for depth, expected in cases_56.items():
             body = build_body('gpt-5.6', self.DUMMY_MSGS, max_tokens=4096,
                               thinking_enabled=(depth != 'off'),
@@ -218,16 +229,16 @@ class TestBuildBody:
             assert 'enable_thinking' not in body
 
     def test_gpt5_ultra_downgrades_on_pre_56(self):
-        """``ultra`` is a GPT-5.6-only tier; on GPT-5.4 it clamps to high."""
+        """Tofu ``ultra`` aliases to GPT-5.4's highest ``xhigh`` rung."""
         from lib.llm import build_body
         body = build_body('gpt-5.4', self.DUMMY_MSGS, max_tokens=4096,
                           thinking_enabled=True, thinking_depth='ultra',
                           stream=False)
-        assert body.get('reasoning_effort') == 'high'
+        assert body.get('reasoning_effort') == 'xhigh'
 
     def test_gpt5_default_effort_medium(self):
         from lib.llm import build_body
-        body = build_body('gpt-5.6-pro', self.DUMMY_MSGS, max_tokens=4096,
+        body = build_body('gpt-5.6', self.DUMMY_MSGS, max_tokens=4096,
                           thinking_enabled=True, stream=False)
         assert body.get('reasoning_effort') == 'medium'
 
@@ -604,9 +615,12 @@ class TestSlotThinkingFormat:
         assert slot.thinking_format == ''
 
     def test_known_values_accepted(self):
+        accepted = []
         for tf in ('', 'enable_thinking', 'thinking_type', 'reasoning_effort',
                     'chat_template_kwargs', 'none'):
-            self._slot(thinking_format=tf)  # must not raise
+            accepted.append(self._slot(thinking_format=tf).thinking_format)
+        assert accepted == ['', 'enable_thinking', 'thinking_type',
+                            'reasoning_effort', 'chat_template_kwargs', 'none']
 
     def test_typo_rejected(self):
         with pytest.raises(ValueError) as excinfo:

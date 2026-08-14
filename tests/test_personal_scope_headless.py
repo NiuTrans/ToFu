@@ -62,10 +62,10 @@ class PersonalScopeRegistryTest(unittest.TestCase):
             {'preferencesEnabled': True}, memory_enabled=False))
         self.assertFalse(resolve_preferences_enabled(
             {'preferencesEnabled': False}, memory_enabled=True))
-        # Absent → UI back-compat fallback to the memory flag.
+        # Absent → interactive My Context stays on independently of memory.
         self.assertTrue(resolve_preferences_enabled({}, memory_enabled=True))
-        self.assertFalse(resolve_preferences_enabled({}, memory_enabled=False))
-        self.assertFalse(resolve_preferences_enabled(None, memory_enabled=False))
+        self.assertTrue(resolve_preferences_enabled({}, memory_enabled=False))
+        self.assertTrue(resolve_preferences_enabled(None, memory_enabled=False))
 
 
 class HeadlessBuildersFailClosedTest(unittest.TestCase):
@@ -179,7 +179,7 @@ class PromptDescribesNoUngivenCapabilityTest(unittest.TestCase):
         try:
             text = self._all_text(self._inject({'memoryEnabled': True,
                                                 'preferencesEnabled': False}))
-            self.assertNotIn('[USER PREFERENCE PROFILE]', text)
+            self.assertNotIn('[USER CONTEXT]', text)
         finally:
             if _seeded:
                 save_profile('')  # clean up the seeded file

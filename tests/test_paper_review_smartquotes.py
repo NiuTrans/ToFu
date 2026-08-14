@@ -101,7 +101,11 @@ def _run(lang_key, ui_lang, phash):
     re_mod2, orig = _patch_dispatch(REVIEW_BODY)
     try:
         task = _new_report_task('t_' + phash[:6], phash, lang_key, None,
-                                client_title='P', ui_lang=ui_lang)
+                                client_title='P', ui_lang=ui_lang,
+                                config={
+                                    'paperInsightEnabled': False,
+                                    'paperCheckpointsEnabled': False,
+                                })
         re_mod2._run_report_task(task, [
             {'role': 'system', 'content': 'sys'},
             {'role': 'user', 'content': 'paper'},

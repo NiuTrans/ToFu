@@ -9,16 +9,15 @@ point-in-time sweep, so the gap re-opens the moment it finishes — measured
 +519 MB of new full rows accumulating between two checks while the old
 process kept running.
 
-``_opportunistic_compact`` piggy-backs on the same sampled hook the TTL
-prune uses, so ANY process running this build heals the backlog
-continuously and the table converges WITHOUT a coordinated restart.
+``_opportunistic_compact`` runs on the same dedicated maintenance daemon as
+TTL pruning, so ANY process running this build heals the backlog continuously
+without stalling an SSE producer.
 
 Properties pinned here:
   1. A full row gets compacted to delta form, and reads still return the
      SAME payload (compaction is invisible to every consumer).
   2. Already-delta rows are left alone (idempotent, no churn).
-  3. It is BOUNDED — one pass touches at most _COMPACT_MAX_TASKS tasks,
-     because this runs on an SSE delta's thread.
+  3. It is BOUNDED — one pass touches at most _COMPACT_MAX_TASKS tasks.
   4. ★ SAFETY: verification failure must leave rows byte-identical. The
      compactor reuses the migration's verify-then-write contract, so a
      projection that cannot round-trip is REFUSED, not written.
@@ -216,17 +215,16 @@ def test_verification_failure_leaves_rows_untouched(monkeypatch):
         _cleanup(tid)
 
 
-def test_compaction_is_wired_into_the_append_hook():
-    """Static pin: the sampled hook must actually call the compactor — an
-    unwired compactor converges nothing."""
+def test_compaction_is_wired_into_maintenance_not_append():
+    """Static pin: compaction converges without blocking an SSE append."""
     src = open(os.path.join(_ROOT, 'lib', 'tasks_pkg', 'event_log.py'),
                encoding='utf-8').read()
-    assert '_COMPACT_PROBABILITY' in src
+    loop = src[src.index('def _maintenance_loop'):]
+    loop = loop[:loop.index('\ndef ')]
+    assert '_opportunistic_compact' in loop
     hook = src[src.index('def append_persistent_event'):]
     hook = hook[:hook.index('\ndef ')]
-    assert '_opportunistic_compact' in hook, (
-        'append_persistent_event does not sample the compactor — leftover '
-        'full rows would never be healed without a restart')
+    assert '_opportunistic_compact' not in hook
 
 
 if __name__ == '__main__':

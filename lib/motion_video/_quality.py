@@ -233,6 +233,21 @@ def asset_floor_findings(scene: dict, html: str, scene_dir: str, *,
             f'role exists for imagery a composition cannot draw itself. Call '
             f'generate_asset with the brief and reference the path it returns. '
             f'Brief: ' + ' | '.join(briefs))
+    prepared = [a for a in (scene.get('resolved_assets') or [])
+                if isinstance(a, dict) and a.get('path')]
+    if prepared:
+        from lib.motion_video._assets import extract_local_refs
+        refs = {r.split('#', 1)[0].split('?', 1)[0]
+                for r in extract_local_refs(html or '')}
+        unused = [str(a.get('path')) for a in prepared
+                  if str(a.get('path')) not in refs]
+        if unused:
+            findings.append(
+                'prepared storyboard assets are not used by the composition: '
+                + ', '.join(unused)
+                + '. Reference every prepared subject/diagram path; '
+                  'generating an asset and then hiding it does not satisfy '
+                  'the visual brief.')
     return findings
 
 
@@ -277,6 +292,25 @@ def scene_telemetry(scene: dict, html: str, scene_dir: str, *,
         # hits: 0) — and the only reason that went unnoticed for so long is
         # that nothing counted it. A capability whose usage is not measured is
         # indistinguishable from one that does not exist.
+        'narrative_role': str(scene.get('narrative_role') or ''),
+        'blueprint': str(scene.get('blueprint') or ''),
+        'shot_recipe': str(scene.get('shot_recipe') or ''),
+        'shot_contract_version': str(
+            scene.get('shot_contract_version') or ''),
+        'motion_family': str(scene.get('motion_family') or ''),
+        'shot_energy': int(scene.get('shot_energy') or 0),
+        'qa_progresses': list(scene.get('qa_progresses') or []),
+        'hold_s': float(scene.get('hold_s') or 0),
+        'plan_findings': len(scene.get('plan_findings') or []),
+        'transition_in': str(scene.get('transition_in') or ''),
+        'timeline_contract_version': str(
+            scene.get('timeline_contract_version') or ''),
+        'content_duration_s': float(scene.get('content_duration_s') or 0),
+        'render_duration_s': float(scene.get('render_duration_s') or 0),
+        'transition_in_duration_s': float(
+            scene.get('transition_in_duration_s') or 0),
+        'outgoing_handle_s': float(scene.get('outgoing_handle_s') or 0),
+        'resolved_assets': len(scene.get('resolved_assets') or []),
         'craft_reads': list(craft_reads or []),
     }
     if exempt:

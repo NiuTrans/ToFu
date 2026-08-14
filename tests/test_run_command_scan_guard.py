@@ -20,7 +20,9 @@ Pinned here:
   2. end-to-end through ``tool_run_command`` — refused BEFORE any subprocess
      (Popen tripwire), allowed shapes actually execute;
   3. escape hatches (explicit timeout / coreutils wrapper) stay open;
-  4. the kill switch TOFU_RUN_SCAN_GUARD=0.
+  4. ordinary find pipelines stay streaming but the find segment receives a
+     native deadline when the caller supplied no timeout;
+  5. the kill switch TOFU_RUN_SCAN_GUARD=0.
 
 Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/test_run_command_scan_guard.py -v
 """
@@ -31,10 +33,17 @@ import os
 
 import pytest
 
-from lib.project_mod.command_analysis import _unbounded_recursive_scan_target
+from lib.project_mod.command_analysis import (
+    _bound_scan_segments,
+    _unbounded_recursive_scan_target,
+)
 from lib.project_mod.run_command import tool_run_command
 
 pytestmark = pytest.mark.unit
+
+# Created under the ``ws`` temporary fixture; it is deliberately shaped like a
+# repository path so the command scanner exercises realistic input.
+_AUDIT_SYNTHETIC_REPO_PATHS = {'lib/a.py'}
 
 
 @pytest.fixture()
@@ -127,6 +136,28 @@ class TestScanGuardAllowedShapes:
 # ═════════════════════════════════════════════════════════════════════
 #  2. End-to-end through tool_run_command
 # ═════════════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestFindSegmentBudget:
+    def test_wraps_only_find_segment_and_preserves_pipeline(self):
+        command = 'printf ready; find . -name "*.py" | sort | head -5'
+        rewritten, count = _bound_scan_segments(command, '/usr/bin/timeout', 40)
+        assert count == 1
+        assert rewritten == (
+            'printf ready; /usr/bin/timeout --verbose --signal=TERM '
+            '--kill-after=2s 40s find . -name "*.py" | sort | head -5')
+
+    def test_does_not_double_wrap_bounded_find(self):
+        command = 'timeout 5 find . -name "*.py" | sort'
+        assert _bound_scan_segments(command, '/usr/bin/timeout', 40) == (command, 0)
+
+    def test_caller_timeout_disables_internal_find_budget(self, ws, monkeypatch):
+        monkeypatch.setattr(
+            'lib.project_mod.run_command._bound_scan_segments',
+            lambda *_args: pytest.fail('internal scanner budget should be skipped'))
+        result = tool_run_command(ws, 'find lib -name "*.py"', timeout=5)
+        assert 'lib/a.py' in result
+
 
 @pytest.mark.unit
 class TestScanGuardEndToEnd:

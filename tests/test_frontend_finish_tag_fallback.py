@@ -29,12 +29,14 @@ import sys
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-FINISH_INFO = os.path.join(ROOT, 'static', 'js', 'ui', 'finish_info.js')
+FINISH_INFO = runtime_section_path('ui/finish_info.js')
 
 
 def _node_available() -> bool:

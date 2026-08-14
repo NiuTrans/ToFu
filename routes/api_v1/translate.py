@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import uuid
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.api_response import (
     api_bad_request, api_error, api_internal_error, api_ok, api_payload,

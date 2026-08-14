@@ -22,7 +22,7 @@ These provider-template / probe routes complement the CRUD surface in
 
 from __future__ import annotations
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.log import get_logger
 

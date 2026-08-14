@@ -7,17 +7,13 @@ the author — not merely a count. Before this, ``_orchSave`` showed only
 ``Saved "X" (1 warning)`` so the parallel verdict-channel warning (and every
 other validator warning) was effectively swallowed.
 
-Extracts the REAL shipped ``_orchToast`` + ``_orchWarnToast`` from
-static/js/orchestration.js (the file is a 2500-line module with many
-top-level Api/window refs, so we lift just these two pure DOM helpers rather
-than eval the whole file) and runs them under jsdom. Skips when node+jsdom
-are absent.
+Loads the shipped ``orchestration-feedback.js`` controller and runs it under
+jsdom. Skips when node+jsdom are absent.
 """
 
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 
@@ -26,8 +22,9 @@ import pytest
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
-ORCH_JS = os.path.join(ROOT, 'static', 'js', 'orchestration.js')
+from tests._runtime_sections import orchestration_legacy_test_root
+
+ROOT = orchestration_legacy_test_root()
 
 
 def _node_deps_available() -> bool:
@@ -36,32 +33,18 @@ def _node_deps_available() -> bool:
     return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
-def _extract(fn_name: str) -> str:
-    """Lift a top-level ``function <fn_name>(...) { ... }`` by brace-matching."""
-    src = open(ORCH_JS, encoding='utf-8').read()
-    m = re.search(r'\nfunction ' + re.escape(fn_name) + r'\s*\(', src)
-    assert m, f'{fn_name} not found in orchestration.js'
-    i = src.index('{', m.start())
-    depth = 0
-    for j in range(i, len(src)):
-        c = src[j]
-        if c == '{':
-            depth += 1
-        elif c == '}':
-            depth -= 1
-            if depth == 0:
-                return src[m.start() + 1:j + 1]
-    raise AssertionError(f'unbalanced braces extracting {fn_name}')
-
-
 _HARNESS = r"""
+const fs = require('fs');
 const path = require('path');
 const ROOT = process.argv[2];
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM('<!DOCTYPE html><body></body>', { url: 'http://localhost/' });
 global.window = dom.window; global.document = dom.window.document;
-
-__FUNCS__
+eval(fs.readFileSync(path.join(ROOT, 'static/js/orchestration-feedback.js'), 'utf8'));
+const feedback = createOrchestrationFeedback({
+  document,
+  setTimeout: () => 0,
+});
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -74,7 +57,7 @@ const warns = [
   "feedback/directive channel is consumed order-dependently across " +
   "concurrent branches."];
 document.querySelectorAll('.orch-toast').forEach(e => e.remove());
-_orchWarnToast('Saved "Flow"', warns);
+feedback.warn('Saved "Flow"', warns);
 const toast = document.querySelector('.orch-toast');
 check('toast_created', !!toast);
 const txt = toast ? toast.textContent : '';
@@ -89,12 +72,25 @@ check('detail_block_present', !!(toast && toast.querySelector('.orch-toast-detai
 
 // No warnings → plain toast, no detail block, no warn styling.
 document.querySelectorAll('.orch-toast').forEach(e => e.remove());
-_orchWarnToast('Saved "Clean"', []);
+feedback.warn('Saved "Clean"', []);
 const clean = document.querySelector('.orch-toast');
 check('clean_no_detail', !!(clean && !clean.querySelector('.orch-toast-detail')));
 check('clean_no_warn_class', !!(clean && !clean.classList.contains('is-warn')));
 check('clean_headline', !!(clean && clean.textContent.includes('Saved "Clean"')));
 check('clean_no_count', !!(clean && !/warning/.test(clean.textContent)));
+
+document.querySelectorAll('.orch-toast').forEach(e => e.remove());
+const localized = createOrchestrationFeedback({
+  document,
+  setTimeout: () => 0,
+  translate: (key, params) => key === 'orch.feedback.warningCount'
+    ? params.count + ' 条提醒' : key,
+  issueMessages: values => values.map(value => value.message),
+});
+localized.warn('已保存', [{severity:'warning',message:'并行节点需要复核'}]);
+const localizedText = document.querySelector('.orch-toast').textContent;
+check('canonical_diagnostic_is_readable', localizedText.includes('并行节点需要复核'));
+check('warning_count_is_localized', localizedText.includes('1 条提醒'));
 
 console.log(out.join('\n'));
 """
@@ -103,11 +99,9 @@ console.log(out.join('\n'));
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
 def test_orch_warning_text_surfaces():
-    funcs = _extract('_orchToast') + '\n' + _extract('_orchWarnToast')
-    harness_src = _HARNESS.replace('__FUNCS__', funcs)
     harness = os.path.join(HERE, '_orch_warning_surface_harness.js')
     with open(harness, 'w', encoding='utf-8') as f:
-        f.write(harness_src)
+        f.write(_HARNESS)
     try:
         proc = subprocess.run(
             ['node', harness, ROOT],
@@ -122,7 +116,37 @@ def test_orch_warning_text_surfaces():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'warning-surface failures:\n' + output
-    assert output.count('PASS') >= 12, f'expected >=12 PASS, got:\n{output}'
+    assert output.count('PASS') >= 14, f'expected >=14 PASS, got:\n{output}'
+
+
+def test_main_editor_delegates_feedback_to_shared_controller():
+    editor = open(
+        os.path.join(ROOT, 'static', 'js', 'orchestration.js'),
+        encoding='utf-8',
+    ).read()
+    command_bridge = open(
+        os.path.join(
+            ROOT, 'static', 'js', 'orchestration-command-bridge.js',
+        ),
+        encoding='utf-8',
+    ).read()
+    feedback = open(
+        os.path.join(ROOT, 'static', 'js', 'orchestration-feedback.js'),
+        encoding='utf-8',
+    ).read()
+    studio_api = open(
+        os.path.join(
+            ROOT, 'frontend/src/features/orchestration/studio-api.ts'),
+        encoding='utf-8',
+    ).read()
+    adapters = command_bridge[command_bridge.index('function _orchToast'):]
+    assert 'createOrchestrationFeedback' in editor
+    assert 'toast: _orchServices.toast' in editor
+    assert '_orchStudioApi.toast' in adapters
+    assert '_orchFeedback.warn' in adapters
+    assert "call('toast', message, isError, toastOptions)" in studio_api
+    assert "createElement('div')" not in adapters
+    assert "createElement('div')" in feedback
 
 
 if __name__ == '__main__':

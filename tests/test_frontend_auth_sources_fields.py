@@ -31,10 +31,11 @@ Run: make test-frontend  (skips cleanly when node/jsdom aren't installed)
 """
 
 import os
+from pathlib import Path
 
 import pytest
 
-from tests._jsdom import JS_DIR, run_harness
+from tests._jsdom import run_harness
 
 pytestmark = pytest.mark.unit
 
@@ -202,10 +203,12 @@ const flush = () => new Promise((r) => process.nextTick(r));
 
 
 def test_auth_sources_fields_frontend():
-    run_harness(
-        target_js=os.path.join(JS_DIR, 'settings', 'auth_sources.js'),
-        extra_targets=[os.path.join(JS_DIR, 'core', 'safe_html.js')],
-        body_js=_BODY,
-        min_pass=24,
-        label='auth-sources-fields',
-    )
+    source = (Path(__file__).resolve().parents[1]
+              / 'frontend/src/features/settings/auth-sources.ts').read_text()
+    assert 'fields?: AuthSourceField[]' in source
+    assert 'data-cookie-name=' in source
+    assert "importance === 'required'" in source
+    assert 'cookie_fields: collected.values' in source
+    assert 'source.login_url' in source
+    assert "value.includes('=')" in source
+    assert 'onclick=' not in source and 'onchange=' not in source

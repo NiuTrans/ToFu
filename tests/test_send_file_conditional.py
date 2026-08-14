@@ -112,17 +112,21 @@ def test_an_unsatisfiable_range_gets_416(seeded, flask_client):
 
 
 @pytest.mark.api
-def test_NEUTER_without_the_catch_the_probe_500s(seeded, flask_client,
-                                                 monkeypatch):
+def test_NEUTER_without_the_catch_the_probe_500s(seeded, flask_app,
+                                                 flask_client, monkeypatch):
     """Documentary: bypass the seam (raw quart send_file, conditional) → the
     probe 500s. The catch is what stands between the probe and a 500."""
-    import quart
+    from lib.quart_sync import send_file
 
     def _pre_seam(path, **kw):
         kw['conditional'] = True
-        return quart.send_file(path, **kw)
+        return send_file(path, **kw)
 
     monkeypatch.setattr('lib.file_serving.send_file_conditional', _pre_seam)
+    # TESTING normally propagates view exceptions out of Quart's test client.
+    # Disable propagation for this one documentary probe so it observes the
+    # production HTTP boundary (500) rather than an in-process exception.
+    monkeypatch.setitem(flask_app.config, 'PROPAGATE_EXCEPTIONS', False)
     r = _get(flask_client, 'bytes=0-0')
     if r.status_code != 500:
         # Upstream fixed (public CI's newer quart/werkzeug, measured

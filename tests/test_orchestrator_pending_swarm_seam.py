@@ -62,7 +62,8 @@ def _extract_guard_block() -> str:
     return textwrap.dedent(m.group(1))
 
 
-def _run_guard(*, swarm_enabled: bool, pending: bool, base_tools):
+def _run_guard(*, swarm_enabled: bool, pending: bool, base_tools,
+               return_cfg: bool = False):
     """Execute the extracted guard block with orchestrator-shaped locals.
 
     Monkeypatches ``lib.swarm.integration.has_live_or_pending_swarm`` via the
@@ -83,11 +84,13 @@ def _run_guard(*, swarm_enabled: bool, pending: bool, base_tools):
             'swarm_enabled': swarm_enabled,
             'tool_list': list(base_tools) if base_tools is not None else None,
             'has_real_tools': bool(base_tools),
-            'max_tool_rounds': (999_999_999 if base_tools else 0),
             'task': {'id': 'deadbeef' * 5, 'convId': 'convX'},
+            'cfg': {},
             'logger': __import__('lib.log', fromlist=['get_logger']).get_logger('test'),
         }
         exec(block, {}, ns)  # noqa: S102 — running our own source, test-only
+        if return_cfg:
+            return ns['tool_list'], ns['cfg']
         return ns['tool_list']
     finally:
         integ.has_live_or_pending_swarm = orig
@@ -120,6 +123,16 @@ def test_pending_swarm_turn_gets_swarm_tools_in_schema():
         f'pending-swarm turn must expose swarm tools; got {sorted(known)}'
 
 
+def test_pending_swarm_override_updates_new_and_compat_authority_catalogs():
+    tool_list, cfg = _run_guard(
+        swarm_enabled=False, pending=True,
+        base_tools=[_dummy('read_files')], return_cfg=True)
+    assert _SWARM_NAMES <= _schema_known(tool_list)
+    assert _SWARM_NAMES <= _schema_known(cfg['_executableToolCatalog'])
+    assert _schema_known(cfg['_enabledToolCatalog']) == _schema_known(
+        cfg['_executableToolCatalog'])
+
+
 def test_no_pending_swarm_leaves_schema_alone():
     tool_list = _run_guard(swarm_enabled=False, pending=False,
                            base_tools=[_dummy('read_files')])
@@ -137,9 +150,8 @@ def test_swarm_enabled_turn_unchanged_by_guard():
     assert _SWARM_NAMES <= known
 
 
-def test_bare_turn_pending_swarm_lifts_round_cap():
-    """A turn with NO other tools (max_tool_rounds=0) still gets a usable
-    schema — the guard lifts the cap so the forced tools aren't dead."""
+def test_bare_turn_pending_swarm_gets_usable_tools():
+    """A turn with no other tools still gets a usable swarm schema."""
     tool_list = _run_guard(swarm_enabled=False, pending=True, base_tools=None)
     known = _schema_known(tool_list)
     assert _SWARM_NAMES <= known

@@ -40,7 +40,7 @@ class RoundState:
     thinking_enabled: bool
 
     # ── control ──
-    exit_reason: str = 'max_rounds_exhausted'   # was _loop_exit_reason
+    exit_reason: str = 'running'                # set by natural/error exit
     abort_phase: str | None = None              # was _abort_detected_phase
     consecutive_tool_timeouts: int = 0          # breaker counter (≥3 → halt)
     last_checkpoint_ts: float = 0.0             # crash-checkpoint throttle

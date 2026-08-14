@@ -50,10 +50,11 @@ class WalletCASTest(_Base):
     def test_conditional_apply_rejects_overdraw_without_moving_row(self):
         from lib.billing import deposit, get_balance
         from lib.billing.wallet import _conditional_apply
-        from lib.database import DOMAIN_SYSTEM, get_thread_db
+        from lib.database import DOMAIN_SYSTEM, get_thread_db, write_transaction
         deposit('usr_cas1', 100, kind='topup', ref_id='seed1')
         db = get_thread_db(DOMAIN_SYSTEM)
-        status, bal = _conditional_apply(db, 'usr_cas1', -500, False)
+        with write_transaction(db, label='test conditional wallet update'):
+            status, bal = _conditional_apply(db, 'usr_cas1', -500, False)
         self.assertEqual(status, 'insufficient')
         self.assertEqual(bal, 100)                 # reports current balance
         self.assertEqual(get_balance('usr_cas1'), 100)  # row untouched
@@ -61,19 +62,21 @@ class WalletCASTest(_Base):
     def test_conditional_apply_moves_balance_relatively(self):
         from lib.billing import deposit
         from lib.billing.wallet import _conditional_apply
-        from lib.database import DOMAIN_SYSTEM, get_thread_db
+        from lib.database import DOMAIN_SYSTEM, get_thread_db, write_transaction
         deposit('usr_cas2', 1000, kind='topup', ref_id='seed2')
         db = get_thread_db(DOMAIN_SYSTEM)
-        status, bal = _conditional_apply(db, 'usr_cas2', -300, False)
-        db.commit()
+        with write_transaction(db, label='test conditional wallet update'):
+            status, bal = _conditional_apply(db, 'usr_cas2', -300, False)
         self.assertEqual(status, 'applied')
         self.assertEqual(bal, 700)
 
     def test_conditional_apply_absent_wallet_row(self):
         from lib.billing.wallet import _conditional_apply
-        from lib.database import DOMAIN_SYSTEM, get_thread_db
+        from lib.database import DOMAIN_SYSTEM, get_thread_db, write_transaction
         db = get_thread_db(DOMAIN_SYSTEM)
-        status, bal = _conditional_apply(db, 'usr_never_seen_cas', -10, False)
+        with write_transaction(db, label='test conditional wallet update'):
+            status, bal = _conditional_apply(
+                db, 'usr_never_seen_cas', -10, False)
         self.assertEqual(status, 'absent')
 
     def test_many_debits_never_overdraw(self):

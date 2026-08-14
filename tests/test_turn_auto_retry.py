@@ -161,6 +161,9 @@ def test_seam_retries_and_reinvokes(monkeypatch):
     types = [e.get('type') for e in task['events']]
     assert 'retry_reset' in types
     assert 'phase' in types
+    resets = [e for e in task['events'] if e.get('type') == 'retry_reset']
+    assert task.get('_contentEpoch') == 1, task
+    assert resets[-1].get('contentEpoch') == 1, resets[-1]
     # accumulators reset to a clean running state
     assert task['_auto_turn_retry_count'] == 1
     # (content was reset before run_task; the spy didn't repopulate it)

@@ -43,10 +43,6 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import quart as _quart  # noqa: E402
-sys.modules['flask'] = _quart
-
-
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
 def _ok(msg): print(' ', _color('✓', '32'), msg)
 def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
@@ -104,7 +100,14 @@ def test_redispatch_persists_and_dispatches(monkeypatch):
                        {'model': 'gpt-4o'}, kind=mq.KIND_REAL)
 
     try:
-        spawned = mq.redispatch_orphaned_queue_on_startup()
+        spawned = []
+        # Startup dispatch is intentionally capped per tick. Other unit tests
+        # may leave valid orphan rows in this isolated worker DB, so drain
+        # bounded batches until this conversation gets its turn.
+        for _ in range(4):
+            spawned.extend(mq.redispatch_orphaned_queue_on_startup())
+            if spawned_tasks:
+                break
 
         # A task was dispatched for our conv.
         assert conv_id in [t for t in spawned] or len(spawned) >= 1, \
@@ -255,12 +258,9 @@ def test_reaped_stuck_task_finalizes_conversation(monkeypatch):
         assert mq.get_queue_depth(conv_id) == 0, 'queue must be drained'
     finally:
         _cleanup(db, conv_id)
-        try:
-            from lib.tasks_pkg.manager import _conv_latest_task, _conv_latest_task_lock
-            with _conv_latest_task_lock:
-                _conv_latest_task.pop(conv_id, None)
-        except Exception:
-            pass
+        from lib.tasks_pkg.manager import _conv_latest_task, _conv_latest_task_lock
+        with _conv_latest_task_lock:
+            _conv_latest_task.pop(conv_id, None)
     _ok('reaped wedged task finalizes conv: error bubble + activeTaskId cleared + queue drained')
 
 
@@ -306,12 +306,9 @@ def test_NC_reaped_task_guard_still_blocks_regenerate_truncation(monkeypatch):
             f'a superseded (non-stuck) task must NOT append an assistant slot, got {msgs}')
     finally:
         _cleanup(db, conv_id)
-        try:
-            from lib.tasks_pkg.manager import _conv_latest_task, _conv_latest_task_lock
-            with _conv_latest_task_lock:
-                _conv_latest_task.pop(conv_id, None)
-        except Exception:
-            pass
+        from lib.tasks_pkg.manager import _conv_latest_task, _conv_latest_task_lock
+        with _conv_latest_task_lock:
+            _conv_latest_task.pop(conv_id, None)
     _ok('non-stuck aborted task still blocked from resurrecting a truncated turn (guard scope)')
 
 
@@ -394,10 +391,32 @@ def test_live_task_conv_not_double_dispatched(monkeypatch):
     _ok('conv with a live task is NOT double-dispatched by the orphaned-queue scan')
 
 
-def test_server_wires_orphan_redispatch_on_serving_loop(monkeypatch):
-    """WIRING regression: server.py::_serve must schedule the orphaned-queue
-    re-dispatch on the SERVING loop, gated on _shutdown_requested — NOT leave
-    ``redispatch_orphaned_queue_on_startup`` as dead code (the confirmed gap).
+def test_deleted_conversation_queue_row_is_consumed():
+    """An impossible stale row cannot remain at the head of every drain."""
+    from lib.database import DOMAIN_CHAT, get_thread_db
+    from lib import message_queue as mq
+
+    conv_id = 'cv-requeue-deleted'
+    db = get_thread_db(DOMAIN_CHAT)
+    mq.enqueue_message(
+        conv_id,
+        {'_user_msg': {
+            'role': 'user', 'content': 'orphan', 'timestamp': 3,
+        }, 'text': 'orphan'},
+        {'model': 'gpt-4o'},
+        kind=mq.KIND_REAL,
+    )
+    try:
+        assert mq.dispatch_next_queued(conv_id) is None
+        assert mq.get_queue_depth(conv_id) == 0
+    finally:
+        _cleanup(db, conv_id)
+
+
+def test_serving_lifecycle_wires_orphan_redispatch(monkeypatch):
+    """WIRING regression: the extracted serving-loop lifecycle must schedule
+    orphaned-queue re-dispatch, gated on its stop event — NOT leave
+    ``redispatch_orphaned_queue_on_startup`` as dead code.
 
     We assert against the server.py SOURCE (not a live boot): the function is
     referenced, scheduled via loop.create_task on an asyncio.to_thread call,
@@ -405,18 +424,18 @@ def test_server_wires_orphan_redispatch_on_serving_loop(monkeypatch):
     here — it fails loudly if a refactor drops the call site again.
     """
     import os as _os
-    server_path = _os.path.join(
-        _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'server.py')
-    with open(server_path, 'r', encoding='utf-8') as f:
+    lifecycle_path = _os.path.join(
+        _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+        'lib', 'serving_loop_lifecycle.py')
+    with open(lifecycle_path, 'r', encoding='utf-8') as f:
         src = f.read()
     assert 'redispatch_orphaned_queue_on_startup' in src, (
-        'server.py never references redispatch_orphaned_queue_on_startup — '
-        'the orphaned-queue drain is dead code again')
-    # It must be scheduled on the loop (not awaited inline in startup) …
-    assert 'loop.create_task(_run_orphan_queue_redispatch())' in src, (
+        'serving lifecycle never reaches redispatch_orphaned_queue_on_startup')
+    # It must be scheduled on the serving runtime (not awaited inline) …
+    assert 'runtime.create_task(\n            _run_orphan_queue_redispatch()' in src, (
         'orphaned-queue redispatch is not scheduled on the serving loop')
     # … via to_thread (it does blocking DB + spawn work) …
-    assert 'asyncio.to_thread(redispatch_orphaned_queue_on_startup)' in src, (
+    assert 'asyncio.to_thread(_redispatch_orphaned_queue)' in src, (
         'orphaned-queue redispatch must run in a thread (blocking DB/spawn work)')
     # … and gated on the shutdown flag so a ^C during boot skips it.
     # Indent-matched body, not a fixed 800-byte window (charter #24 /
@@ -426,9 +445,9 @@ def test_server_wires_orphan_redispatch_on_serving_loop(monkeypatch):
     # coroutine and this guard silently stops protecting anything.
     from tests._source_scan import python_block
     _fn_body = python_block(src, 'async def _run_orphan_queue_redispatch')
-    assert '_shutdown_requested.is_set()' in _fn_body, (
-        'orphaned-queue redispatch is not gated on _shutdown_requested')
-    _ok('server.py wires redispatch_orphaned_queue_on_startup on the serving loop, shutdown-gated')
+    assert 'stop_event.is_set()' in _fn_body, (
+        'orphaned-queue redispatch is not gated on the lifecycle stop event')
+    _ok('serving lifecycle wires orphan queue redispatch off-loop and stop-gated')
 
 
 def main():

@@ -26,6 +26,7 @@ from .conv_affinity import (
     sticky_routing_enabled,
 )
 from .model_entry import resolve_request_ids, routing_group
+from .openai_provider import normalize_official_openai_provider
 from .provider_face import DEFAULT_FACE, dual_face_hosts, resolve_face
 from .slot import Slot
 
@@ -345,13 +346,16 @@ class LLMDispatcher:
         _dual_face_hosts = dual_face_hosts()
         self.face_refusals = []
         from lib.llm_dispatch.discovery import normalize_base_url, should_bypass_proxy
+        from lib.model_registration import clear_provider_models
         from lib.proxy import register_no_proxy_url
 
-        for provider in providers:
+        for raw_provider in providers:
+            provider = normalize_official_openai_provider(raw_provider)
+            prov_id = provider.get('id', 'default')
+            clear_provider_models(prov_id)
             if not provider.get('enabled', True):
                 continue
 
-            prov_id = provider.get('id', 'default')
             base_url = provider.get('base_url', '')
             api_keys = provider.get('api_keys', [])
             prov_extra_headers = provider.get('extra_headers') or {}
@@ -435,7 +439,21 @@ class LLMDispatcher:
             keys = [(f'{prov_id}_key_{i}', k) for i, k in enumerate(effective_keys)]
 
             # Collect models + their aliases for this provider
-            for model_entry in provider.get('models', []):
+            for raw_model_entry in provider.get('models', []):
+                # Every source (templates, Settings, discovery, BYO API) enters
+                # through one model contract. Keep the old blended `cost` only
+                # as an in-memory migration fallback; it is deliberately not
+                # copied into the canonical row or returned to the frontend.
+                legacy_cost = (raw_model_entry.get('cost')
+                               if isinstance(raw_model_entry, dict) else None)
+                try:
+                    from lib.model_registration import register_model
+                    model_entry = register_model(
+                        raw_model_entry, provider_id=prov_id)
+                except ValueError as exc:
+                    logger.error('[Dispatch] Invalid model registration in '
+                                 'provider %s: %s', prov_id, exc)
+                    continue
                 model_id = model_entry.get('model_id', '')
                 if not model_id:
                     continue
@@ -512,17 +530,19 @@ class LLMDispatcher:
                 caps_raw = model_entry.get('capabilities', ['text'])
                 caps = set(caps_raw) if isinstance(caps_raw, list) else {'text'}
                 rpm = model_entry.get('rpm', 30)
-                cost = model_entry.get('cost', 0.01)
                 latency = model_entry.get('latency', 2000)
 
                 # Merge with DEFAULT_SLOT_CONFIGS for any missing fields
                 default_cfg = DEFAULT_SLOT_CONFIGS.get(model_id, {})
+                from lib.model_registration import routing_cost_per_1k
+                cost = routing_cost_per_1k(
+                    model_entry, provider_id=prov_id,
+                    legacy_fallback=(legacy_cost if legacy_cost is not None
+                                     else default_cfg.get('cost')))
                 if not caps_raw or caps_raw == ['text']:
                     caps = set(default_cfg.get('caps', caps))
                 if rpm == 30 and 'rpm' in default_cfg:
                     rpm = default_cfg['rpm']
-                if cost == 0.01 and 'cost' in default_cfg:
-                    cost = default_cfg['cost']
 
                 # ── Per-(key, model) capability matrix ──
                 # ``model_entry['key_access']`` maps a key index (as a string)
@@ -578,7 +598,10 @@ class LLMDispatcher:
                         else:
                             slot_caps = set(alias_cfg.get('caps', caps))
                         slot_rpm = alias_cfg.get('rpm', cell_rpm)
-                        slot_cost = alias_cfg.get('cost', cell_cost)
+                        slot_cost = routing_cost_per_1k(
+                            model_entry, provider_id=prov_id,
+                            wire_model_id=mid,
+                            legacy_fallback=alias_cfg.get('cost', cell_cost))
                         slot_lat = alias_cfg.get('latency', latency)
 
                         # Auto-tag managed pricing tiers ('cheap' + any future
@@ -617,6 +640,7 @@ class LLMDispatcher:
                                 extra_headers=dict(prov_extra_headers),
                                 thinking_format=prov_thinking_format,
                                 protocol=face.protocol,
+                                responses_profile=face.responses_profile,
                                 oauth=prov_oauth,
                                 adapter=dict(prov_adapter),
                                 rpm_limit=slot_rpm,

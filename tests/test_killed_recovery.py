@@ -123,24 +123,25 @@ class _FakeDB:
             c = self._convs.get(cid)
             self._last = None
             if c is not None:
-                self._last = _FakeRow(
-                    settings=json.dumps(c['settings']),
-                    messages=json.dumps(c['messages']))
+                if s.startswith('SELECT REV'):
+                    self._last = _FakeRow(rev=c.get('rev', 0))
+                else:
+                    self._last = _FakeRow(
+                        settings=json.dumps(c['settings']),
+                        messages=json.dumps(c['messages']))
             return self
         if s.startswith('UPDATE'):
-            # last param is conv_id. Column order varies by callsite:
-            #   SET settings=?                    → params[0]=settings
-            #   SET settings=?, messages=?        → [settings, messages]
-            #   SET messages=?                    → params[0]=messages
-            cid = params[-1]
+            assignments = sql.upper().split(' SET ', 1)[1].split(' WHERE ', 1)[0]
+            columns = [part.strip().split('=', 1)[0].strip().lower()
+                       for part in assignments.split(',')]
+            cid = params[len(columns)]
             c = self._convs.get(cid, {})
-            has_settings = 'SETTINGS=' in s
-            has_messages = 'MESSAGES=' in s
-            i = 0
-            if has_settings:
-                c['settings'] = json.loads(params[i]); i += 1
-            if has_messages:
-                c['messages'] = json.loads(params[i]); i += 1
+            for column, value in zip(columns, params):
+                if column == 'settings':
+                    c['settings'] = json.loads(value)
+                elif column == 'messages':
+                    c['messages'] = json.loads(value)
+                    c['rev'] = c.get('rev', 0) + 1
             self._convs[cid] = c
             return self
         return self
@@ -151,11 +152,21 @@ class _FakeDB:
     def commit(self):
         self.commits += 1
 
+    def begin(self):
+        pass
+
+    def rollback(self):
+        pass
+
 
 def _patch(db, dispatched):
     kr.get_thread_db = lambda *_a, **_k: db  # type: ignore
     kr._redispatch_conv = lambda conv_id: (dispatched.append(conv_id) or f'task-{conv_id}')  # type: ignore
     kr._conv_has_live_task = lambda conv_id: False  # type: ignore
+    # Keep these legacy single-conversation tests isolated from live task
+    # objects left in the process-wide manager by the preceding integration
+    # module. Concurrency behaviour has dedicated tests below.
+    kr._count_live_killed_carriers = lambda: 0  # type: ignore
 
 
 def test_run_killed_redispatches_exactly_once():
@@ -289,11 +300,22 @@ def test_durable_scan_matches_tail_only():
 
     class _ScanDB:
         def execute(self, sql, params=()):
-            self._rows = [_FakeRow(id=k, messages=v['_row_messages'])
-                          for k, v in convs.items()]
+            low = ' '.join(sql.lower().split())
+            if ' where id=? and user_id=?' in low:
+                cid = params[0]
+                value = convs.get(cid)
+                self._rows = ([] if value is None else [_FakeRow(
+                    id=cid, user_id=1, messages=value['_row_messages'],
+                    rev=0, msg_count=len(value['messages']),
+                    messages_rows_rev=-1)])
+            else:
+                self._rows = [_FakeRow(id=k, user_id=1)
+                              for k in convs]
             return self
         def fetchall(self):
             return self._rows
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
     kr.get_thread_db = lambda *_a, **_k: _ScanDB()  # type: ignore
     found = kr.list_killed_turn_convs()
     assert found == ['A'], found  # B excluded: killed tag is not on its tail

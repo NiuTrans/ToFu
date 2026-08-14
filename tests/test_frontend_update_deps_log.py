@@ -53,7 +53,7 @@ global.escapeHtml = (s) => String(s)
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 global.t = (k) => k;                 // return the key so we can grep it
 global.addEventListener = () => {};
-global._onReady = () => {};   // feature-loader.js deferred-ready hook (Epic-E sub-9)
+global._onReady = () => {};   // feature-bridge.js deferred-ready hook (Epic-E sub-9)
 global.setTimeout = (fn) => { try { fn && fn(); } catch(e){} return 0; };
 global.clearTimeout = () => {};
 global.requestAnimationFrame = () => 0;

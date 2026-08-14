@@ -23,15 +23,18 @@ the change landed.
 from __future__ import annotations
 
 import os
+import threading
 
 import lib as _lib
 from lib.config_dir import config_path as _config_path
-from lib.json_store import read_json, write_json_atomic
+from lib.json_store import JsonStoreReadError, update_json_atomic
 from lib.log import audit_log, get_logger
+from lib.search_profiles import PROFILE_KEYS, SEARCH_PROFILES, normalize_profile
 
 logger = get_logger(__name__)
 
 _CONFIG_FILE = _config_path('server_config.json')
+_APPLY_LOCK = threading.Lock()
 
 _MB = 1024 * 1024
 
@@ -79,6 +82,8 @@ def normalise_domain(domain: str) -> str:
 def read_effective() -> dict:
     """The values the fetch pipeline will actually use RIGHT NOW."""
     return {
+        'profile': str(getattr(_lib, 'SEARCH_PROFILE', 'balanced')),
+        'overrides': dict(getattr(_lib, 'SEARCH_OVERRIDES', {}) or {}),
         'fetch_top_n': int(getattr(_lib, 'FETCH_TOP_N', 6)),
         'fetch_timeout': int(getattr(_lib, 'FETCH_TIMEOUT', 15)),
         'max_chars_search': int(getattr(_lib, 'FETCH_MAX_CHARS_SEARCH', 60000)),
@@ -86,6 +91,7 @@ def read_effective() -> dict:
         'max_chars_pdf': int(getattr(_lib, 'FETCH_MAX_CHARS_PDF', 0)),
         'max_bytes': int(getattr(_lib, 'FETCH_MAX_BYTES', 20 * _MB)),
         'llm_content_filter': bool(getattr(_lib, 'LLM_CONTENT_FILTER_ENABLED', True)),
+        'deepen_enabled': bool(getattr(_lib, 'SEARCH_DEEPEN_ENABLED', False)),
         'skip_domains': sorted(getattr(_lib, 'SKIP_DOMAINS', set())),
     }
 
@@ -130,9 +136,53 @@ def apply_updates(changes: dict) -> dict:
         :func:`read_effective` snapshot. With NO changes the function is a
         pure read (nothing written, no reload, no audit).
     """
+    with _APPLY_LOCK:
+        return _apply_updates_locked(changes)
+
+
+def _apply_updates_locked(changes: dict) -> dict:
+    """Persist and hot-apply one search update in commit order."""
     changes = dict(changes or {})
     result = {'ok': True, 'applied': {}, 'errors': {}, 'notes': [],
               'effective': read_effective()}
+
+    # ── Profile + explicit override folding ──
+    profile_marker = object()
+    raw_profile = changes.pop('profile', profile_marker)
+    profile = None
+    if raw_profile is not profile_marker:
+        normalized = normalize_profile(raw_profile)
+        if str(raw_profile or '').strip().lower() not in SEARCH_PROFILES:
+            result['errors']['profile'] = 'profile must be fast, balanced, or deep'
+        else:
+            profile = normalized
+    overrides_supplied = 'overrides' in changes
+    raw_overrides = changes.pop('overrides', None)
+    # Selecting a profile through the public tool means "use this preset"
+    # unless the caller explicitly supplies overrides. Clear migrated legacy
+    # concrete profile knobs in that case; unrelated advanced knobs remain.
+    if profile is not None and not overrides_supplied:
+        raw_overrides = {}
+    override_values = {}
+    if raw_overrides is not None:
+        if not isinstance(raw_overrides, dict):
+            result['errors']['overrides'] = 'overrides must be an object'
+        else:
+            for key, value in raw_overrides.items():
+                if key not in PROFILE_KEYS:
+                    result['errors'][f'overrides.{key}'] = 'not a profile override'
+                    continue
+                if key == 'deepen_enabled':
+                    if not isinstance(value, bool):
+                        result['errors'][f'overrides.{key}'] = 'must be a boolean'
+                    else:
+                        override_values[key] = value
+                else:
+                    ok, coerced, err = _validate(key, value)
+                    if ok:
+                        override_values[key] = coerced
+                    else:
+                        result['errors'][f'overrides.{key}'] = err
 
     # ── Alias folding ──
     if 'max_download_mb' in changes:
@@ -169,41 +219,65 @@ def apply_updates(changes: dict) -> dict:
         else:
             result['errors'][key] = err
 
-    if not validated and not domains_to_block and not domains_to_unblock:
+    if (not validated and not domains_to_block and not domains_to_unblock
+            and profile is None and raw_overrides is None):
         if result['errors']:
             result['ok'] = False
             logger.warning('[SearchSettings] apply rejected: %s', result['errors'])
         return result   # pure read when called with no changes at all
 
-    # ── Persist into server_config.json (merge, never clobber) ──
-    data = read_json(_CONFIG_FILE, default={})
-    if not isinstance(data, dict):
-        data = {}
-    search_cfg = data.get('search')
-    if not isinstance(search_cfg, dict):
-        search_cfg = {}
-        data['search'] = search_cfg
+    # ── Persist into server_config.json (locked field-level merge) ──
+    def _mutate(data):
+        if not isinstance(data, dict):
+            raise JsonStoreReadError(
+                'server_config.json is not a JSON object')
+        search_cfg = data.get('search')
+        if not isinstance(search_cfg, dict):
+            search_cfg = {}
+            data['search'] = search_cfg
 
-    for key, value in validated.items():
-        search_cfg[key] = value
-        result['applied'][key] = value
+        if profile is not None:
+            search_cfg['profile'] = profile
+            result['applied']['profile'] = profile
+        if raw_overrides is not None and isinstance(raw_overrides, dict):
+            search_cfg['overrides'] = override_values
+            result['applied']['overrides'] = override_values
+            for key in PROFILE_KEYS:
+                if key not in validated:
+                    search_cfg.pop(key, None)
 
-    if domains_to_block or domains_to_unblock:
-        current = search_cfg.get('skip_domains')
-        if not isinstance(current, list):
-            # Seed from the in-memory defaults so we never SHRINK the set.
-            current = sorted(_lib.SKIP_DOMAINS)
-        current = set(current)
-        current |= set(domains_to_block)
-        current -= set(domains_to_unblock)
-        search_cfg['skip_domains'] = sorted(current)
-        if domains_to_block:
-            result['applied']['block_domain'] = sorted(set(domains_to_block))
-        if domains_to_unblock:
-            result['applied']['unblock_domain'] = sorted(set(domains_to_unblock))
+        for key, value in validated.items():
+            search_cfg[key] = value
+            # Concrete legacy knobs are profile overrides too. Store both
+            # shapes for one compatibility cycle so older versions read it.
+            if key in PROFILE_KEYS:
+                overrides = search_cfg.setdefault('overrides', {})
+                if not isinstance(overrides, dict):
+                    overrides = {}
+                    search_cfg['overrides'] = overrides
+                overrides[key] = value
+            result['applied'][key] = value
+
+        if domains_to_block or domains_to_unblock:
+            current = search_cfg.get('skip_domains')
+            if not isinstance(current, list):
+                # Seed from in-memory defaults so we never shrink the set.
+                current = sorted(_lib.SKIP_DOMAINS)
+            current = set(current)
+            current |= set(domains_to_block)
+            current -= set(domains_to_unblock)
+            search_cfg['skip_domains'] = sorted(current)
+            if domains_to_block:
+                result['applied']['block_domain'] = sorted(
+                    set(domains_to_block))
+            if domains_to_unblock:
+                result['applied']['unblock_domain'] = sorted(
+                    set(domains_to_unblock))
+        return data
 
     try:
-        write_json_atomic(_CONFIG_FILE, data)
+        update_json_atomic(
+            _CONFIG_FILE, _mutate, default={}, strict=True, indent=2)
     except Exception as e:
         logger.error('[SearchSettings] persist failed: %s', e, exc_info=True)
         result['ok'] = False
@@ -257,6 +331,8 @@ def status_payload() -> dict:
             'filter_model': os.environ.get('FETCH_FILTER_MODEL', '') or 'dispatch-default',
             'search_deadline_secs': int(getattr(cfg, 'search_deadline_secs', 45)),
             'fetch_url_deadline_secs': int(getattr(cfg, 'fetch_url_deadline_secs', 25)),
+            'profile': str(getattr(_lib, 'SEARCH_PROFILE', 'balanced')),
+            'deepen_enabled': bool(getattr(_lib, 'SEARCH_DEEPEN_ENABLED', False)),
         })
     except Exception as e:
         logger.warning('[SearchSettings] tofu-search status unavailable: %s', e)

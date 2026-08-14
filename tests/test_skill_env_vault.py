@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -190,6 +189,20 @@ def test_process_env_still_satisfies_the_gate(isolated, monkeypatch):
 
 # ── 4. execution overlay ─────────────────────────────────────────────
 
+def test_enabled_skill_declared_process_env_reaches_child(
+        isolated, monkeypatch):
+    proj = _proj(isolated)
+    _write_pkg(os.path.join(proj, '.tofu', 'skills'), 'mypkg',
+               metadata_yaml=_REQUIRES_ENV_YAML)
+    monkeypatch.setenv('SOYOUNG_API_KEY', 'from-declared-process-env')
+    monkeypatch.setenv('UNRELATED_API_KEY', 'must-not-be-projected')
+
+    from lib.project_mod.run_command import _get_cmd_env
+    env = _get_cmd_env(proj)
+    assert env.get('SOYOUNG_API_KEY') == 'from-declared-process-env'
+    assert 'UNRELATED_API_KEY' not in env
+
+
 def test_exec_env_overlay_enabled_only(isolated):
     proj = _proj(isolated)
     root = os.path.join(proj, '.tofu', 'skills')
@@ -262,11 +275,6 @@ def test_set_skill_scope_moves_package(isolated):
 
 # ── 6. HTTP surface ──────────────────────────────────────────────────
 
-def _install_shim():
-    import quart
-    sys.modules['flask'] = quart
-
-
 def _run(coro):
     loop = asyncio.new_event_loop()
     try:
@@ -280,12 +288,14 @@ class SkillEnvRoutesTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        _install_shim()
         cls._prev_auth = os.environ.get('TOFU_AUTH_MODE')
         os.environ['TOFU_AUTH_MODE'] = 'open'
         from lib.auth_mode import reset_for_tests
         reset_for_tests()
         from quart import Quart
+        if 'PROVIDE_AUTOMATIC_OPTIONS' not in Quart.default_config:
+            Quart.default_config = {**Quart.default_config,
+                                    'PROVIDE_AUTOMATIC_OPTIONS': True}
         cls.app = Quart(__name__)
         cls.app.config['TESTING'] = True
         from routes.api_v1.auth import (

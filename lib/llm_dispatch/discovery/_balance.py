@@ -60,6 +60,7 @@ def _probe_balance_url(base_url: str, api_key: str) -> str:
                 probe_url,
                 headers=headers,
                 timeout=_BALANCE_PROBE_TIMEOUT,
+                allow_redirects=False,
             )
             if resp.ok:
                 # Verify it returns JSON (not an HTML error page)

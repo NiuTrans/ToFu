@@ -114,6 +114,15 @@ class _FakeDB:
         self._conn.commit()
 
 
+def test_upsert_requires_an_explicit_transaction_choice():
+    t = _demo_table('cs_demo_explicit_commit')
+    with pytest.raises(TypeError, match='explicit commit=True/False'):
+        cs.upsert(object(), t, {
+            'id': 'a', 'conv_id': 'c', 'meta': '{}',
+            'created_at': 1, 'pinned': False,
+        })
+
+
 def test_upsert_helper_insert_then_conflict_update(monkeypatch):
     """End-to-end upsert() on real SQLite: insert, then conflict→update via the
     SAME row-dict. Proves the single reusable call-site pattern."""

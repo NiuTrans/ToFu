@@ -31,16 +31,20 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import unittest
 
 import pytest
+
+from tests._runtime_sections import runtime_section_path
 
 pytestmark = pytest.mark.unit
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+STREAMING_UI_JS = runtime_section_path('ui/streaming_ui.js')
+HEALTH_STREAM_TIMER_JS = runtime_section_path('core/health_stream_timer.js')
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -237,11 +241,10 @@ class TestBackendEmittersShipDetailKey(unittest.TestCase):
         (health_stream_timer) BOTH resolve the nested reasonKey — fixing
         only one would leave the raw English token visible in the other."""
         snippet = 'if (_r && _r !== _args.reasonKey) _args.reason = _r;'
-        for rel in (('static', 'js', 'ui', 'streaming_ui.js'),
-                    ('static', 'js', 'core', 'health_stream_timer.js')):
-            with open(os.path.join(ROOT, *rel), encoding='utf-8') as f:
+        for source in (STREAMING_UI_JS, HEALTH_STREAM_TIMER_JS):
+            with open(source, encoding='utf-8') as f:
                 self.assertIn(snippet, f.read(),
-                              f'{rel[-1]} lost the reasonKey resolution')
+                              f'{os.path.basename(source)} lost reasonKey resolution')
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -566,14 +569,15 @@ console.log(out.join('\n'));
 
 
 def _run_harness(neuter=False):
-    harness = os.path.join(HERE, '_stream_phase_i18n_harness.js')
-    with open(harness, 'w') as f:
-        f.write(_HARNESS)
+    with tempfile.NamedTemporaryFile(
+            'w', suffix='.js', delete=False, encoding='utf-8') as handle:
+        handle.write(_HARNESS)
+        harness = handle.name
     try:
         proc = subprocess.run(
             ['node', harness,
              ROOT,                                            # argv[2]
-             os.path.join(JS_DIR, 'ui', 'streaming_ui.js'),  # argv[3]
+             STREAMING_UI_JS,                                # argv[3]
              'neuter-reasonkey' if neuter else '',           # argv[4]
              ],
             capture_output=True, text=True, timeout=60,

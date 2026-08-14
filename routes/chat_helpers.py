@@ -100,14 +100,13 @@ def _log_poll_task_id_mismatch(db, conv_id, polled_task_id, db_meta):
         has_meta = any(db_meta.get(k) for k in ('finishReason', 'usage', 'apiRounds'))
         if has_meta or not conv_id:
             return
-        row = db.execute(
-            'SELECT settings, messages FROM conversations WHERE id=? AND user_id=1',
-            (conv_id,)
-        ).fetchone()
-        if not row:
+        from lib.database.conversation_repository import load_conversation
+        snapshot = load_conversation(
+            db, conv_id, metadata_columns=('settings',))
+        if snapshot is None:
             return
         try:
-            settings = json.loads(row['settings'] or '{}') or {}
+            settings = json.loads(snapshot.get('settings') or '{}') or {}
         except (json.JSONDecodeError, TypeError) as _e:
             logger.debug('log poll task id mismatch: malformed JSON/unexpected type (%s)', _e)
             settings = {}
@@ -115,7 +114,7 @@ def _log_poll_task_id_mismatch(db, conv_id, polled_task_id, db_meta):
         reconciled_at = settings.get('_reconciledAt')
         msg_task_id = None
         try:
-            messages = json.loads(row['messages'] or '[]')
+            messages = snapshot.messages
             for m in reversed(messages):
                 if m.get('role') == 'assistant':
                     msg_task_id = m.get('_taskId')
@@ -162,30 +161,25 @@ def _loads_yielding(raw):
         return json.loads(raw)
 
 
-def _warm_resume_serviceable(resume_cursor, n_events):
+def _warm_resume_serviceable(resume_cursor, base_cursor, next_cursor):
     """Decide whether a warm (in-memory) Last-Event-ID resume is serviceable.
 
-    Returns True iff ``resume_cursor`` names a position the in-memory event
-    buffer can actually replay from — i.e. the next event to send
-    (``resume_cursor + 1``) is at or before the current buffer length.
+    Returns True iff the next absolute event sequence (``Last-Event-ID + 1``)
+    falls inside the retained rolling window ``[base_cursor, next_cursor]``.
 
     When False the caller MUST fall back to a full state-snapshot
-    (a "resync"), exactly as the cold path does, instead of slicing
-    ``events[resume_from:]`` into an empty list. An empty slice on an
-    ahead-of-buffer cursor used to leave the warm stream sending nothing
-    until the next live event (a silent stall) and mis-index the live loop.
-    A cursor that is plausibly behind the buffer (``>= -1``, in range) stays
-    serviceable; only an out-of-range-ahead cursor forces resync.
+    (a "resync"), exactly as the cold path does. This covers both a client
+    that fell behind head eviction and a future/corrupt cursor that would
+    otherwise skip new events forever.
 
     ``resume_cursor`` is the SSE ``Last-Event-ID`` (id of the last RECEIVED
-    event); ``-1``/``0`` etc. are normal early cursors. The boundary case
-    ``resume_from == n_events`` IS serviceable (empty replay, then live
-    streaming continues from exactly that index).
+    event). The boundary case ``resume_cursor + 1 == next_cursor`` is
+    serviceable: replay is empty and live streaming continues at the exact
+    producer boundary.
     """
-    if resume_cursor is None or resume_cursor < 0:
-        return False  # no/invalid cursor → fresh snapshot (caller's else-branch)
-    resume_from = resume_cursor + 1
-    return resume_from <= n_events
+    from lib.task_replay import sse_resume_serviceable
+    return sse_resume_serviceable(
+        resume_cursor, base_cursor=base_cursor, next_cursor=next_cursor)
 
 
 __all__ = [

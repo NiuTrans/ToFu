@@ -30,6 +30,7 @@ suite. A future slice can extract it once that seam moves too.
 from __future__ import annotations
 
 import pathlib
+import sys
 
 import pytest
 
@@ -37,8 +38,11 @@ pytestmark = pytest.mark.unit
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-CONV_JS = ROOT / 'static' / 'js' / 'core' / 'conversations.js'
-LEAF_JS = ROOT / 'static' / 'js' / 'core' / 'conv_verify_visibility.js'
+sys.path.insert(0, str(ROOT / 'tests'))
+from _runtime_sections import runtime_section_names, runtime_section_path  # noqa: E402
+
+CONV_JS = pathlib.Path(runtime_section_path('core/conversations.js'))
+LEAF_JS = pathlib.Path(runtime_section_path('core/conv_verify_visibility.js'))
 INDEX_HTML = ROOT / 'index.html'
 
 
@@ -170,36 +174,21 @@ def test_bundler_lists_leaf_before_conversations_js():
     """Load order: leaf must precede conversations.js so the 11
     surviving bare-name call sites resolve at CALL time via bundle-level
     window scope."""
-    import sys
-    if str(ROOT) not in sys.path:
-        sys.path.insert(0, str(ROOT))
-    from lib.js_bundler import _BUNDLE_FILES
-    assert 'core/conv_verify_visibility.js' in _BUNDLE_FILES, (
-        'core/conv_verify_visibility.js missing from _BUNDLE_FILES')
-    idx_leaf = _BUNDLE_FILES.index('core/conv_verify_visibility.js')
-    idx_conv = _BUNDLE_FILES.index('core/conversations.js')
+    owners = runtime_section_names()
+    idx_leaf = owners.index('core/conv_verify_visibility.js')
+    idx_conv = owners.index('core/conversations.js')
     assert idx_leaf < idx_conv, (
         f'core/conv_verify_visibility.js (idx {idx_leaf}) must precede '
         f'core/conversations.js (idx {idx_conv})')
 
 
 # ---------------------------------------------------------------------------
-# 4. Dev-fallback <script> tag exists in index.html
+# 4. The page shell contains no raw app-script inventory
 # ---------------------------------------------------------------------------
-def test_index_html_has_devfallback_script_tag_for_leaf():
-    """Per the peer's slice-4 note: every _BUNDLE_FILES entry MUST have
-    a matching <script> in index.html or the bundling-failed fallback
-    path silently drops the leaf."""
+def test_index_html_has_no_raw_script_tag_for_leaf():
     src = INDEX_HTML.read_text()
-    assert 'core/conv_verify_visibility.js' in src, (
-        'index.html must have a <script defer src="static/js/core/'
-        'conv_verify_visibility.js"> tag for the dev fallback path')
-    idx_leaf = src.index('core/conv_verify_visibility.js')
-    idx_conv = src.index('core/conversations.js')
-    assert idx_leaf < idx_conv, (
-        'core/conv_verify_visibility.js <script> must appear BEFORE '
-        'core/conversations.js in index.html for correct load order '
-        'on the dev-fallback path')
+    assert 'static/js/core/conv_verify_visibility.js' not in src
+    assert '<!-- TOFU_APP_ASSETS -->' in src
 
 
 # ---------------------------------------------------------------------------

@@ -496,7 +496,6 @@ class _ReportTools(list):
 
 
 _REPORT_TOOLS = _ReportTools()
-_MAX_REPORT_TOOL_ROUNDS = 14
 
 
 def _build_full_tool_schemas() -> list[dict]:
@@ -508,9 +507,8 @@ def _build_full_tool_schemas() -> list[dict]:
     fetchEnabled, codeExecEnabled — memory/skills/todo/scheduler attach on
     ``has_base_tools`` exactly as in chat) and NO project attached — so any
     tool chat gains later lands here automatically and the two modes can never
-    silently drift again. Stateless assembly (``conv_id=''``): no
-    per-conversation schema latch, paper tasks are one-shot. Built per access,
-    NOT at import: vertical-search credentials and MCP connectivity are
+    silently drift again. Stateless assembly (``conv_id=''``), built per
+    access rather than at import: vertical-search credentials and MCP connectivity are
     runtime state (same rationale as ``_ReportTools``).
     """
     from lib.tools import (
@@ -537,8 +535,8 @@ class _PaperFullTools(list):
     because engines pass it straight to ``run_agent_loop(round_tools=...)``.
     Consumed by the report + Q&A engines; the research-only engines
     (insight / recommend / ideate / survey) deliberately keep
-    ``_REPORT_TOOLS`` — their pipeline shape (forced verticals, bounded
-    rounds) is designed around search+fetch and must NOT gain write or
+    ``_REPORT_TOOLS`` — their pipeline shape (forced verticals) is designed
+    around search+fetch and must NOT gain write or
     execution tools.
     """
 

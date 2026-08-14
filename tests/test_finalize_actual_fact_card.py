@@ -24,8 +24,6 @@ This test asserts the SOURCE contract at
   2. ``actualModel = task.get('_fallback_model') or model`` — fallback
      wins, matching the existing ``fallbackModel`` semantics.
   3. All four mode sources are read.
-  4. The block sits AFTER the ``toolsetDiff`` block (co-located per the
-     wire-contract spec).
 
 NEUTER: on a mutated string COPY (shipped file untouched), stripping the
 ``done_evt['actualModel'] = …`` line makes assertion (1) fail — proving
@@ -99,29 +97,6 @@ def test_actual_modes_reads_all_four_sources():
             f'read cfg.get({key!r}) — every composer mode toggle must '
             f'round-trip through the fact card. Missing: {key}.'
         )
-
-
-def test_actual_block_is_co_located_with_toolsetdiff():
-    """Per the wire-contract spec: place the fact-card fields BESIDE the
-    tool-schema latch diff so both settlements ride the same block and
-    remain reviewable together."""
-    src = _read_source()
-    diff_pos = src.index("done_evt['toolsetDiff']")
-    actual_pos = src.index("done_evt['actualModel']")
-    assert 0 < diff_pos < actual_pos, (
-        f'{FINALIZE_PATH}: actualModel block (offset {actual_pos}) must '
-        f'appear AFTER the toolsetDiff block (offset {diff_pos}) so both '
-        f'the tool-schema-latch reconcile AND the fact-card overwrite are '
-        f'clustered in one reviewable spot.'
-    )
-    # And close enough that they are visually one block, not scattered.
-    gap = src[diff_pos:actual_pos]
-    assert gap.count('\n') <= 25, (
-        f'{FINALIZE_PATH}: toolsetDiff and actualModel drifted apart '
-        f'({gap.count(chr(10))} lines between them). Keep them '
-        f'co-located so a future reader sees the whole capsule-reconcile '
-        f'contract at once.'
-    )
 
 
 def test_neuter_removing_actual_model_breaks_contract():

@@ -88,7 +88,7 @@ def _sites():
 def test_envelope_parity():
     """Every converted site reproduces the legacy body; the only additions
     are ok (always) and error/request_id (error sites only)."""
-    from flask import jsonify
+    from quart import jsonify
     app = _make_app()
 
     async def _t():

@@ -285,9 +285,8 @@ def test_agent_wrap_drops_a_loopback_preseed(isolated, monkeypatch,
                                              tmp_path):
     """The measured trap (first agent artifact, 2026-08-02): built from a
     server-local request, it shipped preseed http://127.0.0.1:15000 — the
-    office PC attaches to its OWN loopback, never reaches the server, and
-    the first-run connect dialog never appears (an attachment exists).
-    The agent target drops a loopback preseed so first run always asks."""
+    office PC attaches to its OWN loopback and never reaches the server.
+    The agent target drops it; the personalized installer record owns attach."""
     _wrap_agent_with_fake_makensis(isolated, monkeypatch, tmp_path,
                                    'http://127.0.0.1:15000',
                                    'TofuAgent-Setup-0.16.0-win64.exe')
@@ -298,7 +297,7 @@ def test_agent_wrap_drops_a_loopback_preseed(isolated, monkeypatch,
         os.path.join(str(isolated / 'wrap'), 'payload',
                      'preseed_server.json')), (
         'the preseed FILE must not ship either — its presence is what '
-        'suppresses the first-run dialog')
+        'would override the personalized installer attachment')
 
 
 def test_agent_wrap_keeps_a_reachable_preseed(isolated, monkeypatch,
@@ -397,12 +396,12 @@ def test_NEUTER_agent_wrap_of_a_full_payload_is_refused(isolated,
 
 def test_winpython_provisioning_includes_the_tk_graft():
     """The nuget CPython has 0 tcl files (measured in the nupkg) — without
-    the graft every built installer's connect dialog is dead (the agent
-    smoke gate caught exactly this at build time). Pin the call site."""
+    the graft every built installer's native control panel is dead. Pin the
+    call site."""
     src = inspect.getsource(wb._ensure_winpython)
     assert '_ensure_winpython_tk' in src, (
         'the tcl/tk graft fell out of winpython provisioning — every '
-        'installer built from now on has a dead connect dialog')
+        'installer built from now on has a dead native control panel')
 
 
 def test_tk_graft_short_circuits_on_a_grafted_python(isolated, monkeypatch,
@@ -499,31 +498,29 @@ def test_agent_frame_version_never_breaks_the_poll(monkeypatch):
 def test_agent_smoke_gate_bans_the_server_stack():
     """The frozen-build proof of the size claim: the smoke gate must
     assert the server stack is absent from BOTH sys.modules and the
-    bundle tree, and that tkinter (the connect dialog) ships."""
+    bundle tree, and that tkinter (the native control panel) ships."""
     import desktop.agent_launcher as al
     src = inspect.getsource(al._smoke_main)
     for banned in ('quart', 'flask', 'hypercorn'):
         assert banned in src, f'smoke gate lost its {banned} assertion'
     assert '_MEIPASS' in src, 'the bundle-tree assertion is gone'
     assert 'import tkinter' in src, (
-        'the tkinter assertion is gone — a build without the dialog '
+        'the tkinter assertion is gone — a build without the control-panel '
         "toolkit would ship and only fail on the user's machine")
     assert 'TOFU_AGENT_SMOKE_OK' in src
 
 
-def test_launcher_delegates_the_connect_seams():
-    """The extraction contract: launcher.py keeps the old NAMES (call
-    sites + patch points) but the implementations live in connect_ui —
-    two copies of the dialog/preseed would drift (parity philosophy)."""
+def test_launcher_delegates_the_preseed_import():
+    """The full launcher imports installer configuration through connect_ui."""
     import desktop.launcher as launcher
     src_pre = inspect.getsource(launcher._import_preseed)
-    src_dlg = inspect.getsource(launcher._prompt_connect_line)
-    assert 'connect_ui' in src_pre and 'connect_ui' in src_dlg
+    assert 'connect_ui' in src_pre
     assert 'os.remove' not in src_pre and 'os.path.isfile' not in src_pre, (
         'the preseed logic is back in launcher.py — the move became a copy')
 
 
 def test_connect_ui_owns_the_wire_format_parse():
+    """Already-shipped callers may still invoke the legacy repair dialog."""
     import desktop.connect_ui as cui
     src = inspect.getsource(cui.prompt_connect_line)
     assert 'parse_connect_line' in src, (

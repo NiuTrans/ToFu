@@ -1,11 +1,10 @@
-"""routes/api_v1/desktop.py — Desktop-agent status probe + pairing surface.
+"""routes/api_v1/desktop.py — desktop-agent status and distribution surface.
 
 The status/build/download/streams/devices routes are REST verbs the Local
-Control panel consumes. The pairing routes (pair-code mint + pair
-exchange) implement the one-time pairing-code UX
-(docs/DESKTOP_AGENT_DIST_DESIGN.md §11): the panel mints a 6-digit code
-(authenticated), the agent exchanges it for an agents:bridge token (the
-code IS the credential — no bearer).
+Control panel consumes. Current controlled-end setup is one personalized
+installer: route candidates and its agents:bridge credential stay inside the
+EXE. Pair-code/token routes remain wire compatibility for already-shipped
+clients only; current UI never asks a user to mint, copy, or paste auth data.
 
 The actual long-poll RPC channel (``POST /api/desktop/poll``) stays at
 its original path under :mod:`routes.desktop` because it's a Bridge-Secret-
@@ -18,7 +17,7 @@ import os
 import sys
 import time
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.api_response import (
     api_conflict, api_created, api_error, api_not_found, api_ok, api_payload,
@@ -48,7 +47,7 @@ def _setup_state(connected: bool) -> str:
       IN-PROCESS via the tray's "Enable Computer Control" item, so the
       instruction is one click and no token is involved.
     * ``remote``     — anything else: the user's machine is not this
-      machine, so they need the desktop app plus a bridge token.
+      machine, so it receives a personalized controlled-end installer.
 
     ``sys.frozen`` is the load-bearing signal, NOT the peer address:
     :func:`routes.api_v1.auth._remote_is_loopback` documents that a
@@ -69,10 +68,9 @@ def _setup_state(connected: bool) -> str:
     server grabbed a fallback port and whose agent polled IT, never this
     one. The honest fix is NOT re-classification (impossible without a
     distinguishing signal — a guess would misroute true-local users) but
-    the surface escape hatch: the local_source branch renders a
-    collapsed "从另一台电脑访问本服务器？" details section with the
-    agent download + mint flow (local-control.js). Anyone tempted to
-    "detect the tunnel" here: there is nothing to detect.
+    the surface escape hatch: the local_source branch renders the controlled-
+    end role with its personalized installer (local-control.js). Anyone
+    tempted to "detect the tunnel" here: there is nothing to detect.
     """
     if connected:
         return 'connected'
@@ -155,7 +153,7 @@ def _request_platform_downloads(arch_override: str = '',
     """
     from urllib.parse import quote
 
-    from flask import request
+    from quart import request
     try:
         ua = request.user_agent.string or ''
     except Exception as e:
@@ -248,25 +246,24 @@ def _agent_server_url() -> str:
     a configured BIND_HOST would frequently be ``0.0.0.0`` (meaningless to
     type) and an internal hostname may not resolve from the user's machine.
     """
-    from flask import request
+    from quart import request
     return (request.host_url or '').rstrip('/')
 
 
 def _host_reachability(host: str) -> str:
     """Whether an AGENT can use the address this request arrived on.
 
-    The connect line is minted from ``request.host_url`` — an address the
-    BROWSER demonstrably reaches. Under an SSO-fronted gateway (cloud-IDE
-    preview proxies, corporate IdP) the browser sails through on cookies
+    The installer attachment includes an address derived from the request —
+    one the BROWSER demonstrably reaches. Under an SSO-fronted gateway
+    (cloud-IDE preview proxies, corporate IdP) the browser sails through on cookies
     while the agent — which carries only a bridge token — is bounced at
     the edge and never reaches Tofu. Measured 2026-08-03 (owner live):
     the codelab preview proxy answered every /api/* with
     ``401 {"error":"Unauthorized"}`` while access.log showed ZERO agent
-    polls — the owner had pasted a proxy-URL connect line and the agent
-    polled a wall, silently. The panel warns when the address it is about
-    to hand out is of that kind. 'public' is a heuristic (a public host
-    CAN be fine when nothing intercepts it), so the panel warns without
-    blocking the mint.
+    polls — a proxy-derived URL made the agent poll a wall silently. The panel
+    warns when the address it is about to embed is of that kind. 'public' is
+    a heuristic (a public host CAN be fine when nothing intercepts it), so the
+    panel warns without blocking the download.
     """
     import ipaddress
     h = (host or '').split(':')[0].strip().strip('[]').lower()
@@ -306,11 +303,12 @@ def _caller_bridge_token_count(uid: str) -> int:
 _BRIDGE_SCOPE = 'agents:bridge'
 
 
-# ── Zero-config agent bundle (owner decree 2026-08-05) ──────────────
-# The pairing-code UX is RETIRED: the panel's agent download is now a
-# per-download ZIP = the generic agent exe + tofu-agent-attach.json
-# carrying {route candidates, a fresh agents:bridge token}. Install =
-# auto-attach with zero user input. The measured failure this kills:
+# ── One-file zero-config agent installer ─────────────────────────────
+# The pairing-code and ZIP UX are RETIRED. The panel now downloads one
+# directly runnable personalized .exe. Its fixed NSIS trailer carries
+# {route candidates, a fresh agents:bridge token}; the installer writes
+# that internal record into the install dir and first launch imports it.
+# The measured failure this kills:
 # an agent handed a browser-reachable proxy URL (missing scheme /
 # /proxy/<port> prefix, then SSO-401 for a cookieless client) polls a
 # wall forever — access.log showed ZERO agent requests while the panel
@@ -362,73 +360,21 @@ def _direct_lan_candidate() -> str:
     return 'http://%s:%d' % (ip, port)
 
 
-_GIT_CACHE = {'at': 0.0, 'fix': '', 'verdicts': {}}
+def _agent_installer_ready(entry: dict | None) -> bool:
+    """Whether the artifact itself proves it can import an embedded attach.
 
-
-def _attach_flow_sha() -> str:
-    """The newest commit that introduced the attach-import code.
-
-    Self-adjusting (symbol-content lookup, not a hardcoded sha — those rot
-    on the next rebase): the artifact must contain THIS code or it
-    silently ignores the bundled attach file. '' when the repo is
-    unreadable (packaged server) — the caller then serves optimistically.
+    The old git-ancestry proxy only proved that agent-side JSON import code
+    existed; it could not prove the *installer* knew how to extract internal
+    data. The fixed trailer is direct artifact evidence and also works for
+    mirrored release installers whose build commit is unavailable locally.
     """
-    now = time.time()
-    if now - _GIT_CACHE['at'] < 60:
-        return _GIT_CACHE['fix']
-    fix = ''
-    try:
-        import subprocess
-        out = subprocess.run(
-            ['git', 'log', '-S', 'import_attach_bundle', '--format=%H',
-             '-1', '--', 'desktop/connect_ui.py'],
-            cwd=_REPO_ROOT, capture_output=True, timeout=15)
-        if out.returncode == 0:
-            fix = out.stdout.decode('utf-8', 'replace').strip()
-    except Exception as e:
-        logger.debug('[Desktop] attach-flow sha lookup failed: %s', e)
-    _GIT_CACHE['at'] = now
-    _GIT_CACHE['fix'] = fix
-    _GIT_CACHE['verdicts'] = {}
-    return fix
-
-
-def _contains_fix(fix: str, artifact_sha: str) -> bool:
-    """``fix`` is an ancestor of (or equals) ``artifact_sha`` — i.e. the
-    artifact was built from a tree that CARRIES the attach flow.
-
-    Ancestry, not equality: on this shared tree sibling commits keep
-    landing on top of the fix, so equality would flap the panel's
-    readiness note on every unrelated commit (measured during the v5
-    rollout — the rebuild ran at 1a5e4bd5 over the fix's 514ba38b).
-    """
-    if artifact_sha == fix:
-        return True
-    verdicts = _GIT_CACHE['verdicts']
-    if artifact_sha in verdicts:
-        return verdicts[artifact_sha]
-    ok = False
-    try:
-        import subprocess
-        out = subprocess.run(
-            ['git', 'merge-base', '--is-ancestor', fix, artifact_sha],
-            cwd=_REPO_ROOT, capture_output=True, timeout=15)
-        ok = out.returncode == 0
-    except Exception as e:
-        logger.debug('[Desktop] merge-base probe failed: %s', e)
-    verdicts[artifact_sha] = ok
-    return ok
-
-
-def _agent_bundle_ready(entry: dict | None) -> bool:
-    """Whether the store's agent artifact carries the attach-import code."""
-    if not entry:
+    if not entry or not entry.get('filename'):
         return False
-    sha = str((entry or {}).get('git_sha') or '').strip()
-    if not sha:
-        return False  # unknown lineage — cannot prove the attach flow ships
-    fix = _attach_flow_sha()
-    return (not fix) or _contains_fix(fix, sha)
+    path = _dist_store.resolve_file(str(entry['filename']))
+    if path is None:
+        return False
+    from lib.desktop_dist.agent_installer import has_attachment_slot
+    return has_attachment_slot(path)
 
 
 def _agent_store_entry() -> dict | None:
@@ -454,7 +400,7 @@ def _agent_store_entry() -> dict | None:
     tags=['capabilities'],
 )
 async def desktop_status():
-    from flask import request
+    from quart import request
     from lib.desktop import (
         is_desktop_agent_connected,
         last_poll_time,
@@ -484,12 +430,12 @@ async def desktop_status():
         'bridge_tokens_issued': _caller_bridge_token_count(_uid),
         'bridge_token_required': bool(
             (getenv_compat('TOFU_BRIDGE_SECRET') or '').strip()),
-        # Zero-config bundle surface (2026-08-05): the bind class lets the
+        # One-file installer surface: the bind class lets the
         # panel WARN when a loopback bind makes remote agents unreachable
-        # by construction; bundle readiness flips the agent download from
-        # the bare exe to the credential-carrying ZIP.
+        # by construction; readiness flips the agent download from a stale
+        # bare exe to the personalized, directly runnable installer.
         'server_bind': _server_bind_class(),
-        'agent_bundle_ready': _agent_bundle_ready(_agent_store_entry()),
+        'agent_installer_ready': _agent_installer_ready(_agent_store_entry()),
     })
 
 
@@ -513,7 +459,7 @@ async def desktop_status():
     tags=['capabilities'],
 )
 async def desktop_build():
-    from flask import request
+    from quart import request
     from lib.desktop_dist import builder as _dist_builder
     if request.method == 'POST':
         body = {}
@@ -557,9 +503,9 @@ async def desktop_build():
     tags=['capabilities'],
 )
 def desktop_download(filename):
-    """SYNC on purpose: pure file serving via the sync-safe send_file shim
-    (same carve-out as serve_motion_file) — a 135 MB stream must not sit on
-    the event loop."""
+    """SYNC on purpose: file serving crosses the explicit Quart boundary in
+    the executor (same carve-out as serve_motion_file), so a 135 MB stream
+    never sits on the event loop."""
     path = _dist_store.resolve_file(filename)
     if path is None:
         return api_not_found('not_found',
@@ -569,33 +515,32 @@ def desktop_download(filename):
                                  attachment_filename=filename)
 
 
+# ``agent-bundle`` remains a wire-compatible alias for already-cached pages,
+# but it returns the SAME .exe response. No route distributes a ZIP anymore.
 @api_v1_desktop_bp.route('/api/v1/desktop/agent-bundle', methods=['GET'])
+@api_v1_desktop_bp.route('/api/v1/desktop/agent-installer', methods=['GET'])
 @require_auth
 @api_meta(
-    summary='Download the zero-config agent bundle (ZIP)',
+    summary='Download one personalized zero-config agent installer',
     description=(
-        'The agent installer PLUS ``tofu-agent-attach.json`` — an ordered '
-        'route-candidate list and a fresh per-user agents:bridge token '
-        'minted at download time. The NSIS installer adopts the JSON into '
-        'the install dir; the agent\'s first run imports it and attaches '
-        'with zero user input. ``?base=`` (the panel\'s live origin + '
-        'prefix, host-pinned) becomes the LAST-RESORT candidate — behind '
-        'an SSO edge it is a measured dead end for a cookieless agent, so '
-        'direct-LAN and the agent-side tunnel rungs come first. 409 when '
+        'Returns one directly runnable ``.exe``. Its internal NSIS trailer '
+        'contains an ordered route-candidate list and, when needed, a fresh '
+        'per-user agents:bridge token minted at download time. The installer '
+        'writes that data internally; there is no ZIP, sidecar file, unzip '
+        'step, pairing code, or user-entered credential. ``?base=`` (the '
+        'panel\'s live origin + '
+        'prefix, host-pinned) becomes the LAST-RESORT candidate. Behind '
+        'an SSO edge direct polling is rejected, so direct-LAN and the '
+        'agent-side tunnel rungs come first; the installed agent can also '
+        'use that candidate through the signed-in page\'s browser-assisted '
+        'transport without receiving its cookies. 409 when '
         'the stored installer predates the attach flow (a rebuild is '
         'kicked automatically).'
     ),
     tags=['capabilities'],
 )
-def desktop_agent_bundle():
-    """SYNC on purpose: streams a ~50 MB ZIP (same carve-out as
-    desktop_download / browser_download)."""
-    import io
-    import json as _json
-    import zipfile
-
-    from flask import send_file
-
+def desktop_agent_installer():
+    """SYNC on purpose: streams a ~50 MB executable without buffering it."""
     from .auth import current_auth
 
     entry = _agent_store_entry()
@@ -604,28 +549,27 @@ def desktop_agent_bundle():
             'not_found',
             message='no agent installer in the store yet — a build is '
                     'likely in flight; watch /api/v1/desktop/build')
-    if not _agent_bundle_ready(entry):
-        # A stale exe would ignore the attach file entirely (the import
-        # code is not in its payload) — serving the bundle would be a
-        # lie. Kick the rebuild and say so honestly.
+    if not _agent_installer_ready(entry):
+        # A stale exe has no internal attachment slot. Serving it as
+        # zero-config would be a lie; kick a rebuild and fail explicitly.
         try:
             from lib.desktop_dist import winbuilder as _win_builder
             if not _win_builder.is_running():
-                _win_builder.start_installer(reason='bundle-stale',
+                _win_builder.start_installer(reason='installer-stale',
                                              target='agent')
         except Exception as e:
-            logger.warning('[Desktop] bundle-stale rebuild kick failed: %s', e)
+            logger.warning('[Desktop] installer-stale rebuild kick failed: %s', e)
         return api_error('agent_installer_stale', status=409,
                          message='the agent installer predates the '
-                                 'zero-config attach flow — a rebuild was '
+                                 'one-file attach flow — a rebuild was '
                                  'just kicked; retry in a few minutes')
     path = _dist_store.resolve_file(entry['filename'])
     if path is None:
         return api_not_found('not_found',
                              message='agent artifact missing on disk')
 
-    # Download-time credential (fail-open — an open bridge polls fine
-    # without one; the extension zip follows the same rule).
+    # Download-time credential stays inside the installer. The user never
+    # sees, copies, pastes, or reasons about it.
     token = ''
     try:
         from lib.api_keys import create_key
@@ -638,8 +582,19 @@ def desktop_agent_bundle():
         audit_log('desktop_agent_bundle_minted', key_id=row.get('id'),
                   user_id=uid)
     except Exception as e:
-        logger.warning('[Desktop] bundle token mint failed (serving '
-                       'without one): %s', e)
+        # An open bridge can genuinely poll tokenless. A gated bridge cannot:
+        # serving an EXE that is guaranteed to fail would merely hide the auth
+        # burden until after installation. Keep it internal and ask for a
+        # plain retry while the credential store recovers.
+        if (getenv_compat('TOFU_BRIDGE_SECRET') or '').strip():
+            logger.warning('[Desktop] installer token mint failed on a '
+                           'gated bridge: %s', e)
+            return api_error(
+                'agent_credential_unavailable', status=503,
+                message='the controlled-end installer is temporarily '
+                        'unavailable — retry shortly')
+        logger.warning('[Desktop] installer token mint failed (open bridge; '
+                       'serving without one): %s', e)
 
     candidates = []
     direct = _direct_lan_candidate()
@@ -666,22 +621,34 @@ def desktop_agent_bundle():
         'candidates': candidates,
         'fallback_candidates': fallbacks,
     }
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, 'w') as zf:
-        # The exe is already LZMA-compressed NSIS — store it verbatim
-        # (re-deflating 50 MB buys nothing and costs seconds).
-        zf.write(path, arcname=entry['filename'],
-                 compress_type=zipfile.ZIP_STORED)
-        zf.writestr('tofu-agent-attach.json', _json.dumps(attach))
-    buf.seek(0)
-    zip_name = (entry['filename'][:-4] + '.zip'
-                if entry['filename'].lower().endswith('.exe')
-                else entry['filename'] + '.zip')
-    logger.info('[Desktop] agent bundle downloaded (%s, candidates=%s, '
-                'token=%s)', zip_name, candidates + fallbacks,
+    from quart import Response
+    from lib.desktop_dist.agent_installer import iter_personalized
+
+    # Validate the small record before response headers are committed; a
+    # pathological proxy URL must produce a normal JSON error, not a download
+    # that truncates after 50 MB when the generator finally rejects it.
+    from lib.desktop_dist.agent_installer import encode_attachment
+    try:
+        encode_attachment(attach)
+    except ValueError as e:
+        logger.warning('[Desktop] installer attachment refused: %s', e)
+        return api_error('agent_attachment_too_large', status=400,
+                         message='the externally visible server URL is too '
+                                 'long to embed in the installer')
+
+    response = Response(
+        iter_personalized(path, attach),
+        mimetype='application/vnd.microsoft.portable-executable')
+    response.content_length = os.path.getsize(path)
+    response.headers.set('Content-Disposition', 'attachment',
+                         filename=entry['filename'])
+    response.headers['Cache-Control'] = 'private, no-store'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    logger.info('[Desktop] personalized agent installer downloaded (%s, '
+                'candidates=%s, token=%s)', entry['filename'],
+                candidates + fallbacks,
                 'minted' if token else 'none')
-    return send_file(buf, mimetype='application/zip', as_attachment=True,
-                     download_name=zip_name)
+    return response
 
 
 # ── Client-diagnostics inbox (owner ask 2026-08-06) ──────────────────
@@ -898,7 +865,7 @@ async def desktop_pair():
     bound to the code's minting user, saves it as its remote
     attachment, and starts polling.
     """
-    from flask import request
+    from quart import request
     from lib.api_keys import create_key
     from lib.desktop.pairing import (consume_code,
                                      ip_fail_budget_exceeded,

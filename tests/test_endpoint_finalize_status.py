@@ -64,6 +64,7 @@ def test_finalize_error_reports_error_state_and_carries_envelope(captured_events
 
     assert task['status'] == 'error'
     assert task['finishReason'] == 'error'
+    assert task['finished_at'] > 0
     done = _done_event(captured_events)
     assert done['finishReason'] == 'error'
     assert done['endpointReason'] == 'error'

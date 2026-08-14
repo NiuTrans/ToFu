@@ -1,19 +1,38 @@
 {
   "name": "tofu-frontend-typecheck",
   "version": "0.1.0",
-  "description": "Type-checking harness for Tofu's vanilla-JS frontend (static/js). No build step — tsc --checkJs --noEmit only, used in CI to catch cross-file global misuse.",
+  "description": "Tofu vanilla frontend checks and incremental Vite/TypeScript module build.",
   "private": true,
   "type": "commonjs",
+  "engines": {
+    "node": ">=20.19 <21"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "typecheck:count": "tsc --noEmit --pretty false 2>&1 | grep -c 'error TS' || true"
+    "typecheck:modules": "tsc -p tsconfig.vite.json --noEmit",
+    "typecheck:count": "tsc --noEmit --pretty false 2>&1 | grep -c 'error TS' || true",
+    "generate:actions": "node scripts/update_runtime_actions.mjs --write",
+    "check:actions": "node scripts/update_runtime_actions.mjs --check",
+    "build:frontend": "node scripts/build_frontend.mjs",
+    "build:frontend:raw": "vite build",
+    "verify:frontend": "python3 scripts/verify_frontend_dist.py",
+    "dev:frontend": "vite --host 127.0.0.1",
+    "check:frontend": "npm run check:actions && npm run typecheck:modules && npm run build:frontend"
   },
   "keywords": [],
   "license": "MIT",
   "devDependencies": {
-    "dompurify": "^3.2.4",
+    "dompurify": "^3.4.13",
     "esbuild": "^0.28.1",
     "jsdom": "^25.0.1",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vite": "^7.1.1"
+  },
+  "dependencies": {
+    "highlight.js": "^11.9.0",
+    "html2canvas": "^1.4.1",
+    "katex": "^0.16.22",
+    "marked": "^12.0.2",
+    "pdfjs-dist": "^4.10.38"
   }
 }

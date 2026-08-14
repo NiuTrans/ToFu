@@ -71,8 +71,6 @@ def test_regenerate_route_wires_truncate_to_msgid():
     against source (the route handler is hard to unit-drive through the full
     HTTP stack; the resolution semantics are covered above)."""
     pytest.importorskip('quart')
-    import quart
-    sys.modules['flask'] = quart  # routes/* import flask → quart shim (websocket etc.)
     import routes.chat as c
     src = inspect.getsource(c.chat_regenerate)
     assert "data.get('truncateToMsgId')" in src, \

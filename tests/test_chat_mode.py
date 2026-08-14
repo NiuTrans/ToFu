@@ -131,7 +131,7 @@ class TestLeanGate(unittest.TestCase):
         self.assertFalse(is_lean_mode(None))
 
     def test_chat_keeps_default_capability_tools(self):
-        tl, has_real, _ = _assemble({'chatMode': 'chat', 'mcpEnabled': False})
+        tl, has_real = _assemble({'chatMode': 'chat', 'mcpEnabled': False})
         names = _names(tl)
         self.assertTrue(has_real)
         # Base tools present.
@@ -141,7 +141,13 @@ class TestLeanGate(unittest.TestCase):
         # Everyday capability tools stay on (nothing is dropped anymore).
         self.assertIn('create_memory', names)
         self.assertIn('todo_write', names)
-        self.assertIn('schedule_create', names)
+        # Scheduler remains task-authorized but is routed through Tool Search
+        # under the default native-exposure experiment, so it need not spend
+        # tokens on the initial wire surface.
+        from lib.tools import all_specs
+        scheduler = next(spec for spec in all_specs() if spec.key == 'scheduler')
+        self.assertIn('schedule_create', scheduler.provides)
+        self.assertEqual(scheduler.discovery_policy, 'searchable')
         # chat enables code exec (no project) → the standalone code-exec tool,
         # whose function name is 'run_command' (CODE_EXEC_TOOL is a copy of
         # PROJECT_TOOL_RUN_COMMAND). The project-ONLY tools stay absent.
@@ -152,14 +158,14 @@ class TestLeanGate(unittest.TestCase):
     def test_legacy_air_gets_full_tool_set(self):
         # A stored 'air' conv now loads with the full chat tool set (no longer
         # a stripped-down tier).
-        tl, _, _ = _assemble({'chatMode': 'air', 'mcpEnabled': False})
+        tl, _ = _assemble({'chatMode': 'air', 'mcpEnabled': False})
         names = _names(tl)
         self.assertIn('create_memory', names)
         self.assertIn('todo_write', names)
         self.assertIn('run_command', names)
 
     def test_studio_has_project_tools_not_code_exec(self):
-        tl, _, _ = _assemble({'chatMode': 'studio', 'projectPath': '/tmp/x',
+        tl, _ = _assemble({'chatMode': 'studio', 'projectPath': '/tmp/x',
                               'mcpEnabled': False})
         names = _names(tl)
         # Project family present; run_command supersedes code_exec.
@@ -172,7 +178,7 @@ class TestLeanGate(unittest.TestCase):
     def test_no_chatmode_is_unchanged_legacy(self):
         # A legacy caller with no chatMode keeps memory/todo/scheduler
         # (has_base_tools path) — proves the pass-through is intact.
-        tl, _, _ = _assemble({'mcpEnabled': False})
+        tl, _ = _assemble({'mcpEnabled': False})
         names = _names(tl)
         self.assertIn('create_memory', names)
         self.assertIn('todo_write', names)

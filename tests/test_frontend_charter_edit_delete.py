@@ -37,6 +37,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -44,9 +45,11 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
-_BRAIN_SRC = os.path.join(JS_DIR, 'project-brain.js')
-_I18N_SRC = os.path.join(JS_DIR, 'project-brain-i18n.js')
+sys.path.insert(0, HERE)
+from _runtime_sections import runtime_section_path  # noqa: E402
+
+_BRAIN_SRC = runtime_section_path('project-brain.js')
+_I18N_SRC = runtime_section_path('project-brain-i18n.js')
 
 # A decision long enough to be clamped (so data-pb-src is stamped and the
 # overlay would translate it) and clearly ENGLISH so a Chinese-UI overlay

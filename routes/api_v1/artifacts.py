@@ -21,10 +21,10 @@ HTML with custom Content-Disposition + CSP headers — not v1 envelope shape).
 
 from __future__ import annotations
 
-from flask import Blueprint, request
+from quart import Blueprint, request
 
 from lib.api_response import (
-    api_bad_request, api_internal_error, api_not_found, api_ok,
+    api_bad_request, api_not_found, api_ok,
 )
 from lib.artifacts import (
     ArtifactNotFoundError, delete_artifact, get_artifact_meta,
@@ -34,6 +34,7 @@ from lib.artifacts import (
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.request_parser import async_parse_body
+from lib.storage import StorageError
 
 from .auth import require_auth
 
@@ -157,9 +158,8 @@ async def delete_artifact_v1(artifact_id):
     tags=['artifacts'],
 )
 async def scan_conv_v1():
-    import json as _json
+    import asyncio
 
-    from lib.database import DOMAIN_CHAT, async_fetchone
     from routes.common import DEFAULT_USER_ID
 
     body = await async_parse_body()
@@ -167,20 +167,16 @@ async def scan_conv_v1():
     if not conv_id:
         return api_bad_request('conv_id is required', field='conv_id')
 
-    row = await async_fetchone(
-        'SELECT messages FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID),
-        domain=DOMAIN_CHAT,
-    )
-    if not row:
+    def _load():
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        from lib.database.conversation_repository import load_conversation
+        return load_conversation(
+            get_thread_db(DOMAIN_CHAT), conv_id, user_id=DEFAULT_USER_ID)
+
+    snapshot = await asyncio.to_thread(_load)
+    if snapshot is None:
         return api_not_found('conv_not_found')
-    raw = row['messages']
-    try:
-        messages = _json.loads(raw) if isinstance(raw, str) else (raw or [])
-    except (TypeError, ValueError) as e:
-        logger.warning('[Artifacts.v1:scan] failed to parse messages '
-                       'for conv=%s: %s', conv_id[:8], e)
-        return api_internal_error('invalid_messages_blob')
+    messages = snapshot.messages
 
     scanned = 0
     created_meta: list[dict] = []
@@ -197,6 +193,8 @@ async def scan_conv_v1():
         try:
             created = scan_message(conv_id, content, msg_id=msg_id,
                                     task_id='', task=None)
+        except StorageError:
+            raise
         except Exception as e:
             logger.warning('[Artifacts.v1:scan] failed for conv=%s msg=%s: %s',
                            conv_id[:8], msg_id[:8], e, exc_info=True)

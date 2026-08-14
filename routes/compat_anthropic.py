@@ -12,7 +12,7 @@ SDK compatibility.
 
 from __future__ import annotations
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.agent_core.admission import (
     await_terminal, controller, on_terminal, register_waiter,
@@ -177,7 +177,7 @@ async def messages():
     except Exception as e:
         logger.debug('[compat:anthropic] record_tokens failed: %s', e)
 
-    from flask import jsonify
+    from quart import jsonify
     return jsonify(out)
 
 
@@ -208,7 +208,7 @@ def count_tokens():
             for m in msgs
         )
         n = max(1, len(text) // 4)
-    from flask import jsonify
+    from quart import jsonify
     return jsonify({'input_tokens': int(n)})
 
 

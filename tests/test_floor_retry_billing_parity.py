@@ -191,7 +191,7 @@ def pinned_pricing(monkeypatch):
             'cacheReadMul': _CACHE_READ_MUL,
         }
 
-    def _fake_lookup_pricing(_model_id, _provider_id=None):
+    def _fake_lookup_pricing(_model_id, _provider_id=None, **_kwargs):
         return {
             'input': _BASE_INPUT_PER_1M_USD,
             'output': _OUTPUT_PER_1M_USD,
@@ -224,7 +224,7 @@ def _drive_primary_path(monkeypatch, script, conv_id: str):
         accumulated: dict = {}
         result = _fb._llm_call_with_fallback(
             task, _body(), 'aws.claude-opus-4.8', 0, 4096,
-            tool_call_happened=False, tool_list=None, max_tool_rounds=10,
+            tool_call_happened=False, tool_list=None,
             messages=_body()['messages'], preset='opus',
             thinking_enabled=False,
             accumulated_usage=accumulated, api_rounds=api_rounds,
@@ -306,7 +306,7 @@ def test_parity_primary_path_no_resend_when_disabled(monkeypatch, pinned_pricing
         accumulated: dict = {}
         _fb._llm_call_with_fallback(
             task, _body(), 'aws.claude-opus-4.8', 0, 4096,
-            tool_call_happened=False, tool_list=None, max_tool_rounds=10,
+            tool_call_happened=False, tool_list=None,
             messages=_body()['messages'], preset='opus',
             thinking_enabled=False,
             accumulated_usage=accumulated, api_rounds=api_rounds,

@@ -23,9 +23,15 @@ alias). Names that are not ``TOFU_*`` (or a ``CHATUI_*`` already passed
 directly) are looked up verbatim.
 """
 
+from functools import lru_cache
 import os
+from pathlib import Path
 
-__all__ = ['getenv_compat']
+from lib.log import get_logger
+
+
+logger = get_logger(__name__)
+__all__ = ['getenv_compat', 'getenv_project_compat']
 
 _LEGACY_PREFIX = 'CHATUI_'
 _MODERN_PREFIX = 'TOFU_'
@@ -58,6 +64,51 @@ def getenv_compat(*names, default=''):
     """
     for name in _expand_aliases(names):
         value = os.environ.get(name)
+        if value:
+            return value
+    return default
+
+
+@lru_cache(maxsize=8)
+def _project_env_values(project_root: str) -> dict[str, str]:
+    """Read one project's dotenv file once without mutating ``os.environ``."""
+    values: dict[str, str] = {}
+    path = Path(project_root) / '.env'
+    try:
+        lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
+    except OSError as exc:
+        logger.debug('[EnvCompat] project dotenv unavailable: %s', exc)
+        return values
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, _, value = line.partition('=')
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip()
+        if (len(value) >= 2 and value[0] == value[-1]
+                and value[0] in ('"', "'")):
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def getenv_project_compat(*names, default='', project_root=None):
+    """Resolve env aliases with the project ``.env`` as a fallback.
+
+    This mirrors ``server.py``'s fill-if-absent dotenv loading without
+    mutating process-global environment state, so standalone data tools see
+    the same storage authority flags as the server. Explicit shell variables,
+    including an empty value, shadow the file exactly as server startup does.
+    """
+    root = (Path(project_root).resolve() if project_root is not None
+            else Path(__file__).resolve().parent.parent)
+    file_values = _project_env_values(str(root))
+    for name in _expand_aliases(names):
+        value = (os.environ[name] if name in os.environ
+                 else file_values.get(name))
         if value:
             return value
     return default

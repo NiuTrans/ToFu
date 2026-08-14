@@ -42,7 +42,8 @@ import pytest
 pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_MODEL_CAPS_JS = os.path.join(_ROOT, 'static', 'js', 'core', 'model_caps.js')
+_MODEL_CAPS_JS = os.path.join(
+    _ROOT, 'frontend', 'src', 'runtime', 'app-runtime.js')
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -59,7 +60,7 @@ def _read_frontend_fallback() -> list[str]:
     m = re.search(
         r'_FALLBACK_CHAT_EXCLUDED_CAPS\s*=\s*\[([^\]]+)\]', src)
     assert m, 'Could not locate _FALLBACK_CHAT_EXCLUDED_CAPS literal in ' \
-              'static/js/core/model_caps.js — did the array get reformatted?'
+              'frontend/src/runtime/app-runtime.js — did the array get reformatted?'
     inner = m.group(1)
     return [s.strip().strip("'\"") for s in inner.split(',') if s.strip()]
 

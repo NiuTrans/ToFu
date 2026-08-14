@@ -21,11 +21,11 @@ Patch-safety: ``_write_heartbeat`` resolves ``_get_local_ip`` through the
 ``lib.database._pg_ownership`` facade.
 """
 
-import json
 import os
 import threading
 import time
 
+from lib.json_store import read_json, write_json_atomic
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -48,16 +48,12 @@ def _read_heartbeat(pgdata):
     """Return parsed heartbeat dict ({host, pid, ts}) or None."""
     path = _heartbeat_path(pgdata)
     try:
-        with open(path) as f:
-            data = json.load(f)
+        data = read_json(path, strict=True)
         if isinstance(data, dict):
             return data
         logger.debug('[DB] Heartbeat at %s is not a dict', path)
         return None
-    except FileNotFoundError as _e_audit:
-        logger.debug('[_bootstrap] _read_heartbeat caught %s: %s', type(_e_audit).__name__, _e_audit)
-        return None
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, RuntimeError) as e:
         logger.debug('[DB] Could not read heartbeat at %s: %s', path, e)
         return None
 
@@ -95,11 +91,10 @@ def _write_heartbeat(pgdata):
         'ts': time.time(),
     }
     path = _heartbeat_path(pgdata)
-    tmp = path + '.tmp'
     try:
-        with open(tmp, 'w') as f:
-            json.dump(payload, f)
-        os.replace(tmp, path)
+        # Refreshed every 30 seconds; atomic visibility matters, synchronous
+        # durability does not.  Avoid a perpetual metadata-fsync tax on FUSE.
+        write_json_atomic(path, payload, fsync=False, indent=None)
     except OSError as e:
         logger.debug('[DB] Could not write heartbeat to %s: %s', path, e)
 

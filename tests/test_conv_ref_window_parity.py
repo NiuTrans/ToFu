@@ -202,3 +202,54 @@ class TestCharterAlignment:
         from lib.conv_ref._detail import get_conversation
         p = inspect.signature(get_conversation).parameters
         assert 'limit' in p and 'before' in p
+
+
+class TestHeadTailSelection:
+    """The one-query row selector is byte-for-byte parity with memory."""
+
+    class _FakeDB:
+        def __init__(self, messages):
+            import json
+            self.rows = [
+                {'meta': json.dumps(message), 'seq': seq}
+                for seq, message in enumerate(messages)
+            ]
+
+        def execute(self, sql, params=()):
+            low = sql.lower()
+            all_rows = self.rows
+
+            class _Cur:
+                def fetchall(self_inner):
+                    if 'union all' in low:
+                        head = int(params[1])
+                        start, end = int(params[3]), int(params[4])
+                        return ([r for r in all_rows if r['seq'] < head]
+                                + [r for r in all_rows
+                                   if start <= r['seq'] < end])
+                    end = int(params[1])
+                    return [r for r in all_rows if r['seq'] < end]
+
+            return _Cur()
+
+    @pytest.mark.parametrize('n,head,tail,before', [
+        (100, 3, 5, None),
+        (8, 3, 5, None),
+        (100, 3, 10, 50),
+        (5, 3, 10, 0),
+        (10, 0, 3, 999),
+    ])
+    def test_matches_memory(self, n, head, tail, before):
+        from lib.database.messages_rows import load_message_selection
+
+        messages = _mk(n)
+        selected = load_message_selection(
+            self._FakeDB(messages), 'c', head, tail,
+            before_seq=before, known_total=n)
+        memory, omitted, total = _mem_window(
+            messages, head, tail, before=before)
+        assert [seq for seq, _ in selected['kept']] == memory
+        assert [message for _, message in selected['kept']] == [
+            messages[seq] for seq in memory]
+        assert selected['omitted'] == omitted
+        assert selected['totalCount'] == total

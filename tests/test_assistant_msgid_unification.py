@@ -35,8 +35,10 @@ TWO layers, each with a NEUTER control proving the fix is load-bearing:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
+import tempfile
 
 import pytest
 
@@ -237,12 +239,39 @@ def _run(override=None):
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     paths = source_argv('_rebaseUnackedTail', override=override)
+    source = open(paths[0], encoding='utf-8').read()
+
+    def extract(name):
+        match = re.search(r'function\s+' + re.escape(name) + r'\s*\(', source)
+        assert match, f'{name} source missing'
+        brace = source.index('{', match.start())
+        depth = 0
+        for index in range(brace, len(source)):
+            if source[index] == '{':
+                depth += 1
+            elif source[index] == '}':
+                depth -= 1
+                if depth == 0:
+                    return source[match.start():index + 1]
+        raise AssertionError(f'{name} source is unbalanced')
+
+    extracted_source = '\n'.join((
+        extract('_isErrorOnlyAssistant'),
+        extract('_rebaseUnackedTail'),
+    ))
+    with tempfile.NamedTemporaryFile('w', suffix='.js', delete=False) as handle:
+        handle.write(extracted_source)
+        extracted = handle.name
     try:
-        return subprocess.run(['node', harness, *paths],
+        return subprocess.run(['node', harness, extracted],
                               capture_output=True, text=True, timeout=60)
     finally:
         try:
             os.remove(harness)
+        except OSError:
+            pass
+        try:
+            os.remove(extracted)
         except OSError:
             pass
 

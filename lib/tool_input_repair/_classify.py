@@ -143,6 +143,19 @@ def resolve_tool_name(name: str, known: set[str] | None = None) -> tuple[str, st
     if name in valid:
         return name, None
 
+    # Unified-edit migration: old Tofu names and familiar foreign-harness
+    # names all converge on edit_file when that is the session's visible edit
+    # surface. The structural repair pass then converts their legacy argument
+    # shapes into ``edits=[{operation, anchor, content, ...}]``. In rollback
+    # sessions edit_file is absent, so the ordinary legacy aliases below keep
+    # resolving to apply_diff/apply_diffs exactly as before.
+    if 'edit_file' in valid and name.lower() in {
+        'apply_diff', 'apply_diffs', 'insert_content', 'insert_contents',
+        'edit', 'str_replace', 'str_replace_editor', 'search_replace',
+        'replace', 'edits', 'multiedit', 'insert',
+    }:
+        return 'edit_file', 'alias'
+
     # 2. Static alias table (case-insensitive key), but only if the target
     #    actually exists in this session — never invent a tool.
     target = _TOOL_NAME_ALIASES.get(name.lower())

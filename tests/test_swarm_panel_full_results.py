@@ -122,10 +122,8 @@ class TestFrontendSlicesRemoved(unittest.TestCase):
     """The two JS slices that clip the rendered card."""
 
     def _panel_src(self):
-        here = os.path.dirname(os.path.abspath(__file__))
-        root = os.path.normpath(os.path.join(here, '..'))
-        path = os.path.join(root, 'static', 'js', 'ui',
-                            'streaming_swarm_panel.js')
+        from tests._runtime_sections import runtime_section_path
+        path = runtime_section_path('ui/streaming_swarm_panel.js')
         with open(path, encoding='utf-8') as f:
             return f.read()
 

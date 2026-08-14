@@ -1,25 +1,9 @@
-"""Guard: deprecated OpenAI SKUs must NOT reappear in any seam.
-
-2026-07-24 owner-directed retirement:
-  * GPT-5.6 shipped as a two-tier lineup (flagship + pro) — the
-    generation dropped mini/nano.
-  * The original GPT-5 family (gpt-5, gpt-5.2, gpt-5-mini, gpt-5-nano)
-    was retired since 5.4 and 5.6 fully supersede its capabilities and
-    the OpenAI gateway no longer routes to it.
-
-If auto-discovery / bootstrap templates / a future refresh accidentally
-resurrects one of these IDs, this test fires. Codex-branded snapshots
-(``gpt-5.2-codex`` / ``gpt-5.1-codex-mini``) are intentionally kept —
-Codex is a separate lineup on its own cadence.
-
-There is NO ``gpt-5.5``: OpenAI's cadence went 5.2 → 5.4 → 5.6, so the
-guard also blocks a stray 5.5 from being invented.
-"""
+"""Guard unsupported or fabricated OpenAI model IDs across catalogue seams."""
 from __future__ import annotations
 
 import os
-import re
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -36,6 +20,7 @@ _RETIRED_EXACT_IDS = (
     'gpt-5-nano',
     'gpt-5.6-mini',
     'gpt-5.6-nano',
+    'gpt-5.6-pro',   # Pro is reasoning.mode="pro", not a model ID
     'gpt-5.5',        # never existed; guard against future invention
     'gpt-5.5-mini',
     'gpt-5.5-pro',
@@ -75,24 +60,14 @@ class TestDeprecatedOpenAISkuAbsence:
                 f'{mid!r} still offered by bootstrap OpenAI template'
             )
 
-    def test_provider_templates_js_omits_retired_ids(self):
-        """The frontend Settings provider-picker mirror must not offer
-        retired SKUs either. Text-grep against exact quoted IDs (the
-        file is not JSON, so parse-vs-grep is a wash — grep is stricter
-        because it also catches stray occurrences in comments)."""
-        js_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            'static', 'js', 'settings', 'provider_templates.js',
-        )
-        with open(js_path, 'r', encoding='utf-8') as f:
-            body = f.read()
+    def test_current_provider_templates_omit_unsupported_ids(self):
+        root = Path(__file__).resolve().parents[1]
+        bodies = [
+            (root / 'static/provider_templates/openai.json').read_text(),
+            (root / 'frontend/src/runtime/app-runtime.js').read_text(),
+        ]
         for mid in _RETIRED_EXACT_IDS:
-            # Match the model_id literal only ('gpt-5.6-mini') — a bare
-            # ``gpt-5`` substring would false-positive on 5.4 / 5.6, so
-            # anchor on a quote + exact ID + non-word terminator.
-            pattern = r"['\"]" + re.escape(mid) + r"['\"]"
-            hits = re.findall(pattern, body)
-            assert not hits, (
-                f'{mid!r} still referenced in provider_templates.js '
-                f'({len(hits)} hit[s])'
-            )
+            literal_hits = sum(
+                body.count(f"'{mid}'") + body.count(f'"{mid}"')
+                for body in bodies)
+            assert literal_hits == 0, f'{mid!r} still offered by a provider template'

@@ -112,7 +112,7 @@ def test_swap_path_runs_reconciliation_on_prebuilt_body():
     from types import SimpleNamespace
     from lib.llm_dispatch.api import _adapt_stream_body_for_slot
     slot = SimpleNamespace(model='aws.claude-opus-4.8', thinking_format='',
-                           provider_id='sankuai')
+                           provider_id='sankuai', protocol='')
     body = {'model': 'some-other-model', 'max_tokens': 4096,
             'messages': _img_msg(_data_uri('image/jpeg', _PNG))}
     out = _adapt_stream_body_for_slot(

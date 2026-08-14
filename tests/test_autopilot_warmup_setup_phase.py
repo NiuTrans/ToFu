@@ -89,10 +89,16 @@ def test_setup_phases_emitted_in_prestream_window(monkeypatch):
     phases = _setup_phases(captured)
     # Two attributed setup steps: objective-resolution + context-assembly.
     assert len(phases) == 2, f'expected 2 working setup phases, got {captured}'
+    assert [ev['inner'].get('detailKey') for ev in phases] == [
+        'stream.phase.vuVerifyAssistant',
+        'stream.phase.vuAssembleContext',
+    ]
     for ev in phases:
         assert ev['vuMsgId'] == 'vu-xyz'
         detail = ev['inner'].get('detail') or ''
-        assert 'Autopilot' in detail and len(detail) > len('Autopilot')
+        # Headless clients keep a meaningful English fallback while the web
+        # client resolves detailKey through its current locale.
+        assert detail.startswith('Autopilot ') and len(detail) > len('Autopilot ')
 
     # DECISIVE: both setup phases fill the SILENT window — they precede the
     # sub-task's first stream turn, not follow it.
@@ -112,7 +118,7 @@ def test_nc_neutered_helper_emits_no_setup_phase(monkeypatch):
     captured: list = []
     _wire(monkeypatch, captured)
     monkeypatch.setattr(ap, '_emit_vu_setup_phase',
-                        lambda task, vu_msg_id, detail: None)
+                        lambda task, vu_msg_id, detail, **fields: None)
 
     res = ap.run_virtual_user(_make_task(), vu_msg_id='vu-xyz')
     assert res is not None

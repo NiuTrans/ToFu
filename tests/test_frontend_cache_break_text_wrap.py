@@ -29,6 +29,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -36,13 +37,15 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
+sys.path.insert(0, HERE)
+from _runtime_sections import runtime_section_path  # noqa: E402
 # Epic-E sub-8 (2026-08-01): _buildCostPopover moved to
 # ui/finish_info_rich.js (deferred); the phrase family it calls
 # (_cacheBreakReason/_translateCacheCause/…) STAYS in ui/finish_info.js.
 # Eval BOTH in one script scope — mirrors production's shared global
 # lexical environment across the two bundles.
-JS_PATH = os.path.join(ROOT, 'static', 'js', 'ui', 'finish_info.js')
-JS_RICH_PATH = os.path.join(ROOT, 'static', 'js', 'ui', 'finish_info_rich.js')
+JS_PATH = runtime_section_path('ui/finish_info.js')
+JS_RICH_PATH = runtime_section_path('ui/finish_info_rich.js')
 CSS_PATH = os.path.join(ROOT, 'static', 'styles.css')
 
 

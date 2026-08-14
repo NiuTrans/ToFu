@@ -66,11 +66,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_names, runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = runtime_sections_dir()
 
 
 def _node_available() -> bool:
@@ -128,13 +130,12 @@ def test_initializer_module_is_bundled():
     """CLAUDE.md §3.2.1: a top-level static/js/*.js not listed in
     _BUNDLE_FILES loads as a SILENT no-op in production (the script tag is
     stripped but never re-added)."""
-    bundler = open(os.path.join(ROOT, 'lib', 'js_bundler.py'),
-                   encoding='utf-8').read()
-    assert 'core/current_user.js' in bundler, (
-        'core/current_user.js must be registered in _BUNDLE_FILES or it '
+    runtime_files = runtime_section_names()
+    assert 'core/current_user.js' in runtime_files, (
+        'core/current_user.js must be registered in the Vite runtime or it '
         'silently never loads in production')
     # Must load BEFORE main.js (which calls it) — main.js is always last.
-    assert bundler.index('core/current_user.js') < bundler.index("'main.js'"), (
+    assert runtime_files.index('core/current_user.js') < runtime_files.index('main.js'), (
         'core/current_user.js must be bundled before main.js')
 
 

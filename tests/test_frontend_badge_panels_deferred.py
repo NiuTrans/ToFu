@@ -25,34 +25,26 @@ import re
 
 import pytest
 
+from tests._runtime_sections import runtime_section, runtime_section_names
+
 pytestmark = pytest.mark.unit
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-BUNDLER_PY = ROOT / 'lib' / 'js_bundler.py'
 INDEX_HTML = ROOT / 'index.html'
-FEATURE_LOADER = ROOT / 'static' / 'js' / 'feature-loader.js'
-OPTIMIZER = ROOT / 'static' / 'js' / 'optimizer.js'
-MOBILE_PANELS = ROOT / 'static' / 'js' / 'mobile_panels.js'
+MAIN = ROOT / 'frontend' / 'src' / 'main.ts'
 
 BADGE_STUBS = ('toggleOptimizerPanel', 'toggleTimerPanel')
-
-
-def _manifest():
-    import lib.js_bundler as jb
-    return jb._extract_manifest_from_source(str(BUNDLER_PY))
 
 
 # ---------------------------------------------------------------------------
 # 1. manifest move
 # ---------------------------------------------------------------------------
 def test_badge_panels_deferred_not_core():
-    bundle, deferred, _ep, _crit = _manifest()
+    names = runtime_section_names()
     for name in ('optimizer.js', 'timer.js'):
-        assert name in deferred, f'{name} must be in _DEFERRED_FILES'
-        assert name not in bundle, (
-            f'{name} must NOT remain in _BUNDLE_FILES — double-load would '
-            'duplicate the polling intervals')
+        assert names.count(name) == 1, f'{name} must have exactly one Vite runtime owner'
+    assert not (ROOT / 'static' / 'js').exists()
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +64,7 @@ def test_optimizer_badge_no_static_onclick():
 
 
 def test_optimizer_iife_branches_ready_state():
-    src = OPTIMIZER.read_text()
+    src = runtime_section('optimizer.js')
     m = re.search(r'\(function _bindOptimizerBadge\(\).*?\}\)\(\);', src, re.S)
     assert m, 'optimizer.js lost the _bindOptimizerBadge IIFE'
     assert 'document.readyState' in m.group(0), (
@@ -83,32 +75,32 @@ def test_optimizer_iife_branches_ready_state():
 
 def test_timer_badge_static_onclick_kept():
     html = INDEX_HTML.read_text()
-    assert 'onclick="toggleTimerPanel(event)"' in html, (
-        'index.html #timerBadge must keep its static toggleTimerPanel onclick')
+    assert 'data-tofu-action="toggleTimerPanel(event)"' in html
+    assert 'onclick="toggleTimerPanel(event)"' not in html
 
 
 # ---------------------------------------------------------------------------
 # 3. stubs (py + js dual tables)
 # ---------------------------------------------------------------------------
 def test_badge_stubs_in_py_table():
-    _bf, _df, entry_points, _crit = _manifest()
-    missing = [s for s in BADGE_STUBS if s not in entry_points]
+    main = MAIN.read_text(encoding='utf-8')
+    missing = [s for s in BADGE_STUBS if f"'{s}'" not in main]
     assert not missing, (
-        f'_DEFERRED_ENTRY_POINTS is missing badge-panel stubs: {missing}')
+        f'the Vite feature router is missing badge-panel actions: {missing}')
 
 
 def test_badge_stubs_in_loader_table():
-    loader = FEATURE_LOADER.read_text()
-    missing = [s for s in BADGE_STUBS if f"'{s}'" not in loader]
+    loader = runtime_section('optimizer.js') + runtime_section('timer.js')
+    missing = [s for s in BADGE_STUBS if f'function {s}(' not in loader]
     assert not missing, (
-        f'feature-loader.js is missing badge-panel stubs: {missing}')
+        f'the migrated runtime is missing badge-panel owners: {missing}')
 
 
 # ---------------------------------------------------------------------------
 # 4. mobile_panels stays gated (it wraps the deferred globals via window.*)
 # ---------------------------------------------------------------------------
 def test_mobile_panels_open_flag_sync_gated():
-    src = MOBILE_PANELS.read_text()
+    src = runtime_section('mobile_panels.js')
     for name in ('_setTimerPanelOpen', '_setOptimizerPanelOpen'):
-        assert f'typeof window.{name} === "function"' in src, (
-            f'mobile_panels.js must keep window.{name} typeof-gated')
+        assert f'typeof runtimeScope.{name} === "function"' in src, (
+            f'mobile_panels.js must keep runtimeScope.{name} typeof-gated')

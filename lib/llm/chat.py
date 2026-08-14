@@ -42,6 +42,7 @@ from lib.model_info import (
     _parse_token_limit_from_error,
     is_claude,
 )
+from lib.subscription_quota import record_codex_quota
 from lib.http_client import http_post
 
 logger = get_logger(__name__)
@@ -52,7 +53,7 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
          timeout=None, log_prefix='', api_key=None, base_url=None,
          extra_headers=None, max_retries=None, _limit_retry=False,
          thinking_format='', provider_id='', api_protocol='openai', oauth='',
-         adapter=None):
+         adapter=None, responses_feature_profile=''):
     """Non-streaming chat completion.
 
     Args:
@@ -107,6 +108,9 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
         thinking_format=thinking_format,
         provider_id=provider_id,
     )
+    if _responses:
+        body['_responses_feature_profile'] = (
+            responses_feature_profile or 'compatible')
 
     # Cache breakpoints + extended-TTL beta header
     _task_id_for_latch = body.get('_task_id', '')
@@ -182,6 +186,15 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
                 if extra_headers:
                     hdrs.update(extra_headers)
             hdrs['M-TraceId'] = trace_id
+            if (_responses and isinstance(body.get('multi_agent'), dict)
+                    and body['multi_agent'].get('enabled')):
+                beta_key = next((key for key in hdrs
+                                 if key.lower() == 'openai-beta'),
+                                'OpenAI-Beta')
+                beta = str(hdrs.get(beta_key) or '')
+                marker = 'responses_multi_agent=v1'
+                if marker not in beta:
+                    hdrs[beta_key] = f'{beta},{marker}' if beta else marker
             if log_prefix:
                 logger.debug('%s M-TraceId=%s', log_prefix, trace_id)
             try:
@@ -246,7 +259,9 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
                             max_retries=max_retries, _limit_retry=True,
                             thinking_format=thinking_format,
                             provider_id=provider_id, api_protocol=api_protocol,
-                            adapter=adapter)
+                            oauth=oauth, adapter=adapter,
+                            responses_feature_profile=(
+                                responses_feature_profile or 'compatible'))
                         usage_r['_model_limit_learned'] = {
                             'model': model,
                             'old_limit': max_tokens,
@@ -322,10 +337,27 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
     _tool_calls = msg.get('tool_calls')
     if _tool_calls:
         usage['_tool_calls'] = _tool_calls
+    # DeepSeek V4 thinking-mode tool calls require the complete reasoning
+    # content to be echoed on the assistant message in every later request.
+    # The streaming path already preserves this field; expose it to callers
+    # of the non-streaming helper as private dispatch metadata as well.
+    _reasoning_content = (msg.get('reasoning_content')
+                          or msg.get('thinking')
+                          or msg.get('reasoning'))
+    if not _reasoning_content and isinstance(msg.get('reasoning_details'), list):
+        _reasoning_content = ''.join(
+            (part.get('thinking') or part.get('text') or '')
+            for part in msg['reasoning_details'] if isinstance(part, dict))
+    if isinstance(_reasoning_content, str) and _reasoning_content:
+        usage['_reasoning_content'] = _reasoning_content
 
     usage['trace_id'] = trace_id
     if resp_trace and resp_trace != trace_id:
         usage['resp_trace_id'] = resp_trace
+    _quota_scope = ('oauth_codex' if oauth == 'codex' else
+                    ('adapter:' + str(adapter.get('agent_id') or '')
+                     if isinstance(adapter, dict) and adapter else 'codex'))
+    usage = record_codex_quota(resp.headers, usage, cache_key=_quota_scope)
 
     if log_prefix:
         tokens = usage.get('total_tokens', 0)

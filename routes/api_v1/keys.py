@@ -13,7 +13,7 @@ The Settings UI hits these to manage keys without dropping to the CLI.
 
 from __future__ import annotations
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.api_keys import (
     ALL_SCOPES, create_key, get_key_by_id, list_keys, revoke_key, update_key,

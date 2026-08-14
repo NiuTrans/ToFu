@@ -36,7 +36,9 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_PATH = os.path.join(ROOT, 'static', 'js', 'core', 'turn_settlement.js')
+from tests._runtime_sections import runtime_section_path
+
+JS_PATH = runtime_section_path('core/turn_settlement.js')
 
 CAPABLE = 'gpt-4o'
 INCAPABLE = 'claude-sonnet-4-5'

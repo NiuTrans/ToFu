@@ -47,6 +47,7 @@ __all__ = [
     'WELL_KNOWN_ENGINES',
     'sweep_once',
     'start_local_autodiscovery',
+    'stop_local_autodiscovery',
 ]
 
 
@@ -67,6 +68,7 @@ _STATE_PATH = config_path('local_autodiscover.json')
 
 _thread = None
 _stop_event = threading.Event()
+_thread_lock = threading.Lock()
 
 
 def _disabled() -> bool:
@@ -338,15 +340,40 @@ def _loop() -> None:
     logger.info('[AutoDiscover] worker stopped')
 
 
-def start_local_autodiscovery() -> None:
+def start_local_autodiscovery() -> bool:
     """Idempotent: spawn the background sweep thread (no-op if running/disabled)."""
     global _thread
     if _disabled():
         logger.info('[AutoDiscover] disabled via TOFU_LOCAL_AUTODISCOVER=0')
-        return
-    if _thread is not None and _thread.is_alive():
-        return
-    _stop_event.clear()
-    _thread = threading.Thread(target=_loop, name='local-autodiscover',
-                               daemon=True)
-    _thread.start()
+        return False
+    with _thread_lock:
+        if _thread is not None and _thread.is_alive():
+            return False
+        _stop_event.clear()
+        _thread = threading.Thread(target=_loop, name='local-autodiscover',
+                                   daemon=True)
+        _thread.start()
+    return True
+
+
+def stop_local_autodiscovery(timeout: float = 2.0) -> bool:
+    """Signal and bounded-join the local discovery worker."""
+    global _thread
+    _stop_event.set()
+    with _thread_lock:
+        thread = _thread
+    if thread is None:
+        return True
+    try:
+        wait_seconds = max(0.0, float(timeout))
+    except (TypeError, ValueError, OverflowError) as exc:
+        logger.debug('[AutoDiscover] invalid stop timeout; using 2.0: %s', exc)
+        wait_seconds = 2.0
+    if thread is not threading.current_thread():
+        thread.join(timeout=wait_seconds)
+    if thread.is_alive():
+        return False
+    with _thread_lock:
+        if _thread is thread:
+            _thread = None
+    return True

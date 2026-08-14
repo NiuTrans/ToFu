@@ -125,9 +125,18 @@ def run_tool_dispatch(
     #   liveness clock before entering the pipeline. See
     #   manager.reap_stuck_running_tasks.
     task['_dispatch_heartbeat'] = time.time()
+    # The full executable catalog is the execution/validation authority.  The
+    # provider-specific wire surface may contain only eager tools plus the
+    # local gateways, or native deferred namespaces.
+    _enabled_catalog = task.get(
+        '_executable_tool_catalog', task.get('_enabled_tool_catalog'))
+    _execution_catalog = list(
+        tool_list or []
+        if not isinstance(_enabled_catalog, list) else _enabled_catalog)
     _tool_timed_out = execute_tool_pipeline(
         task, parsed_tcs, cfg, project_path, project_enabled,
-        tool_list, messages, all_search_results_text, round_num, rs.model,
+        _execution_catalog, messages, all_search_results_text, round_num,
+        rs.model,
     )
 
     # Clean up live messages ref after tool execution

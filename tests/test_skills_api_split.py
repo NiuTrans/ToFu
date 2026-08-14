@@ -19,7 +19,6 @@ redirected to a tmp dir — the real store is never touched.
 import asyncio
 import io
 import os
-import sys
 import tempfile
 import unittest
 import zipfile
@@ -27,23 +26,6 @@ import zipfile
 import pytest
 
 import lib.memory.storage._dirs as dirs
-
-
-def _install_shim():
-    import quart
-    sys.modules['flask'] = quart
-    for attr in ('json', 'globals', 'helpers', 'wrappers', 'ctx'):
-        qs = f'quart.{attr}'
-        if qs in sys.modules:
-            sys.modules[f'flask.{attr}'] = sys.modules[qs]
-    from quart.wrappers import Request as _QR
-    import inspect
-    if inspect.iscoroutinefunction(_QR.get_json):
-        _orig = _QR.get_json
-
-        def _sync_get_json(self, *a, **kw):
-            return asyncio.run(_orig(self, *a, **kw))
-        _QR.get_json = _sync_get_json
 
 
 def _run(coro):
@@ -89,13 +71,13 @@ class SkillsApiSplitTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        _install_shim()
         cls._prev_auth = os.environ.get('TOFU_AUTH_MODE')
         os.environ['TOFU_AUTH_MODE'] = 'open'
         from lib.auth_mode import reset_for_tests
         reset_for_tests()
         from quart import Quart
-        cls.app = Quart(__name__)
+        cls.app = Quart(__name__, static_folder=None)
+        cls.app.config.setdefault('PROVIDE_AUTOMATIC_OPTIONS', True)
         cls.app.config['TESTING'] = True
         from routes.api_v1.auth import (
             attach_rate_headers, bearer_auth_before_request,

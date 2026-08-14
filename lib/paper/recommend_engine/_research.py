@@ -25,11 +25,6 @@ from ._ground import _detect_lang
 
 logger = get_logger(__name__)
 
-# How many tool-eligible research rounds the interpretation agent gets before
-# it MUST produce its final JSON. Enough to search, open a couple of hits, and
-# verify a venue/award claim — but bounded so the describe box stays snappy.
-_MAX_RECOMMEND_TOOL_ROUNDS = 5
-
 # The interpretation agent researches KNOWN-TITLE papers, so its web_search
 # calls are forced onto the academic vertical (arXiv + Semantic Scholar JSON
 # APIs). Those APIs have their OWN uptime, independent of the Brave/Bing/DDG/
@@ -198,7 +193,6 @@ def _research_and_interpret(description, max_results, *, abort=None, on_tool_eve
 
     run_agent_loop(
         abort=abort_signal,
-        max_tool_rounds=_MAX_RECOMMEND_TOOL_ROUNDS,
         round_tools=_REPORT_TOOLS,
         dispatch=_dispatch,
         execute_tool=_execute_tool,

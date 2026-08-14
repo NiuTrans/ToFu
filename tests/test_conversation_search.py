@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from routes.conversations import build_search_text
 
-from routes.conversations_search import _head_cap_sql
+from routes.conversations_search import _head_cap_sql, _snippet_projection_sql
 
 
 def _search_items(resp):
@@ -770,3 +770,35 @@ class TestPhase2HeadCapCrossBackend:
         conn.close()
         assert got_far == [], 'match beyond the 10000-char cap must be excluded'
         assert [r[0] for r in got_near] == ['near']
+
+    def test_snippet_projection_is_bounded_and_sqlite_executable(self):
+        """Only the short snippet, never the full search blob, is returned."""
+        import sqlite3
+
+        conn = sqlite3.connect(':memory:')
+        conn.row_factory = sqlite3.Row
+        conn.execute('CREATE TABLE conversations '
+                     '(id TEXT, user_id INTEGER, search_text TEXT)')
+        huge = ('a' * 200_000) + ' needle_here ' + ('z' * 200_000)
+        conn.execute('INSERT INTO conversations VALUES (?, ?, ?)',
+                     ('huge', 1, huge))
+        radius = 40
+        width = (2 * radius) + len('needle_here')
+        sql = _snippet_projection_sql('sqlite', '?')
+        row = conn.execute(
+            sql, (radius, width, 'needle_here', 1, 'huge')
+        ).fetchone()
+        conn.close()
+
+        assert row is not None and 'needle_here' in row['snippet']
+        assert len(row['snippet']) <= width
+        assert len(row['snippet']) * 1000 < len(huge), (
+            'snippet projection accidentally returned a large fraction of '
+            'the authoritative search blob')
+
+    def test_pg_snippet_projection_uses_server_side_substring(self):
+        sql = _snippet_projection_sql('pg', '?,?')
+        assert sql.startswith('SELECT id, CASE WHEN match_pos > 0')
+        assert 'substring(search_text FROM GREATEST' in sql
+        assert "strpos(lower(search_text), ?)" in sql
+        assert 'AS snippet' in sql

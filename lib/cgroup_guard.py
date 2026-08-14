@@ -43,6 +43,17 @@ Env vars (all optional):
                                                CRITICAL keeps counting)
   TOFU_CGROUP_JOURNAL            default 1   — rolling pressure journal to
                                                logs/cgroup_pressure.log
+  TOFU_PROCESS_RSS_RELIEF_MB     default min(4096, 50% of cgroup MiB) — also
+                                               trim when this process's RSS
+                                               alone crosses the ceiling;
+                                               0 disables
+  TOFU_PROCESS_RSS_COOLDOWN_SEC  default 300 — minimum delay between RSS-only
+                                               relief passes
+  TOFU_PROCESS_RSS_RECYCLE_MB    default min(8192, 70% of cgroup MiB) — after
+                                               relief, request one
+                                               graceful worker recycle if RSS
+                                               is still above this ceiling;
+                                               0 disables
 
 What relief can and cannot do (measured 2026-07-31, do not re-litigate)
 ----------------------------------------------------------------------
@@ -536,22 +547,38 @@ def write_pressure_journal(snap: dict) -> bool:
         rec['top'] = [{'comm': r['comm'], 'rss_gib': round(_gib(r['rss']), 2)}
                       for r in _top_rss_processes()]
     try:
-        os.makedirs(os.path.dirname(_JOURNAL_PATH), exist_ok=True)
+        parent = os.path.dirname(_JOURNAL_PATH)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         line = _json.dumps(rec, separators=(',', ':')) + '\n'
-        # Ring bound: when over budget, keep the newest half.
-        try:
-            if os.path.getsize(_JOURNAL_PATH) > _JOURNAL_MAX_BYTES:
-                with open(_JOURNAL_PATH, 'r', encoding='utf-8', errors='replace') as f:
-                    tail = f.read()[-_JOURNAL_MAX_BYTES // 2:]
-                tmp = _JOURNAL_PATH + '.tmp'
-                with open(tmp, 'w', encoding='utf-8') as f:
-                    f.write(tail)
-                os.replace(tmp, _JOURNAL_PATH)
-        except OSError as _e:
-            logger.debug('write pressure journal: unreadable (%s)', _e)
-            pass
-        with open(_JOURNAL_PATH, 'a', encoding='utf-8') as f:
-            f.write(line)
+        from lib.json_store import locked_path, write_bytes_atomic
+        # Trimming and appending are one transaction.  Without the stable
+        # sidecar lock, two server processes can each replace the journal with
+        # an older tail and silently discard the other's newest record.
+        with locked_path(_JOURNAL_PATH):
+            try:
+                if os.path.getsize(_JOURNAL_PATH) > _JOURNAL_MAX_BYTES:
+                    keep = max(1, _JOURNAL_MAX_BYTES // 2)
+                    with open(_JOURNAL_PATH, 'rb') as f:
+                        size = f.seek(0, os.SEEK_END)
+                        start = max(0, size - keep)
+                        f.seek(start)
+                        tail = f.read()
+                    # A byte-window can start in the middle of a UTF-8 JSON
+                    # record.  Retain only complete newline-delimited records.
+                    if start:
+                        boundary = tail.find(b'\n')
+                        tail = tail[boundary + 1:] if boundary >= 0 else b''
+                    write_bytes_atomic(
+                        _JOURNAL_PATH, tail, fsync=False, mode=0o644)
+            except FileNotFoundError as error:
+                logger.debug('write pressure journal: no prior journal (%s)',
+                             error)
+                pass
+            except OSError as _e:
+                logger.debug('write pressure journal: unreadable (%s)', _e)
+            with open(_JOURNAL_PATH, 'ab') as f:
+                f.write(line.encode('utf-8'))
         return True
     except OSError as e:
         logger.debug('[cgroup] pressure journal write failed: %s', e)
@@ -595,9 +622,137 @@ def check_oom_kill_count() -> bool:
 _monitor_thread: Optional[threading.Thread] = None
 _monitor_stop = threading.Event()
 _monitor_lock = threading.Lock()
+_last_process_rss_relief_at = 0.0
+_process_rss_recycle_requested = False
 
 
-def run_monitor_once() -> Optional[dict]:
+def _process_rss_relief_limit_bytes() -> Optional[int]:
+    """Return the process-local RSS relief threshold, or None when disabled.
+
+    The shared cgroup can be roomy while this one process has retained many
+    GiB of thread-arena/history allocations.  That shape is independently
+    dangerous: it raises restart latency and makes Tofu the first OOM victim
+    during the next unrelated cgroup spike.  Clamp tiny values to 256 MiB so
+    a typo cannot turn the 30-second monitor into a permanent cache flusher.
+    """
+    raw = os.environ.get('TOFU_PROCESS_RSS_RELIEF_MB', '')
+    try:
+        mb = float(raw or '4096')
+    except (ValueError, TypeError) as e:
+        logger.warning('[cgroup] invalid TOFU_PROCESS_RSS_RELIEF_MB; using 4096: %s', e)
+        mb = 4096.0
+    if mb <= 0:
+        return None
+    if not raw:
+        cgroup_limit = mem_limit_bytes()
+        if cgroup_limit is not None:
+            mb = min(mb, (cgroup_limit / (1 << 20)) * 0.50)
+    return int(max(256.0, mb) * (1 << 20))
+
+
+def _process_rss_recycle_limit_bytes() -> Optional[int]:
+    """Return the post-relief RSS ceiling that requests a graceful recycle."""
+    raw = os.environ.get('TOFU_PROCESS_RSS_RECYCLE_MB', '')
+    try:
+        mb = float(raw or '8192')
+    except (ValueError, TypeError) as e:
+        logger.warning('[cgroup] invalid TOFU_PROCESS_RSS_RECYCLE_MB; using 8192: %s', e)
+        mb = 8192.0
+    if mb <= 0:
+        return None
+    if not raw:
+        cgroup_limit = mem_limit_bytes()
+        if cgroup_limit is not None:
+            mb = min(mb, (cgroup_limit / (1 << 20)) * 0.70)
+    return int(max(384.0, mb) * (1 << 20))
+
+
+def _maybe_relieve_process_rss(now: Optional[float] = None,
+                               recycle_callback=None) -> Optional[dict]:
+    """Relieve oversized RSS and request one graceful recycle at the hard cap.
+
+    ``malloc_trim`` cannot return live/fragmented native allocations.  If RSS
+    remains above the hard ceiling after a relief attempt, letting the process
+    continue growing merely delegates recovery to the untrappable kernel OOM
+    killer.  A caller-supplied callback converts that into a controlled drain;
+    the external lifecycle manager then restores a small fresh worker.
+    """
+    global _last_process_rss_relief_at, _process_rss_recycle_requested
+    relief_limit = _process_rss_relief_limit_bytes()
+    recycle_limit = _process_rss_recycle_limit_bytes()
+    rss_before = _self_rss_bytes()
+    if rss_before is None:
+        return None
+    needs_relief = relief_limit is not None and rss_before >= relief_limit
+    needs_recycle_check = recycle_limit is not None and rss_before >= recycle_limit
+    if not needs_relief and not needs_recycle_check:
+        return None
+
+    stats = None
+    try:
+        cooldown = float(
+            os.environ.get('TOFU_PROCESS_RSS_COOLDOWN_SEC', '') or '300')
+    except (ValueError, TypeError) as e:
+        logger.warning('[cgroup] invalid TOFU_PROCESS_RSS_COOLDOWN_SEC; using 300: %s', e)
+        cooldown = 300.0
+    cooldown = max(30.0, cooldown)
+    if now is None:
+        import time as _time
+        now = _time.monotonic()
+
+    if needs_relief and now - _last_process_rss_relief_at >= cooldown:
+        # Latch before doing work: if a defensive action itself raises, the
+        # monitor must not retry and log-storm every tick.
+        _last_process_rss_relief_at = now
+        stats = relieve_memory(
+            'process RSS %.1fMiB >= %.1fMiB'
+            % (rss_before / (1 << 20), relief_limit / (1 << 20)))
+        if not isinstance(stats, dict):
+            stats = {}
+        rss_after = _self_rss_bytes()
+        stats.update({
+            'process_rss_before': rss_before,
+            'process_rss_after': rss_after,
+            'process_rss_limit': relief_limit,
+        })
+        logger.warning(
+            '[cgroup] process-RSS relief: %.1fMiB -> %s (limit %.1fMiB)',
+            rss_before / (1 << 20),
+            ('%.1fMiB' % (rss_after / (1 << 20))) if rss_after is not None else 'unknown',
+            relief_limit / (1 << 20))
+    else:
+        rss_after = rss_before
+
+    if (recycle_callback is not None and recycle_limit is not None
+            and rss_after is not None and rss_after >= recycle_limit
+            and not _process_rss_recycle_requested):
+        reason = ('process RSS %.1fMiB remains >= %.1fMiB hard ceiling after relief'
+                  % (rss_after / (1 << 20), recycle_limit / (1 << 20)))
+        # One-shot latch before callback: requesting shutdown repeatedly from a
+        # 30-second monitor can turn the second request into a force-quit.
+        _process_rss_recycle_requested = True
+        logger.critical('[cgroup] %s — requesting graceful worker recycle', reason)
+        audit_log('process_rss_recycle_requested',
+                  rss_bytes=rss_after, limit_bytes=recycle_limit)
+        try:
+            recycle_callback(reason)
+        except Exception as e:
+            # The callback did not accept the request; allow a later tick to
+            # retry instead of permanently suppressing the only hard guard.
+            _process_rss_recycle_requested = False
+            logger.error('[cgroup] graceful worker recycle request failed: %s', e)
+        if stats is None:
+            stats = {
+                'process_rss_before': rss_before,
+                'process_rss_after': rss_after,
+                'process_rss_limit': relief_limit,
+            }
+        stats['process_rss_recycle_limit'] = recycle_limit
+        stats['process_rss_recycle_requested'] = _process_rss_recycle_requested
+    return stats
+
+
+def run_monitor_once(recycle_callback=None) -> Optional[dict]:
     """One monitor tick: relieve memory if usage crosses the relief threshold.
 
     Returns the relief stats dict when relief ran, else None. Never raises.
@@ -611,13 +766,18 @@ def run_monitor_once() -> Optional[dict]:
         check_oom_kill_count()
     except Exception as e:  # journaling must never break the relief path
         logger.debug('[cgroup] journal/oom-watch tick failed: %s', e)
+    # Process-local high water is independent of aggregate cgroup pressure.
+    # Run it first and never double-relieve on the same tick.
+    rss_relief = _maybe_relieve_process_rss(recycle_callback=recycle_callback)
+    if rss_relief is not None:
+        return rss_relief
     relief_pct = _env_pct('TOFU_CGROUP_RELIEF_PCT', 92.0)
     if snap['pct'] >= relief_pct:
         return relieve_memory('monitor %.1f%% >= %.0f%%' % (snap['pct'], relief_pct))
     return None
 
 
-def start_monitor() -> bool:
+def start_monitor(recycle_callback=None) -> bool:
     """Start the low-frequency background relief monitor (idempotent).
 
     Returns True if a thread was started, False if unnecessary (cgroup
@@ -638,7 +798,7 @@ def start_monitor() -> bool:
             logger.info('[cgroup] pressure monitor started (interval=%.0fs)', interval)
             while not _monitor_stop.wait(interval):
                 try:
-                    run_monitor_once()
+                    run_monitor_once(recycle_callback=recycle_callback)
                 except Exception as e:
                     logger.warning('[cgroup] monitor tick failed: %s', e)
 
@@ -648,9 +808,27 @@ def start_monitor() -> bool:
         return True
 
 
-def stop_monitor() -> None:
-    """Signal the monitor thread to stop (best-effort; for clean shutdown/tests)."""
+def stop_monitor(timeout: float = 2.0) -> bool:
+    """Signal and bounded-join the pressure monitor."""
+    global _monitor_thread
     _monitor_stop.set()
+    with _monitor_lock:
+        thread = _monitor_thread
+    if thread is None:
+        return True
+    try:
+        wait_seconds = max(0.0, float(timeout))
+    except (TypeError, ValueError, OverflowError) as exc:
+        logger.debug('[cgroup] invalid stop timeout; using 2.0: %s', exc)
+        wait_seconds = 2.0
+    if thread is not threading.current_thread():
+        thread.join(timeout=wait_seconds)
+    if thread.is_alive():
+        return False
+    with _monitor_lock:
+        if _monitor_thread is thread:
+            _monitor_thread = None
+    return True
 
 
 # ── ③ large-request headroom guard ──

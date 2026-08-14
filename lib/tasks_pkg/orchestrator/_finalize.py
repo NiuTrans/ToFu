@@ -41,6 +41,7 @@ from lib.tasks_pkg.manager import (
     _strip_base64_for_snapshot,
     append_event,
     persist_task_result,
+    reset_task_text,
     stream_llm_response,
 )
 from lib.tasks_pkg.commit_round import (  # noqa: E402
@@ -88,10 +89,10 @@ def _discard_pretool_prose(task: dict[str, Any], round_num: int) -> None:
     Continue's ``contentPrefix`` path re-seeds ``task['content']`` explicitly
     (and later), so this reset is safe there too.
     """
-    with task['content_lock']:
-        task['content'] = ''
-        task['thinking'] = ''
-    append_event(task, build_event(EventType.DELTA_RESET, roundNum=round_num))
+    content_epoch = reset_task_text(task)
+    append_event(task, build_event(
+        EventType.DELTA_RESET, roundNum=round_num,
+        contentEpoch=content_epoch))
 
 
 # ── Suspicious-completion detection ────────────────────────────────────────
@@ -155,14 +156,6 @@ def _check_suspicious_completion(task, last_finish_reason, _loop_exit_reason,
                       finish_reason=last_finish_reason, model=model)
         except Exception as _ae:
             logger.debug('[%s] content_track_divergence audit failed: %s', tid, _ae)
-
-    if _loop_exit_reason == 'max_rounds_exhausted':
-        suspicion_reasons.append('loop_fell_through_max_rounds')
-        _tc_count = len((assistant_msg or {}).get('tool_calls', []))
-        logger.warning('[%s] conv=%s ⚠️ MAX TOOL ROUNDS EXHAUSTED: ran %d rounds without model stopping. '
-                       'last_finish_reason=%s final_content=%dchars tool_calls_in_last_round=%d '
-                       'model=%s. Consider increasing max_tool_rounds or investigating infinite tool loop.',
-                       tid, task.get('convId', ''), round_num + 1, last_finish_reason, _content_len, _tc_count, model)
 
     if last_finish_reason is None:
         suspicion_reasons.append('finish_reason_is_None')
@@ -286,10 +279,16 @@ def _emit_tool_round_phase(task, assistant_msg, round_num):
     clients that don't localize keep rendering ``detail`` unchanged.
     """
     if round_num == 0:
+        if task.get('_vu_subtask'):
+            detail = 'Autopilot is composing your reply…'
+            detail_key = 'autopilot.composing'
+        else:
+            detail = 'Generating response…'
+            detail_key = 'stream.phase.generatingResponse'
         append_event(task, build_phase(
             Phase.LLM_THINKING,
-            detail='Generating response…',
-            detailKey='stream.phase.generatingResponse',
+            detail=detail,
+            detailKey=detail_key,
             roundNum=1))
     else:
         tool_names = [tc['function']['name'] for tc in assistant_msg.get('tool_calls', [])]
@@ -458,8 +457,10 @@ def _maybe_auto_retry_turn(task: dict[str, Any], cfg: dict[str, Any]) -> bool:
     _detail = (f'⚠️ 请求失败（{_kind}），正在自动重试整轮 '
                f'({_next}/{_cap}）… / Transient error — auto-retrying the turn')
     try:
+        content_epoch = reset_task_text(task)
         append_event(task, build_event(
-            EventType.RETRY_RESET, attempt=_next, max=_cap, kind=_kind))
+            EventType.RETRY_RESET, attempt=_next, max=_cap, kind=_kind,
+            contentEpoch=content_epoch))
         # (2) transient status bar (same contract as inner stream retries)
         append_event(task, build_phase(
             Phase.RETRYING, detail=_detail,
@@ -489,9 +490,9 @@ def _maybe_auto_retry_turn(task: dict[str, Any], cfg: dict[str, Any]) -> bool:
     if _pristine is not None:
         task['messages'] = list(_pristine)
     task['_auto_turn_retry_count'] = _next
-    with task['content_lock']:
-        task['content'] = ''
-        task['thinking'] = ''
+    # Text was cleared atomically with retry_reset before the backoff. Keeping
+    # one reset seam prevents a poll snapshot from pairing the new epoch with
+    # the discarded attempt's old text.
     # ★ HONEST ACCOUNTING — the discarded attempt was BILLED.
     #   By the time a turn settles into abnormal_stop / premature_close, the
     #   inner stream-anomaly loop may already have burned up to 16 attempts'
@@ -531,6 +532,7 @@ def _maybe_auto_retry_turn(task: dict[str, Any], cfg: dict[str, Any]) -> bool:
     task['error'] = None
     task['finishReason'] = None
     task['toolRounds'] = []
+    task['programRuns'] = []
     # Clear per-phase inner-retry counters so the re-run starts with a fresh
     # inner budget (the stream-anomaly retries are per-attempt, not lifetime).
     task.pop('_premature_retry_count_phase', None)
@@ -711,7 +713,11 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         fb.append({'role':'user','content':f'Here are fetched contents:\n\n{combined}\n\nProvide a comprehensive answer. Cite sources.'})
         try:
             snapshot = _strip_base64_for_snapshot(fb)
-            append_event(task, build_event(EventType.MESSAGES_SNAPSHOT, kind='state', model=model, roundNum='fallback', label=f'Fallback · {len(fb)}条', messages=snapshot))
+            append_event(task, build_event(
+                EventType.MESSAGES_SNAPSHOT, kind='state', model=model,
+                roundNum='fallback', label=f'Fallback · {len(fb)}条',
+                messages=snapshot,
+                contextManifest=list(task.get('_contextManifest') or [])))
         except Exception as e:
             logger.warning('[Task %s] messages_snapshot fallback failed, model=%s: %s', tid, model, e, exc_info=True)
         body = _o.build_body(
@@ -987,11 +993,15 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         if (_proj_feed and task.get('convId')
                 and not (_cfg_feed.get('autopilotRunId') or '').strip()):
             from lib.agent_core.activity import emit_activity_event
-            _kind_feed = 'aborted' if task.get('aborted') else 'completed'
+            _kind_feed = (
+                'aborted' if task.get('aborted') else
+                ('blocked' if task.get('_todo_blocked') else 'completed'))
             emit_activity_event(
                 _proj_feed, task['convId'], _kind_feed,
                 (task.get('lastUserQuery') or '').strip() or ('Turn ' + _kind_feed),
-                task_id=task['id'])
+                task_id=task['id'],
+                payload={'todoBlocked': task.get('_todo_blocked')}
+                if task.get('_todo_blocked') else None)
     except Exception as _feed_e:
         logger.debug('[%s] project-feed terminal emit skipped: %s', tid, _feed_e)
 
@@ -1151,13 +1161,11 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         task['thinkingDepth'] = thinking_depth
     if task.get('error'): done_evt['error'] = task['error']
     if task.get('toolSummary'): done_evt['toolSummary'] = task['toolSummary']
-    # Tool-schema latch: a mid-conversation tool toggle was held back to keep
-    # the prompt cache intact. Tell the frontend so it can offer "Apply now".
-    if cfg.get('_toolsetDiverged'):
-        done_evt['toolsetDiverged'] = True
-        _ts_diff = cfg.get('_toolsetDiff')
-        if _ts_diff and (_ts_diff.get('added') or _ts_diff.get('removed')):
-            done_evt['toolsetDiff'] = _ts_diff
+    if task.get('_todoState'):
+        from lib.tools.todo import public_todo_state
+        done_evt['todoState'] = public_todo_state(task['_todoState'])
+    if task.get('_todo_blocked'):
+        done_evt['todoBlocked'] = task['_todo_blocked']
     # ── Turn-ctx capsule fact-card contract ────────────────────────────
     # The per-turn note in the message gutter (static/js/info-rail.js) is
     # captured from the LIVE toolbar at send time — model / depth / modes
@@ -1439,6 +1447,66 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     except Exception as _ce:
         logger.warning('[Cost] done-event stamp failed (non-fatal): %s', _ce)
 
+    # Same real-cost outcome sent on the live terminal event. The durable copy
+    # was produced by the pre-emit conversation sync above; this closes the
+    # live/reload parity gap without making experiment telemetry critical-path.
+    try:
+        from lib.cost_experiments import build_cost_experiment_outcome
+        _outcome = build_cost_experiment_outcome(
+            task.get('_costExperiment'),
+            usage=done_evt.get('usage'),
+            cost=done_evt.get('cost'),
+            api_rounds=done_evt.get('apiRounds'),
+            finish_reason=(done_evt.get('finishReason')
+                           or task.get('finishReason')),
+            error=done_evt.get('error') or task.get('error'),
+            elapsed_ms=(time.time() - task.get('created_at', time.time())) * 1000,
+            compactions=task.get('_costExperimentCompactions', 0),
+            model=done_evt.get('model') or task.get('model') or '',
+            provider_id=task.get('provider_id') or '',
+            task=task,
+        )
+        if _outcome:
+            done_evt['costExperiment'] = _outcome
+            task['costExperiment'] = _outcome
+            _round_tag = {
+                'experiment_id': _outcome.get('experiment_id'),
+                'arm': _outcome.get('arm'),
+            }
+            for _rd in done_evt.get('apiRounds') or []:
+                if isinstance(_rd, dict) and _outcome.get('arm'):
+                    _rd.setdefault('costExperiment', _round_tag)
+    except Exception as _xe:
+        logger.warning('[CostExperiment] done-event outcome failed '
+                       '(non-fatal): %s', _xe, exc_info=True)
+
+    # Terminal SLO sample. Correlation ids stay in events/logs only; the
+    # Prometheus dimensions are deliberately limited to provider/model/outcome.
+    try:
+        from lib.observability import record_llm_task
+        _metric_error = done_evt.get('error') or task.get('error')
+        _metric_code = (_metric_error or {}).get('code') \
+            if isinstance(_metric_error, dict) else ''
+        if 'budget' in str(_metric_code):
+            _metric_outcome = 'budget'
+        elif task.get('aborted') or last_finish_reason == 'aborted':
+            _metric_outcome = 'aborted'
+        elif _metric_error:
+            _metric_outcome = 'error'
+        else:
+            _metric_outcome = 'success'
+        record_llm_task(
+            done_evt.get('model') or task.get('model') or '',
+            task.get('provider_id') or '',
+            time.time() - task.get('created_at', time.time()),
+            len(done_evt.get('apiRounds') or []),
+            done_evt.get('usage') or {},
+            float((done_evt.get('cost') or {}).get('costUsd') or 0.0),
+            _metric_outcome,
+        )
+    except Exception as _metric_err:
+        logger.debug('[Metrics] terminal LLM sample skipped: %s', _metric_err)
+
     # ★ Comprehensive task-completion summary — keyed on the FULL task id so a
     #   user who quotes the id from the cost popover can grep ONE line that
     #   spans the whole turn (all tool rounds). Includes the per-round cache
@@ -1503,7 +1571,7 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     # incidental write. At this point the hook has concluded (a spawned VU
     # carrier projects itself as <tid>#vu; an ordinary settle projects IDLE),
     # the status is terminal and the latch is gone — this frame is the truth.
-    from lib.tasks_pkg.manager._registry import notify_terminal_busy_state
+    from lib.tasks_pkg.manager import notify_terminal_busy_state
     notify_terminal_busy_state(task)
     # persist_task_result already ran BEFORE the autopilot hook (see above);
     # the heavy-state release was deferred because the VU inherits

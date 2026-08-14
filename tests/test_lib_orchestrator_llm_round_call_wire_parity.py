@@ -18,7 +18,8 @@ class TestLlmRoundCallWireParity:
         sig = inspect.signature(_llm_round_call.run_llm_call_with_fallback)
         params = set(sig.parameters.keys())
         assert {'task', 'rs', 'body', 'messages', 'tool_list', 'stream_acc',
-                'round_num', 'tid', 'max_tokens', 'max_tool_rounds'} <= params
+                'round_num', 'tid', 'max_tokens'} <= params
+        assert 'max_tool_rounds' not in params
 
     def test_body_calls_fallback_with_stream_acc_callback(self):
         src = inspect.getsource(_llm_round_call.run_llm_call_with_fallback)

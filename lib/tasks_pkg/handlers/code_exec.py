@@ -211,15 +211,48 @@ def _make_run_command_spawn_cb(task, rn, round_entry):
         #   switch / reload mid-command can project a live countdown instead of
         #   restarting it. Deliberately NOT throttled — it happens once per
         #   command, not per output chunk.
-        try:
-            from lib.tasks_pkg.manager import checkpoint_task_partial
-            checkpoint_task_partial(task, force=True)
-        except Exception as e:
-            logger.warning('[code_exec] spawn checkpoint failed (non-fatal) '
-                           'task=%s round=%s: %s',
-                           (task.get('id') or '?')[:8], rn, e)
+        # Sub-agent executor proxies deliberately suppress parent-stream
+        # events and own durability through lib/swarm/persistence. Writing the
+        # inner run_command round under the parent's task id would both corrupt
+        # that ownership boundary and used to fail on the proxy's partial task
+        # shape (`content_lock`). Main-chat tasks keep the existing checkpoint.
+        if not task.get('_suppressCheckpoint'):
+            try:
+                from lib.tasks_pkg.manager import checkpoint_task_partial
+                checkpoint_task_partial(task, force=True)
+            except Exception as e:
+                logger.warning('[code_exec] spawn checkpoint failed (non-fatal) '
+                               'task=%s round=%s: %s',
+                               (task.get('id') or '?')[:8], rn, e)
 
     return _on_spawn
+
+
+def _make_grep_intercept_cb(task, rn, round_entry):
+    """Publish display-only metadata when run_command delegates a file grep.
+
+    The empty progress frame updates the running card immediately. No marker is
+    appended to ``toolContent`` or subprocess output, so the model protocol and
+    restored command transcript remain a normal ``run_command`` invocation.
+    """
+    fired = {'done': False}
+
+    def _on_intercept(_count=1):
+        if fired['done']:
+            return
+        fired['done'] = True
+        round_entry['grepSearchIntercepted'] = True
+        append_event(task, {
+            'type': 'tool_progress',
+            'roundNum': rn,
+            'toolCallId': round_entry.get('toolCallId', ''),
+            'toolName': round_entry.get('toolName') or 'run_command',
+            'stream': 'stdout',
+            'chunk': '',
+            'grepSearchIntercepted': True,
+        })
+
+    return _on_intercept
 
 
 def _make_stdin_callback(task, rn, round_entry, command):
@@ -276,9 +309,14 @@ def _make_stdin_callback(task, rn, round_entry, command):
 def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
     from lib.project_mod import execute_standalone_command
     cmd = fn_args.get('command', '')
-    cb = _make_stdin_callback(task, rn, round_entry, cmd)
+    # Background swarm/agent workers have no UI capable of answering a stdin
+    # request. Giving them the interactive callback changes run_command to its
+    # stdin-waiting implementation and can strand a worker indefinitely.
+    cb = (None if task.get('_unattended')
+          else _make_stdin_callback(task, rn, round_entry, cmd))
     progress_cb = _make_run_command_progress_cb(task, rn, round_entry, cmd)
     spawn_cb = _make_run_command_spawn_cb(task, rn, round_entry)
+    grep_intercept_cb = _make_grep_intercept_cb(task, rn, round_entry)
     try:
         # ★ task= (pt_0bde0fd8): without it the runner got task=None — the
         #   subprocess was NEVER registered (_subprocess_pid), so a silent
@@ -289,6 +327,7 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
                                                   stdin_callback=cb,
                                                   on_chunk=progress_cb,
                                                   on_spawn=spawn_cb,
+                                                  on_grep_intercept=grep_intercept_cb,
                                                   task=task)
     finally:
         # Flush any buffered tail that didn't reach the coalescing threshold.
@@ -337,5 +376,7 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
         if interrupted:
             meta['interrupted'] = True
             meta['badge'] = 'interrupted'
+    if round_entry.get('grepSearchIntercepted'):
+        meta['grepSearchIntercepted'] = True
     _finalize_tool_round(task, rn, round_entry, [meta])
     return tc_id, tool_content, False

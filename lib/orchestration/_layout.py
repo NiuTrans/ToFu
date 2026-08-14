@@ -9,9 +9,53 @@ See :mod:`lib.orchestration` for the package overview.
 
 from __future__ import annotations
 
+import copy
+import math
+
 from lib.log import get_logger
 
 logger = get_logger(__name__)
+
+
+def has_definition_layout(defn: dict) -> bool:
+    """Return whether every node has finite numeric display coordinates."""
+    nodes = defn.get('nodes') if isinstance(defn, dict) else None
+    if not isinstance(nodes, list):
+        return False
+
+    def finite_coordinate(value: object) -> bool:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        try:
+            return math.isfinite(value)
+        except OverflowError as e:
+            # Arbitrarily large JSON integers cannot be projected into a
+            # browser coordinate even though Python still considers them ints.
+            logger.debug(
+                '[OrchestrationLayout] coordinate %r is not browser-finite: %s',
+                value, e)
+            return False
+
+    return all(
+        isinstance(node, dict)
+        and isinstance(node.get('pos'), dict)
+        and finite_coordinate(node['pos'].get('x'))
+        and finite_coordinate(node['pos'].get('y'))
+        for node in nodes
+    )
+
+
+def project_definition_layout(defn: dict) -> dict:
+    """Return a detached definition, laying it out only when coordinates lack.
+
+    Durable reads use this migration-safe projection for old or inline run
+    snapshots. Stored authoring data is never mutated, and an intentional
+    complete user layout remains byte-for-byte unchanged.
+    """
+    projected = copy.deepcopy(defn)
+    if not has_definition_layout(projected):
+        layout_definition(projected)
+    return projected
 
 
 def layout_definition(defn: dict, *, x_gap: int = 230, y_gap: int = 150,

@@ -11,15 +11,18 @@ backing worker thread is started lazily on first registration.
 
 from __future__ import annotations
 
+import atexit
 import hmac
 import hashlib
+import heapq
+import itertools
 import json
 import secrets
 import threading
 import time
 from queue import Empty, Queue
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.api_response import api_bad_request, api_created, api_not_found, api_ok
 from lib.config_dir import config_path
@@ -27,6 +30,7 @@ from lib.http_client import http_post
 from lib.json_store import read_json, update_json_atomic
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
+from lib.safe_fetch import SafeFetchError, validate_public_url
 from lib.request_parser import (
     BadRequest, optional_list, optional_str, parse_body, require_str,
 )
@@ -41,6 +45,9 @@ _STORE = config_path('webhooks.json')
 _QUEUE: Queue = Queue(maxsize=10_000)
 _WORKER_STARTED = False
 _WORKER_LOCK = threading.Lock()
+_WORKER_THREAD = None
+_WORKER_STOP = threading.Event()
+_MAX_DELAYED_RETRIES = 10_000
 
 
 # ── Persistence ────────────────────────────────────────────────────
@@ -66,21 +73,55 @@ def _public(sub: dict) -> dict:
 # ── Worker ─────────────────────────────────────────────────────────
 
 def _ensure_worker_started() -> None:
-    global _WORKER_STARTED
-    if _WORKER_STARTED:
+    global _WORKER_STARTED, _WORKER_THREAD
+    if (_WORKER_STARTED and _WORKER_THREAD is not None
+            and _WORKER_THREAD.is_alive()):
         return
     with _WORKER_LOCK:
-        if _WORKER_STARTED:
+        if (_WORKER_STARTED and _WORKER_THREAD is not None
+                and _WORKER_THREAD.is_alive()):
             return
+        _WORKER_STOP.clear()
         _WORKER_STARTED = True
-        threading.Thread(target=_worker_loop,
-                          name='webhook-worker', daemon=True).start()
+        _WORKER_THREAD = threading.Thread(
+            target=_worker_loop, name='webhook-worker', daemon=True)
+        _WORKER_THREAD.start()
         # Hook the PushHub once: every event the hub processes is fanned
         # out to ``_on_push_event``, which enqueues a delivery for each
         # matching subscription. Listener exceptions are isolated by the
         # hub itself, so a delivery bug can never break in-browser push.
         from lib.push import hub
         hub.add_listener(_on_push_event)
+
+
+def stop_webhook_worker(timeout: float = 2.0) -> bool:
+    """Stop the delivery daemon without making process shutdown unbounded."""
+    global _WORKER_STARTED
+    _WORKER_STOP.set()
+    try:
+        _QUEUE.put_nowait(None)
+    except Exception as exc:
+        logger.debug('[Webhooks] worker wake-up skipped during shutdown: %s', exc)
+    thread = _WORKER_THREAD
+    if thread is None or thread is threading.current_thread():
+        _WORKER_STARTED = False
+        return True
+    try:
+        wait_s = max(0.0, float(timeout))
+    except (TypeError, ValueError):
+        logger.debug('[Webhooks] invalid worker shutdown timeout %r; using 2s',
+                     timeout)
+        wait_s = 2.0
+    thread.join(wait_s)
+    stopped = not thread.is_alive()
+    if stopped:
+        _WORKER_STARTED = False
+    else:
+        logger.warning('[Webhooks] worker did not stop within %.1fs', wait_s)
+    return stopped
+
+
+atexit.register(stop_webhook_worker)
 
 
 def _on_push_event(channel: str, task_id: str, payload: dict) -> None:
@@ -113,6 +154,13 @@ def _sign(secret: str, body: str, ts: str) -> str:
     return hmac.new(secret.encode('utf-8'), msg, hashlib.sha256).hexdigest()
 
 
+def _validate_webhook_url(url: str, *, allow_unresolved: bool = False) -> None:
+    """Webhooks are public egress unless the operator names an exception."""
+    validate_public_url(
+        url, allow_hosts_env='TOFU_WEBHOOK_ALLOW_HOSTS',
+        allow_unresolved=allow_unresolved)
+
+
 def _deliver(item: dict) -> bool:
     sub = item['sub']
     url = sub.get('url')
@@ -133,41 +181,108 @@ def _deliver(item: dict) -> bool:
         'X-Tofu-Subscription-Id': sub.get('id', ''),
     }
     try:
+        # Re-check at delivery time: a hostname can change after registration.
+        # Redirects are intentionally disabled; a webhook endpoint is expected
+        # to accept this exact POST URL, and following a 30x would create a
+        # second SSRF hop as well as potentially changing POST into GET.
+        _validate_webhook_url(url)
         resp = http_post(url, data=body.encode('utf-8'), headers=headers,
-                         timeout=15)
+                         timeout=15, allow_redirects=False)
+        item['_last_status'] = int(resp.status_code)
         if 200 <= resp.status_code < 300:
             return True
         logger.warning('[Webhooks] delivery %s %s → %d',
                        sub.get('id', ''), url, resp.status_code)
         return False
     except Exception as e:
+        item['_last_status'] = None
         logger.warning('[Webhooks] delivery %s %s failed: %s',
                        sub.get('id', ''), url, e)
         return False
 
 
+def _delivery_is_retryable(item: dict) -> bool:
+    """Retry transient transport/HTTP failures, never permanent client errors."""
+    status = item.get('_last_status')
+    if status is None:
+        return True
+    return status in (408, 409, 425, 429) or status >= 500
+
+
+def _subscription_is_active(sub: dict) -> bool:
+    """False once a queued subscription has been deleted or disabled."""
+    sub_id = sub.get('id')
+    if not sub_id:
+        return False
+    return any(
+        current.get('id') == sub_id and not current.get('disabled')
+        for current in _load()
+    )
+
+
+def _schedule_retry(delayed: list, sequence, item: dict, *, now=None) -> bool:
+    """Put one failed delivery on the bounded in-thread delay heap."""
+    item['attempt'] = item.get('attempt', 0) + 1
+    if item['attempt'] >= 5 or len(delayed) >= _MAX_DELAYED_RETRIES:
+        return False
+    backoff = min(60, 2 ** item['attempt'])
+    heapq.heappush(
+        delayed,
+        ((time.monotonic() if now is None else now) + backoff,
+         next(sequence), item),
+    )
+    return True
+
+
 def _worker_loop():
     logger.info('[Webhooks] worker started')
-    while True:
+    # Delayed retries live in this one worker, not one Timer thread per event.
+    # Entries are (monotonic ready time, stable sequence, delivery item).
+    delayed: list[tuple[float, int, dict]] = []
+    sequence = itertools.count()
+    while not _WORKER_STOP.is_set():
+        item = None
+        from_immediate_queue = False
+        now = time.monotonic()
+        if delayed and delayed[0][0] <= now:
+            _ready_at, _seq, item = heapq.heappop(delayed)
+        timeout = 5.0
+        if item is None and delayed:
+            timeout = min(timeout, max(0.0, delayed[0][0] - now))
         try:
-            item = _QUEUE.get(timeout=5)
+            if item is None:
+                item = _QUEUE.get(timeout=timeout)
+                from_immediate_queue = True
         except Empty:
             continue
         try:
+            if item is None or _WORKER_STOP.is_set():
+                continue
+            # Deleting/disabling a subscription revokes work that was already
+            # queued, including delayed retries. Otherwise a typo'd endpoint
+            # keeps generating DNS/network traffic after the user removes it.
+            if not _subscription_is_active(item.get('sub') or {}):
+                continue
             ok = _deliver(item)
-            if not ok:
-                item['attempt'] = item.get('attempt', 0) + 1
-                if item['attempt'] < 5:
-                    backoff = min(60, 2 ** item['attempt'])
-                    threading.Timer(backoff,
-                                     lambda: _QUEUE.put(item)).start()
-                else:
-                    logger.warning('[Webhooks] giving up on %s after %d '
-                                   'attempts',
-                                   item['sub'].get('id', ''), item['attempt'])
+            if not ok and _delivery_is_retryable(item):
+                if not _schedule_retry(delayed, sequence, item):
+                    logger.warning('[Webhooks] giving up/drop on %s after %d '
+                                   'attempts (delayed=%d)',
+                                   item['sub'].get('id', ''),
+                                   item.get('attempt', 0), len(delayed))
+            elif not ok:
+                logger.warning('[Webhooks] permanent failure for %s (HTTP %s), '
+                               'not retrying', item['sub'].get('id', ''),
+                               item.get('_last_status'))
         except Exception as e:
             logger.error('[Webhooks] worker cycle failed: %s', e,
                          exc_info=True)
+        finally:
+            if from_immediate_queue:
+                try:
+                    _QUEUE.task_done()
+                except (AttributeError, ValueError) as exc:
+                    logger.debug('[Webhooks] queue task_done skipped: %s', exc)
 
 
 # ── Routes ─────────────────────────────────────────────────────────
@@ -190,8 +305,14 @@ def create_sub():
         url = require_str(body, 'url', max_len=2000)
     except BadRequest as e:
         return api_bad_request(str(e), field=e.field or 'url')
-    if not url.startswith(('http://', 'https://')):
-        return api_bad_request('url must be http(s)://', field='url')
+    try:
+        # Saving a subscription must work on an offline fresh install. A
+        # currently resolvable private target is still rejected here; a DNS
+        # outage is merely deferred because _deliver() revalidates immediately
+        # before every network request and follows no redirects.
+        _validate_webhook_url(url, allow_unresolved=True)
+    except SafeFetchError as e:
+        return api_bad_request(str(e), field='url')
     channel = optional_str(body, 'channel', default='', max_len=80)
     task_id = optional_str(body, 'task_id', default='*', max_len=200)
     event_types = optional_list(body, 'event_types',

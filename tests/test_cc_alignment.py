@@ -375,9 +375,9 @@ class TestResolveModelConfigResponseFormat:
 
 @pytest.mark.unit
 class TestAssembleToolListReturnValue:
-    """Verify _assemble_tool_list returns the expected 3-tuple."""
+    """Verify _assemble_tool_list returns only tools and capability state."""
 
-    def test_returns_three_values(self):
+    def test_returns_two_values(self):
         from lib.tasks_pkg.model_config import _assemble_tool_list
         result = _assemble_tool_list(
             cfg={'messages': []},
@@ -394,13 +394,13 @@ class TestAssembleToolListReturnValue:
             scheduler_enabled=False,
             messages=None,
         )
-        assert len(result) == 3, f'Expected 3-tuple, got {len(result)}-tuple'
-        tool_list, has_real_tools, max_tool_rounds = result
+        assert len(result) == 2, f'Expected 2-tuple, got {len(result)}-tuple'
+        tool_list, has_real_tools = result
         assert tool_list is not None
 
     def test_default_tool_list_includes_read_files(self):
         from lib.tasks_pkg.model_config import _assemble_tool_list
-        tool_list, has_real_tools, max_tool_rounds = _assemble_tool_list(
+        tool_list, has_real_tools = _assemble_tool_list(
             cfg={'messages': []},
             project_path=None,
             project_enabled=False,
@@ -602,10 +602,16 @@ class TestSystemReminderAndBlocks:
         # Static CC content lives somewhere in the system message blocks
         assert 'Function Result Clearing' in full
         assert 'concise' in full.lower()
-        # Memory accumulation reminder gets its own segmented block (last)
-        last_block_text = content[-1].get('text', '')
-        assert '<memory_accumulation>' in last_block_text or \
-               'accumulated memories' in last_block_text
+        # Memory accumulation reminder gets its own segmented block. It is not
+        # required to be last: later independent cache blocks (for example the
+        # credential-vault index) may legitimately follow it.
+        memory_blocks = [
+            block.get('text', '') for block in content
+            if isinstance(block, dict)
+            and ('<memory_accumulation>' in block.get('text', '')
+                 or 'accumulated memories' in block.get('text', ''))
+        ]
+        assert memory_blocks, 'memory reminder must remain a separate cache block'
 
     def test_cache_breakpoints_per_block(self):
         """add_cache_breakpoints should cache each text block independently."""

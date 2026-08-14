@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 
-from lib.database import DOMAIN_CHAT, db_execute_with_retry, get_thread_db, json_dumps_pg
+from lib.database import DOMAIN_CHAT, get_thread_db
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -99,11 +99,10 @@ def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db=None, task=Non
     _guard_key_msg_id = ''
     _guard_key_idx = None
     try:
-        row = db.execute(
-            'SELECT messages, settings FROM conversations WHERE id=? AND user_id=1',
-            (conv_id,)
-        ).fetchone()
-        if not row:
+        from lib.database.conversation_repository import load_conversation
+        snapshot = load_conversation(
+            db, conv_id, metadata_columns=('settings',))
+        if snapshot is None:
             return
 
         # ── Check autoTranslate setting (canonical default-OFF resolver) ──
@@ -111,7 +110,8 @@ def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db=None, task=Non
         # defaulted FALSE — the three-way split that made auto-translate fire
         # unpredictably. Now every trigger path resolves through the single
         # lib.conv_config.resolve_auto_translate (default OFF).
-        settings = json.loads(row[1] or '{}') if row[1] else {}
+        raw_settings = snapshot.get('settings')
+        settings = json.loads(raw_settings or '{}') if raw_settings else {}
         from lib.conv_config import resolve_auto_translate, resolve_translate_target, target_lang_code
         auto_translate = resolve_auto_translate(settings)
         # ── OUTPUT-side target language (model reply → human) ──
@@ -129,7 +129,7 @@ def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db=None, task=Non
                         settings.get('autoTranslate'))
             return
 
-        messages = json.loads(row[0] or '[]')
+        messages = snapshot.messages
 
         # ── Resolve the target message by STABLE ID first (Phase 2) ──
         # The caller passes a positional ``msg_idx`` (e.g. len(messages)-1 from
@@ -189,17 +189,12 @@ def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db=None, task=Non
                             _now_ms = int(time.time() * 1000)
                             # Phase 4 W4: CAS on rev (best-effort single-shot; a
                             # miss just skips the stale-clear, as before).
-                            db_execute_with_retry(
-                                db,
-                                'UPDATE conversations SET messages=?, updated_at=? WHERE id=? AND user_id=1 AND rev=?',
-                                (json_dumps_pg(messages), _now_ms, conv_id, _ua_row[0])
-                            )
-                            # Phase 5 dual-write (flag-gated, inert when off):
-                            # stale-translation clear edits ONE message.
-                            from lib.database.messages_rows import mirror_write_and_commit
-                            mirror_write_and_commit(db, conv_id, messages,
-                                                    now_ms=_now_ms,
-                                                    changed_seqs=[eff_idx])
+                            from lib.database.conversation_repository import replace_messages
+                            replace_messages(
+                                db, conv_id, messages,
+                                expected_rev=_ua_row[0],
+                                metadata={'updated_at': _now_ms},
+                                changed_seqs=[eff_idx])
                     except Exception as ce:
                         logger.warning('%s conv=%s Failed to clear stale translation: %s',
                                        pfx, conv_id[:8], ce)
@@ -256,17 +251,12 @@ def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db=None, task=Non
                     ).fetchone()
                     if _ua_row:
                         _now_ms = int(time.time() * 1000)
-                        db_execute_with_retry(
-                            db,
-                            'UPDATE conversations SET messages=?, updated_at=? WHERE id=? AND user_id=1 AND rev=?',
-                            (json_dumps_pg(messages), _now_ms, conv_id, _ua_row[0])
-                        )
-                        # Phase 5 dual-write (flag-gated, inert when off):
-                        # the settle marker edits ONE message.
-                        from lib.database.messages_rows import mirror_write_and_commit
-                        mirror_write_and_commit(db, conv_id, messages,
-                                                now_ms=_now_ms,
-                                                changed_seqs=[eff_idx])
+                        from lib.database.conversation_repository import replace_messages
+                        replace_messages(
+                            db, conv_id, messages,
+                            expected_rev=_ua_row[0],
+                            metadata={'updated_at': _now_ms},
+                            changed_seqs=[eff_idx])
                 except Exception as ne:
                     logger.warning('%s conv=%s Failed to persist no-op '
                                    '_translateDone marker: %s', pfx, conv_id[:8], ne)

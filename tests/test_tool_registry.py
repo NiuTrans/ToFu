@@ -64,6 +64,20 @@ class TestOrdering(unittest.TestCase):
 
 
 class TestPhaseSemantics(unittest.TestCase):
+    def test_available_scope_keeps_hidden_tool_executable_not_on_wire(self):
+        ctx = _ctx()
+        tl, _ = assemble_tool_list(ctx)
+        self.assertNotIn('run_command', _names(tl))
+        self.assertIn('run_command', _names(ctx.enabled_tool_catalog))
+        self.assertEqual(
+            ctx.discovery_policy_by_name['run_command'], 'searchable')
+
+    def test_selected_only_scope_preserves_legacy_authority(self):
+        ctx = _ctx(cfg={'tools': {'executionScope': 'selected_only'}})
+        tl, _ = assemble_tool_list(ctx)
+        self.assertNotIn('run_command', _names(tl))
+        self.assertNotIn('run_command', _names(ctx.enabled_tool_catalog))
+
     def test_read_files_always_on_and_pulls_memory(self):
         # Even bare (no project/search), read_files is on → counts as a base
         # tool → memory tools attach.
@@ -73,16 +87,18 @@ class TestPhaseSemantics(unittest.TestCase):
         self.assertIn('read_files', names)
         self.assertIn('create_memory', names)
 
-    def test_scheduler_is_default_tool_regardless_of_flag(self):
+    def test_scheduler_is_default_authority_regardless_of_flag(self):
         # Scheduler tools are a DEFAULT capability (like memory / todo): they
         # attach whenever a base tool exists, NOT gated on scheduler_enabled.
         # read_files is always on, so they're present even with the flag off.
         for flag in (False, True):
-            tl, _ = assemble_tool_list(_ctx(scheduler_enabled=flag))
-            names = _names(tl)
+            ctx = _ctx(scheduler_enabled=flag)
+            assemble_tool_list(ctx)
+            names = _names(ctx.enabled_tool_catalog)
             for n in ('schedule_create', 'schedule_list', 'schedule_manage'):
                 self.assertIn(n, names,
-                              f'{n} must be present regardless of scheduler_enabled={flag}')
+                              f'{n} must remain executable regardless of scheduler_enabled={flag}')
+                self.assertEqual(ctx.discovery_policy_by_name[n], 'searchable')
 
     def test_swarm_without_base_tools(self):
         # Swarm is NOT gated on has_base_tools — but read_files is always on,
@@ -115,9 +131,9 @@ class TestPhaseSemantics(unittest.TestCase):
     def test_charter_tools_register_in_project_mode(self):
         # Charter tools (Pillar #2) ride the same project-mode gate as the
         # conv-ref tools — present in project mode, absent otherwise.
-        tl_proj, _ = assemble_tool_list(_ctx(
-            project_path='/tmp/x', project_enabled=True))
-        names = _names(tl_proj)
+        ctx_proj = _ctx(project_path='/tmp/x', project_enabled=True)
+        assemble_tool_list(ctx_proj)
+        names = _names(ctx_proj.enabled_tool_catalog)
         self.assertIn('project_charter_read', names)
         self.assertIn('project_charter_propose', names)
         # Drift note: this test used to assert project_charter_commit WAS in
@@ -142,8 +158,7 @@ class TestPhaseSemantics(unittest.TestCase):
 
     def test_conv_ref_not_triggered_by_assistant_prose(self):
         # REGRESSION: a conversation *about* the feature, where the assistant
-        # quotes the bare token, must NOT self-enable the tools. (This is the
-        # exact false-positive that popped the toolset-diverged banner.)
+        # quotes the bare token, must NOT self-enable the tools.
         tl, _ = assemble_tool_list(_ctx(messages=[
             {'role': 'user', 'content': 'what is the REFERENCED_CONVERSATION tag?'},
             {'role': 'assistant',
@@ -155,7 +170,7 @@ class TestPhaseSemantics(unittest.TestCase):
 
 class TestLegacyShim(unittest.TestCase):
     def test_caller_supplied_tools_override(self):
-        tl, hr, mtr = _assemble_tool_list(
+        tl, hr = _assemble_tool_list(
             cfg={'tools': [{'type': 'function', 'function': {'name': 'foo'}}]},
             project_path='', project_enabled=False, task_id='t', search_mode='multi',
             search_enabled=True, fetch_enabled=True, code_exec_enabled=False,
@@ -163,7 +178,6 @@ class TestLegacyShim(unittest.TestCase):
             messages=[])
         self.assertEqual(_names(tl), ['foo'])
         self.assertTrue(hr)
-        self.assertEqual(mtr, 999_999_999)
 
     def test_empty_returns_none_tool_list(self):
         # Force-disable read_files by simulating no specs would be a deeper
@@ -174,6 +188,26 @@ class TestLegacyShim(unittest.TestCase):
         # read_files keeps this non-empty — assert the shim path stays valid.
         self.assertIsNotNone(tl)
         self.assertTrue(hr)
+
+    def test_frontend_enabled_families_are_stamped_as_tool_search_pins(self):
+        cfg = {'memoryEnabled': True, 'mcpEnabled': False}
+        tl, _ = _assemble_tool_list(
+            cfg=cfg, project_path='/tmp/x', project_enabled=True,
+            task_id='t', search_mode='multi', search_enabled=True,
+            fetch_enabled=True, code_exec_enabled=False,
+            browser_enabled=False, desktop_enabled=False,
+            swarm_enabled=False, image_gen_enabled=False,
+            messages=[])
+        names = set(_names(tl))
+        pins = set(cfg['_frontendSelectedToolNames'])
+        assert {'web_search', 'fetch_url', 'read_files', 'list_dir',
+                'run_command', 'create_memory',
+                'todo_write'} <= pins <= names
+        assert 'load_skill' not in names  # no skill is installed in this fixture
+        # High-level production tools merely ride the search gate; the human
+        # did not explicitly select them, so they remain eligible for search.
+        assert 'produce_report' in _names(cfg['_enabledToolCatalog'])
+        assert 'produce_report' not in pins
 
 
 class TestPluginRegistration(unittest.TestCase):
@@ -187,8 +221,9 @@ class TestPluginRegistration(unittest.TestCase):
         try:
             register_tool_spec(spec)
             self.assertIn(spec, all_specs())
-            tl, _ = assemble_tool_list(_ctx(cfg={'weatherEnabled': True}))
-            self.assertIn('_test_weather_tool', _names(tl))
+            ctx = _ctx(cfg={'weatherEnabled': True})
+            assemble_tool_list(ctx)
+            self.assertIn('_test_weather_tool', _names(ctx.enabled_tool_catalog))
             # Gate off → absent.
             tl_off, _ = assemble_tool_list(_ctx(cfg={}))
             self.assertNotIn('_test_weather_tool', _names(tl_off))

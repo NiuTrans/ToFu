@@ -31,7 +31,12 @@ from __future__ import annotations
 
 import json
 
-from lib.database import DOMAIN_CHAT, get_thread_db
+from lib.database import (
+    DOMAIN_CHAT,
+    db_execute_with_retry,
+    get_thread_db,
+    write_transaction,
+)
 from lib.ids import short_id
 from lib.log import audit_log, get_logger
 from lib.timeutil import now_ms
@@ -480,50 +485,55 @@ def post_task(project_path: str, conv_id: str, title: str, *,
     project_path = normalize_project_path(project_path)
     try:
         db = get_thread_db(DOMAIN_CHAT)
-        # Admission counts ACTIVE epics only (status != 'done') — completed
-        # epics are history and must never block a new post, else a long-lived
-        # project's board is permanently "full".
-        n = db.execute(
-            "SELECT COUNT(*) AS c FROM project_tasks "
-            "WHERE project_path=? AND status!='done'",
-            (project_path,)).fetchone()
-        if n and int(n['c']) >= _MAX_ACTIVE_TASKS:
-            return {'ok': False,
-                    'error': f'board full: {_MAX_ACTIVE_TASKS} active epics '
-                             '(complete or reopen some before posting more)'}
-        # Prune the oldest completed epics so the retained history stays bounded
-        # over the project's life. Best-effort in the same connection; the
-        # "Recently done" lane only ever shows the last ~8 anyway.
-        try:
-            d = db.execute(
+        # Admission, bounded-history pruning, and insertion are one semantic
+        # unit. BEGIN IMMEDIATE makes the capacity decision serial on SQLite;
+        # the transaction primitive gives PostgreSQL the same rollback scope.
+        with write_transaction(db, label='post project board task'):
+            # Admission counts ACTIVE epics only (status != 'done') — completed
+            # epics are history and must never block a new post.
+            n = db.execute(
                 "SELECT COUNT(*) AS c FROM project_tasks "
-                "WHERE project_path=? AND status='done'",
+                "WHERE project_path=? AND status!='done'",
                 (project_path,)).fetchone()
-            done_n = int(d['c']) if d else 0
-            if done_n > _MAX_DONE_RETAINED:
-                db.execute(
-                    'DELETE FROM project_tasks WHERE id IN ('
-                    "  SELECT id FROM project_tasks "
-                    "  WHERE project_path=? AND status='done' "
-                    '  ORDER BY updated_at ASC LIMIT ?)',
-                    (project_path, done_n - _MAX_DONE_RETAINED))
-        except Exception as e:
-            logger.debug('[Board] done-row prune skipped proj=%.40r: %s',
-                         project_path, e)
-        task_id = short_id('pt_', 16)
-        ts = _now_ms()
-        deps = json.dumps([str(d) for d in (depends_on or [])], ensure_ascii=False)
-        # RWA P5:远程绑定的会话发的 epic 自动携带远程根 token。
-        merged_ws = _merge_remote_token(
-            write_set, _conv_remote_token(db, conv_id))
-        wset = json.dumps(merged_ws, ensure_ascii=False)
-        db.execute(
-            'INSERT INTO project_tasks '
-            '(id, project_path, title, status, owner_conv_id, lease_expires_at, '
-            ' created_by_conv, depends_on, write_set, created_at, updated_at) '
-            "VALUES (?, ?, ?, 'open', '', 0, ?, ?, ?, ?, ?)",
-            (task_id, project_path, title, conv_id or '', deps, wset, ts, ts))
-        db.commit()
+            if n and int(n['c']) >= _MAX_ACTIVE_TASKS:
+                return {'ok': False,
+                        'error': f'board full: {_MAX_ACTIVE_TASKS} active epics '
+                                 '(complete or reopen some before posting more)'}
+            # Keep a failed best-effort prune from poisoning PostgreSQL's outer
+            # transaction: the nested unit is a savepoint.
+            try:
+                with write_transaction(db, label='prune project board history'):
+                    d = db.execute(
+                        "SELECT COUNT(*) AS c FROM project_tasks "
+                        "WHERE project_path=? AND status='done'",
+                        (project_path,)).fetchone()
+                    done_n = int(d['c']) if d else 0
+                    if done_n > _MAX_DONE_RETAINED:
+                        db.execute(
+                            'DELETE FROM project_tasks WHERE id IN ('
+                            "  SELECT id FROM project_tasks "
+                            "  WHERE project_path=? AND status='done' "
+                            '  ORDER BY updated_at ASC LIMIT ?)',
+                            (project_path, done_n - _MAX_DONE_RETAINED))
+            except Exception as e:
+                logger.debug('[Board] done-row prune skipped proj=%.40r: %s',
+                             project_path, e)
+            task_id = short_id('pt_', 16)
+            ts = _now_ms()
+            deps = json.dumps(
+                [str(d) for d in (depends_on or [])], ensure_ascii=False)
+            # RWA P5:远程绑定的会话发的 epic 自动携带远程根 token。
+            merged_ws = _merge_remote_token(
+                write_set, _conv_remote_token(db, conv_id))
+            wset = json.dumps(merged_ws, ensure_ascii=False)
+            db.execute(
+                'INSERT INTO project_tasks '
+                '(id, project_path, title, status, owner_conv_id, '
+                ' lease_expires_at, created_by_conv, depends_on, write_set, '
+                ' created_at, updated_at) '
+                "VALUES (?, ?, ?, 'open', '', 0, ?, ?, ?, ?, ?)",
+                (task_id, project_path, title, conv_id or '', deps, wset,
+                 ts, ts))
     except Exception as e:
         logger.error('[Board] post failed proj=%.40r: %s', project_path, e, exc_info=True)
         return {'ok': False, 'error': str(e)}
@@ -590,24 +600,28 @@ def claim_task(project_path: str, conv_id: str, task_id: str, *,
         prev_lease = int(row['lease_expires_at'] or 0)
         # RWA P5:认领会话的远程绑定并入 write_set(与认领同事务)——
         # claimed write_set 是 select_dispatchable 降级排序的输入。
+        previous_write_set = row['write_set'] or '[]'
         try:
-            cur_ws = json.loads(row['write_set'] or '[]')
+            cur_ws = json.loads(previous_write_set)
         except Exception as _e:
             logger.debug('claim task: failed (%s)', _e)
             cur_ws = []
         merged_ws = _merge_remote_token(
             cur_ws if isinstance(cur_ws, list) else [],
             _conv_remote_token(db, conv_id))
-        res = db.execute(
+        res = db_execute_with_retry(
+            db,
             "UPDATE project_tasks SET status='claimed', owner_conv_id=?, "
             'lease_expires_at=?, dispatched=?, updated_at=?, write_set=? '
             'WHERE id=? AND project_path=? '
             '  AND COALESCE(owner_conv_id,?)=? '
-            '  AND COALESCE(lease_expires_at,0)=?',
+            '  AND COALESCE(lease_expires_at,0)=? '
+            "  AND COALESCE(write_set,'[]')=?",
             (conv_id or '', lease, 1 if dispatched else 0, now,
              json.dumps(merged_ws, ensure_ascii=False),
-             task_id, project_path, prev_owner, prev_owner, prev_lease))
-        db.commit()
+             task_id, project_path, prev_owner, prev_owner, prev_lease,
+             previous_write_set),
+            return_cursor=True)
         if getattr(res, 'rowcount', 1) == 0:
             # Lost the race: another writer claimed/refreshed between our read
             # and write. Re-read to report the current owner (advisory refusal).
@@ -644,14 +658,16 @@ def complete_task(project_path: str, conv_id: str, task_id: str) -> dict:
         title = _task_title(db, project_path, task_id)
         if title is None:
             return {'ok': False, 'error': 'task not found'}
-        db.execute(
+        cursor = db_execute_with_retry(
+            db,
             "UPDATE project_tasks SET status='done', lease_expires_at=0, "
             "dispatched=0, blocked_until=0, block_count=0, block_reason='', "
             "wait_paths='[]', dispatch_target='', block_question='', "
             "human_answer='', updated_at=? "
             'WHERE id=? AND project_path=?',
-            (_now_ms(), task_id, project_path))
-        db.commit()
+            (_now_ms(), task_id, project_path), return_cursor=True)
+        if getattr(cursor, 'rowcount', 0) == 0:
+            return {'ok': False, 'error': 'task not found'}
     except Exception as e:
         logger.error('[Board] complete failed proj=%.40r task=%s: %s',
                      project_path, task_id, e, exc_info=True)
@@ -746,14 +762,18 @@ def block_task(project_path: str, conv_id: str, task_id: str, reason: str,
         # answer_task): a fresh block also supersedes (clears) any stale
         # human_answer left from an earlier round.
         question_json = _clean_block_question(question, options)
-        db.execute(
+        cursor = db_execute_with_retry(
+            db,
             'UPDATE project_tasks SET blocked_until=?, block_count=?, '
             'block_reason=?, block_question=?, human_answer=?, blocked_by=?, '
             'updated_at=? '
-            'WHERE id=? AND project_path=?',
+            'WHERE id=? AND project_path=? '
+            'AND COALESCE(block_count,0)=?',
             (blocked_until, new_count, reason, question_json, '', conv_id,
-             now, task_id, project_path))
-        db.commit()
+             now, task_id, project_path, new_count - 1),
+            return_cursor=True)
+        if getattr(cursor, 'rowcount', 0) == 0:
+            return {'ok': False, 'error': 'block_conflict'}
     except Exception as e:
         logger.error('[Board] block failed proj=%.40r task=%s: %s',
                      project_path, task_id, e, exc_info=True)
@@ -812,14 +832,20 @@ def reopen_task(project_path: str, conv_id: str, task_id: str) -> dict:
         has_live_block = int(row['blocked_until'] or 0) > _now_ms()
         if prev_status == 'open' and not has_live_block:
             return {'ok': False, 'error': 'already_open'}
-        db.execute(
+        previous_blocked_until = int(row['blocked_until'] or 0)
+        cursor = db_execute_with_retry(
+            db,
             "UPDATE project_tasks SET status='open', owner_conv_id='', "
             "lease_expires_at=0, dispatched=0, blocked_until=0, block_count=0, "
             "block_reason='', wait_paths='[]', dispatch_target='', "
             "block_question='', human_answer='', updated_at=? "
-            'WHERE id=? AND project_path=?',
-            (_now_ms(), task_id, project_path))
-        db.commit()
+            'WHERE id=? AND project_path=? AND status=? '
+            "AND COALESCE(owner_conv_id,'')=? "
+            'AND COALESCE(blocked_until,0)=?',
+            (_now_ms(), task_id, project_path, prev_status, prev_owner,
+             previous_blocked_until), return_cursor=True)
+        if getattr(cursor, 'rowcount', 0) == 0:
+            return {'ok': False, 'error': 'reopen_conflict'}
     except Exception as e:
         logger.error('[Board] reopen failed proj=%.40r task=%s: %s',
                      project_path, task_id, e, exc_info=True)
@@ -869,34 +895,39 @@ def delete_task(project_path: str, conv_id: str, task_id: str) -> dict:
     project_path = normalize_project_path(project_path)
     try:
         db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT title, status, owner_conv_id FROM project_tasks '
-            'WHERE id=? AND project_path=?', (task_id, project_path)).fetchone()
-        if not row:
-            return {'ok': False, 'error': 'task not found'}
-        title = row['title'] or ''
-        prev_status = row['status'] or 'open'
-        prev_owner = row['owner_conv_id'] or ''
-        dependents = []
-        for r in db.execute(
-                "SELECT title, depends_on FROM project_tasks "
-                "WHERE project_path=? AND status!='done' AND id!=?",
-                (project_path, task_id)).fetchall():
-            try:
-                deps = json.loads(r['depends_on']) if r['depends_on'] else []
-            except (TypeError, ValueError) as e:
-                logger.debug('[Board] dependent depends_on parse failed: %s', e)
-                deps = []
-            if isinstance(deps, list) and task_id in deps:
-                dependents.append((r['title'] or '')[:80])
-        if dependents:
-            logger.info('[Board] delete refused proj=%.40r task=%s: %d active '
-                        'dependents', project_path, task_id, len(dependents))
-            return {'ok': False, 'error': 'has_dependents',
-                    'dependents': dependents}
-        db.execute('DELETE FROM project_tasks WHERE id=? AND project_path=?',
-                   (task_id, project_path))
-        db.commit()
+        with write_transaction(db, label='delete project board task'):
+            row = db.execute(
+                'SELECT title, status, owner_conv_id FROM project_tasks '
+                'WHERE id=? AND project_path=?',
+                (task_id, project_path)).fetchone()
+            if not row:
+                return {'ok': False, 'error': 'task not found'}
+            title = row['title'] or ''
+            prev_status = row['status'] or 'open'
+            prev_owner = row['owner_conv_id'] or ''
+            dependents = []
+            for r in db.execute(
+                    "SELECT title, depends_on FROM project_tasks "
+                    "WHERE project_path=? AND status!='done' AND id!=?",
+                    (project_path, task_id)).fetchall():
+                try:
+                    deps = (json.loads(r['depends_on'])
+                            if r['depends_on'] else [])
+                except (TypeError, ValueError) as e:
+                    logger.debug(
+                        '[Board] dependent depends_on parse failed: %s', e)
+                    deps = []
+                if isinstance(deps, list) and task_id in deps:
+                    dependents.append((r['title'] or '')[:80])
+            if dependents:
+                logger.info(
+                    '[Board] delete refused proj=%.40r task=%s: %d active '
+                    'dependents', project_path, task_id, len(dependents))
+                return {'ok': False, 'error': 'has_dependents',
+                        'dependents': dependents}
+            db.execute(
+                'DELETE FROM project_tasks WHERE id=? AND project_path=?',
+                (task_id, project_path))
     except Exception as e:
         logger.error('[Board] delete failed proj=%.40r task=%s: %s',
                      project_path, task_id, e, exc_info=True)
@@ -949,12 +980,15 @@ def answer_task(project_path: str, conv_id: str, task_id: str, answer: str) -> d
                 question_text = str(_bq.get('q') or '')
         except (TypeError, ValueError) as e:
             logger.debug('[Board] answer: stored question JSON unparseable: %s', e)
-        db.execute(
+        cursor = db_execute_with_retry(
+            db,
             'UPDATE project_tasks SET human_answer=?, blocked_until=0, '
             "block_count=0, block_reason='', block_question='', updated_at=? "
-            'WHERE id=? AND project_path=?',
-            (answer, _now_ms(), task_id, project_path))
-        db.commit()
+            'WHERE id=? AND project_path=? AND block_question=?',
+            (answer, _now_ms(), task_id, project_path, question_raw),
+            return_cursor=True)
+        if getattr(cursor, 'rowcount', 0) == 0:
+            return {'ok': False, 'error': 'answer_conflict'}
     except Exception as e:
         logger.error('[Board] answer failed proj=%.40r task=%s: %s',
                      project_path, task_id, e, exc_info=True)
@@ -1004,11 +1038,14 @@ def set_write_set(project_path: str, conv_id: str, task_id: str,
         title = _task_title(db, project_path, task_id)
         if title is None:
             return {'ok': False, 'error': 'task not found'}
-        db.execute(
+        cursor = db_execute_with_retry(
+            db,
             'UPDATE project_tasks SET write_set=?, updated_at=? '
             'WHERE id=? AND project_path=?',
-            (json.dumps(clean), _now_ms(), task_id, project_path))
-        db.commit()
+            (json.dumps(clean), _now_ms(), task_id, project_path),
+            return_cursor=True)
+        if getattr(cursor, 'rowcount', 0) == 0:
+            return {'ok': False, 'error': 'task not found'}
     except Exception as e:
         logger.error('[Board] set_write_set failed proj=%.40r task=%s: %s',
                      project_path, task_id, e, exc_info=True)

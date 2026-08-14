@@ -320,7 +320,8 @@ class ToolEnvironment:
                         or self.limits.per_call_timeout_s)
         try:
             resp = http_post(url, json={'tool': tool.name, 'arguments': fn_args},
-                             headers=headers, timeout=timeout)
+                             headers=headers, timeout=timeout,
+                             allow_redirects=False)
         except Exception as e:
             logger.debug('[CustomTool] webhook request failed for %s: %s: %s',
                          tool.name, type(e).__name__, e)

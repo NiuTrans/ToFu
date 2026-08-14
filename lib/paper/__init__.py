@@ -17,7 +17,6 @@ from .hashing import BASE_DIR, PAPER_DIR, PAPER_IMG_DIR, _paper_hash, _safe_hash
 
 # Prompts + tool list
 from .prompts import (
-    _MAX_REPORT_TOOL_ROUNDS,
     _REPORT_PROMPT_EN,
     _REPORT_PROMPT_ZH,
     _REPORT_TOOLS,
@@ -151,7 +150,7 @@ from .qa_runtime import (
     _qa_tasks,
     _qa_tasks_lock,
 )
-from .qa_engine import _MAX_QA_TOOL_ROUNDS, _run_qa_task
+from .qa_engine import _run_qa_task
 
 # Deepen (on-demand section depth, reading-xp P3)
 from .deepen_engine import (
@@ -186,7 +185,7 @@ __all__ = [
     'BASE_DIR', 'PAPER_DIR', 'PAPER_IMG_DIR', '_paper_hash', '_safe_hash_dir',
     'resolve_paper_hash',
     # prompts
-    '_REPORT_PROMPT_EN', '_REPORT_PROMPT_ZH', '_REPORT_TOOLS', '_MAX_REPORT_TOOL_ROUNDS',
+    '_REPORT_PROMPT_EN', '_REPORT_PROMPT_ZH', '_REPORT_TOOLS',
     'date_anchor_clause',
     # review mode
     'REVIEW_VENUES', 'DEFAULT_VENUE', 'parse_report_lang', 'is_review_lang',
@@ -247,7 +246,7 @@ __all__ = [
     '_qa_runtime', '_qa_tasks', '_qa_tasks_lock', '_QA_TASK_TTL',
     '_qa_latest_index', '_qa_latest_for', '_qa_register_latest',
     '_new_qa_task', '_append_qa_event', '_cleanup_stale_qa_tasks',
-    '_run_qa_task', '_MAX_QA_TOOL_ROUNDS',
+    '_run_qa_task',
     # deepen (reading-xp P3)
     'DEEPEN_MODES', '_deepen_runtime', 'deepen_lang_key',
     'extract_report_section', 'read_deepen_cache', 'start_deepen',

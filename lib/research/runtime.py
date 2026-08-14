@@ -50,6 +50,17 @@ def _new_research_task(task_id: str, *, direction: str, workdir: str, lang: str,
                 'n_ideas': n_ideas, 'conv_id': conv_id})
 
 
+def _claim_research_task(key: tuple, task_id: str, *, direction: str,
+                         workdir: str, lang: str, n_ideas: int = 6,
+                         conv_id: str = ''):
+    """Atomic start path; resume continues to use _new_research_task."""
+    return _production.claim_task(
+        key, task_id,
+        meta={'direction': direction, 'lang': lang, 'n_ideas': n_ideas},
+        fields={'direction': direction, 'workdir': workdir, 'lang': lang,
+                'n_ideas': n_ideas, 'conv_id': conv_id})
+
+
 def _append_research_event(task, event):
     return _production.append_event(task, event)
 
@@ -66,6 +77,7 @@ __all__ = [
     '_production', '_research_runtime', '_research_tasks',
     '_research_tasks_lock', '_research_dedup_index', '_research_index_get',
     '_research_index_register', '_new_research_task',
+    '_claim_research_task',
     '_append_research_event', '_cleanup_stale_research_tasks',
     '_research_task_id',
 ]

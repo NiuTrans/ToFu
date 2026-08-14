@@ -54,6 +54,14 @@ def _normalise_for_compare(html: str) -> str:
     """Collapse whitespace and drop the marker so pre/post-marker cards match."""
     import re as _re
     out = (html or '').replace(TEMPLATE_MARKER, '')
+    # The runtime moved from CDN to a verified scene-local asset.  That is a
+    # dependency-location change, not a composition identity change: legacy
+    # pre-marker fallback cards must remain recognisable or a resume would
+    # misclassify them as authored and pin the gradient forever.
+    out = _re.sub(
+        r'(?:https?://[^"\'<>\s]*gsap[^"\'<>\s]*?\.js'
+        r'|assets/gsap-[0-9.]+\.min\.js)',
+        '__TOFU_GSAP_RUNTIME__', out, flags=_re.IGNORECASE)
     return _re.sub(r'\s+', ' ', out).strip()
 
 
@@ -167,7 +175,7 @@ _TEMPLATE = """<!doctype html>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width={width}, height={height}" />
     <title>{scene_id}</title>
-    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script src="assets/gsap-3.14.2.min.js"></script>
     <style>
       * {{ margin: 0; padding: 0; box-sizing: border-box; }}
       html, body {{ margin: 0; width: {width}px; height: {height}px; overflow: hidden; background: #000; }}

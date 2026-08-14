@@ -10,8 +10,8 @@ so re-running the sweep is safe.
 
 Wiring
 ------
-``start_janitor()`` spawns one daemon thread; ``server.py`` calls it
-once at startup. The default sweep interval is 5 min, and the default
+``start_janitor()`` spawns one daemon thread; Quart's serving lifecycle calls
+it after database initialization. The default sweep interval is 5 min, and the default
 TTL is 30 min — long enough for any legitimately slow request to
 finish, short enough that the operator's quota doesn't bleed.
 
@@ -35,7 +35,7 @@ import threading
 import time
 from typing import Optional
 
-from lib.database import DOMAIN_SYSTEM, get_thread_db, suppress_sql_error_log
+from lib.database import DOMAIN_SYSTEM, pooled_db, suppress_sql_error_log
 from lib.log import audit_log, get_logger
 
 logger = get_logger(__name__)
@@ -81,7 +81,6 @@ def _stale_reservations(cutoff_ts: int) -> list:
 
     Uses one SQL query so the cost is O(stale rows), not O(ledger).
     """
-    db = get_thread_db(DOMAIN_SYSTEM)
     sql = '''
       SELECT r.user_id, r.ref_id, ABS(r.amount_micro) AS amt
         FROM billing_ledger r
@@ -94,7 +93,8 @@ def _stale_reservations(cutoff_ts: int) -> list:
                 AND s.kind IN ('reserve_release', 'debit')
           )
     '''
-    rows = db.execute(sql, (cutoff_ts,)).fetchall()
+    with pooled_db(DOMAIN_SYSTEM) as db:
+        rows = db.execute(sql, (cutoff_ts,)).fetchall()
     out = []
     for row in rows:
         if hasattr(row, 'keys'):
@@ -142,10 +142,8 @@ def sweep_once() -> dict:
 def _wait_for_ledger_table(timeout: float = 120.0) -> bool:
     """Poll until the ``billing_ledger`` table exists and is visible.
 
-    ``start_janitor()`` is invoked at server-import time, before
-    ``init_db()`` has created the billing tables (schema init takes ~30s
-    on FUSE). Gating the first sweep here avoids an ``UndefinedTable``
-    crash that would otherwise spam ``error.log`` on every boot.
+    The lifecycle normally starts the janitor after ``init_db()``. Keep this
+    gate as defence in depth for direct library callers and schema races.
 
     Returns:
         True once the table is queryable, False if it never appears
@@ -156,11 +154,10 @@ def _wait_for_ledger_table(timeout: float = 120.0) -> bool:
     while not _stop.is_set() and time.monotonic() < deadline:
         if db_available:
             try:
-                db = get_thread_db(DOMAIN_SYSTEM)
                 # Expected-to-fail probe before schema bootstrap — suppress the
                 # DB layer's ERROR log so a slow/absent schema doesn't spam
                 # error.log with self-recovering "no such table" noise.
-                with suppress_sql_error_log():
+                with pooled_db(DOMAIN_SYSTEM) as db, suppress_sql_error_log():
                     db.execute('SELECT 1 FROM billing_ledger LIMIT 0')
                 return True
             except Exception as e:
@@ -209,8 +206,18 @@ def start_janitor() -> None:
     _thread.start()
 
 
-def stop_janitor() -> None:
+def stop_janitor(timeout: float = 5.0) -> bool:
+    """Stop and bounded-join the lifecycle-owned worker."""
+    global _thread
     _stop.set()
+    thread = _thread
+    if (thread is not None and thread.is_alive()
+            and thread is not threading.current_thread()):
+        thread.join(timeout=max(0.0, float(timeout)))
+    stopped = thread is None or not thread.is_alive()
+    if stopped:
+        _thread = None
+    return stopped
 
 
 __all__ = ['start_janitor', 'stop_janitor', 'sweep_once']

@@ -21,6 +21,7 @@ import io
 import os
 import tarfile
 import unittest
+import zipfile
 from unittest import mock
 
 import pytest
@@ -226,6 +227,38 @@ class TestDownloadAndVerify(unittest.TestCase):
                     _adapter.install_binary('latest')
             self.assertIn('SHA-256 mismatch', str(ctx.exception))
             self.assertFalse(os.path.isfile(_adapter._binary_path()))
+
+    def test_zip_traversal_is_rejected_without_touching_destination(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            archive = root / 'CLIProxyAPI_windows_amd64.zip'
+            with zipfile.ZipFile(archive, 'w') as z:
+                z.writestr('../../CLIProxyAPI.exe', b'evil')
+            dest = root / 'adapter'
+            dest.mkdir()
+            with self.assertRaisesRegex(ValueError, 'unsafe adapter archive path'):
+                _adapter._extract_binary(str(archive), str(dest))
+            self.assertFalse((root / 'CLIProxyAPI.exe').exists())
+            self.assertEqual(list(dest.iterdir()), [])
+
+    def test_tar_binary_install_is_atomic_and_leaves_no_staging_file(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            archive, _sha = self._fake_release_io(root, b'new binary')
+            dest = root / 'adapter'
+            dest.mkdir()
+            final = dest / 'cliproxyapi'
+            final.write_bytes(b'working old binary')
+            installed = _adapter._extract_binary(str(archive), str(dest))
+            self.assertEqual(Path(installed).read_bytes(), b'new binary')
+            self.assertFalse(any(
+                p.name.startswith('.cliproxyapi-') for p in dest.iterdir()))
 
 
 class TestConfigAndLifecycle(unittest.TestCase):

@@ -4,8 +4,8 @@ Covers the model-facing skills channel end to end:
 
   * ``build_skills_index``   — the always-visible <available_skills> block
     (format, byte-stability, disabled/ineligible exclusion)
-  * ``activate_skill``       — progressive-disclosure loader (id + name
-    resolution, body + file manifest, honest unknown/disabled/ineligible)
+  * ``load_skill``           — exact-id progressive-disclosure loader
+    (body + bounded file sample, honest unknown/disabled/ineligible)
   * the ``_inject_system_contexts`` splice seam — gated on has_real_tools
     ONLY (independent of the memory toggle), idempotent, own cache block
   * tool registration (``_build_skills``) + display wiring (label /
@@ -124,67 +124,67 @@ def test_skills_index_excludes_disabled_and_ineligible(isolated):
     assert '2 installed skills are hidden' in block
 
 
-# ── activate_skill ───────────────────────────────────────────────────
+# ── load_skill ──────────────────────────────────────────────────────
 
 @pytest.mark.unit
-def test_activate_returns_instructions_and_manifest(isolated):
-    from lib.skills import activate_skill
+def test_load_returns_instructions_and_manifest(isolated):
+    from lib.skills import load_skill
     proj = _proj(isolated)
     pkg_dir = _write_pkg(os.path.join(proj, '.tofu', 'skills'), 'mypkg',
                          with_script=True, body='THE GUIDE')
 
-    out = activate_skill('mypkg', project_path=proj)
-    assert out.startswith('Skill activated: **mypkg**')
-    assert f'Package location: {os.path.abspath(pkg_dir)}' in out
+    out = load_skill('mypkg', project_path=proj)
+    assert out.startswith('Skill loaded: **mypkg**')
+    assert f'base_directory: {os.path.abspath(pkg_dir)}' in out
+    assert 'content_hash:' in out
     assert '<skill_instructions>\nTHE GUIDE\n</skill_instructions>' in out
-    # Manifest: SKILL.md + reference doc + script, with kinds.
-    assert '- SKILL.md (' in out and 'skill entry point' in out
-    assert '- references/ref.md (' in out and 'reference doc' in out
-    assert '- scripts/run.py (' in out and 'runnable script' in out
+    # Bounded sample uses absolute, directly-readable paths.
+    assert os.path.join(pkg_dir, 'references', 'ref.md') in out
+    assert os.path.join(pkg_dir, 'scripts', 'run.py') in out
 
 
 @pytest.mark.unit
-def test_activate_resolves_by_name_case_insensitively(isolated):
-    from lib.skills import activate_skill
+def test_load_requires_exact_id(isolated):
+    from lib.skills import load_skill
     proj = _proj(isolated)
     _write_pkg(os.path.join(proj, '.tofu', 'skills'), 'mypkg')
-    assert activate_skill('MYPKG', project_path=proj).startswith(
-        'Skill activated: **mypkg**')
+    assert load_skill('MYPKG', project_path=proj).startswith(
+        "Skill not found: 'MYPKG'")
 
 
 @pytest.mark.unit
-def test_activate_unknown_lists_available(isolated):
-    from lib.skills import activate_skill
+def test_load_unknown_lists_available(isolated):
+    from lib.skills import load_skill
     proj = _proj(isolated)
     _write_pkg(os.path.join(proj, '.tofu', 'skills'), 'mypkg')
 
-    out = activate_skill('nope', project_path=proj)
+    out = load_skill('nope', project_path=proj)
     assert out.startswith("Skill not found: 'nope'")
-    assert 'mypkg (project)' in out
+    assert 'Available skill IDs: mypkg' in out
 
 
 @pytest.mark.unit
-def test_activate_disabled_reports_without_leaking(isolated):
-    from lib.skills import activate_skill
+def test_load_disabled_reports_without_leaking(isolated):
+    from lib.skills import load_skill
     proj = _proj(isolated)
     _write_pkg(os.path.join(proj, '.tofu', 'skills'), 'off', enabled=False,
                body='SECRET GUIDE')
 
-    out = activate_skill('off', project_path=proj)
-    assert 'DISABLED' in out
+    out = load_skill('off', project_path=proj)
+    assert 'disabled' in out
     assert 'SECRET GUIDE' not in out
 
 
 @pytest.mark.unit
-def test_activate_ineligible_reports_reason(isolated):
-    from lib.skills import activate_skill
+def test_load_ineligible_reports_reason(isolated):
+    from lib.skills import load_skill
     proj = _proj(isolated)
     _write_pkg(os.path.join(proj, '.tofu', 'skills'), 'needsbin',
                requires_bins=['definitely-not-a-real-bin-xyz123'],
                body='SECRET GUIDE')
 
-    out = activate_skill('needsbin', project_path=proj)
-    assert 'cannot be used' in out
+    out = load_skill('needsbin', project_path=proj)
+    assert 'unavailable' in out
     assert 'definitely-not-a-real-bin-xyz123' in out
     assert 'SECRET GUIDE' not in out
 
@@ -225,7 +225,7 @@ def test_injection_skills_gating_and_idempotency(isolated):
     proj = _proj(isolated)
     _write_pkg(os.path.join(proj, '.tofu', 'skills'), 'mypkg')
 
-    # has_real_tools=False → no index (no activate_skill tool either).
+    # has_real_tools=False → no index (no load_skill tool either).
     no_tools = [{'role': 'system', 'content': 'Base.'}]
     _run_inject(no_tools, has_real_tools=False, project_path=proj,
                 project_enabled=True)
@@ -260,10 +260,15 @@ def test_tool_registration_surface(isolated):
     from types import SimpleNamespace
     from lib.tools.registry._build import _build_skills
 
-    on = _build_skills(SimpleNamespace(lean=False, has_base_tools=True))
-    assert [t['function']['name'] for t in on] == ['activate_skill']
+    proj = _proj(isolated)
+    _write_pkg(os.path.join(proj, '.tofu', 'skills'), 'mypkg')
+    ctx = SimpleNamespace(
+        lean=False, has_base_tools=True, cfg={'projectPaths': [proj]},
+        project_path=proj, project_enabled=True, tid='test')
+    on = _build_skills(ctx)
+    assert [t['function']['name'] for t in on] == ['load_skill']
 
-    # Same attachment rule as memory: no base tools → no activate_skill.
+    # No base tools or no eligible installed skills → no loader schema.
     assert _build_skills(
         SimpleNamespace(lean=False, has_base_tools=False)) == []
     assert _build_skills(
@@ -272,8 +277,9 @@ def test_tool_registration_surface(isolated):
     # Declared idempotent (read-only) via the ToolSpec registry.
     from lib.tools import all_specs
     spec = next(s for s in all_specs() if s.key == 'skills')
-    assert 'activate_skill' in spec.idempotent_tools
-    assert 'activate_skill' in spec.provides
+    assert 'load_skill' in spec.idempotent_tools
+    assert 'load_skill' in spec.provides
+    assert 'activate_skill' not in spec.provides
     assert not spec.write_tools
 
 
@@ -283,21 +289,25 @@ def test_display_wiring(isolated):
         _TOOL_DISPLAY_DISPATCH, tool_round_label)
     from lib.tasks_pkg.tool_dispatch._labels import tool_label
 
-    assert 'activate_skill' in _TOOL_DISPLAY_DISPATCH
+    assert 'load_skill' in _TOOL_DISPLAY_DISPATCH
+    assert tool_round_label('load_skill', {'skill_id': 'mypkg'}) == \
+        'Loaded skill: mypkg'
+    assert tool_label('load_skill') == 'Loading skill'
+    # Display-only history shim; this name has no schema or handler.
     assert tool_round_label('activate_skill', {'skill': 'mypkg'}) == \
-        'Activating skill: mypkg'
-    assert tool_label('activate_skill') == 'Loading skill'  # no emoji (owner directive 2026-08-03)
+        'Previously activated skill: mypkg'
 
 
 @pytest.mark.unit
 def test_handler_registered_via_handlers_package(isolated):
     """Pins the import chain: importing lib.tasks_pkg.executor triggers the
-    handlers package import, which must register activate_skill — a missing
+    handlers package import, which must register load_skill — a missing
     'skills' line in handlers/__init__.py flips this red."""
     import lib.tasks_pkg.executor as executor
-    handler = executor.tool_registry.lookup('activate_skill')
+    handler = executor.tool_registry.lookup('load_skill')
     assert handler is not None
     assert handler.__module__ == 'lib.tasks_pkg.handlers.skills'
+    assert executor.tool_registry.lookup('activate_skill') is None
 
 
 @pytest.mark.unit
@@ -311,13 +321,13 @@ def test_handler_end_to_end(isolated):
     # append_event (SSE push + durable event-log row) out of this unit test.
     task = {'id': 'skill-test-task', 'toolRounds': [], 'events': [],
             'events_lock': threading.Lock(), '_suppressEvents': True}
-    round_entry = {'query': 'Activating skill: mypkg'}
+    round_entry = {'query': 'Loaded skill: mypkg'}
     tc_id, content, is_search = _handle_skill_tool(
-        task, None, 'activate_skill', 'tc1', {'skill': 'mypkg'},
+        task, None, 'load_skill', 'tc1', {'skill_id': 'mypkg'},
         0, round_entry,
         {'projectPaths': [proj]}, proj, True)
     assert tc_id == 'tc1'
-    assert content.startswith('Skill activated: **mypkg**')
+    assert content.startswith('Skill loaded: **mypkg**')
     assert is_search is False
     # The round was finalized with display metadata (badge + status).
     assert round_entry['status'] == 'done'

@@ -146,6 +146,8 @@ class SwarmEvent:
             d['status'] = 'error'
         elif self.phase:
             d['phase'] = self.phase
+        if self.status and 'status' not in d:
+            d['status'] = self.status
         if self.agent_id:
             d['agentId'] = self.agent_id   # camelCase for frontend
         if self.role:
@@ -157,6 +159,8 @@ class SwarmEvent:
             d['duration_s'] = round(self.duration_s, 2)
         if self.tokens:
             d['tokens'] = self.tokens
+        if self.round_num:
+            d['roundNum'] = self.round_num
         if self.metadata:
             d.update(self.metadata)
         return d

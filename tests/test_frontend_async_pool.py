@@ -23,11 +23,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+ASYNC_POOL = runtime_section_path('core/async_pool.js')
 
 
 def _node_available() -> bool:
@@ -108,7 +110,7 @@ def _run_harness(js_source_path: str):
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_async_pool_caps_concurrency():
-    pool_js = os.path.join(JS_DIR, 'core', 'async_pool.js')
+    pool_js = ASYNC_POOL
     proc = _run_harness(pool_js)
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
@@ -122,7 +124,7 @@ def test_async_pool_neuter_uncaps_and_fails(tmp_path):
     """NEUTER: force the cap to Infinity → all 50 workers run at once → peak
     == 50, so peak_within_limit / peak_reached_limit FAIL. Proves the cap is
     what bounds concurrency, not the harness timing."""
-    pool_js = os.path.join(JS_DIR, 'core', 'async_pool.js')
+    pool_js = ASYNC_POOL
     with open(pool_js, encoding='utf-8') as f:
         src = f.read()
     marker = 'var cap = (typeof limit === \'number\' && limit >= 1) ? Math.floor(limit) : 4;'

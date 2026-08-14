@@ -42,29 +42,45 @@ def _motion_index_register(key: tuple, task_id: str) -> None:
     _production.index_register(key, task_id)
 
 
+def _motion_task_shape(*, srt_path: str, workdir: str, voice: str, speed,
+                       alignment: str, narration: bool, quality: str,
+                       parallel: int, width: int, height: int,
+                       scenes_path: str = '') -> tuple[dict, dict]:
+    return (
+        {'srt_path': srt_path, 'voice': voice, 'alignment': alignment,
+         'narration': narration, 'quality': quality,
+         'aspect': f'{width}x{height}'},
+        {'srt_path': srt_path, 'scenes_path': scenes_path,
+         'workdir': workdir, 'voice': voice, 'speed': speed,
+         'alignment': alignment, 'narration': narration, 'quality': quality,
+         'parallel': parallel, 'width': width, 'height': height},
+    )
+
+
 def _new_motion_task(task_id: str, *, srt_path: str, workdir: str,
                      voice: str, speed, alignment: str, narration: bool,
                      quality: str, parallel: int, width: int, height: int,
                      scenes_path: str = ''):
     """Create + register a pending motion task with the engine's field shape."""
-    return _production.create_task(
-        task_id,
-        meta={'srt_path': srt_path, 'voice': voice, 'alignment': alignment,
-              'narration': narration, 'quality': quality,
-              'aspect': f'{width}x{height}'},
-        fields={
-            'srt_path': srt_path,
-            'scenes_path': scenes_path,
-            'workdir': workdir,
-            'voice': voice,
-            'speed': speed,
-            'alignment': alignment,
-            'narration': narration,
-            'quality': quality,
-            'parallel': parallel,
-            'width': width,
-            'height': height,
-        })
+    meta, fields = _motion_task_shape(
+        srt_path=srt_path, workdir=workdir, voice=voice, speed=speed,
+        alignment=alignment, narration=narration, quality=quality,
+        parallel=parallel, width=width, height=height,
+        scenes_path=scenes_path)
+    return _production.create_task(task_id, meta=meta, fields=fields)
+
+
+def _motion_claim_task(key: tuple, task_id: str, *, srt_path: str,
+                       workdir: str, voice: str, speed, alignment: str,
+                       narration: bool, quality: str, parallel: int,
+                       width: int, height: int, scenes_path: str = ''):
+    """Atomically join-or-create a motion task for one dedup identity."""
+    meta, fields = _motion_task_shape(
+        srt_path=srt_path, workdir=workdir, voice=voice, speed=speed,
+        alignment=alignment, narration=narration, quality=quality,
+        parallel=parallel, width=width, height=height,
+        scenes_path=scenes_path)
+    return _production.claim_task(key, task_id, meta=meta, fields=fields)
 
 
 def _append_motion_event(task, event):
@@ -89,6 +105,7 @@ __all__ = [
     '_motion_dedup_index',
     '_motion_index_get',
     '_motion_index_register',
+    '_motion_claim_task',
     '_new_motion_task',
     '_append_motion_event',
     '_cleanup_stale_motion_tasks',

@@ -43,14 +43,15 @@ Env knobs:
 from __future__ import annotations
 
 import ipaddress
-import json
 import os
 import random
 import threading
 import time
+from copy import deepcopy
 from urllib.parse import urlparse
 
 from lib.config_dir import config_path
+from lib.json_store import read_json, write_json_atomic
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -153,6 +154,7 @@ def _new_state(host: str, sample_url: str) -> dict:
 _lock = threading.Lock()
 _states: 'dict[str, dict]' = {}
 _dirty = False
+_generation = 0
 _last_save = 0.0
 
 _prober_thread: 'threading.Thread | None' = None
@@ -282,7 +284,7 @@ def report_outcome(url: str, ok: bool, latency_ms: 'float | None' = None,
     """
     if not _enabled():
         return
-    global _dirty
+    global _dirty, _generation
     try:
         host = (urlparse(url).hostname or '').lower()
     except Exception as _e:
@@ -314,6 +316,7 @@ def report_outcome(url: str, ok: bool, latency_ms: 'float | None' = None,
             path['last_fail'] = now
         _reevaluate(st)
         _dirty = True
+        _generation += 1
     _maybe_save()
 
 
@@ -434,56 +437,83 @@ def _save() -> None:
     with _lock:
         if not _dirty:
             return
+        generation = _generation
         payload = {
             'version': _STORE_VERSION,
             'saved_at': time.time(),
-            'hosts': list(_states.values()),
+            # The serializer runs after releasing _lock.  Snapshot nested path
+            # dicts too, otherwise report_outcome can mutate the payload while
+            # json is walking it and persist a torn combination of counters.
+            'hosts': deepcopy(list(_states.values())),
         }
-        _dirty = False
-        _last_save = time.time()
     try:
-        os.makedirs(os.path.dirname(_STORE_PATH), exist_ok=True)
-        tmp = _STORE_PATH + '.tmp'
-        with open(tmp, 'w') as f:
-            json.dump(payload, f)
-        os.replace(tmp, _STORE_PATH)
+        write_json_atomic(_STORE_PATH, payload, fsync=False, indent=None)
     except Exception as e:
-        logger.debug('[Netpath] save failed: %s', e)
+        # Keep the generation dirty so a later report/probe retries.  The old
+        # code cleared it before I/O, permanently forgetting the failure.
+        with _lock:
+            _dirty = True
+            _last_save = time.time()
+        logger.warning('[Netpath] save failed; state remains dirty: %s', e)
+        return
+    with _lock:
+        # A report may have landed while the snapshot was being serialized.
+        # Clear only the exact generation that reached disk.
+        if _generation == generation:
+            _dirty = False
+        _last_save = time.time()
 
 
 def _load() -> None:
-    global _dirty
-    try:
-        with open(_STORE_PATH) as f:
-            payload = json.load(f)
-        if payload.get('version') != _STORE_VERSION:
-            return
-        now = time.time()
-        with _lock:
-            for st in payload.get('hosts', []):
+    global _dirty, _generation
+    payload = read_json(_STORE_PATH, default=None)
+    if not isinstance(payload, dict) or payload.get('version') != _STORE_VERSION:
+        return
+    now = time.time()
+    restored = 0
+    with _lock:
+        hosts = payload.get('hosts')
+        if not isinstance(hosts, list):
+            hosts = []
+        for st in hosts:
+            if not isinstance(st, dict):
+                continue
+            try:
                 host = (st.get('host') or '').lower()
                 if not host or host in _states or _is_exempt_host(host):
                     continue
+                sample_url = st.get('sample_url') or ''
+                parsed = urlparse(sample_url)
+                if (parsed.scheme not in ('http', 'https')
+                        or (parsed.hostname or '').lower() != host
+                        or parsed.username is not None
+                        or parsed.password is not None):
+                    sample_url = 'https://%s/' % host
                 # Restore only measurement data + decision; timestamps that
                 # drive TTL/LRU are refreshed so stale hosts age out.
-                fresh = _new_state(host, st.get('sample_url') or
-                                   'https://%s/' % host)
-                fresh['decision'] = st.get('decision')
+                fresh = _new_state(host, sample_url)
+                decision = st.get('decision')
+                fresh['decision'] = (decision if decision in (
+                    'direct', 'proxy') else None)
                 fresh['last_seen'] = now
                 for name in ('direct', 'proxy'):
                     src = (st.get('paths') or {}).get(name) or {}
+                    if not isinstance(src, dict):
+                        src = {}
                     dst = fresh['paths'][name]
-                    dst['ewma_ms'] = src.get('ewma_ms')
-                    dst['samples'] = int(src.get('samples') or 0)
-                    dst['fails'] = int(src.get('fails') or 0)
+                    latency = src.get('ewma_ms')
+                    dst['ewma_ms'] = (float(latency) if latency is not None
+                                      else None)
+                    dst['samples'] = max(0, int(src.get('samples') or 0))
+                    dst['fails'] = max(0, int(src.get('fails') or 0))
                 _states[host] = fresh
-            _dirty = False
-        logger.info('[Netpath] Restored %d host(s) from disk', len(_states))
-    except FileNotFoundError as _e:
-        logger.debug('load: missing (%s)', _e)
-        pass
-    except Exception as e:
-        logger.debug('[Netpath] load failed: %s', e)
+                restored += 1
+            except (TypeError, ValueError, OverflowError) as error:
+                logger.debug('[Netpath] skipped malformed host state: %s',
+                             error)
+        _dirty = False
+        _generation = 0
+    logger.info('[Netpath] Restored %d host(s) from disk', restored)
 
 
 def status_summary() -> dict:
@@ -507,21 +537,34 @@ def _round(v):
 
 def reset_proxy_stats() -> None:
     """Invalidate all proxy-path measurements (proxy address changed)."""
+    global _dirty, _generation
+    changed = False
     with _lock:
         for st in _states.values():
+            old = st['paths']['proxy']
+            if (old['ewma_ms'] is not None or old['samples'] or old['fails']
+                    or st['decision'] == 'proxy'):
+                changed = True
             st['paths']['proxy'] = _new_path()
             if st['decision'] == 'proxy':
                 st['decision'] = None
+        if changed:
+            _dirty = True
+            _generation += 1
+    if changed:
+        _save()
     logger.info('[Netpath] Proxy stats reset (proxy address changed)')
 
 
 def reset_for_test() -> None:
     """Clear all learned state and stop the prober. Test-only."""
-    global _dirty
+    global _dirty, _generation, _last_save
     stop_prober()
     with _lock:
         _states.clear()
         _dirty = False
+        _generation = 0
+        _last_save = 0.0
 
 
 _load()

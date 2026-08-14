@@ -16,6 +16,8 @@ Background — the `lib/paper` drop bug:
   name collides with a nested git-tracked package.
 """
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {'lib/paper/report_engine.py'}
+
 import os
 import subprocess
 import sys

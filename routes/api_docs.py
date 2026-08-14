@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from flask import Blueprint, Response, current_app
+from quart import Blueprint, Response, current_app
 
 from lib.log import get_logger
 from lib.openapi import build_spec, redoc_html, swagger_html

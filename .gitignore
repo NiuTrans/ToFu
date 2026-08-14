@@ -72,10 +72,23 @@ __pycache__/
 /benchmarks/
 /promo/
 /scripts/*
+!/scripts/rootless_egress_bridge.c
 !/scripts/gen_desktop_icons.py
-!/scripts/gen_frontend_globals.py
+!/scripts/gen_tofu_icons.py
+!/scripts/png_to_svg.py
+!/scripts/build_frontend.mjs
+!/scripts/frontend_budget.py
+!/scripts/update_runtime_actions.mjs
+!/scripts/verify_frontend_dist.py
+!/scripts/gen_orchestration_authoring_metadata.py
+!/scripts/gen_orchestration_compatibility_defaults.py
+!/scripts/gen_orchestration_http_contract.py
+!/scripts/gen_orchestration_wire_formats.py
 !/scripts/gen_tool_inventory.py
 !/scripts/audit_tests.py
+!/scripts/bootstrap_rootless_qemu.sh
+!/scripts/rootless_qemu-conda-linux-64.lock
+!/scripts/rootless_terminal_bench_21.py
 # P2 test tooling (docs/TESTING_STRATEGY.md): test_select.py is loaded by
 # tests/test_test_select.py and driven by `make test-affected`; ratchet_audit.py
 # is loaded by tests/test_ratchet_incident_link.py and regenerates
@@ -83,6 +96,18 @@ __pycache__/
 !/scripts/test_select.py
 !/scripts/ratchet_audit.py
 !/scripts/package_extension.sh
+!/scripts/vendor_mcp.sh
+!/scripts/migrate_pg_to_sqlite.py
+!/scripts/activate_sqlite_cutover.py
+!/scripts/_database_leaf.py
+!/scripts/migrate_chatui_to_tofu.py
+!/scripts/compact_sqlite_diagnostics.py
+!/scripts/compact_sqlite_projections.py
+!/scripts/retranslate_truncated.py
+!/scripts/storagectl.py
+!/scripts/storage_certify.py
+!/scripts/ptc_live_smoke.py
+!/scripts/verify_pdf_stack.py
 !/scripts/install_on_server.sh
 # Shared "is this release complete?" predicate. BOTH gates in
 # build-desktop.yml call it — the version gate judges an already-published
@@ -113,7 +138,16 @@ __pycache__/
 !/scripts/cache_ab_probe.py
 # debug/ = standalone scratch/benchmark scripts (never imported by the app);
 # tracked *.log already ignored above, this covers the .py/.json/.png/.md/.html too.
-/debug/
+# NOTE: contents-level (/debug/*), NOT dir-level (/debug/) — git never descends
+# into an excluded DIRECTORY, so a /debug/ rule would make the negation below
+# dead (the uploads/* + !.gitkeep pattern is the established shape).
+/debug/*
+# Whitelist: the CI wizard pixel probe (the manual installer-ui-probe.yml
+# workflow drives it on windows-latest). That workflow ships in the
+# opensource export, so the script must too — the same dead-pipeline
+# argument as release_assets.py: a public clone without it carries a
+# workflow that dies on a missing file.
+!/debug/win_ci_shot.py
 # Raw AI-gen asset candidates + proof strips (review-only, multi-MB) under the
 # pet-icon dir. Anchored to that subtree, not a bare _candidates glob.
 static/icons/pet/_candidates/
@@ -147,6 +181,18 @@ docs/解答260505_v2.pdf
 # These hold thousands of repo clones + conda envs (800K+ files combined)
 # and are the #1 cause of grep/find FUSE timeouts — never track or scan them.
 *_workdir/
+
+# Hermetic evaluation outputs. The supported runner writes outside the project
+# by default and also makes every artifact root self-ignoring; these root rules
+# are the final guard when TOFU_EVAL_ROOT is deliberately placed in this repo.
+/.eval-runs/
+/eval-runs/
+# Common upstream SWE-bench / Harbor output names, in case their CLIs are run
+# directly from the repository root instead of through our wrapper.
+/evaluation_results/
+/sb-cli-reports/
+/jobs/
+/trials/
 
 # ── CWD pollution: stray dirs created by eval/agent harnesses that wrote
 #    output to a path RELATIVE to the repo root instead of an absolute one
@@ -183,24 +229,7 @@ logs/
 *.log
 server_*.log
 
-# ── JS bundle (auto-generated at startup) ──
-static/js/bundle-*.js
-# Deferred feature bundle — also a content-hashed runtime artifact. Anchor to
-# the 8-hex-hash pattern, NEVER a bare `feature-*` glob: that would also match
-# the tracked SOURCE `feature-loader.js` (the lazy loader), the exact class of
-# bug _clean_old_bundles hit (see bundle-cleaner-must-not-delete-source).
-static/js/feature-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].js
-# Single-language i18n packs (lib/i18n_packs.py, Epic-E) — same content-hashed
-# runtime artifact family as feature- above, so the same 8-hex anchor applies:
-# NEVER a bare `i18n-*` glob, which would also match the tracked SOURCE
-# static/js/i18n.js. The `??` pins the 2-letter lang slot (zh/en), mirroring
-# lib/js_bundler._BUILT_BUNDLE_RE `i18n-(?:zh|en)-[0-9a-f]{8}`.
-static/js/i18n-??-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].js
-# Bundle build-lock + private temp files (leading dot; written by
-# lib/js_bundler during the atomic temp→rename publish). Runtime-only.
-static/js/.bundle-build.lock
 static/js/.bundle-*.js
-static/js/.feature-*.js
 static/js/.i18n-*.js
 
 # ── Minified stylesheets (auto-generated at startup by lib/css_bundler) ──
@@ -209,6 +238,7 @@ static/settings-*.css
 
 # ── Frontend type-check harness (tsc --checkJs) ──
 node_modules/
+/node_modules.local_bak.*/
 *.tsbuildinfo
 
 # ── Linting ──
@@ -269,6 +299,12 @@ uploads/images/*
 # ── Model-generated posters (output of generate_image into project) ──
 static/posters/
 
+# Vite production output is content-addressed and rebuilt from frontend/src.
+static/vite/
+# Interrupted Vite builds leave temporary siblings beside the final output.
+/static/.vite-build-*/
+/static/tmp/
+
 # ── PyInstaller / desktop build artifacts ──
 build/
 dist/
@@ -280,7 +316,16 @@ static/icons/installer/
 .icon-backups/
 # AI assistant evolution journal (per-developer, not source)
 JOURNAL.md
+# Context-efficiency run logs and patches (generated; manifest stays tracked)
+benchmarks/context_efficiency_results/
 # AI assistant runtime artifacts (file-history, trash, sandbox)
 .tofu*
-# AI assistant runtime artifacts (file-history, trash, sandbox)
-.tofu*
+
+# ── Local generated output and test fault-injection leftovers ──
+/artifacts/
+/"artifacts/
+/config-temp/
+/remote:*/
+/*.tmp.js
+*.neuter
+JOURNAL.md.lock

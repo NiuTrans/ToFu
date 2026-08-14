@@ -7,7 +7,9 @@ import time
 import zipfile
 from urllib.parse import urlparse
 
-from flask import Blueprint, jsonify, request, send_file
+from quart import Blueprint, jsonify, request
+
+from lib.quart_sync import send_file
 
 from lib.log import get_logger
 from lib.api_response import api_bad_request, api_not_found, api_ok
@@ -61,8 +63,12 @@ async def browser_poll():
         logger.debug('[Browser] non-numeric chromeMajor from client=%s: %s',
                      (client_id or 'anon')[:12], e)
         chrome_major = 0
-    mark_poll(client_id, chrome_major=chrome_major, user_id=_bridge_user,
-              ext_version=str(data.get('extVersion') or '')[:32])
+    mark_poll(
+        client_id, chrome_major=chrome_major, user_id=_bridge_user,
+        ext_version=str(data.get('extVersion') or '')[:32],
+        protocol_version=data.get('protocolVersion') or 1,
+        capabilities=data.get('capabilities'),
+        profile=str(data.get('profile') or '')[:80])
     results = data.get('results', [])
     if results:
         logger.info('[Browser] poll received %d result(s) from client=%s: cmd_ids=%s',
@@ -79,7 +85,9 @@ async def browser_poll():
                     [(c.get('type', '?'), c.get('id', '?')[:8]) for c in commands])
     else:
         logger.debug('[Browser] poll idle (no commands) client=%s', (client_id or 'anon')[:12])
-    return jsonify({'commands': commands})
+    from lib.browser.protocol import MIN_PROTOCOL_VERSION, PROTOCOL_VERSION
+    return jsonify({'commands': commands, 'protocolVersion': PROTOCOL_VERSION,
+                    'minProtocolVersion': MIN_PROTOCOL_VERSION})
 
 
 @browser_bp.route('/api/browser/commands', methods=['GET', 'OPTIONS'])

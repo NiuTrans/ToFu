@@ -609,12 +609,27 @@ class StreamingScheduler:
                 else:
                     result.retry_count = attempt
 
-        # Record completion — put into queue INSIDE lock so that
-        # iter_completions cannot see _running==0 before the item
-        # is actually in the queue (race condition fix).
+        # Publish the completion callback BEFORE removing this id from
+        # ``_running`` or making the result visible to the driver's queue.
+        # Otherwise the driver can observe scheduler-idle and terminate in the
+        # gap before MasterOrchestrator has copied the result into
+        # ``_results_by_id``.  ``await_agents(ids=ALL)`` then sees a supposedly
+        # settled swarm with a missing result.  The callback runs without the
+        # scheduler lock (it legitimately probes running_count), so this order
+        # also avoids a lock inversion.
         elapsed_total = time.monotonic() - t0
         logger.debug('[Scheduler] _run_one FINISHED agent=%s final_status=%s elapsed=%.1fs',
                       spec.id, result.status if result else 'None', elapsed_total)
+        if self._on_complete:
+            try:
+                self._on_complete(spec, result)
+            except Exception as e:
+                logger.warning('[Scheduler] on_complete callback error for %s: %s',
+                               spec.id, e, exc_info=True)
+
+        # Record completion — put into queue INSIDE lock so that
+        # iter_completions cannot see _running==0 before the item
+        # is actually in the queue.
         with self._lock:
             self._completed[spec.id] = (spec, result)
             self._all_results.append((spec, result))
@@ -632,12 +647,6 @@ class StreamingScheduler:
                          list(self._running.keys()), len(self._completed))
             # Unblock dependents
             self._launch_ready_locked()
-
-        if self._on_complete:
-            try:
-                self._on_complete(spec, result)
-            except Exception as e:
-                logger.warning('[Scheduler] on_complete callback error for %s: %s', spec.id, e, exc_info=True)
 
 
 # ═══════════════════════════════════════════════════════════

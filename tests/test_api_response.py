@@ -10,10 +10,6 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Install Flask→Quart shim before importing routes
-import quart as _quart
-sys.modules['flask'] = _quart
-
 import pytest as _pytest
 
 
@@ -62,9 +58,8 @@ def _make_app_ctx():
     Newer Flask sansio (3.1+) reads ``config['PROVIDE_AUTOMATIC_OPTIONS']``
     in ``add_url_rule``, but the installed Quart dropped it from
     ``default_config`` → bare ``Quart(__name__)`` raises ``KeyError`` on
-    construction. ``server.py`` patches ``Quart.default_config`` at import
-    time; replicate that here so this module works standalone too (without
-    importing the whole server).
+    construction. Keep this standalone mini-app compatible without importing
+    the whole production server.
     """
     from quart import Quart
     if 'PROVIDE_AUTOMATIC_OPTIONS' not in Quart.default_config:
@@ -237,6 +232,35 @@ def test_api_error_envelope():
     _ok('api_error(envelope) preserves envelope dict')
 
 
+def test_api_typed_error_builds_complete_extensible_envelope():
+    from lib.api_response import api_typed_error
+    from lib.error_envelope import KINDS
+    app = _make_app_ctx()
+
+    async def _t():
+        async with app.test_request_context('/test'):
+            status, body = await _resolve(api_typed_error(
+                'server_busy', status=503, detail='capacity reached',
+                source='unit', extensions={
+                    'retry_after_s': 3,
+                    'kind': 'cannot_override_core',
+                }))
+            envelope = body['error']
+            assert status == 503 and body['ok'] is False
+            assert envelope['kind'] == 'server_busy'
+            assert envelope['kind'] in KINDS
+            assert envelope['retryable'] is True
+            assert envelope['retry_after_s'] == 3
+            assert envelope['source'] == 'unit'
+            for field in ('severity', 'message', 'hint', 'detail', 'model',
+                          'context', 'source', 'raw'):
+                assert field in envelope
+
+    import asyncio
+    asyncio.run(_t())
+    _ok('api_typed_error builds complete envelope with safe extensions')
+
+
 def test_api_error_exception_classified():
     """api_error(Exception) auto-classifies via from_exception."""
     from lib.api_response import api_error
@@ -277,6 +301,28 @@ def test_api_error_with_extras():
     import asyncio
     asyncio.run(_t())
     _ok('api_error("err", retry_after=N) emits extras at top level')
+
+
+def test_api_error_extras_cannot_override_failure_invariant():
+    from lib.api_response import api_error, api_typed_error
+    app = _make_app_ctx()
+
+    async def _t():
+        async with app.test_request_context('/test'):
+            status, body = await _resolve(
+                api_error('denied', status=403, ok=True))
+            assert status == 403
+            assert body == {'ok': False, 'error': 'denied'}
+
+            status, body = await _resolve(api_typed_error(
+                'permission', status=401, detail='API key required', ok=True))
+            assert status == 401
+            assert body['ok'] is False
+            assert body['error']['kind'] == 'permission'
+
+    import asyncio
+    asyncio.run(_t())
+    _ok('error helpers keep ok=False when extras contain ok=True')
 
 
 def test_api_bad_request():
@@ -624,12 +670,12 @@ def test_sse_response_headers():
             h = resp.headers
             assert h.get('Cache-Control') == 'no-cache, no-transform'
             assert h.get('X-Accel-Buffering') == 'no'
-            assert h.get('Connection') == 'keep-alive'
+            assert h.get('Connection') is None
             assert 'text/event-stream' in (h.get('Content-Type') or '')
 
     import asyncio
     asyncio.run(_t())
-    _ok('sse_response() → canonical 4-key SSE headers')
+    _ok('sse_response() → HTTP/1.1+HTTP/2-safe SSE headers')
 
 
 def test_sse_response_extra_headers():
@@ -647,7 +693,7 @@ def test_sse_response_extra_headers():
             assert h.get('X-Tofu-Task-Id') == 'task-abc'
             # Canonical keys still present after the merge.
             assert h.get('X-Accel-Buffering') == 'no'
-            assert h.get('Connection') == 'keep-alive'
+            assert h.get('Connection') is None
 
     import asyncio
     asyncio.run(_t())
@@ -660,12 +706,12 @@ def test_sse_response_matches_legacy_literal():
     away from the shipped values, this catches the drift."""
     from lib.api_response import sse_response
     app = _make_app_ctx()
-    # The verbatim dict that lived at every streaming Response(...) site.
-    legacy = {
+    # Canonical end-to-end fields; connection-specific headers are deliberately
+    # excluded because HTTP/2 forbids them.
+    canonical = {
         'Content-Type': 'text/event-stream; charset=utf-8',
         'Cache-Control': 'no-cache, no-transform',
         'X-Accel-Buffering': 'no',
-        'Connection': 'keep-alive',
     }
 
     async def _t():
@@ -673,14 +719,15 @@ def test_sse_response_matches_legacy_literal():
             def _gen():
                 yield 'data: x\n\n'
             resp = sse_response(_gen())
-            for k, v in legacy.items():
+            for k, v in canonical.items():
                 assert resp.headers.get(k) == v, (
                     f'header {k!r}: helper={resp.headers.get(k)!r} '
-                    f'legacy={v!r}')
+                    f'canonical={v!r}')
+            assert resp.headers.get('Connection') is None
 
     import asyncio
     asyncio.run(_t())
-    _ok('sse_response() headers are byte-equal to the legacy literal dict')
+    _ok('sse_response() headers match the HTTP/2-safe canonical set')
 
 
 def test_sse_response_timeout_none():
@@ -715,6 +762,7 @@ def main():
         test_api_no_content,
         test_api_error_string,
         test_api_error_envelope,
+        test_api_typed_error_builds_complete_extensible_envelope,
         test_api_error_exception_classified,
         test_api_error_with_extras,
         test_api_bad_request,

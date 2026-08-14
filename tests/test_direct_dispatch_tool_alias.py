@@ -207,7 +207,7 @@ def test_swarm_agent_schema_repair_applies_on_direct_path(monkeypatch):
     from lib.swarm.agent import SubAgent
     from lib.swarm.protocol import SubTaskSpec
 
-    tools = [{'type': 'function', 'function': {'name': 'apply_diff', 'parameters': {}}}]
+    tools = [{'type': 'function', 'function': {'name': 'edit_file', 'parameters': {}}}]
     spec = SubTaskSpec(role='coder', objective='edit a file')
     agent = SubAgent(spec, parent_task={'id': 't1', 'convId': 'c1'},
                      all_tools=tools, thinking_enabled=False)
@@ -225,8 +225,11 @@ def test_swarm_agent_schema_repair_applies_on_direct_path(monkeypatch):
     agent._execute_single_tool(
         _tc('apply_diff',
             '{"file_path": "x.py", "old_string": "a", "new_string": "b"}'), 1)
-    assert captured['fn_name'] == 'apply_diff'
-    assert captured['fn_args'] == {'path': 'x.py', 'search': 'a', 'replace': 'b'}, (
+    assert captured['fn_name'] == 'edit_file'
+    assert captured['fn_args'] == {'edits': [{
+        'path': 'x.py', 'operation': 'replace',
+        'anchor': 'a', 'content': 'b',
+    }]}, (
         'swarm direct path must apply param-key alias repair — got %r'
         % captured.get('fn_args'))
 

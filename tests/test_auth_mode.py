@@ -18,6 +18,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import pytest
+
+
+pytestmark = pytest.mark.unit
+
 
 class AuthModeUnitTest(unittest.TestCase):
     """Direct unit tests on :mod:`lib.auth_mode`."""
@@ -156,6 +161,43 @@ class OpenModeGateTest(unittest.TestCase):
             r = await c.get('/api/v1/keys')
             self.assertEqual(r.status_code, 200)
         asyncio.run(go())
+
+    def test_open_mode_api_requests_are_rate_limited_by_peer(self):
+        import asyncio
+        import json
+        from lib.rate_limit_store import reset_for_test
+
+        old_rpm = os.environ.get('TOFU_OPEN_MODE_RPM')
+        old_backend = os.environ.get('TOFU_RATE_LIMIT_BACKEND')
+        os.environ['TOFU_OPEN_MODE_RPM'] = '1'
+        os.environ['TOFU_RATE_LIMIT_BACKEND'] = 'memory'
+        reset_for_test()
+
+        async def go():
+            c = self.app.test_client()
+            first = await c.get('/api/v1/keys')
+            second = await c.get('/api/v1/keys')
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(second.status_code, 429)
+            self.assertEqual(second.headers['X-RateLimit-Limit-Requests'], '1')
+            self.assertEqual(second.headers['X-RateLimit-Remaining-Requests'], '0')
+            self.assertIn('Retry-After', second.headers)
+            body = json.loads(await second.get_data(as_text=True))
+            self.assertFalse(body['ok'])
+            self.assertEqual(body['error']['kind'], 'ratelimit')
+
+        try:
+            asyncio.run(go())
+        finally:
+            if old_rpm is None:
+                os.environ.pop('TOFU_OPEN_MODE_RPM', None)
+            else:
+                os.environ['TOFU_OPEN_MODE_RPM'] = old_rpm
+            if old_backend is None:
+                os.environ.pop('TOFU_RATE_LIMIT_BACKEND', None)
+            else:
+                os.environ['TOFU_RATE_LIMIT_BACKEND'] = old_backend
+            reset_for_test()
 
 
 if __name__ == '__main__':

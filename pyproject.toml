@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tofu"
 version = "0.16.0"
-description = "Tofu (豆腐) — Self-hosted AI assistant with Flask backend and vanilla JS frontend"
+description = "Tofu (豆腐) — Self-hosted AI assistant with Quart backend and vanilla JS frontend"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -19,6 +19,10 @@ dynamic = ["dependencies"]
 test = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
+    # The external mock LLM process in tests/mock_llm_server.py intentionally
+    # remains a tiny Flask fixture; Flask is not part of the application
+    # runtime anymore.
+    "flask>=3.0",
     # Parallel test execution across worker processes. The suite is ~5400
     # tests; running it serially is the dominant CI wall-time cost. Each xdist
     # worker is its own process → its own session fixtures → its own throwaway
@@ -64,7 +68,7 @@ dependencies = {file = ["requirements.txt"]}
 # Ship the importable Python packages. The in-process façade (`tofu`) and the
 # kernel it calls (`lib.tasks_pkg.entry`) require `lib*` and `routes*` to be
 # importable; `tofu*` is the supported public surface.
-include = ["tofu*", "lib*", "routes*"]
+include = ["tofu*", "lib*", "routes*", "rootless_vm*"]
 exclude = ["tests*", "benchmarks*", "debug*", "clients*", "desktop*",
            "browser_extension*", "docs*", "promo*", "propaganda*",
            "swebench_rerun_workdir*", "outputs*", "paper*", "tools*"]
@@ -74,6 +78,12 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
+# `-p no:napari` blocks an unrelated plugin leaked in by the host Python
+# environment. Its napari -> vispy import chain raises ``OSError: GL ES 2.0
+# library not found`` on headless machines before Tofu collection begins. Keep
+# this in project addopts as well as the Makefile so a direct
+# ``python -m pytest`` is equally hermetic.
+#
 # `-p no:timeout` MUST precede/accompany the explicit load: with entry-point
 # autoload ON (a bare `pytest`, exactly what public CI runs) pytest-timeout's
 # entrypoint registers the module as 'timeout', and the explicit
@@ -82,7 +92,7 @@ python_functions = "test_*"
 # 2026-08-05 on the first push carrying this addopts — every CI test leg died
 # at startup). Blocking the 'timeout' name keeps exactly one registration in
 # both worlds (autoload on OR PYTEST_DISABLE_PLUGIN_AUTOLOAD=1).
-addopts = "-v --tb=short --strict-markers -p no:timeout -p pytest_timeout"
+addopts = "-v --tb=short --strict-markers -p no:napari -p no:timeout -p pytest_timeout"
 # Per-test hang guard. pytest-timeout has been an installed, DECLARED dep for
 # a while, but with no default configured it never fired — measured
 # 2026-07-27: a sleep(600) test ran until an EXTERNAL kill stopped the shell,
@@ -104,6 +114,7 @@ markers = [
     "api: API integration tests (requires PostgreSQL)",
     "visual: Visual E2E tests (requires live server + Chromium)",
     "slow: Long-running tests (opt-in)",
-    "ci_serial: Timing/concurrency-sensitive suites that assert locking or race behavior — public CI runs them in a dedicated SERIAL step (no xdist) because an oversubscribed runner starves their writer/heartbeat windows into false 'database is locked' / timeout reds (measured f0a930e→e65e14f). Locally they run in the normal parallel lanes.",
+    "timeout(seconds): Override the default pytest-timeout deadline for a test.",
+    "ci_serial: Timing/concurrency-sensitive suites that assert locking or race behavior — CI and parallel Makefile targets run them in a dedicated SERIAL step (no xdist) because an oversubscribed runner starves their writer/heartbeat windows into false 'database is locked' / timeout reds (measured f0a930e→e65e14f). JOBS=0 keeps the whole target serial.",
     "live_llm: Hits the real LLM API (costs money, needs creds). Manual-only; gated by TOFU_PARITY_LIVE=1.",
 ]

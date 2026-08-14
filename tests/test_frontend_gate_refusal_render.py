@@ -34,6 +34,7 @@ Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q \\
 from __future__ import annotations
 
 import os
+import json
 import re
 import tempfile
 
@@ -298,13 +299,14 @@ def test_gate_i18n_keys_defined():
     js = open(TOOL_ROUNDS, encoding='utf-8').read()
     referenced = set(re.findall(r'"(tool\.gate[A-Za-z]+)"', js))
     assert referenced, 'no tool.gate* keys referenced — guard lost its anchor'
-    i18n = open(os.path.join(JS_DIR, 'i18n.js'), encoding='utf-8').read()
+    locale_dir = os.path.join(os.path.dirname(HERE), 'frontend', 'src', 'i18n', 'locales')
+    with open(os.path.join(locale_dir, 'zh.json'), encoding='utf-8') as fh:
+        zh = json.load(fh)
+    with open(os.path.join(locale_dir, 'en.json'), encoding='utf-8') as fh:
+        en = json.load(fh)
     missing = []
     for key in sorted(referenced):
-        m = re.search(
-            r"'" + re.escape(key) + r"':\s*\{\s*zh:\s*'.+?',\s*en:\s*'.+?'\s*\}",
-            i18n, re.S)
-        if not m:
+        if key not in zh or key not in en:
             missing.append(key)
     assert not missing, (
         f'tool.gate* keys referenced but not fully defined in i18n.js '

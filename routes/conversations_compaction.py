@@ -8,7 +8,7 @@ same ``conversations_bp`` Blueprint via side-effect import in
 import asyncio
 import json
 
-from flask import request
+from quart import request
 
 from lib.database import DOMAIN_CHAT, async_fetchall, async_fetchone
 from lib.log import get_logger

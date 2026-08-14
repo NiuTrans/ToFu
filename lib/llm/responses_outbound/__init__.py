@@ -26,6 +26,7 @@ from lib.llm.responses_outbound._sse import ResponsesSSETranslator
 from lib.llm.responses_outbound._to_responses import (
     RESPONSES_PROFILES,
     openai_body_to_responses,
+    responses_cache_affinity_key,
 )
 from lib.llm.responses_outbound._url import responses_url
 
@@ -33,6 +34,7 @@ __all__ = [
     'RESPONSES_PROFILES',
     'ResponsesSSETranslator',
     'openai_body_to_responses',
+    'responses_cache_affinity_key',
     'responses_response_to_openai',
     'responses_url',
 ]

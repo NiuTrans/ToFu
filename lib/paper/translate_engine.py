@@ -8,9 +8,9 @@ to ``paper_translations`` on success.
 
 import re
 import time
+import uuid
 
 import lib as _lib
-from lib.database import get_thread_db
 from lib.llm_dispatch.api import dispatch_stream
 from lib.log import get_logger
 
@@ -130,12 +130,11 @@ def _run_translate_task(task, paper_text):
         task['finished_at'] = time.time()
 
         try:
-            db = get_thread_db()
-            from lib.database._core_schema import PAPER_TRANSLATIONS, upsert
-            upsert(db, PAPER_TRANSLATIONS, {
+            from lib.storage import get_storage_client
+            get_storage_client(write=True).command('paper.translation.upsert', {
                 'paper_hash': task['paper_hash'], 'lang': lang, 'text': full_text,
                 'model': model or _lib.LLM_MODEL, 'created_at': int(time.time()),
-            }, retry=True)
+            }, f'paper.translation.upsert:{uuid.uuid4().hex}')
             logger.info('[Paper:Translate] Task %s done — %d chars persisted',
                         task['task_id'], len(full_text))
         except Exception as e:

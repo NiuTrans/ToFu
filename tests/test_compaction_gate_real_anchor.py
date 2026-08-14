@@ -53,7 +53,18 @@ _ANCHOR_MOD = 'lib.tasks_pkg.compaction._real_anchor'
 
 
 def _task(conv='c-anchor', model='kimi-k3'):
-    return {'id': 't1234567', 'convId': conv, 'config': {'model': model}}
+    # These tests isolate the provider-measured anchor guard.  The separately
+    # tested economic working-set policy intentionally compacts at 128K by
+    # default, so opt it out here; otherwise a 215K real anchor correctly trips
+    # that independent policy and this suite no longer measures its namesake.
+    return {
+        'id': 't1234567',
+        'convId': conv,
+        'config': {
+            'model': model,
+            'compaction': {'workingSetTokens': 0},
+        },
+    }
 
 
 def _clear_cooldown(conv):

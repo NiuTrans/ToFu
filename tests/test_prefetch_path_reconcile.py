@@ -47,9 +47,6 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import quart as _quart  # noqa: E402
-sys.modules['flask'] = _quart
-
 import pytest  # noqa: E402
 
 pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
@@ -175,11 +172,8 @@ def test_prefetch_live_task_placeholder_not_deleted():
         _mgr._chat_runtime._tasks.pop(task_id, None)
         with _mgr._conv_latest_task_lock:
             _mgr._conv_latest_task.pop(conv_id, None)
-        try:
-            from lib.runtime_state_store import get_store
-            get_store().set_value('latest', conv_id, None, 1)
-        except Exception:
-            pass
+        from lib.runtime_state_store import get_store
+        get_store().delete_value('latest', conv_id)
         _cleanup(db, conv_id)
     _ok('live-task placeholder NOT deleted/persisted/stamped on prefetch (gate 1)')
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import lib as _lib
 from lib.config_dir import config_path as _config_path
-from lib.json_store import read_json, write_json_atomic
+from lib.json_store import JsonStoreReadError, update_json_atomic
 from lib.log import audit_log, get_logger
 from lib.search_settings import normalise_domain as _ss_normalise_domain
 
@@ -23,21 +23,6 @@ logger = get_logger(__name__)
 
 
 _CONFIG_FILE = _config_path('server_config.json')
-
-
-# ══════════════════════════════════════════════════════════
-#  File helpers (delegate to lib.json_store)
-# ══════════════════════════════════════════════════════════
-
-def _load_config() -> dict:
-    """Read server_config.json. Returns {} on missing or unparseable file."""
-    data = read_json(_CONFIG_FILE, default={})
-    return data if isinstance(data, dict) else {}
-
-
-def _atomic_write(data: dict) -> None:
-    """Atomically persist the config file."""
-    write_json_atomic(_CONFIG_FILE, data)
 
 
 def _normalise_domain(domain: str) -> str:
@@ -68,24 +53,32 @@ def apply(args: dict) -> dict:
         raise ValueError(f'invalid domain: {args.get("domain")!r}')
     ttl_days = int(args.get('ttl_days') or 7)
 
-    data = _load_config()
-    search_cfg = data.setdefault('search', {}) if isinstance(data.get('search', {}), dict) else {}
-    if not isinstance(search_cfg, dict):
-        search_cfg = {}
-        data['search'] = search_cfg
-    current = search_cfg.get('skip_domains')
-    if not isinstance(current, list):
-        # Seed with in-memory defaults so we never SHRINK the effective set
-        current = sorted(_lib.SKIP_DOMAINS)
-    if domain in current:
-        logger.info('[Optimizer.block_search_domain] %s already present — no-op',
-                    domain)
-    else:
-        current.append(domain)
-    search_cfg['skip_domains'] = sorted(set(current))
-    data['search'] = search_cfg
+    outcome = {'size': 0}
 
-    _atomic_write(data)
+    def _mutate(data):
+        if not isinstance(data, dict):
+            raise JsonStoreReadError(
+                'server_config.json is not a JSON object')
+        search_cfg = data.get('search')
+        if not isinstance(search_cfg, dict):
+            search_cfg = {}
+            data['search'] = search_cfg
+        current = search_cfg.get('skip_domains')
+        if not isinstance(current, list):
+            # Seed with in-memory defaults so we never shrink the effective set.
+            current = sorted(_lib.SKIP_DOMAINS)
+        if domain in current:
+            logger.info(
+                '[Optimizer.block_search_domain] %s already present — no-op',
+                domain)
+        else:
+            current.append(domain)
+        search_cfg['skip_domains'] = sorted(set(current))
+        outcome['size'] = len(search_cfg['skip_domains'])
+        return data
+
+    update_json_atomic(
+        _CONFIG_FILE, _mutate, default={}, strict=True, indent=2)
 
     # Hot-reload so lib.SKIP_DOMAINS updates without restart
     try:
@@ -100,16 +93,16 @@ def apply(args: dict) -> dict:
         action='block_search_domain',
         domain=domain,
         ttl_days=ttl_days,
-        skip_domains_size_after=len(search_cfg['skip_domains']),
+        skip_domains_size_after=outcome['size'],
     )
     logger.info('[Optimizer.block_search_domain] applied domain=%s ttl_days=%d '
                 'skip_domains=%d',
-                domain, ttl_days, len(search_cfg['skip_domains']))
+                domain, ttl_days, outcome['size'])
 
     return {
         'domain': domain,
         'ttl_days': ttl_days,
-        'skip_domains_size_after': len(search_cfg['skip_domains']),
+        'skip_domains_size_after': outcome['size'],
     }
 
 
@@ -119,16 +112,27 @@ def revert(args: dict) -> dict:
     if not domain:
         raise ValueError(f'invalid domain for revert: {args.get("domain")!r}')
 
-    data = _load_config()
-    search_cfg = data.setdefault('search', {})
-    if not isinstance(search_cfg, dict):
-        search_cfg = {}
-        data['search'] = search_cfg
-    current = search_cfg.get('skip_domains')
-    if isinstance(current, list) and domain in current:
-        current = [d for d in current if d != domain]
-        search_cfg['skip_domains'] = sorted(set(current))
-        _atomic_write(data)
+    outcome = {'reverted': False, 'size': 0}
+
+    def _mutate(data):
+        if not isinstance(data, dict):
+            raise JsonStoreReadError(
+                'server_config.json is not a JSON object')
+        search_cfg = data.get('search')
+        if not isinstance(search_cfg, dict):
+            return None
+        current = search_cfg.get('skip_domains')
+        if not isinstance(current, list) or domain not in current:
+            return None
+        search_cfg['skip_domains'] = sorted(
+            {item for item in current if item != domain})
+        outcome['reverted'] = True
+        outcome['size'] = len(search_cfg['skip_domains'])
+        return data
+
+    update_json_atomic(
+        _CONFIG_FILE, _mutate, default={}, strict=True, indent=2)
+    if outcome['reverted']:
         try:
             _lib.reload_config()
         except Exception as e:
@@ -137,12 +141,12 @@ def revert(args: dict) -> dict:
             raise
         audit_log('optimizer_revert',
                   action='block_search_domain', domain=domain,
-                  skip_domains_size_after=len(search_cfg['skip_domains']))
+                  skip_domains_size_after=outcome['size'])
         logger.info('[Optimizer.block_search_domain] reverted domain=%s '
                     'skip_domains=%d',
-                    domain, len(search_cfg['skip_domains']))
+                    domain, outcome['size'])
         return {'domain': domain, 'reverted': True,
-                'skip_domains_size_after': len(search_cfg['skip_domains'])}
+                'skip_domains_size_after': outcome['size']}
 
     logger.info('[Optimizer.block_search_domain] revert no-op: %s not present',
                 domain)

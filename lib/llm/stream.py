@@ -18,6 +18,7 @@ import requests
 
 from lib.llm._sse_core import (
     SSEAccumulator,
+    activate_native_tool_search_fallback,
     classify_status_error,
     prepare_request,
 )
@@ -39,11 +40,13 @@ from lib.llm_errors import (
     PermissionError_,
     PromptTooLongError,
     RateLimitError,
+    RetryableAPIError,
     _RETRYABLE,
     decode_error_body,
 )
 from lib.log import get_logger
 from lib.proxy import proxies_for, report_outcome as _proxy_report_outcome
+from lib.subscription_quota import record_codex_quota
 
 logger = get_logger(__name__)
 
@@ -136,6 +139,23 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
         api_key=api_key, base_url=base_url, extra_headers=extra_headers,
         api_protocol=api_protocol, oauth=oauth)
 
+    if plan.responses_transport == 'websocket':
+        from lib.llm.responses_websocket import (
+            ResponsesWebSocketUnavailable,
+            stream_responses_websocket,
+        )
+        try:
+            return stream_responses_websocket(
+                plan, on_thinking=on_thinking, on_content=on_content,
+                on_tool_call_ready=on_tool_call_ready,
+                abort_check=abort_check, log_prefix=log_prefix,
+                on_first_byte_wait=on_first_byte_wait)
+        except ResponsesWebSocketUnavailable as exc:
+            # The socket failed before response.create was sent, so the same
+            # translated request can safely use the proven SSE transport.
+            logger.warning('%s [ResponsesWS] unavailable before send (%s); '
+                           'falling back to SSE', log_prefix, exc)
+
     # ``prepare_request`` already opened the RawSSEDumper fd (when enabled), so
     # a single outer try/finally must guard EVERY exit path — including the
     # connect-phase re-raise below, which used to escape before the dumper was
@@ -197,7 +217,6 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                 try:
                     _egress_route = _eg.route_request(plan.url, user_id='')
                 except _eg.EgressUnavailable as e:
-                    _proxy_report_outcome(plan.url, False)
                     raise EndpointUnreachableError(str(e), base_url=plan.url) from e
                 if _egress_route != 'direct':
                     try:
@@ -206,20 +225,84 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                             body=json.dumps(plan.body).encode(),
                             agent_id=_egress_route, log_prefix=log_prefix)
                     except _eg.EgressUnavailable as e:
-                        _proxy_report_outcome(plan.url, False)
                         raise EndpointUnreachableError(str(e), base_url=plan.url) from e
                 else:
-                    resp = get_sync_session().post(
-                        plan.url, headers=plan.hdrs, json=plan.body,
-                        stream=True, timeout=(CONNECT_TIMEOUT, None),
-                        proxies=proxies_for(plan.url))
+                    from lib.proxy import (
+                        report_subscription_route,
+                        subscription_route_candidates,
+                    )
+                    _server_routes = subscription_route_candidates(plan.url)
+                    if _server_routes:
+                        _attempted_routes = set()
+                        for _server_route in _server_routes:
+                            _attempted_routes.add(_server_route.route_id)
+                            _route_t0 = time.monotonic()
+                            try:
+                                resp = get_sync_session().post(
+                                    plan.url, headers=plan.hdrs,
+                                    json=plan.body, stream=True,
+                                    timeout=(CONNECT_TIMEOUT, None),
+                                    proxies=_server_route.requests_proxies(),
+                                    allow_redirects=False)
+                            except requests.exceptions.ConnectionError as e:
+                                from lib.subscription_routes import (
+                                    is_safe_connect_failure,
+                                )
+                                if not is_safe_connect_failure(e):
+                                    report_subscription_route(
+                                        plan.url, _server_route, False)
+                                    raise EndpointUnreachableError(
+                                        'subscription route disconnected '
+                                        'before response headers; request was '
+                                        'not replayed because delivery is '
+                                        'ambiguous (%s)'
+                                        % type(e).__name__,
+                                        base_url=plan.url) from e
+                                report_subscription_route(
+                                    plan.url, _server_route, False)
+                                logger.info(
+                                    '%s connection failed via %s — trying '
+                                    'next subscription route',
+                                    log_prefix, _server_route.label)
+                                _known_routes = {
+                                    item.route_id for item in _server_routes}
+                                for _candidate in subscription_route_candidates(
+                                        plan.url):
+                                    if (_candidate.route_id
+                                            not in _attempted_routes
+                                            and _candidate.route_id
+                                            not in _known_routes):
+                                        _server_routes.append(_candidate)
+                                        _known_routes.add(_candidate.route_id)
+                                continue
+                            report_subscription_route(
+                                plan.url, _server_route, True,
+                                (time.monotonic() - _route_t0) * 1000.0)
+                            break
+                        else:
+                            raise EndpointUnreachableError(
+                                'all server subscription routes failed during '
+                                'connection setup',
+                                base_url=plan.url) from None
+                    else:
+                        resp = get_sync_session().post(
+                            plan.url, headers=plan.hdrs, json=plan.body,
+                            stream=True, timeout=(CONNECT_TIMEOUT, None),
+                            proxies=proxies_for(plan.url),
+                            allow_redirects=False)
                 _resp_holder['resp'] = resp
                 if _watchdog.aborted:
                     # Stop landed while we were blocked pre-headers — the flag
                     # is all we get (no socket handle to close retroactively).
                     raise AbortedError('User aborted while awaiting response headers')
-                _proxy_report_outcome(
-                    plan.url, True, (time.monotonic() - _conn_t0) * 1000.0)
+                # Server-route attempts report their concrete route above;
+                # desktop-agent success belongs to agent health, not a stale
+                # server proxy choice. Only generic non-subscription direct
+                # traffic still feeds the legacy netpath scorer here.
+                if _egress_route == 'direct' and not _server_routes:
+                    _proxy_report_outcome(
+                        plan.url, True,
+                        (time.monotonic() - _conn_t0) * 1000.0)
         except AbortedError:
             raise
         except requests.exceptions.ConnectionError as e:
@@ -251,6 +334,12 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                     raise EndpointUnreachableError(str(e), base_url=plan.url) from e
             else:
                 err_body = decode_error_body(resp)
+            if activate_native_tool_search_fallback(
+                    resp.status_code, err_body, plan=plan,
+                    canonical_body=body):
+                raise RetryableAPIError(
+                    'native Tool Search rejected; retrying locally',
+                    status_code=resp.status_code)
             classify_status_error(resp.status_code, err_body,
                                   body=plan.body,
                                   log_prefix=log_prefix, raw_dumper=plan.raw_dumper)
@@ -294,7 +383,16 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
             raise AbortedError('User aborted while waiting on %s' % plan.url)
 
         acc.fire_final_tool_callback()
-        return acc.finalize(resp_trace=resp_trace)
+        msg, finish_reason, usage = acc.finalize(resp_trace=resp_trace)
+        # ChatGPT-backed Codex reports the subscription allowance in response
+        # headers, separately from the token usage carried by the SSE body.
+        # Preserve both facts on the same per-round usage record.
+        _quota_scope = ('oauth_codex' if oauth == 'codex' else
+                        ('adapter:' + str(adapter.get('agent_id') or '')
+                         if isinstance(adapter, dict) and adapter else 'codex'))
+        usage = record_codex_quota(
+            resp.headers, usage, cache_key=_quota_scope)
+        return msg, finish_reason, usage
     finally:
         _watchdog.cancel()
         try:

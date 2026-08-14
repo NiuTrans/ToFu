@@ -182,8 +182,8 @@ def test_mcp_spec_has_upper_bound(label, path, lang):
         )
 
 
-def test_bridge_source_uses_the_v2_api_names():
-    """``_bridge.py`` must not reference a v1-only SDK name.
+def test_bridge_source_keeps_v2_primary_with_v1_rolling_fallback():
+    """``_bridge.py`` must retain v2 support plus the v1 deployment bridge.
 
     The pin alone does not migrate the client: ``requirements.txt`` saying
     ``mcp>=2,<3`` while the bridge still imports ``streamablehttp_client``
@@ -204,8 +204,7 @@ def test_bridge_source_uses_the_v2_api_names():
     from lib.mcp.client import _bridge as bridge_mod
 
     src = inspect.getsource(bridge_mod)
-    for dead in ('streamablehttp_client', '.inputSchema', '.isError',
-                 "'serverInfo'"):
+    for dead in ('streamablehttp_client', '.inputSchema', '.isError'):
         assert dead not in src, (
             f'_bridge.py references v1-only SDK name {dead!r} — removed in '
             f'mcp 2.x, this is an ImportError/AttributeError at runtime'
@@ -217,6 +216,8 @@ def test_bridge_source_uses_the_v2_api_names():
         assert live in src, (
             f'_bridge.py no longer uses {live!r} — the v2 migration regressed'
         )
+    assert "getattr(_mcp_sdk, 'Client', None)" in src
+    assert 'ClientSession(read, write' in src
 
 
 def test_tofu_client_sites_are_on_the_v2_line():
@@ -337,6 +338,16 @@ def test_launcher_resolution_is_reproducible():
         'The uv and npm cutoffs disagree. Two ecosystems pinned to different '
         'instants means "reproducible" is only half true, and which half '
         'depends on which launcher a server happens to use.'
+    )
+
+
+def test_default_cutoff_includes_current_adopted_mcp_releases():
+    """The reproducibility ceiling must not exclude an adopted dependency."""
+    from lib.mcp.client._vendor import _SUPPLY_CUTOFF_DEFAULT
+
+    assert _SUPPLY_CUTOFF_DEFAULT >= '2026-08-14T00:00:00Z', (
+        'overleaf-mcp-plus==0.3.1 is the adopted exact launcher pin; an '
+        'earlier cutoff makes that release unsatisfiable'
     )
 
 

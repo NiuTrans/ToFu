@@ -24,7 +24,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ripgrep fd-find \
         # General utilities
         curl ca-certificates git \
-    && rm -rf /var/lib/apt/lists/*
+        # Equal PostgreSQL backend ships its local server toolchain; any
+        # distro-created cluster is removed because live pgdata belongs only
+        # under /app/data and is initialized by the Storage Sidecar.
+        postgresql \
+    && rm -rf /var/lib/postgresql/* /var/lib/apt/lists/*
 
 # ── App directory ───────────────────────────────────────────
 WORKDIR /app
@@ -34,8 +38,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ── Playwright browser (optional — for advanced page fetching)
-RUN pip install --no-cache-dir playwright \
-    && playwright install chromium --with-deps 2>/dev/null || true
+RUN python -m playwright install chromium --with-deps
 
 # ── Copy application code ──────────────────────────────────
 COPY . .
@@ -54,8 +57,9 @@ EXPOSE 15000
 
 # ── Health check ───────────────────────────────────────────
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:15000/ || exit 1
+    CMD curl -fsS http://localhost:15000/api/health || exit 1
 
 # ── Entrypoint ─────────────────────────────────────────────
-# SQLite auto-creates the database on first run — zero setup needed
+# SQLite defaults; exact TOFU_DB_BACKEND=postgres selects the equal PG backend.
+ENV TOFU_SERVER_WORKER=1 TOFU_MANAGED_BY=docker
 CMD ["python", "server.py"]

@@ -29,11 +29,19 @@ until the leaf lands and conversations.js delegates.
 from __future__ import annotations
 
 import pathlib
+import sys
+
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-CONV_JS = ROOT / 'static' / 'js' / 'core' / 'conversations.js'
-LEAF_JS = ROOT / 'static' / 'js' / 'core' / 'conv_merge_shells.js'
+sys.path.insert(0, str(ROOT / 'tests'))
+from _runtime_sections import runtime_section_names, runtime_section_path  # noqa: E402
+
+CONV_JS = pathlib.Path(runtime_section_path('core/conversations.js'))
+LEAF_JS = pathlib.Path(runtime_section_path('core/conv_merge_shells.js'))
 INDEX_HTML = ROOT / 'index.html'
 
 
@@ -122,27 +130,18 @@ def test_bundler_lists_leaf_before_conversations_js():
     ``_serverConvCount`` resolve via bundle-level window scope, and
     so ``folders.js`` / ``conversation_list.js`` (both loaded LATER
     in the manifest via the ui/ block) find ``mergeServerConvShells``."""
-    import sys
-    if str(ROOT) not in sys.path:
-        sys.path.insert(0, str(ROOT))
-    from lib.js_bundler import _BUNDLE_FILES
-    assert 'core/conv_merge_shells.js' in _BUNDLE_FILES, (
-        'core/conv_merge_shells.js missing from _BUNDLE_FILES')
-    idx_leaf = _BUNDLE_FILES.index('core/conv_merge_shells.js')
-    idx_conv = _BUNDLE_FILES.index('core/conversations.js')
+    owners = runtime_section_names()
+    idx_leaf = owners.index('core/conv_merge_shells.js')
+    idx_conv = owners.index('core/conversations.js')
     assert idx_leaf < idx_conv, (
         f'core/conv_merge_shells.js (idx {idx_leaf}) must precede '
         f'core/conversations.js (idx {idx_conv})')
 
 
 # ---------------------------------------------------------------------------
-# 4. Dev-fallback <script> tag exists in index.html
+# 4. The page shell contains no raw app-script inventory
 # ---------------------------------------------------------------------------
-def test_index_html_has_devfallback_script_tag_for_leaf():
-    """Per the peer note about slice 4: every _BUNDLE_FILES entry MUST
-    have a matching <script> in index.html or the bundling-failed dev
-    fallback path silently drops the leaf."""
+def test_index_html_has_no_raw_script_tag_for_leaf():
     src = INDEX_HTML.read_text()
-    assert 'core/conv_merge_shells.js' in src, (
-        'index.html must have a <script defer src="static/js/core/'
-        'conv_merge_shells.js"> tag for the dev fallback path')
+    assert 'static/js/core/conv_merge_shells.js' not in src
+    assert '<!-- TOFU_APP_ASSETS -->' in src

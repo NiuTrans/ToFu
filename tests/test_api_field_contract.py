@@ -41,6 +41,14 @@ _PNG_B64 = base64.b64encode(base64.b64decode(
 )).decode()
 
 
+@pytest.fixture(autouse=True)
+def _no_background_llm(monkeypatch):
+    """Field-shape probes stop at task admission; no model call is needed."""
+    import lib.tasks_pkg as tasks_pkg
+
+    monkeypatch.setattr(tasks_pkg, 'spawn_task', lambda _task: None)
+
+
 # ─── Shape checker ─────────────────────────────────────────────────────
 # spec forms:
 #   str/int/float/bool/list/dict  — isinstance check (bool excluded from int)
@@ -191,6 +199,55 @@ _SERVER_CONFIG_SPEC = {
     }],
     'dropdown_models': 'any',
     'models': 'any',
+    'cost_experiment': {
+        'enabled': bool,
+        'experiment_id': str,
+        'traffic_percent': int,
+        'treatment_percent': int,
+        'min_sample_size': int,
+        'assignment_unit': str,
+        'sticky': bool,
+        'arms': dict,
+    },
+}
+
+_COST_EXPERIMENT_REPORT_SPEC = {
+    'ok': bool,
+    'experiment_id': str,
+    'enabled': bool,
+    'windowDays': int,
+    'assignmentUnit': str,
+    'minSampleSize': int,
+    'ready': bool,
+    'truncated': bool,
+    'rowCap': int,
+    'arms': {
+        'control': {
+            'conversations': int,
+            'turns': int,
+            'pricedTurns': int,
+            'unpricedTurns': int,
+            'fullyPricedConversations': int,
+            'costPerPricedTurnUsd': (float, type(None)),
+            'costPerFullyPricedConversationUsd': (float, type(None)),
+            'pricingCoverage': (float, type(None)),
+        },
+        'optimized': {
+            'conversations': int,
+            'turns': int,
+            'pricedTurns': int,
+            'unpricedTurns': int,
+            'fullyPricedConversations': int,
+            'costPerPricedTurnUsd': (float, type(None)),
+            'costPerFullyPricedConversationUsd': (float, type(None)),
+            'pricingCoverage': (float, type(None)),
+        },
+    },
+    'comparison': {
+        'costPerConversationDeltaPct': (float, type(None)),
+        'costPerPricedTurnDeltaPct': (float, type(None)),
+        'optimizedIsCheaper': bool,
+    },
 }
 
 _IMAGE_UPLOAD_SPEC = {
@@ -242,6 +299,13 @@ class TestFieldContract:
         assert resp.status_code == 200
         _assert_endpoint_shape(resp.get_json(), _SERVER_CONFIG_SPEC,
                                'GET /api/v1/server-config (model picker)')
+
+    def test_cost_experiment_report_shape(self, flask_client):
+        resp = flask_client.get('/api/v1/cost-experiments/report?days=14')
+        assert resp.status_code == 200
+        _assert_endpoint_shape(
+            resp.get_json(), _COST_EXPERIMENT_REPORT_SPEC,
+            'GET /api/v1/cost-experiments/report')
 
     def test_image_upload_shape(self, flask_client):
         resp = flask_client.post('/api/images/upload', json={

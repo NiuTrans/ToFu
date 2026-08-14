@@ -113,6 +113,23 @@ def stamp_round_cache_accounting(
         tools=tools, model=model,
         usage=usage,
     )
+    # Codex's private Responses endpoint can step back exactly one or more
+    # 1,024-token implicit breakpoints while the sent wire remains append-only.
+    # The generic detector deliberately ignores sub-2k fluctuations, so carry
+    # the provider-specific, wire-proven verdict stamped by cache_settle into
+    # the round record instead of silently losing the event.
+    _codex_cache = usage.get('_codex_cache') or {}
+    _codex_status = _codex_cache.get('status')
+    if (not _cache_break and _codex_status in (
+            'implicit_breakpoint_fallback', 'upstream_cache_miss')):
+        _cache_break = {
+            'codex_cache': {
+                key: _codex_cache.get(key)
+                for key in (
+                    'status', 'cached_tokens', 'previous_cached_tokens',
+                    'max_cached_tokens', 'drop_tokens', 'wire_append_only')
+            }
+        }
     # Stamp the break reason onto the round we just recorded so
     # the frontend cost popover can explain WHY cache_read dropped
     # (system-prompt change, tools change, TTL expiry, …). Guard on

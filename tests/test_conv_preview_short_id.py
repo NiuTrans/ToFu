@@ -87,7 +87,7 @@ class ConvPreviewShortIdTest(unittest.TestCase):
         restore_db_state(getattr(cls, '_db_snapshot', None))
         cls._tmp.cleanup()
 
-    def _preview(self, conv_id):
+    def _preview(self, conv_id, *, enable_rows=False):
         """Invoke the async endpoint and return the parsed JSON body + status.
 
         The async DB facade (``async_fetchone`` / ``async_fetchall``) runs on a
@@ -102,10 +102,14 @@ class ConvPreviewShortIdTest(unittest.TestCase):
         from lib.database import get_thread_db, DOMAIN_CHAT
         import routes.conversations as rc
 
+        sql_seen = []
+
         async def _fake_fetchone(sql, params=None, *, domain=DOMAIN_CHAT):
+            sql_seen.append(sql)
             return get_thread_db(DOMAIN_CHAT).execute(sql, params).fetchone()
 
         async def _fake_fetchall(sql, params=None, *, domain=DOMAIN_CHAT):
+            sql_seen.append(sql)
             return get_thread_db(DOMAIN_CHAT).execute(sql, params).fetchall()
 
         app = _make_app_ctx()
@@ -120,8 +124,14 @@ class ConvPreviewShortIdTest(unittest.TestCase):
                 return json.loads(body), status
 
         with _mock.patch.object(rc, 'async_fetchone', _fake_fetchone), \
-                _mock.patch.object(rc, 'async_fetchall', _fake_fetchall):
-            return asyncio.run(_run())
+                _mock.patch.object(rc, 'async_fetchall', _fake_fetchall), \
+                _mock.patch.dict(os.environ, {
+                    'TOFU_MESSAGES_ROWS': '1' if enable_rows else '0',
+                    'TOFU_MESSAGES_ROWS_READ': '1' if enable_rows else '0',
+                }):
+            result = asyncio.run(_run())
+        self._last_preview_sql = sql_seen
+        return result
 
     def test_exact_id_resolves(self):
         data, status = self._preview('mr7hh5n6llzwnm')
@@ -151,6 +161,23 @@ class ConvPreviewShortIdTest(unittest.TestCase):
     def test_unknown_id_is_404(self):
         _data, status = self._preview('doesnotexistxx')
         self.assertEqual(status, 404)
+
+    def test_verified_row_preview_never_selects_whole_messages_blob(self):
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        from lib.database.messages_rows import backfill_conv
+
+        db = get_thread_db(DOMAIN_CHAT)
+        cid = 'mr7hh5n6llzwnm'
+        row = db.execute(
+            'SELECT messages FROM conversations WHERE id=?', (cid,)).fetchone()
+        backfill_conv(db, cid, row['messages'], commit=True)
+
+        data, status = self._preview(cid, enable_rows=True)
+        self.assertEqual(status, 200)
+        self.assertIn('finish tag', data.get('firstUserMessage', ''))
+        projected_sql = ' '.join(self._last_preview_sql).lower()
+        self.assertNotIn('title, messages', projected_sql,
+                         'verified preview fetched the whole conversation blob')
 
 
 if __name__ == '__main__':

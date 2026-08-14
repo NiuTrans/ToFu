@@ -139,7 +139,32 @@ def test_build_result_meta_records_endpoint_signal():
     }
     meta = build_result_meta(task)
     assert meta.get('endpointMode') is True
+    assert meta.get('endpointPhase') == 'planning'
+    assert meta.get('endpointIteration') == 0
     assert meta.get('endpointStopReason') == 'approved'
+
+
+def test_build_result_meta_records_flow_current_turn_identity():
+    from lib.tasks_pkg.manager import build_result_meta
+    task = {
+        'id': 'flow-meta-1', 'endpoint_mode': True, 'flow_mode': True,
+        '_flow_projection': 'autopilot', '_endpoint_phase': 'reviewing',
+        '_endpoint_iteration': 3,
+        '_flow_current_turn': {
+            'flowProjection': 'autopilot',
+            'turnRole': 'virtual_user', 'emits': 'user',
+            'vuMsgId': 'vu-meta-1', 'autopilotRunId': 'run-meta-1',
+        },
+    }
+    meta = build_result_meta(task)
+    assert meta['flowMode'] is True
+    assert meta['flowProjection'] == 'autopilot'
+    assert meta['endpointPhase'] == 'reviewing'
+    assert meta['endpointIteration'] == 3
+    assert meta['turnRole'] == 'virtual_user'
+    assert meta['emits'] == 'user'
+    assert meta['vuMsgId'] == 'vu-meta-1'
+    assert meta['autopilotRunId'] == 'run-meta-1'
 
 
 def test_build_result_meta_no_endpoint_for_plain_task():
@@ -157,6 +182,11 @@ def put_task():
     added = []
 
     def _put(task):
+        # Mirror manager._registry's production task shape. Poll snapshots
+        # content/thinking under this lock so a synthetic registry entry must
+        # carry it as well.
+        import threading
+        task.setdefault('content_lock', threading.Lock())
         with tasks_lock:
             tasks[task['id']] = task
         added.append(task['id'])
@@ -195,6 +225,30 @@ def test_inmemory_poll_carries_endpoint_terminal_signal(flask_client, put_task):
     assert body['endpointPhase'] == 'done'
     assert body['endpointStopReason'] == 'approved'
     assert body.get('endpointIteration') == 1
+
+
+@pytest.mark.api
+def test_inmemory_poll_carries_flow_vu_identity(flask_client, put_task):
+    put_task({
+        'id': 'flow-vu-inmem-1', 'status': 'running',
+        'content': 'Keep going', 'thinking': '',
+        'endpoint_mode': True, 'flow_mode': True,
+        '_flow_projection': 'autopilot',
+        '_endpoint_phase': 'reviewing', '_endpoint_iteration': 2,
+        '_flow_current_turn': {
+            'flowProjection': 'autopilot',
+            'turnRole': 'virtual_user', 'emits': 'user',
+            'vuMsgId': 'vu-inmem-1', 'autopilotRunId': 'run-inmem-1',
+        },
+    })
+    status, body = _poll(flask_client, 'flow-vu-inmem-1')
+    assert status == 200, body
+    assert body['flowMode'] is True
+    assert body['flowProjection'] == 'autopilot'
+    assert body['endpointPhase'] == 'reviewing'
+    assert body['turnRole'] == 'virtual_user'
+    assert body['vuMsgId'] == 'vu-inmem-1'
+    assert body['autopilotRunId'] == 'run-inmem-1'
 
 
 # ── DB poll branch: reconstruct turns after the task is evicted ────────

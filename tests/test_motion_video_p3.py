@@ -18,6 +18,8 @@ import time
 
 import pytest
 
+pytest_plugins = ('tests._artifact_sidecar',)
+
 from lib import motion_video as mv
 
 pytestmark = pytest.mark.unit
@@ -340,6 +342,59 @@ def test_engine_scenes_only_run(monkeypatch, tmp_path):
     assert os.path.isfile(task['result']['srt_path'])  # sidecar still built
 
 
+def test_engine_passes_real_overlap_plan_and_renders_visual_handle(
+        monkeypatch, tmp_path):
+    from lib.motion_video.engine import run_motion_task
+    _fake_media(monkeypatch)
+    seen = {}
+
+    def fake_concat(inputs, output, **kwargs):
+        seen['transitions'] = kwargs.get('transitions')
+        _touch(output)
+        return {'ok': True, 'output': output, 'duration': 6.0,
+                'mode': 'transition', 'elapsed': 0.1}
+
+    monkeypatch.setattr('lib.motion_video.concat_mp4s', fake_concat)
+    scenes = [
+        {'id': 'scene-001', 'start': 0.0, 'end': 3.0, 'text': '第一句。'},
+        {'id': 'scene-002', 'start': 3.0, 'end': 6.0, 'text': '第二句。',
+         'transition_in': 'dissolve'},
+    ]
+    task = _scenes_only_task(tmp_path, scenes)
+    run_motion_task(task)
+    assert task['status'] == 'done', task.get('error')
+    persisted = json.loads(
+        (tmp_path / 'job' / 'scenes.json').read_text(encoding='utf-8'))
+    assert persisted[0]['content_duration_s'] == pytest.approx(3.0)
+    assert persisted[0]['render_duration_s'] == pytest.approx(3.4)
+    assert persisted[0]['outgoing_handle_s'] == pytest.approx(0.4)
+    assert seen['transitions'][0]['ffmpeg'] == 'fade'
+    assert seen['transitions'][0]['duration_s'] == pytest.approx(0.4)
+    first_html = (tmp_path / 'job' / 'scenes' / 'scene-001' /
+                  'index.html').read_text(encoding='utf-8')
+    assert 'data-duration="3.4"' in first_html
+    sidecar = (tmp_path / 'job' / 'final.srt').read_text(encoding='utf-8')
+    assert '00:00:03,000' in sidecar
+
+
+def test_audio_plan_api_rejects_ambiguous_or_missing_inputs(
+        flask_client, tmp_path):
+    both = flask_client.post('/api/v1/motion/videos', json={
+        'srt': SRT, 'audio_plan': {'bgm': {}},
+        'audio_plan_path': str(tmp_path / 'plan.json'),
+    })
+    # Missing path is caught before ambiguity becomes a worker-side error.
+    assert both.status_code == 400
+    malformed = flask_client.post('/api/v1/motion/videos', json={
+        'srt': SRT, 'audio_plan': ['not', 'an', 'object'],
+    })
+    assert malformed.status_code == 400
+    missing = flask_client.post('/api/v1/motion/videos', json={
+        'srt': SRT, 'audio_plan_path': str(tmp_path / 'missing.json'),
+    })
+    assert missing.status_code == 400
+
+
 def test_engine_scenes_only_gap_rejected(monkeypatch, tmp_path):
     from lib.motion_video.engine import run_motion_task
     _fake_media(monkeypatch)
@@ -374,8 +429,20 @@ def test_engine_burn_in_step(monkeypatch, tmp_path):
 
 def _seed_job(tmp_path):
     job = tmp_path / 'job'
-    scenes = [{'id': 'scene-001', 'start': 0.0, 'end': 3.0, 'text': '一。'},
-              {'id': 'scene-002', 'start': 3.0, 'end': 6.0, 'text': '二。'}]
+    scenes = [
+        {'id': 'scene-001', 'start': 0.0, 'end': 3.0,
+         'text': '价格是一项关键证据。',
+         'shot_recipe': 'hook-counter-burst',
+         'motion_family': 'metric-impact', 'shot_energy': 5,
+         'qa_progresses': [0.05, 0.46, 0.78, 0.94],
+         'plan_findings': []},
+        {'id': 'scene-002', 'start': 3.0, 'end': 6.0,
+         'text': '这意味着更高的效率。',
+         'shot_recipe': 'messaging-multi-phrase',
+         'motion_family': 'kinetic-type', 'shot_energy': 3,
+         'qa_progresses': [0.06, 0.46, 0.8, 0.95],
+         'plan_findings': []},
+    ]
     (job / 'audio').mkdir(parents=True)
     (job / 'scenes.json').write_text(json.dumps(scenes), encoding='utf-8')
     for sc in scenes:
@@ -463,11 +530,38 @@ def test_scenes_list_and_file(flask_client, monkeypatch, tmp_path):
     scenes = r.get_json()['scenes']
     assert len(scenes) == 2
     assert all(s['has_video'] and s['has_composition'] for s in scenes)
+    assert scenes[0]['shot_recipe'] == 'hook-counter-burst'
+    assert scenes[0]['motion_family'] == 'metric-impact'
+    assert scenes[0]['shot_energy'] == 5
+    assert scenes[0]['qa_progresses'] == [0.05, 0.46, 0.78, 0.94]
     r = flask_client.get(f'/api/v1/motion/videos/{tid}/scenes/scene-001/file')
     assert r.status_code == 200
     assert r.data == b'old'
     r = flask_client.get(f'/api/v1/motion/videos/{tid}/scenes/scene-999/file')
     assert r.status_code == 404
+
+
+def test_shot_recipe_catalog_endpoint(flask_client):
+    r = flask_client.get('/api/v1/motion/shot-recipes')
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body['contract_version'] == 'motion-shot-v1'
+    assert body['count'] == len(body['recipes']) == 13
+    demo = next(item for item in body['recipes']
+                if item['id'] == 'demo-page-scroll-spotlight')
+    assert demo['motion_family'] == 'product-demo'
+    assert len(demo['qa_progresses']) == 4
+    assert demo['hold_s'] > 0
+    assert demo['constraints']
+
+
+def test_audio_contract_endpoint(flask_client):
+    r = flask_client.get('/api/v1/motion/audio-contract')
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body['contract_version'] == 'motion-audio-v1'
+    assert body['template']['bgm']['asset']
+    assert body['template']['mix']['loudness_lufs'] == -14
 
 
 def test_scene_regen_endpoint(flask_client, monkeypatch, tmp_path):
@@ -517,13 +611,16 @@ def test_build_abstract_scenes_empty():
 
 
 def _insert_report(phash, lang='zh'):
-    from lib.database import get_thread_db
-    db = get_thread_db()
-    db.execute(
-        'INSERT OR REPLACE INTO paper_reports (paper_hash, lang, report, model,'
-        ' created_at) VALUES (?, ?, ?, ?, ?)',
-        (phash, lang, REPORT, 'm', int(time.time())))
-    db.commit()
+    import uuid
+    from lib.storage import get_storage_client
+    get_storage_client(write=True).command('paper.report.upsert', {
+        'paper_hash': phash,
+        'lang': lang,
+        'report': REPORT,
+        'model': 'm',
+        'meta': {},
+        'created_at': int(time.time()),
+    }, f'paper.video.report:{uuid.uuid4().hex}')
 
 
 def test_paper_video_start_flow(flask_client, monkeypatch, tmp_path):

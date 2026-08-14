@@ -641,6 +641,8 @@ class TestStreamingUI:
 
     def test_streaming_indicator_appears(self, page, screenshot_dir):
         """While processing, a streaming indicator should be visible."""
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
         _wait_for_app_ready(page)
 
         # ★ Fresh conversation for isolation
@@ -652,8 +654,10 @@ class TestStreamingUI:
         page.locator("#sendBtn").click()
 
         # Try to catch the streaming state
+        captured_stream = False
         try:
             page.wait_for_selector("#streaming-msg", state="attached", timeout=5000)
+            captured_stream = True
             # Take screenshot during streaming
             path = _screenshot(page, screenshot_dir, "16_streaming_state")
             _check(path, "Streaming in progress — loading indicator visible", [
@@ -661,11 +665,14 @@ class TestStreamingUI:
                 "user message visible above",
                 "partially received content or placeholder",
             ])
-        except Exception:
+        except PlaywrightTimeoutError:
             print("  ⚠️  Streaming completed too fast to capture mid-stream state")
 
         # Wait for completion
         try:
             page.wait_for_selector("#streaming-msg", state="detached", timeout=60000)
-        except Exception:
-            pass
+        except PlaywrightTimeoutError:
+            pytest.fail('streaming indicator remained attached for more than 60s')
+        assert page.locator('#streaming-msg').count() == 0
+        assert captured_stream or textarea.input_value() == '', (
+            'neither a streaming state nor a completed send was observed')

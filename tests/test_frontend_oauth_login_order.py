@@ -17,7 +17,7 @@ _completeLogin through four scenarios asserting the exact call SEQUENCE:
   A  server succeeds                 → ['server', 'success']
   B  server 403, browser succeeds    → ['server', 'browser', 'store', 'success']
   C  server 400 (auth rejection)     → ['server', 'error']  (no browser retry)
-  D  server 403, browser fails       → ['server', 'browser', 'curl']
+  D  server 403, browser fails       → ['server', 'browser', 'error']
 
 NEUTER: restoring the browser-first order breaks the sequence assertions.
 """
@@ -31,11 +31,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-OAUTH_JS = os.path.join(ROOT, 'static', 'js', 'settings', 'oauth.js')
+OAUTH_JS = runtime_section_path('settings/oauth.js')
 NODE = shutil.which('node')
 
 _ENTRY_NEEDLE = "  _serverExchange(provider, code, state)\n    .then(function(data) {"
@@ -68,7 +70,6 @@ globalThis._browserExchange = () => { seq.push('browser');
                             : Promise.reject(new Error('cors-or-network')); };
 globalThis._storeBrowserToken = () => { seq.push('store');
   return Promise.resolve({ ok: true, email: 'e@x' }); };
-globalThis._showCurlHelper = () => { seq.push('curl'); };
 globalThis._updateOAuthCard = (p, st) => { if (st && st.status === 'success') seq.push('success');
                                            if (st && st.status === 'error') seq.push('error'); };
 globalThis._autoConfigureOAuthProvider = () => {};
@@ -125,9 +126,9 @@ def test_auth_rejection_never_retries_browser():
         assert seq == ['server', 'error'], (sc, seq)
 
 
-def test_both_paths_fail_lands_on_curl_helper():
+def test_both_automatic_paths_fail_without_assigning_terminal_work():
     seq = _drive({'serverOk': False, 'serverStatus': 403, 'browserOk': False})
-    assert seq == ['server', 'browser', 'curl'], seq
+    assert seq == ['server', 'browser', 'error'], seq
 
 
 def test_NEUTER_browser_first_breaks_sequence():

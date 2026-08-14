@@ -47,7 +47,7 @@ BUNDLER_PY = ROOT / 'lib' / 'js_bundler.py'
 INDEX_HTML = ROOT / 'index.html'
 PANEL = ROOT / 'static' / 'js' / 'project.js'
 STATE = ROOT / 'static' / 'js' / 'project_state.js'
-FEATURE_LOADER = ROOT / 'static' / 'js' / 'feature-loader.js'
+FEATURE_LOADER = ROOT / 'static' / 'js' / 'feature-bridge.js'
 
 STATE_SYMBOLS = (
     '_scanPollTimer', 'toggleAutoApply', '_updateAutoApplyUI',
@@ -89,7 +89,7 @@ def test_state_in_core_panel_deferred():
         "'project_state.js' must be in _BUNDLE_FILES — the boot/SSE/bar "
         'state subset is first-paint critical')
     assert 'project.js' in deferred, (
-        "'project.js' (the panel) must be in _DEFERRED_FILES — 67KB out "
+        "'project.js' (the panel) must be in _CLASSIC_ASSET_FILES — 67KB out "
         'of the render-blocking core')
 
 
@@ -174,14 +174,14 @@ def test_panel_stubs_in_py_table():
     _bf, _df, entry_points, _crit = _manifest()
     missing = [s for s in PANEL_STUBS if s not in entry_points]
     assert not missing, (
-        f'_DEFERRED_ENTRY_POINTS is missing panel stubs: {missing}')
+        f'_FEATURE_ENTRY_POINTS is missing panel stubs: {missing}')
 
 
 def test_panel_stubs_in_loader_table():
     loader = FEATURE_LOADER.read_text()
     missing = [s for s in PANEL_STUBS if f"'{s}'" not in loader]
     assert not missing, (
-        f'feature-loader.js is missing panel stubs: {missing}')
+        f'feature-bridge.js is missing panel stubs: {missing}')
 
 
 def test_state_functions_not_stubbed():
@@ -201,14 +201,10 @@ def test_state_functions_not_stubbed():
 
 
 # ---------------------------------------------------------------------------
-# 5. dev-fallback tags (both files, state before panel)
+# 5. The page shell contains no raw app-script inventory
 # ---------------------------------------------------------------------------
-def test_dev_fallback_script_tags():
+def test_index_has_no_raw_project_scripts():
     html = INDEX_HTML.read_text()
-    si = html.find('static/js/project_state.js')
-    pi = html.find('static/js/project.js')
-    assert si != -1, 'index.html lost the project_state.js dev-fallback tag'
-    assert pi != -1, 'index.html lost the project.js dev-fallback tag'
-    assert si < pi, (
-        'the project_state.js tag must precede the project.js tag '
-        '(panel calls the state subset at runtime)')
+    assert 'static/js/project_state.js' not in html
+    assert 'static/js/project.js' not in html
+    assert '<!-- TOFU_APP_ASSETS -->' in html

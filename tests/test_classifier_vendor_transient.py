@@ -151,11 +151,14 @@ class TestRetryLabelI18nCoverage:
             'stream.retryReason.waitingBackoff'
 
     def test_i18n_strings_exist(self):
+        import json
         import pathlib
-        src = (pathlib.Path(__file__).resolve().parent.parent
-               / 'static' / 'js' / 'i18n.js').read_text(encoding='utf-8')
-        assert "'stream.retryReason.upstreamError'" in src
-        assert "'stream.retryReason.waitingBackoff'" in src
+        locale_root = (pathlib.Path(__file__).resolve().parent.parent
+                       / 'frontend' / 'src' / 'i18n' / 'locales')
+        for path in locale_root.glob('*.json'):
+            catalog = json.loads(path.read_text(encoding='utf-8'))
+            assert 'stream.retryReason.upstreamError' in catalog, path.name
+            assert 'stream.retryReason.waitingBackoff' in catalog, path.name
 
     def test_retry_phase_fields_maps_labels(self):
         from lib.llm_dispatch.retry_i18n import retry_phase_fields

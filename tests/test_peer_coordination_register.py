@@ -7,15 +7,9 @@ telling it it is writing to ANOTHER AGENT. The description framing ("advisory
 message / share a finding / the peer decides whether to act") biased the model
 to narrate status for a human reader.
 
-Fix (two parts, both asserted here):
-  1. ``render_peer_protocol_block(project_path)`` — a ``[PEER MESSAGING
-     PROTOCOL]`` block, injected into the system prompt in project mode
-     (system_context.py §4.47), mirroring the ``[PROJECT BOARD]`` block's
-     imperative style: CLAIM / CONFIRM boundary / HAND OFF / WARN of overlap,
-     and an explicit "do NOT send status updates / FYI notes".
-  2. The ``project_message`` / ``project_intervene`` tool descriptions rewritten
-     to the coordination register ("writing TO ANOTHER AGENT", "not a status
-     report").
+Fix: the ``project_message`` / ``project_intervene`` tool descriptions own the
+coordination register ("writing TO ANOTHER AGENT", "not a status report").
+There is no ambient peer protocol block when these tools are unavailable.
 
 Each assertion has a byte-reverting NEUTER that fails when the coordination
 wording is reverted to the old report-to-human phrasing.
@@ -34,62 +28,15 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
-class PeerProtocolBlockTest(unittest.TestCase):
-    """The ambient [PEER MESSAGING PROTOCOL] system-prompt block."""
+class PeerProtocolPlacementTest(unittest.TestCase):
+    """Peer instructions live with the tools, not in ambient context."""
 
-    def test_block_present_in_project_mode(self):
-        from lib.conversations.project_peer import render_peer_protocol_block
-        block = render_peer_protocol_block('/some/project')
-        self.assertIn('[PEER MESSAGING PROTOCOL]', block)
-
-    def test_block_empty_outside_project_mode(self):
-        from lib.conversations.project_peer import render_peer_protocol_block
-        self.assertEqual(render_peer_protocol_block(''), '')
-
-    def test_block_uses_coordination_register_not_report(self):
-        """The block must teach the agent-to-agent register (writing to another
-        agent; claim/boundary/hand-off/overlap) AND explicitly forbid the
-        report-to-human style. This is the load-bearing content."""
-        from lib.conversations.project_peer import render_peer_protocol_block
-        block = render_peer_protocol_block('/p').lower()
-        # It addresses another AGENT, not a human reader.
-        self.assertIn('another agent', block)
-        # It names the four coordination acts.
-        for verb in ('claim', 'confirm', 'hand off', 'overlap'):
-            self.assertIn(verb, block, f'protocol must mention {verb!r}')
-        # It explicitly forbids the report-to-human style (the symptom).
-        self.assertTrue(
-            'status' in block and 'not' in block,
-            'the block must explicitly warn against status/FYI-report prose')
-
-    def test_NEUTER_report_style_block_fails_the_register_assertion(self):
-        """NEGATIVE CONTROL — a block written in the OLD report-to-human style
-        (no 'another agent', no forbid-status clause) fails the register
-        assertion, proving the assertion actually detects the register."""
-        old_style = ('[PEER MESSAGING PROTOCOL] — send an advisory message to a '
-                     'sibling conversation; share a finding and the peer decides '
-                     'whether to act.').lower()
-        # The load-bearing markers are absent from the old-style text.
-        self.assertNotIn('another agent', old_style)
-        self.assertFalse('hand off' in old_style and 'overlap' in old_style,
-                         'old report-style block must NOT satisfy the register check')
-
-    def test_block_injected_into_system_prompt(self):
-        """End-to-end: the block reaches the assembled system prompt in project
-        mode via system_context (the §4.47 injection site)."""
-        import lib.tasks_pkg.system_context._inject as sc_inject
-        # Drive only the marker-based injection: build a minimal messages list
-        # and confirm render_peer_protocol_block's marker appears once the
-        # renderer returns content. We assert the renderer is wired (imported)
-        # in the module rather than exercising the full 1000-line assembler.
-        # NOTE: system_context was split into a package (2026-06) — the §4.47
-        # injection site lives in the ``_inject`` submodule, NOT the facade
-        # ``__init__``. Reading ``system_context.__file__`` finds none of the
-        # tokens → read the submodule that actually wires the block.
-        src = open(sc_inject.__file__).read()
-        self.assertIn('[PEER MESSAGING PROTOCOL]', src)
-        self.assertIn('render_peer_protocol_block', src)
-        self.assertIn("_ctx_injected('peer_protocol'", src)
+    def test_no_ambient_protocol_renderer_or_context_provider(self):
+        import lib.conversations.project_peer as pp
+        import lib.tasks_pkg.context_composer._providers as providers
+        self.assertFalse(hasattr(pp, 'render_peer_protocol_block'))
+        src = open(providers.__file__, encoding='utf-8').read()
+        self.assertNotIn('[PEER MESSAGING PROTOCOL]', src)
 
 
 class PeerToolDescriptionRegisterTest(unittest.TestCase):
@@ -179,11 +126,11 @@ class PeerReplyAffordanceTest(unittest.TestCase):
         pp.send_peer_message('/p', 'convSENDERfull', 'convTARGETfull', 'boundary?')
         return captured['p']['text']
 
-    # ── Part A: ambient protocol block teaches a bounded reply ──
+    # ── Part A: project_message's schema teaches a bounded reply ──
 
-    def test_protocol_block_teaches_bounded_reply(self):
-        from lib.conversations.project_peer import render_peer_protocol_block
-        block = render_peer_protocol_block('/p')
+    def test_tool_description_teaches_bounded_reply(self):
+        from lib.tools.conversation import PEER_MESSAGE_TOOL
+        block = PEER_MESSAGE_TOOL['function']['description']
         low = block.lower()
         # It tells the receiver it MAY reply, and names the reply tool + arg.
         self.assertIn('receive', low, 'block must address the RECEIVE side')
@@ -195,33 +142,6 @@ class PeerReplyAffordanceTest(unittest.TestCase):
                         'block must anchor the reply budget to the rate limit')
         self.assertTrue('not a chat' in low or 'not a chat channel' in low,
                         'block must warn it is coordination, not a chat channel')
-
-    def test_NEUTER_block_without_reply_clause_fails(self):
-        """Byte-revert the receive-side reply clause out of the shipped block →
-        the bounded-reply assertion FAILS, proving it depends on the real clause
-        (not on pre-existing send-side text)."""
-        def run():
-            import lib.conversations.project_peer as pp
-            block = pp.render_peer_protocol_block('/p')
-            self.assertNotIn('project_message(to_conv_id=', block,
-                             'NEUTER: with the reply clause removed the receive '
-                             'affordance must be ABSENT')
-
-        _patch_restore(
-            _PEER_SRC,
-            "        'decides how to act.\\n'\n"
-            "        'When you RECEIVE a peer message (it arrives as a turn prefixed '\n"
-            "        '\"[Peer message from a sibling conversation …]\" and carries a reply '\n"
-            "        'id), you MAY reply EXACTLY ONCE via '\n"
-            "        'project_message(to_conv_id=<that reply id>) — but only to CONFIRM a '\n"
-            "        'boundary, HAND OFF context, or DECLINE. If a reply would not change '\n"
-            "        'what the peer does, do NOT acknowledge for its own sake: incorporate '\n"
-            "        'the message and keep working. Your rate-limit budget is the ceiling '\n"
-            "        '— this is coordination, not a chat channel, so never reply just to '\n"
-            "        'be polite.'",
-            "        'decides how to act.'",
-            run,
-        )
 
     # ── Part B: received body carries the FULL reply id, stays plain content ──
 

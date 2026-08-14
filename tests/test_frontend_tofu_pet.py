@@ -15,7 +15,7 @@ stub, drive its public `window.TofuPet` surface, and assert:
   * the time/mood FSM resolves to the right expression at representative
     hours + moods (the core state logic);
   * loading activity wins over the clock (thinking), success celebrates;
-  * the module is wired into the JS bundler manifest + index.html dev fallback.
+  * the module is wired into the classic asset manifest, not raw index HTML.
 A biting NEUTER breaks the night-sleep branch and proves the FSM test catches it.
 """
 import re
@@ -334,14 +334,14 @@ def test_dom_footstep_fx_layer_fully_removed():
         assert token not in css, f"orphaned footstep-fx CSS {token!r} still in styles.css"
     # NEUTER: reintroduce a fx symbol → the JS "symbol gone" assertion must bite.
     neut = src + "\n  var _fxLayer = null;\n"
-    bit = False
-    try:
-        for sym in ("_emitFootstep", "_fxLayer", "FX_SCENE", "_fxScene",
-                    "_emitAccum", "FX_MAX", "fxCount"):
-            assert sym not in neut, f"dead footstep-fx symbol {sym!r} still in tofu-pet.js"
-    except AssertionError:
-        bit = True
-    assert bit, "neuter did not bite — re-adding a fx symbol went undetected"
+    reintroduced = [
+        sym for sym in ("_emitFootstep", "_fxLayer", "FX_SCENE", "_fxScene",
+                        "_emitAccum", "FX_MAX", "fxCount")
+        if sym in neut
+    ]
+    assert reintroduced == ['_fxLayer'], (
+        'neuter must add exactly the forbidden _fxLayer symbol; '
+        f'found={reintroduced}')
 
 
 def test_cat_chases_the_scene_critter():
@@ -1431,9 +1431,8 @@ def test_registered_in_bundler_manifest():
         "tofu-pet.js missing from _BUNDLE_FILES — it would load as a silent no-op"
 
 
-def test_registered_in_index_html_fallback():
-    assert "tofu-pet.js" in INDEX.read_text(), \
-        "tofu-pet.js missing from index.html dev-fallback <script> tags"
+def test_not_registered_as_raw_index_script():
+    assert "static/js/tofu-pet.js" not in INDEX.read_text()
 
 
 def test_neuter_breaks_night_sleep():
@@ -1488,7 +1487,7 @@ if __name__ == "__main__":
                test_night_is_sleepy, test_morning_daytime_defaults,
                test_low_mood_is_sad_during_day, test_loading_activity_beats_the_clock,
                test_success_celebrates, test_registered_in_bundler_manifest,
-               test_registered_in_index_html_fallback, test_neuter_breaks_night_sleep]:
+               test_neuter_breaks_night_sleep]:
         fn()
         print("PASS", fn.__name__)
     print("ALL GREEN")

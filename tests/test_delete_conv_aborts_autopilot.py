@@ -46,15 +46,17 @@ def _ok(msg): print(' ', _color('✓', '32'), msg)
 def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
 
 
-def _seed_conv(db, conv_id):
+def _seed_conv(db, conv_id, messages=None):
     from lib.database._core_schema import CONVERSATIONS, upsert
     from lib.database import json_dumps_pg
     now_ms = int(time.time() * 1000)
+    if messages is None:
+        messages = [{'role': 'user', 'content': 'hi'},
+                    {'role': 'assistant', 'content': 'yo'}]
     upsert(db, CONVERSATIONS, {
         'id': conv_id, 'user_id': 1, 'title': 'del-abort-test',
-        'messages': json_dumps_pg([{'role': 'user', 'content': 'hi'},
-                                   {'role': 'assistant', 'content': 'yo'}]),
-        'msg_count': 2, 'created_at': now_ms, 'updated_at': now_ms,
+        'messages': json_dumps_pg(messages),
+        'msg_count': len(messages), 'created_at': now_ms, 'updated_at': now_ms,
         'settings': '{}',
     }, insert_cols=['id', 'user_id', 'title', 'messages', 'msg_count',
                     'created_at', 'updated_at', 'settings'], retry=True)
@@ -89,6 +91,7 @@ def _cleanup_task(tid):
 def _cleanup_conv(db, *conv_ids):
     from lib.database import db_execute_with_retry
     for cid in conv_ids:
+        db_execute_with_retry(db, 'DELETE FROM conversation_messages WHERE conv_id=?', (cid,))
         db_execute_with_retry(db, 'DELETE FROM conversations WHERE id=? AND user_id=1', (cid,))
         db_execute_with_retry(db, 'DELETE FROM task_results WHERE conv_id=?', (cid,))
         db_execute_with_retry(db, 'DELETE FROM message_queue WHERE conv_id=?', (cid,))
@@ -113,6 +116,41 @@ def test_delete_aborts_running_task():
         _cleanup_task(tid)
         _cleanup_conv(db, conv_id)
     _ok('delete aborts the conv\'s running task and removes the conv row')
+
+
+def test_delete_cascades_message_mirror_in_same_transaction():
+    """A deleted conversation must not leave row-store history behind."""
+    from lib.database import DOMAIN_CHAT, get_thread_db
+    from lib.database.messages_rows import backfill_conv
+    from routes.conversations import _delete_conv_blocking
+
+    conv_id = 'cv-del-message-mirror'
+    db = get_thread_db(DOMAIN_CHAT)
+    mirror_messages = [
+        {'role': 'user', 'content': 'mirror me'},
+        {'role': 'assistant', 'content': 'then cascade me'},
+    ]
+    _seed_conv(db, conv_id, mirror_messages)
+    backfill_conv(db, conv_id, mirror_messages)
+    try:
+        before = db.execute(
+            'SELECT COUNT(*) AS n FROM conversation_messages WHERE conv_id=?',
+            (conv_id,)).fetchone()['n']
+        assert before == 2, f'precondition failed: expected 2 mirror rows, got {before}'
+
+        _delete_conv_blocking(db, conv_id)
+
+        parent = db.execute(
+            'SELECT 1 FROM conversations WHERE id=? AND user_id=1',
+            (conv_id,)).fetchone()
+        mirror = db.execute(
+            'SELECT COUNT(*) AS n FROM conversation_messages WHERE conv_id=?',
+            (conv_id,)).fetchone()['n']
+        assert parent is None, 'conversation row survived delete'
+        assert mirror == 0, 'conversation_messages rows survived delete'
+    finally:
+        _cleanup_conv(db, conv_id)
+    _ok('delete cascades the message-row mirror')
 
 
 def test_delete_disarms_autopilot_marker():

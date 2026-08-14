@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for response-size instrumentation in server._log_response.
+"""Tests for response-size instrumentation in http_request_lifecycle.log_response.
 
 Root cause this guards (see JOURNAL 2026-07-19 "溯源"): a fast-but-heavy
 response (a 2.9MB conversation fetch) was logged at INFO as
@@ -18,6 +18,7 @@ Run:
 import logging
 import os
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -32,7 +33,14 @@ def srv():
     except ImportError as e:
         pytest.skip('quart/hypercorn not installed: %s' % e)
     import server
-    return server
+    from lib import http_request_lifecycle as lifecycle
+    return SimpleNamespace(
+        app=server.app,
+        _fmt_size=lifecycle.format_size,
+        _response_size=lifecycle.response_size,
+        _log_response=lifecycle.log_response,
+        _lifecycle_log=lifecycle.logger,
+    )
 
 
 class _FakeResp:

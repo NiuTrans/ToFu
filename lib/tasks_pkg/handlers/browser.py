@@ -90,7 +90,9 @@ def _handle_browser_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
         # an internal (underscore-prefixed) arg.
         fn_args = dict(fn_args or {})
         fn_args['_projectPath'] = project_path
-    tool_content = execute_browser_tool(fn_name, fn_args, client_id=browser_client_id)
+    tool_content = execute_browser_tool(
+        fn_name, fn_args, client_id=browser_client_id,
+        user_id=str(task.get('_userId') or ''))
 
     is_screenshot = isinstance(tool_content, dict) and tool_content.get('__screenshot__')
     if is_screenshot:

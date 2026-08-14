@@ -13,6 +13,7 @@ from lib.tasks_pkg.system_prompt_cc._sections import (
     section_actions,
     section_doing_tasks,
     section_function_result_clearing,
+    section_gpt56_lean,
     section_intro,
     section_output_efficiency,
     section_summarize_tool_results,
@@ -73,6 +74,7 @@ def build_static_blocks(*, cwd: str, is_git: bool, model: str,
                          is_code_context: bool = True,
                          include_date: bool = True,
                          tool_names: set[str] | None = None,
+                         profile: str = 'full',
                          ) -> list[dict]:
     """Build the static prompt as an ordered list of identified blocks.
 
@@ -86,31 +88,36 @@ def build_static_blocks(*, cwd: str, is_git: bool, model: str,
 
     Args mirror ``build_static_prompt``.
     """
-    raw: list[tuple[str, str]] = [
-        ('intro', section_intro(is_code_context=is_code_context)),
-        ('system', section_system()),
-        ('doing_tasks', section_doing_tasks(is_code_context=is_code_context)),
-        ('actions', section_actions(is_code_context=is_code_context)),
-    ]
-    if has_real_tools:
-        raw.append(('using_tools', section_using_tools(tool_names=tool_names)))
     _web_tools = bool(tool_names) and bool(
         {'web_search', 'fetch_url'} & set(tool_names))
-    raw.append(('tone_and_style',
-                section_tone_and_style(is_code_context=is_code_context,
-                                       web_tools=_web_tools)))
-    raw.append(('output_efficiency', section_output_efficiency()))
-    if has_real_tools:
-        raw.append(('function_result_clearing',
-                    section_function_result_clearing()))
-        raw.append(('system_reminders', section_system_reminders()))
-        # NOTE: summarize-tool-results is folded into function_result_clearing
-        # for toggling purposes — they're one conceptual unit.
-        raw[-2] = ('function_result_clearing',
-                   section_function_result_clearing() + "\n\n"
-                   + section_summarize_tool_results())
+    if str(profile or '').lower() == 'lean':
+        raw: list[tuple[str, str]] = [('intro', section_gpt56_lean(
+            is_code_context=is_code_context, tool_names=tool_names,
+            web_tools=_web_tools))]
     else:
-        raw.append(('system_reminders', section_system_reminders()))
+        raw = [
+            ('intro', section_intro(is_code_context=is_code_context)),
+            ('system', section_system()),
+            ('doing_tasks', section_doing_tasks(is_code_context=is_code_context)),
+            ('actions', section_actions(is_code_context=is_code_context)),
+        ]
+        if has_real_tools:
+            raw.append(('using_tools', section_using_tools(tool_names=tool_names)))
+        raw.append(('tone_and_style',
+                    section_tone_and_style(is_code_context=is_code_context,
+                                           web_tools=_web_tools)))
+        raw.append(('output_efficiency', section_output_efficiency()))
+        if has_real_tools:
+            raw.append(('function_result_clearing',
+                        section_function_result_clearing()))
+            raw.append(('system_reminders', section_system_reminders()))
+            # NOTE: summarize-tool-results is folded into function_result_clearing
+            # for toggling purposes — they're one conceptual unit.
+            raw[-2] = ('function_result_clearing',
+                       section_function_result_clearing() + "\n\n"
+                       + section_summarize_tool_results())
+        else:
+            raw.append(('system_reminders', section_system_reminders()))
     raw.append(('environment',
                 section_environment(cwd=cwd, is_git=is_git, model=model,
                                     extra_roots=extra_roots,
@@ -138,7 +145,8 @@ def build_static_prompt(*, cwd: str, is_git: bool, model: str,
                          is_code_context: bool = True,
                          include_date: bool = True,
                          tool_names: set[str] | None = None,
-                         disabled_blocks: set[str] | None = None) -> str:
+                         disabled_blocks: set[str] | None = None,
+                         profile: str = 'auto') -> str:
     """Assemble the full Claude Code-style static prompt block.
 
     Sections are concatenated with blank lines between, matching Claude
@@ -174,11 +182,19 @@ def build_static_prompt(*, cwd: str, is_git: bool, model: str,
                          OFF in the per-block editor. Those blocks are dropped
                          from the assembled prompt. ``None`` keeps every block.
     """
+    normalized_profile = str(profile or 'auto').strip().lower()
+    if normalized_profile == 'auto':
+        from lib.model_info._openai_gpt56 import is_official_gpt56_model
+        normalized_profile = ('lean' if is_official_gpt56_model(model)
+                              else 'full')
+    if normalized_profile not in {'full', 'lean'}:
+        normalized_profile = 'full'
     disabled = disabled_blocks or set()
     blocks = build_static_blocks(
         cwd=cwd, is_git=is_git, model=model, extra_roots=extra_roots,
         has_real_tools=has_real_tools, is_code_context=is_code_context,
         include_date=include_date, tool_names=tool_names,
+        profile=normalized_profile,
     )
     return "\n\n".join(b['text'] for b in blocks if b['id'] not in disabled)
 

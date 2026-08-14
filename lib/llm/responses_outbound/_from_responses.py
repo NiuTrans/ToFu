@@ -18,7 +18,12 @@ Shape notes:
 
 from __future__ import annotations
 
-from lib.llm.responses_outbound._sse import _usage_to_openai
+from lib.llm.responses_outbound._sse import (
+    _CAPTURE_ITEM_TYPES,
+    _multi_agent_message_is_user_visible,
+    _program_needs_followup,
+    _usage_to_openai,
+)
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -49,12 +54,15 @@ def responses_response_to_openai(data: dict,
     content_parts: list = []
     reasoning_parts: list = []
     tool_calls: list = []
+    response_items: list[dict] = []
 
     for item in data.get('output') or []:
         if not isinstance(item, dict):
             continue
         itype = item.get('type')
         if itype == 'message':
+            if not _multi_agent_message_is_user_visible(item):
+                continue
             for part in item.get('content') or []:
                 if not isinstance(part, dict):
                     continue
@@ -63,6 +71,7 @@ def responses_response_to_openai(data: dict,
                 elif part.get('type') == 'refusal':
                     content_parts.append(part.get('refusal', ''))
         elif itype == 'reasoning':
+            response_items.append(dict(item))
             for summ in item.get('summary') or []:
                 if isinstance(summ, dict) and summ.get('text'):
                     reasoning_parts.append(summ['text'])
@@ -73,12 +82,25 @@ def responses_response_to_openai(data: dict,
             name = item.get('name', '')
             if tool_name_reverse:
                 name = tool_name_reverse.get(name, name)
-            tool_calls.append({
+            tool_call = {
                 'id': item.get('call_id', ''),
                 'type': 'function',
                 'function': {'name': name,
                              'arguments': item.get('arguments', '')},
-            })
+            }
+            if isinstance(item.get('caller'), dict):
+                tool_call['caller'] = dict(item['caller'])
+            agent = item.get('agent')
+            if isinstance(agent, dict) and agent.get('agent_name'):
+                tool_call.setdefault('caller', {
+                    'type': 'multi_agent',
+                })['agent_name'] = str(agent['agent_name'])
+            tool_calls.append(tool_call)
+        elif itype in _CAPTURE_ITEM_TYPES:
+            response_items.append(dict(item))
+        else:
+            logger.warning('[Responses] unhandled non-stream output item '
+                           'type=%s; response remains usable', itype or '?')
 
     finish = 'tool_calls' if tool_calls else 'stop'
     if status == 'incomplete':
@@ -89,15 +111,24 @@ def responses_response_to_openai(data: dict,
     message: dict = {'role': 'assistant',
                      'content': '\n'.join(p for p in content_parts if p)}
     if reasoning_parts:
-        message['reasoning_content'] = '\n'.join(reasoning_parts)
+        # Paragraph-join: each summary part is its own markdown headline —
+        # a bare '\n' collapses under markdown/plain rendering and fuses
+        # adjacent '**…**' headlines (mirrors the SSE translator's part
+        # boundary separator).
+        message['reasoning_content'] = '\n\n'.join(reasoning_parts)
+    if response_items:
+        message['_responses_items'] = response_items
     if tool_calls:
         message['tool_calls'] = tool_calls
 
+    usage = _usage_to_openai(data.get('usage') or {})
+    if _program_needs_followup(data.get('output') or []):
+        usage['_program_pending'] = True
     return {
         'id': data.get('id', ''),
         'object': 'chat.completion',
         'model': data.get('model', ''),
         'choices': [{'index': 0, 'message': message,
                      'finish_reason': finish}],
-        'usage': _usage_to_openai(data.get('usage') or {}),
+        'usage': usage,
     }

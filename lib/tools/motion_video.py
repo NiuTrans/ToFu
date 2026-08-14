@@ -182,7 +182,10 @@ MOTION_VIDEO_TOOLS = [
             "description": (
                 "Assemble final.mp4 from ordered scene MP4s. Uniform specs concat losslessly "
                 "(-c copy); mismatched scenes are re-encode-normalized to the first scene's "
-                "spec. Output is atomic and post-verified (total duration ≈ Σ scenes, silent)."
+                "spec. Optional transitions execute real FFmpeg xfade edits. For every overlap, "
+                "the outgoing scene MUST already include an equal visual tail handle; then the "
+                "final program duration stays aligned with narration/SRT. Output is atomic and "
+                "post-verified."
             ),
             "parameters": {
                 "type": "object",
@@ -199,6 +202,24 @@ MOTION_VIDEO_TOOLS = [
                     "timeout": {
                         "type": "integer",
                         "description": "Wall-clock seconds (default 1800)."
+                    },
+                    "transitions": {
+                        "type": "array",
+                        "description": "Optional ordered N-1 boundary plan. Zero duration is a "
+                                       "hard cut; non-zero boundaries consume an equal outgoing "
+                                       "visual handle from the previous clip.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "duration_s": {"type": "number", "minimum": 0,
+                                               "maximum": 0.8},
+                                "ffmpeg": {"type": "string", "enum": [
+                                    "", "fade", "wipeleft", "wiperight", "wipeup",
+                                    "wipedown", "slideleft", "slideright", "slideup",
+                                    "slidedown"]}
+                            },
+                            "required": ["duration_s", "ffmpeg"]
+                        }
                     }
                 },
                 "required": ["inputs", "output"],
@@ -254,10 +275,11 @@ MOTION_VIDEO_TOOLS = [
         "function": {
             "name": "motion_video_mux",
             "description": (
-                "P2 音画合成 final step: mux the silent final MP4 with the narration track "
-                "(video stream copied, audio → AAC with loudnorm). Run motion_video_concat "
-                "for the scene WAVs first (or pass any single audio file). Post-verified: "
-                "audio track present, duration preserved."
+                "Final audio step. With audio_plan_path, stage and hash licensed local BGM/SFX, "
+                "resolve cues against scenes/beat time, duck BGM under narration, mix to -14 "
+                "LUFS, and emit audio_plan.json + audio_attribution.txt. Without a plan, mux the "
+                "single narration track using the legacy loudnorm path. Runtime audio downloads "
+                "are forbidden. Post-verified: audio present and program duration preserved."
             ),
             "parameters": {
                 "type": "object",
@@ -268,8 +290,8 @@ MOTION_VIDEO_TOOLS = [
                     },
                     "audio": {
                         "type": "string",
-                        "description": "Narration track (WAV/MP3/AAC), e.g. the concatenated "
-                                       "scene narrations."
+                        "description": "Optional narration track. Required when no audio plan is "
+                                       "provided; optional for BGM/SFX-only delivery."
                     },
                     "output": {
                         "type": "string",
@@ -278,9 +300,19 @@ MOTION_VIDEO_TOOLS = [
                     "loudnorm": {
                         "type": "boolean",
                         "description": "Apply EBU R128 loudness normalization (default true)."
+                    },
+                    "audio_plan_path": {
+                        "type": "string",
+                        "description": "Optional motion-audio-v1 JSON, relative to the project "
+                                       "or absolute. Its asset paths resolve beside the plan."
+                    },
+                    "scenes_path": {
+                        "type": "string",
+                        "description": "scenes.json carrying motion-timeline-v1 fields; required "
+                                       "for scene-relative SFX cues."
                     }
                 },
-                "required": ["video", "audio", "output"],
+                "required": ["video", "output"],
             },
         },
     },

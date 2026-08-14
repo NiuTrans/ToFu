@@ -26,30 +26,60 @@ Example usage:
     #   POST /api/paper/report/abort/<task_id>
 """
 
-from flask import request
+from quart import request
 
-from lib.api_response import api_not_found, api_ok, api_payload
+from lib.api_response import api_not_found, api_ok
 from lib.log import get_logger
+from lib.openapi import api_meta
+from lib.task_runtime_ports import TaskRouteRuntimePort
+from routes.task_http import (
+    task_replay_cursor,
+    task_replay_parameters,
+    task_replay_response,
+)
 
 logger = get_logger(__name__)
 
 
-def register_task_routes(bp, runtime, *, url_prefix: str,
+def _apply_decorators(handler, decorators):
+    for decorator in reversed(tuple(decorators or ())):
+        handler = decorator(handler)
+    return handler
+
+
+def register_task_routes(bp, runtime: TaskRouteRuntimePort, *, url_prefix: str,
                          enable_poll: bool = True,
                          enable_abort: bool = True,
                          poll_path: str = '/poll/<task_id>',
-                         abort_path: str = '/abort/<task_id>'):
+                         abort_path: str = '/abort/<task_id>',
+                         abort_handler=None,
+                         poll_responses=None,
+                         abort_responses=None,
+                         poll_extensions=None,
+                         abort_extensions=None,
+                         route_decorators=(),
+                         tags=('tasks',)):
     """Attach standard /poll and /abort routes for a TaskRuntime.
 
     Args:
         bp: Flask/Quart Blueprint to attach routes to.
-        runtime: TaskRuntime instance to back the routes.
+        runtime: Structural task replay/abort runtime backing the routes.
         url_prefix: URL prefix (e.g. '/api/paper/report'). Routes are
             registered under this prefix.
         enable_poll: If True, register GET <prefix>/poll/<task_id>.
         enable_abort: If True, register POST <prefix>/abort/<task_id>.
         poll_path: Override the poll route shape (default '/poll/<task_id>').
         abort_path: Override the abort route shape (default '/abort/<task_id>').
+        abort_handler: Optional application-specific response adapter. It
+            receives ``task_id`` and replaces the default bool-to-HTTP mapping
+            while retaining the shared route registration.
+        poll_responses: Optional OpenAPI response map for the poll adapter.
+        abort_responses: Optional OpenAPI response map for the abort adapter.
+        poll_extensions: Optional OpenAPI vendor extensions for polling.
+        abort_extensions: Optional OpenAPI vendor extensions for aborting.
+        route_decorators: Authentication/scope decorators applied uniformly to
+            every enabled generated route.
+        tags: OpenAPI tags applied to generated poll/abort operations.
 
     The generated routes use the runtime's `kind` as their endpoint name
     suffix to avoid conflicts when multiple runtimes share a blueprint.
@@ -58,27 +88,33 @@ def register_task_routes(bp, runtime, *, url_prefix: str,
     safe_kind = kind.replace('-', '_').replace(':', '_')
 
     if enable_poll:
-        @bp.route(f'{url_prefix}{poll_path}', methods=['GET'],
-                  endpoint=f'task_poll_{safe_kind}')
         def _poll(task_id):
-            try:
-                cursor = int(request.args.get('cursor', '0'))
-                if cursor < 0:
-                    cursor = 0
-            except (TypeError, ValueError) as _e_audit:
-                logger.debug('[_task_routes] _poll caught %s: %s', type(_e_audit).__name__, _e_audit)
-                cursor = 0
+            cursor = task_replay_cursor(request.args)
             resp = runtime.poll(task_id, cursor=cursor)
-            # runtime.poll() already returns the canonical response shape
-            # (ok / events / next_cursor / status / done / error). Preserve
-            # it verbatim — only the HTTP status varies.
-            status_code = 404 if resp.get('error') == 'not_found' else 200
-            return api_payload(resp, status_code)
+            # runtime.poll() returns the versioned replay page. Preserve it
+            # verbatim; the replay protocol owns its HTTP mapping too.
+            return task_replay_response(resp)
+
+        poll_view = api_meta(
+            summary=f'Poll {kind} task events',
+            description='Returns one tofu.task-replay/v1 cursor page.',
+            tags=list(tags),
+            parameters=task_replay_parameters(),
+            responses=poll_responses,
+            extensions=poll_extensions,
+        )(_poll)
+        poll_view = _apply_decorators(poll_view, route_decorators)
+        bp.add_url_rule(
+            f'{url_prefix}{poll_path}',
+            endpoint=f'task_poll_{safe_kind}',
+            view_func=poll_view,
+            methods=['GET'],
+        )
 
     if enable_abort:
-        @bp.route(f'{url_prefix}{abort_path}', methods=['POST'],
-                  endpoint=f'task_abort_{safe_kind}')
         def _abort(task_id):
+            if abort_handler is not None:
+                return abort_handler(task_id)
             ok = runtime.abort(task_id)
             if not ok:
                 task = runtime.get(task_id)
@@ -86,6 +122,21 @@ def register_task_routes(bp, runtime, *, url_prefix: str,
                     return api_not_found()
                 return api_ok(status=task['status'], note='already finished')
             return api_ok(status='aborting')
+
+        abort_view = api_meta(
+            summary=f'Abort {kind} task',
+            tags=list(tags),
+            request_body=False,
+            responses=abort_responses,
+            extensions=abort_extensions,
+        )(_abort)
+        abort_view = _apply_decorators(abort_view, route_decorators)
+        bp.add_url_rule(
+            f'{url_prefix}{abort_path}',
+            endpoint=f'task_abort_{safe_kind}',
+            view_func=abort_view,
+            methods=['POST'],
+        )
 
     logger.debug('[TaskRoutes] registered for kind=%s prefix=%s '
                  '(poll=%s abort=%s)',

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """tests/test_probe_nonchat_skip.py — access-matrix probe must NOT chat-probe
-non-chat models (image_gen / embedding / transcription).
+non-chat models (image_gen / embedding / transcription / TTS).
 
 WHY
 ---
@@ -29,6 +29,7 @@ THE FIX (all asserted here)
       transcription  → multipart POST /audio/transcriptions with a 0.3s
                        silence WAV (no real speech leaves the box);
       embedding      → POST /embeddings with a one-word input.
+      tts            → POST /audio/speech and verify real audio bytes.
     Only capabilities with no implemented surface keep the ``skipped``
     verdict (zero network, ``recommend_disable=False``).
   * ROUTE — ``routes/config.probe_provider_cells_start`` carries each model's
@@ -59,16 +60,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 import lib.provider_probe as pp  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-ACCESS_MATRIX_JS = os.path.join(ROOT, 'static', 'js', 'settings', 'providers', 'access_matrix.js')
-MODEL_CAPS_JS = os.path.join(ROOT, 'static', 'js', 'core', 'model_caps.js')
+ACCESS_MATRIX_JS = runtime_section_path('settings/providers/access_matrix.js')
+MODEL_CAPS_JS = runtime_section_path('core/model_caps.js')
 
-_NONCHAT_CAPS = (['image_gen'], ['embedding'], ['transcription'])
+_NONCHAT_CAPS = (['image_gen'], ['embedding'], ['transcription'], ['tts'])
 
 
 def _task() -> dict:
@@ -100,7 +103,7 @@ class _ProbeRedirect(unittest.TestCase):
 class BackendSkipTest(_ProbeRedirect):
 
     def test_known_nonchat_caps_use_modality_probe(self):
-        """image_gen / embedding / transcription cells must be driven through
+        """image_gen / embedding / transcription / TTS cells use
         their OWN probe function — never the chat probe — with the image
         cell capped at ONE attempt (billed generation) and a 60s timeout
         floor; aliases inherit the root caps."""
@@ -119,6 +122,7 @@ class BackendSkipTest(_ProbeRedirect):
             (0, 'sk-a', 'img-1', 'img-1-alias', ['image_gen']),  # alias inherits caps
             (0, 'sk-a', 'emb-1', 'emb-1', ['embedding']),
             (0, 'sk-a', 'asr-1', 'asr-1', ['transcription']),
+            (0, 'sk-a', 'tts-1', 'tts-1', ['tts']),
         ]
         task = _task()
         task['total'] = len(work)
@@ -143,8 +147,10 @@ class BackendSkipTest(_ProbeRedirect):
         self.assertEqual(by_mid['emb-1']['timeout'], 10)
         self.assertIs(by_mid['asr-1']['probe_fn'], pp.probe_transcription_cell)
         self.assertEqual(by_mid['asr-1']['attempts'], 3)
+        self.assertIs(by_mid['tts-1']['probe_fn'], pp.probe_tts_cell)
+        self.assertEqual(by_mid['tts-1']['attempts'], 3)
 
-        for mid in ('img-1', 'img-1-alias', 'emb-1', 'asr-1'):
+        for mid in ('img-1', 'img-1-alias', 'emb-1', 'asr-1', 'tts-1'):
             cell = task['cells'][pp.probe_cell_key(0, mid)]
             self.assertEqual(cell['status'], 'ok', mid)
         self.assertEqual(task['summary']['skipped'], 0)
@@ -153,9 +159,15 @@ class BackendSkipTest(_ProbeRedirect):
         # the frontend's fresh-vs-stale discrimination depends on it.
         self.assertEqual(
             {mid: task['cells'][pp.probe_cell_key(0, mid)]['probe_surface']
-             for mid in ('chat-x', 'img-1', 'img-1-alias', 'emb-1', 'asr-1')},
+             for mid in ('chat-x', 'img-1', 'img-1-alias', 'emb-1', 'asr-1', 'tts-1')},
             {'chat-x': 'chat', 'img-1': 'image', 'img-1-alias': 'image',
-             'emb-1': 'embedding', 'asr-1': 'transcription'})
+             'emb-1': 'embedding', 'asr-1': 'transcription', 'tts-1': 'tts'})
+        self.assertEqual(
+            {mid: task['cells'][pp.probe_cell_key(0, mid)]['proof']
+             for mid in ('chat-x', 'img-1', 'emb-1', 'asr-1', 'tts-1')},
+            {'chat-x': 'generated_text', 'img-1': 'image_payload',
+             'emb-1': 'embedding_vector',
+             'asr-1': 'transcript_payload', 'tts-1': 'audio_bytes'})
 
     def test_unknown_nonchat_caps_still_skipped(self):
         """A FUTURE non-chat capability with no implemented probe surface
@@ -184,7 +196,8 @@ class BackendSkipTest(_ProbeRedirect):
         self.assertFalse(cell['recommend_disable'])
         self.assertIn('no probe surface', cell['detail'])
         self.assertEqual(task['summary'],
-                         {'ok': 0, 'disable': 0, 'skipped': 1},
+                         {'ok': 0, 'disable': 0, 'skipped': 1,
+                          'neutral': 0, 'failed': 0},
                          'skipped cells must NOT inflate the ok count')
 
     def test_chat_caps_and_legacy_tuples_still_probed(self):
@@ -228,11 +241,12 @@ class BackendSkipTest(_ProbeRedirect):
 
 
 class _FakeResp:
-    def __init__(self, code, payload=None, text=None):
+    def __init__(self, code, payload=None, text=None, content=None):
         self.status_code = code
         self._payload = payload
         self.text = text if text is not None else (
             '' if payload is None else str(payload))
+        self.content = content
 
     def json(self):
         if self._payload is None:
@@ -269,8 +283,8 @@ class ModalityProbeTest(unittest.TestCase):
         with self._post(cap, _FakeResp(200, {'data': []})):
             status, detail = pp.probe_embedding_cell(
                 'https://gw.example.com/v1', 'sk-a', 'emb-1', {}, 10)
-        self.assertEqual(status, 'error')
-        self.assertIn('invalid shape', detail)
+        self.assertEqual(status, 'invalid_response')
+        self.assertIn('invalid response', detail)
 
     def test_transcription_probe_sends_silence_wav(self):
         cap = {}
@@ -290,6 +304,29 @@ class ModalityProbeTest(unittest.TestCase):
         self.assertLess(len(wav), 20_000, 'silence clip must stay tiny')
         # Digital silence: every PCM sample is zero — no speech leaves the box.
         self.assertEqual(set(wav[44:]), {0})
+
+    def test_tts_probe_requires_real_audio_bytes(self):
+        cap = {}
+        resp = _FakeResp(200, None, text='', content=b'RIFF\x00\x00\x00\x00WAVE')
+        with self._post(cap, resp), mock.patch('lib.tts.default_voice',
+                                               return_value='alloy'):
+            status, detail = pp.probe_tts_cell(
+                'https://gw.example.com/v1', 'sk-a', 'tts-1', {}, 10)
+        self.assertEqual(status, 'ok', detail)
+        self.assertIn('verified audio bytes', detail)
+        self.assertEqual(cap['url'], 'https://gw.example.com/v1/audio/speech')
+        self.assertEqual(cap['json']['input'], 'ping')
+        self.assertEqual(cap['json']['voice'], 'alloy')
+
+    def test_tts_probe_rejects_json_error_under_200(self):
+        cap = {}
+        resp = _FakeResp(200, {'error': 'not audio'}, text='{"error":"not audio"}',
+                         content=b'{"error":"not audio"}')
+        with self._post(cap, resp), mock.patch('lib.tts.default_voice',
+                                               return_value='alloy'):
+            status, _ = pp.probe_tts_cell(
+                'https://gw.example.com/v1', 'sk-a', 'tts-1', {}, 10)
+        self.assertEqual(status, 'invalid_response')
 
     def test_image_probe_chat_surface_carries_modalities(self):
         """protocol='openai' mirrors the app's gemini-style image path."""
@@ -336,6 +373,7 @@ class ModalityProbeTest(unittest.TestCase):
         self.assertIs(pp.nonchat_probe_fn(['transcription']),
                       pp.probe_transcription_cell)
         self.assertIs(pp.nonchat_probe_fn(['embedding']), pp.probe_embedding_cell)
+        self.assertIs(pp.nonchat_probe_fn(['tts']), pp.probe_tts_cell)
         self.assertIs(pp.nonchat_probe_fn(['image_gen', 'embedding']),
                       pp.probe_image_cell, 'image wins on multi-cap models')
         self.assertIsNone(pp.nonchat_probe_fn(['video_gen']))

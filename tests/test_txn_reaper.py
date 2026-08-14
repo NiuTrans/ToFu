@@ -18,6 +18,8 @@ Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest tests/test_txn_reaper.py
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 pytestmark = pytest.mark.unit
@@ -77,6 +79,23 @@ def test_reaper_rolls_back_only_the_zombie(fresh_db):
     zombie.close()
     live.close()
     fresh.close()
+
+
+def test_test_boundary_reaps_fresh_transaction_from_same_thread(fresh_db):
+    """A just-finished test can leak a <1s txn from pytest's runner thread.
+
+    The ordinary idle threshold must still protect other live threads, while
+    the explicit owner identity closes this boundary-sized lock cascade.
+    """
+    leaked = _zombie_conn(fresh_db, idle_s=0.0)
+    assert fresh_db.reap_idle_write_transactions(
+        idle_s=1.0, owner_ident=-1) == 0
+    assert leaked._conn.in_transaction
+
+    assert fresh_db.reap_idle_write_transactions(
+        idle_s=1.0, owner_ident=threading.get_ident()) == 1
+    assert not leaked._conn.in_transaction
+    leaked.close()
 
 
 def test_NEUTER_without_reap_zombie_survives(fresh_db):

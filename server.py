@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Tofu Server — Quart + Hypercorn (HTTP/2, ASGI).
+"""Tofu Server — Quart + Hypercorn (ASGI).
 
 App entry point. Uses:
   - Quart (async Flask from Pallets) as the application framework
   - Hypercorn as the ASGI server with HTTP/2 support
-  - Auto-generated self-signed TLS for zero-config HTTP/2 in browsers
+  - Optional TLS/HTTP2 for explicitly configured direct deployments
 
 All existing Flask-style sync route handlers run unchanged in a thread pool.
 
 Usage:
-    python server.py                          # HTTPS + HTTP/2 (auto-cert)
-    python server.py --no-tls                 # HTTP/1.1 only
+    python server.py                          # HTTP/1.1 (proxy-safe default)
+    TOFU_TLS=1 python server.py               # HTTPS + HTTP/2 (auto-cert)
+    python server.py --no-tls                 # Explicit HTTP/1.1
     python server.py --certfile cert.pem --keyfile key.pem   # custom cert
 """
 
@@ -20,9 +21,94 @@ import sys
 import json
 import logging
 import time
-import signal
 import threading
 import faulthandler
+
+
+def _delegate_executable_to_manager():
+    """Fast-path a human ``python server.py`` into the sole lifecycle owner."""
+    external_owner = (
+        os.environ.get('TOFU_SERVER_WORKER') == '1'
+        or os.environ.get('_TOFU_VIA_BOOTSTRAP') == '1'
+        or os.environ.get('TOFU_RUN_SERVER') == '1'
+        # In-place update/HEAD re-exec keeps the original worker PID and sets
+        # this port handoff marker before execv. It is already the worker; a
+        # manager handoff here would strand that PID holding the instance lock
+        # while it waits for itself to become ready.
+        or bool(os.environ.get('_TOFU_REEXEC_PORT'))
+        or os.getpid() == 1  # Docker/container entrypoint owns this process
+    )
+    if __name__ != '__main__' or external_owner:
+        return
+    if any(arg in ('-h', '--help') for arg in sys.argv[1:]):
+        sys.stdout.write(
+            'usage: python server.py [--host HOST] [--port PORT] [--no-tls] '
+            '[--certfile FILE --keyfile FILE]\n\n'
+            'Starts Tofu through the project-local manager. Operations: '
+            'python serverctl.py {status,stop,restart,logs,doctor}\n')
+        raise SystemExit(0)
+
+    # Preserve the established environment-selection contract without loading
+    # the application first. The re-executed wrapper will immediately hand off
+    # to serverctl; the eventual worker still runs the full native-path setup.
+    project = os.path.dirname(os.path.abspath(__file__))
+    marker = os.path.join(project, '.tofu_env.json')
+    try:
+        with open(marker, encoding='utf-8') as fh:
+            cfg = json.load(fh)
+        target = cfg.get('python') or ''
+        prefix = cfg.get('env_prefix') or ''
+        in_target = (
+            os.path.realpath(sys.prefix) == os.path.realpath(prefix)
+            if prefix else os.path.realpath(sys.executable) == os.path.realpath(target)
+        )
+        if target and os.access(target, os.X_OK) and not in_target \
+                and os.environ.get('_TOFU_ENV_REEXEC') != '1':
+            os.environ['_TOFU_ENV_REEXEC'] = '1'
+            os.execv(target, [target, *sys.argv])
+    except (OSError, ValueError, TypeError):
+        pass
+
+    try:
+        from serverctl import managed_start
+        code = managed_start(sys.argv[1:], wait=180.0, source='python-server.py')
+    except Exception as exc:
+        sys.stderr.write(
+            '[server.py] Could not hand startup to the Tofu manager: %s\n'
+            'Diagnose with: %s serverctl.py doctor\n' % (exc, sys.executable))
+        code = 1
+    raise SystemExit(code)
+
+
+_delegate_executable_to_manager()
+
+
+def _install_numeric_thread_defaults() -> int:
+    """Bound implicit BLAS/OpenMP pools before NumPy or ML imports.
+
+    High-core personal hosts otherwise make OpenBLAS eagerly retain one native
+    worker per visible CPU (64 in the measured deployment) even while Tofu is
+    idle.  Tofu already owns request, DB, agent, and tool executors; an
+    additional host-sized pool per numeric runtime causes oversubscription and
+    needless thread stacks under memory pressure. Explicit library variables
+    always win. ``TOFU_NUMERIC_THREADS`` changes only the zero-config default.
+    """
+    raw = os.environ.get('TOFU_NUMERIC_THREADS', '4')
+    try:
+        workers = int(raw or '4')
+    except (TypeError, ValueError):
+        workers = 4
+    workers = max(1, min(32, workers))
+    value = str(workers)
+    for name in ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS',
+                 'MKL_NUM_THREADS', 'NUMEXPR_NUM_THREADS'):
+        os.environ.setdefault(name, value)
+    return workers
+
+
+# Must run before the first ``lib`` import: route/plugin discovery eventually
+# imports NumPy, at which point OpenBLAS has already fixed its native pool.
+_NUMERIC_THREADS = _install_numeric_thread_defaults()
 
 # Internal process marker (NOT a user knob — the owner directive 2026-08-05:
 # plain `python server.py` carries everything). lib.database's local-primary
@@ -41,39 +127,69 @@ os.environ.setdefault('TOFU_SERVER_PROCESS', '1')
 # to die. all_threads=True captures every Python thread, not just the
 # crashing one — essential for diagnosing concurrent-fetch races.
 #
-# Dual-sink strategy: write to BOTH the FUSE-backed logs/ (durable across
-# box restarts, but may be truncated by the very FUSE stall that caused the
-# crash) AND a tmpfs mirror in /dev/shm (immune to FUSE stalls, but lost on
-# box reboot). On crash, check /dev/shm first for the clean copy.
+# Dual-sink strategy: write to BOTH a per-process FUSE-backed file (durable
+# across box restarts) and a per-process tmpfs mirror (immune to FUSE stalls).
+# Only a real ``python server.py`` process arms the sinks.  Historically this
+# ran on every ``import server`` and appended to one shared file: test/tool
+# imports alone produced 44k headers, while 1,598 stall dumps grew it to
+# 125 MiB with no bound.
 _fault_log = None
-try:
-    _FAULT_LOG_PATH = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), 'logs', 'faulthandler.log')
-    os.makedirs(os.path.dirname(_FAULT_LOG_PATH), exist_ok=True)
-    _fault_log = open(_FAULT_LOG_PATH, 'a', buffering=1)  # line-buffered
-    _fault_log.write('\n=== faulthandler armed pid=%d at %s ===\n'
-                     % (os.getpid(), time.strftime('%Y-%m-%d %H:%M:%S')))
-except OSError:
-    pass
-
-# Prefer tmpfs for the live faulthandler sink (survives FUSE stalls intact);
-# fall back to the FUSE log, then stderr.
 _fault_shm_log = None
-try:
-    _FAULT_SHM_PATH = '/dev/shm/tofu_faulthandler_%d.log' % os.getpid()
-    _fault_shm_log = open(_FAULT_SHM_PATH, 'w', buffering=1)
-    _fault_shm_log.write('=== faulthandler armed pid=%d at %s ===\n'
-                         % (os.getpid(), time.strftime('%Y-%m-%d %H:%M:%S')))
-    faulthandler.enable(file=_fault_shm_log, all_threads=True)
-except OSError:
-    _fault_shm_log = None
+_FAULT_LOG_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'logs')
+_FAULT_LOG_PATH = os.path.join(
+    _FAULT_LOG_DIR, 'tofu_faulthandler_%d.log' % os.getpid())
+_FAULT_SHM_PATH = '/dev/shm/tofu_faulthandler_%d.log' % os.getpid()
 
-if _fault_shm_log is None:
-    # tmpfs unavailable — use the FUSE log (better than nothing)
-    if _fault_log is not None:
-        faulthandler.enable(file=_fault_log, all_threads=True)
-    else:
-        faulthandler.enable(all_threads=True)
+
+def _arm_faulthandler_sinks():
+    """Open early crash sinks for the executable server, never an importer."""
+    global _fault_log, _fault_shm_log, _FAULT_LOG_DIR, _FAULT_LOG_PATH
+    header = '=== faulthandler armed pid=%d at %s ===\n' % (
+        os.getpid(), time.strftime('%Y-%m-%d %H:%M:%S'))
+
+    # Arm tmpfs first, before importing even the lightweight writable-path
+    # resolver.  This preserves early native-crash capture while ensuring a
+    # fresh/XDG or frozen install places its durable file beside all other logs
+    # instead of writing into a source/read-only bundle.
+    try:
+        _fault_shm_log = open(_FAULT_SHM_PATH, 'w+', buffering=1)
+        _fault_shm_log.write(header)
+        faulthandler.enable(file=_fault_shm_log, all_threads=True)
+    except (OSError, RuntimeError):
+        if _fault_shm_log is not None:
+            try:
+                _fault_shm_log.close()
+            except OSError:
+                pass
+        _fault_shm_log = None
+
+    try:
+        from lib.log import LOG_DIR as _writable_log_dir
+        _FAULT_LOG_DIR = _writable_log_dir
+        _FAULT_LOG_PATH = os.path.join(
+            _FAULT_LOG_DIR, 'tofu_faulthandler_%d.log' % os.getpid())
+    except Exception:
+        pass
+    try:
+        os.makedirs(_FAULT_LOG_DIR, exist_ok=True)
+        _fault_log = open(_FAULT_LOG_PATH, 'w+', buffering=1)
+        _fault_log.write(header)
+    except OSError:
+        _fault_log = None
+
+    # Fall back to the durable fd, then stderr, when tmpfs is unavailable.
+    # ``w+`` lets the healthy heartbeat cap repeated non-fatal stall dumps
+    # without replacing the descriptor retained by faulthandler.
+    if _fault_shm_log is None:
+        if _fault_log is not None:
+            faulthandler.enable(file=_fault_log, all_threads=True)
+        else:
+            faulthandler.enable(all_threads=True)
+
+
+if __name__ == '__main__':
+    _arm_faulthandler_sinks()
 
 
 # ── Faulthandler-sink hygiene + event-loop stall detection (pure helpers) ──
@@ -183,13 +299,16 @@ def _heartbeat_path():
     return os.path.join(_heartbeat_dir(), _HEARTBEAT_FILE)
 
 
-def _write_heartbeat(pid=None, ts=None, path=None):
+def _write_heartbeat(pid=None, ts=None, path=None, *, phase='serving'):
     """Atomically stamp ``{pid, ts}`` (wall-clock) into the sidecar.
 
-    Best-effort: a wedged loop failing to write is precisely the signal we
-    want, so a write failure NEVER raises — it just lets the file age. Atomic
-    (temp + ``os.replace``) so a concurrent reader never sees a half-written
-    file. Returns True on success, False on any failure.
+    ``phase='booting'`` is stamped by the executable immediately after taking
+    the instance lock, before importing the database or starting background
+    writers.  A contender gives that phase a longer grace period than a stale
+    serving-loop heartbeat, so a legitimate schema migration cannot be
+    mistaken for a wedged server.  Best-effort: a write failure NEVER raises.
+    Atomic (temp + ``os.replace``) means a concurrent reader never sees a
+    half-written file. Returns True on success, False on any failure.
     """
     pid = os.getpid() if pid is None else pid
     ts = time.time() if ts is None else ts
@@ -198,7 +317,7 @@ def _write_heartbeat(pid=None, ts=None, path=None):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = '%s.%d.tmp' % (path, pid)
         with open(tmp, 'w') as f:
-            f.write(json.dumps({'pid': pid, 'ts': ts}))
+            f.write(json.dumps({'pid': pid, 'ts': ts, 'phase': phase}))
         os.replace(tmp, path)
         return True
     except (OSError, ValueError, TypeError) as e:
@@ -227,6 +346,26 @@ def _read_heartbeat(path=None):
         return None, None
 
 
+def _read_heartbeat_state(path=None):
+    """Return the heartbeat record while keeping ``_read_heartbeat`` stable.
+
+    Old sidecars without ``phase`` are serving heartbeats. Invalid records are
+    ambiguous and therefore return ``None`` (the reclaim path fails safe).
+    """
+    path = path or _heartbeat_path()
+    try:
+        with open(path) as f:
+            data = json.loads(f.read() or '{}')
+        pid = int(data['pid'])
+        ts = float(data['ts'])
+        phase = str(data.get('phase') or 'serving')
+        if phase not in ('booting', 'serving'):
+            return None
+        return {'pid': pid, 'ts': ts, 'phase': phase}
+    except (OSError, KeyError, ValueError, TypeError):
+        return None
+
+
 def _heartbeat_stale_threshold():
     """Seconds after which a heartbeat proves the loop is wedged.
 
@@ -241,6 +380,21 @@ def _heartbeat_stale_threshold():
     if bump <= 0:
         bump = 1.0
     return max(30.0, bump * 3.0)
+
+
+def _boot_heartbeat_stale_threshold():
+    """Grace for a lock holder that has not reached the serving loop yet.
+
+    Production startup can legitimately spend tens of seconds migrating and
+    verifying a 20 GB SQLite authority.  Keep the bound finite so a process
+    genuinely wedged during import remains reclaimable without weakening the
+    normal 30-second serving-loop detector.
+    """
+    try:
+        value = float(os.environ.get('TOFU_BOOT_HEARTBEAT_GRACE_SECS', '') or '180')
+    except (ValueError, TypeError):
+        value = 180.0
+    return max(60.0, min(900.0, value))
 
 
 _SERVE_MODE_FILE = '.last_serve_mode'
@@ -280,12 +434,15 @@ def _holder_wedge_age(pid, now=None, path=None):
     behaviour. The age is returned (not just a bool) so the caller can log the
     concrete staleness.
     """
-    hb_pid, hb_ts = _read_heartbeat(path)
-    if hb_pid is None or hb_ts is None or hb_pid != pid:
+    state = _read_heartbeat_state(path)
+    if state is None or state['pid'] != pid:
         return None
     now = time.time() if now is None else now
-    age = now - hb_ts
-    if age < 0 or age <= _heartbeat_stale_threshold():
+    age = now - state['ts']
+    threshold = (_boot_heartbeat_stale_threshold()
+                 if state['phase'] == 'booting'
+                 else _heartbeat_stale_threshold())
+    if age < 0 or age <= threshold:
         return None
     return age
 
@@ -350,7 +507,8 @@ def _reclaim_stale_instance_lock(lock_path, hostname, logger):
     return True
 
 
-def _acquire_instance_lock(lock_path, logger, hostname=None, allow_reclaim=True):
+def _acquire_instance_lock(lock_path, logger, hostname=None, allow_reclaim=True,
+                           *, mark_booting=False):
     """Acquire the exclusive single-instance lock at *lock_path*.
 
     Returns ``(ok, fd)``: ``(True, <open flocked fd>)`` on success — the caller
@@ -389,7 +547,9 @@ def _acquire_instance_lock(lock_path, logger, hostname=None, allow_reclaim=True)
     except (IOError, OSError):
         fd.close()
         if allow_reclaim and _reclaim_stale_instance_lock(lock_path, hostname, logger):
-            ok2, fd2 = _acquire_instance_lock(lock_path, logger, hostname=hostname, allow_reclaim=False)
+            ok2, fd2 = _acquire_instance_lock(
+                lock_path, logger, hostname=hostname, allow_reclaim=False,
+                mark_booting=mark_booting)
             if ok2 and fd2 is not None:
                 logger.info('[Lock] reclaimed stale lock and acquired fresh instance lock (pid=%d)', os.getpid())
             else:
@@ -404,6 +564,8 @@ def _acquire_instance_lock(lock_path, logger, hostname=None, allow_reclaim=True)
         fd.flush()
     except OSError as e:
         logger.debug('[Lock] could not stamp lock identity: %s', e)
+    if mark_booting:
+        _write_heartbeat(pid=os.getpid(), phase='booting')
     return True, fd
 
 
@@ -445,34 +607,117 @@ def _prune_stale_fault_dumps(directory='/dev/shm', keep_basename='',
     return removed
 
 
-def _stall_pressure_context():
-    """Best-effort host-pressure snapshot for a LoopWatch stall line.
+def _fault_dump_limits():
+    """Return bounded per-file and stale-dump retention settings."""
+    def _integer(name, default, minimum, maximum):
+        try:
+            value = int(os.environ.get(name, '') or default)
+        except (TypeError, ValueError):
+            value = default
+        return max(minimum, min(maximum, value))
 
-    Returns a compact string like ``load1=7.20 cgmem=91.4%`` (either part may
-    be absent) or ``''``. Why it exists: the stall top-frame can only say WHAT
-    the loop was doing; the dominant stall class is the loop idle in
-    ``select()`` because the HOST is starved (cgroup memory pressure relief,
-    a sibling's 46 GB dump, a 300 MB JSON parse on a shared box). Without the
-    pressure reading IN the stall line, classifying a stall means hand-
-    correlating two log files (the 2026-08-05 audit did exactly that). Cheap
-    local reads only (cgroupfs + /proc) — NEVER FUSE: the watcher fires
-    precisely when the loop may be wedged on a syscall, so the probe itself
-    must be syscall-cheap. Never raises.
+    return {
+        'active_bytes': _integer(
+            'TOFU_FAULT_DUMP_MAX_BYTES', 16 * 1024 * 1024,
+            1 * 1024 * 1024, 256 * 1024 * 1024),
+        'stale_files': _integer(
+            'TOFU_FAULT_DUMP_FILES', 8, 1, 64),
+        'stale_bytes': _integer(
+            'TOFU_FAULT_DUMP_TOTAL_BYTES', 64 * 1024 * 1024,
+            4 * 1024 * 1024, 1024 * 1024 * 1024),
+    }
+
+
+def _trim_fault_sink_if_oversize(sink, max_bytes, *, header=''):
+    """Reuse a live fd while bounding repeated recoverable stall dumps.
+
+    Replacing the path is unsafe because the C-level faulthandler retains the
+    old descriptor.  Truncating only after its one-shot timer is cancelled
+    preserves descriptor identity and keeps the next capture on the named
+    file.  Returns True when a trim occurred.
     """
-    parts = []
+    if sink is None or max_bytes <= 0:
+        return False
     try:
-        with open('/proc/loadavg') as _f:
-            parts.append('load1=%s' % _f.read().split()[0])
-    except Exception:
-        pass
+        sink.flush()
+        if os.fstat(sink.fileno()).st_size <= max_bytes:
+            return False
+        sink.seek(0)
+        sink.truncate(0)
+        if header:
+            sink.write(header)
+        sink.flush()
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _reset_fault_sink(sink, *, header=''):
+    """Keep only the newest manual durable dump on a live sink fd."""
+    if sink is None:
+        return False
     try:
-        from lib.cgroup_guard import pressure as _cg_pressure
-        _p = _cg_pressure()
-        if _p:
-            parts.append('cgmem=%.1f%%' % _p['pct'])
-    except Exception:
-        pass
-    return ' '.join(parts)
+        sink.flush()
+        sink.seek(0)
+        sink.truncate(0)
+        if header:
+            sink.write(header)
+        sink.flush()
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _prune_fault_dump_budget(directory, *, keep_basename='', pid_alive=_pid_alive,
+                             max_dead_files=8, max_dead_bytes=64 * 1024 * 1024):
+    """Keep newest dead-process evidence within count and byte budgets.
+
+    Live process files, the current sink and unrelated files are never
+    touched.  Unlike the historical prune-all helper, retaining the newest
+    dead files means the next boot does not erase the crash it is meant to
+    diagnose.  Returns the number of old dead dumps removed.
+    """
+    import glob as _glob
+    pattern = os.path.join(
+        directory, _FAULT_DUMP_PREFIX + '*' + _FAULT_DUMP_SUFFIX)
+    dead = []
+    for path in _glob.glob(pattern):
+        base = os.path.basename(path)
+        if keep_basename and base == keep_basename:
+            continue
+        pid = _parse_fault_dump_pid(base)
+        if pid is None or pid_alive(pid):
+            continue
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        dead.append((stat.st_mtime_ns, base, path, stat.st_size))
+
+    removed = 0
+    kept_files = 0
+    kept_bytes = 0
+    for _mtime, _base, path, size in sorted(dead, reverse=True):
+        fits = (kept_files < max(0, int(max_dead_files))
+                and kept_bytes + size <= max(0, int(max_dead_bytes)))
+        if fits:
+            kept_files += 1
+            kept_bytes += size
+            continue
+        try:
+            os.unlink(path)
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+from lib.server_runtime_probes import stall_pressure_context
+
+
+def _stall_pressure_context():
+    """Compatibility hook consumed by the extracted loop watchdog owner."""
+    return stall_pressure_context()
 
 
 def _loop_stall_decide(age, threshold, already_dumped):
@@ -578,18 +823,35 @@ def _should_arm_ctimer(threshold, sink):
 
 
 
-# One-shot boot cleanup: prune dead-pid faulthandler dumps from the tmpfs sink
-# so it stays bounded (the file we just opened for THIS pid is preserved).
+# One-shot boot cleanup: retain recent dead-process evidence but bound both the
+# tmpfs and durable per-pid families.  The file opened for this process and any
+# other genuinely live server are always preserved.
 if _fault_shm_log is not None:
     try:
-        _pruned = _prune_stale_fault_dumps(
+        _fault_limits = _fault_dump_limits()
+        _pruned = _prune_fault_dump_budget(
             directory='/dev/shm',
-            keep_basename=os.path.basename(_FAULT_SHM_PATH))
+            keep_basename=os.path.basename(_FAULT_SHM_PATH),
+            max_dead_files=_fault_limits['stale_files'],
+            max_dead_bytes=_fault_limits['stale_bytes'])
         if _pruned:
-            sys.stderr.write('[boot] pruned %d stale faulthandler dump(s) from /dev/shm\n'
+            sys.stderr.write('[boot] pruned %d over-budget faulthandler dump(s) from /dev/shm\n'
                              % _pruned)
     except Exception:
         pass   # cleanup is best-effort; never block boot on it
+if _fault_log is not None:
+    try:
+        _fault_limits = _fault_dump_limits()
+        _pruned = _prune_fault_dump_budget(
+            directory=_FAULT_LOG_DIR,
+            keep_basename=os.path.basename(_FAULT_LOG_PATH),
+            max_dead_files=_fault_limits['stale_files'],
+            max_dead_bytes=_fault_limits['stale_bytes'])
+        if _pruned:
+            sys.stderr.write('[boot] pruned %d over-budget durable fault dump(s)\n'
+                             % _pruned)
+    except Exception:
+        pass
 
 # ── Pin mapped pages into RAM (FUSE SIGBUS mitigation) ──
 # All .so files (C extensions, libpython, libc) are dlopen'd via mmap with
@@ -608,7 +870,12 @@ if _fault_shm_log is not None:
 # machine yet already ~full, and pinning there both adds unreclaimable pages
 # and inflates our oom_score so the killer targets us first — so we also skip
 # when the cgroup is already past TOFU_MLOCK_MAX_USAGE_PCT (default 85%) full.
-# Override: TOFU_MLOCK=1 forces it on, =0 forces it off (default 'auto').
+# Override: TOFU_MLOCK=1 forces it on, =auto enables the legacy headroom-gated
+# mode.  The production default is OFF: MCL_FUTURE locks every later mmap and
+# allocation, so a healthy-looking boot can grow into tens of GiB of
+# unreclaimable memory hours later.  A one-shot startup headroom check cannot
+# make that safe.  Operators with a proven FUSE SIGBUS workload can still opt
+# into the bounded-by-cgroup legacy policy explicitly with TOFU_MLOCK=auto.
 def _tofu_path_is_fuse(_path):
     """Best-effort: True if *_path* sits on a FUSE filesystem (stdlib-only)."""
     try:
@@ -681,7 +948,7 @@ def _tofu_cgroup_mem_usage_bytes():
 
 def _tofu_should_mlock():
     """Decide whether mlockall is worth it. Returns (do_it, reason)."""
-    _mode = os.environ.get('TOFU_MLOCK', 'auto').strip().lower()
+    _mode = os.environ.get('TOFU_MLOCK', 'off').strip().lower()
     if _mode in ('0', 'off', 'false', 'no'):
         return False, 'disabled via TOFU_MLOCK=%s' % _mode
     if _mode in ('1', 'on', 'true', 'yes', 'force'):
@@ -974,258 +1241,23 @@ _load_dotenv()
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Sync→loop body-read bounded wait (extracted for testability)
+#  Sync→loop boundary helpers (back-compatible test surface)
 # ═══════════════════════════════════════════════════════════════════════
-# ``_run_coro_sync`` (installed by the Flask→Quart shim below) bridges a sync
-# route handler running in an executor thread to the MAIN event loop to read
-# the request body (get_json / form / files / data). If the loop is EVER wedged
-# (a blocking call slipped onto it, a FUSE/PG stall), an UNBOUNDED
-# ``future.result()`` there blocks the worker thread FOREVER; every subsequent
-# request-body read queues behind it and the whole sync-executor pool is
-# exhausted — the "whole site frozen, must restart" failure mode. Bounding the
-# wait severs that one failure mode WITHOUT hurting legitimate slow large
-# uploads. These two helpers are module-level (not closure-local) so a unit test
-# can exercise the bound directly, mirroring the ``timeout=30`` contract the
-# sibling ``_sync_safe`` wrapper already carries.
+# Legacy synchronous routes cross Quart's async request/response boundary via
+# ``lib.quart_sync``. Keep these module-level names for existing diagnostics and
+# tests without mutating Quart's module or Request class.
 
 def _resolve_sync_body_timeout():
-    """Seconds to wait for a cross-thread request-body read before aborting.
-
-    Reads ``TOFU_SYNC_BODY_TIMEOUT`` (default 300s — generous so a genuine slow
-    upload is never cut short; this is a backstop against an infinitely wedged
-    loop, NOT a tight per-request budget). A value ``<= 0`` opts out (unbounded,
-    the legacy behaviour) and returns ``None``.
-    """
-    raw = os.environ.get('TOFU_SYNC_BODY_TIMEOUT', '') or '300'
-    try:
-        val = float(raw)
-    except (ValueError, TypeError) as e:
-        logging.getLogger('server').debug(
-            '[Server] bad TOFU_SYNC_BODY_TIMEOUT=%r, using 300s: %s', raw, e)
-        return 300.0
-    return None if val <= 0 else val
+    """Return the configured timeout for an explicit sync boundary."""
+    from lib.quart_sync import sync_boundary_timeout
+    return sync_boundary_timeout()
 
 
 def _await_coro_on_loop(coro, main_loop, timeout):
-    """Run ``coro`` on ``main_loop`` from a sync thread, bounded by ``timeout``.
+    """Run an awaitable on ``main_loop`` from an executor thread."""
+    from lib.quart_sync import await_on_loop
+    return await_on_loop(coro, main_loop, timeout)
 
-    On timeout the coroutine is best-effort cancelled, an ERROR is logged (per
-    CLAUDE.md §2.2), and ``concurrent.futures.TimeoutError`` propagates so the
-    handler fails fast instead of hanging the worker thread indefinitely.
-    """
-    from concurrent.futures import TimeoutError as _FuturesTimeoutError
-    future = asyncio.run_coroutine_threadsafe(coro, main_loop)
-    try:
-        return future.result(timeout=timeout)
-    except _FuturesTimeoutError:
-        future.cancel()
-        logging.getLogger('server').error(
-            '[Server] _run_coro_sync timed out after %ss waiting on the main '
-            'event loop for a request-body read — the loop is likely wedged. '
-            'Aborting this read instead of hanging the worker thread (raise '
-            'TOFU_SYNC_BODY_TIMEOUT if this is a genuine slow upload).', timeout)
-        raise
-
-
-# ═══════════════════════════════════════════════════════════════════════
-#  Framework Compatibility Shim
-# ═══════════════════════════════════════════════════════════════════════
-# Quart is API-compatible with Flask but lives under `quart.*` imports.
-# Our routes and lib/ code import from flask. We install a shim so that
-# `from flask import *` resolves to Quart's equivalents at runtime.
-# This is the official Quart migration approach.
-
-def _install_flask_shim():
-    """Make `from flask import X` resolve to Quart equivalents.
-
-    Quart is a superset of Flask's API. This shim allows all existing
-    route code to work without changing any import statements.
-
-    Key difference: Quart makes send_from_directory, send_file, and
-    make_response async. When sync route handlers (running in Quart's
-    thread pool) call these, they get coroutine objects. We wrap them
-    with sync-safe versions that detect this and await appropriately.
-    """
-    try:
-        import quart
-    except ImportError:
-        sys.stderr.write(
-            '\033[31m[server.py] ERROR: quart is not installed.\n'
-            '  Install with: pip install quart hypercorn cryptography\033[0m\n')
-        sys.exit(1)
-
-    import asyncio
-    import functools
-    import inspect
-
-    # Recover the GENUINE async helpers. If server.py is imported/exec'd
-    # more than once in the same process (e.g. a test re-imports it via
-    # importlib), ``quart.make_response`` etc. are already our sync-safe
-    # wrappers from the first install. Capturing those as the "originals"
-    # and wrapping them again would corrupt ``_orig_make_response_async``
-    # (it would point at a sync-safe wrapper instead of the real async
-    # ``quart.make_response``), so error handlers that
-    # ``await _orig_make_response_async(...)`` would route through the
-    # thread-bridge and deadlock. ``_sync_safe`` stashes the genuine async
-    # function on ``.__wrapped__``; unwrap through it so a re-install
-    # always starts from the real async helpers.
-    def _genuine(fn):
-        while getattr(fn, '_quart_async_wrapper', False):
-            fn = getattr(fn, '__wrapped__', fn)
-        return fn
-
-    _orig_send_from_directory = _genuine(quart.send_from_directory)
-    _orig_send_file = _genuine(quart.send_file)
-    _orig_make_response = _genuine(quart.make_response)
-
-    def _sync_safe(async_fn):
-        """Wrap an async function to be callable from sync code in a thread."""
-        @functools.wraps(async_fn)
-        def wrapper(*args, **kwargs):
-            coro = async_fn(*args, **kwargs)
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-            if loop and loop.is_running():
-                # We're in a thread with an event loop running elsewhere.
-                # Use the Quart-provided mechanism to run coroutines from
-                # sync code within a request context.
-                future = asyncio.run_coroutine_threadsafe(coro, loop)
-                return future.result(timeout=30)
-            else:
-                return asyncio.run(coro)
-        # Also make it awaitable for async callers
-        wrapper._async = async_fn
-        wrapper.__wrapped__ = async_fn
-        # Mark it so Quart's ensure_async can detect the dual nature
-        wrapper._quart_async_wrapper = True
-        return wrapper
-
-    # Quart 0.19.x's send_file / send_from_directory still use the
-    # pre-Flask-2.0 kwarg name `attachment_filename`; modern route code
-    # uses Flask's `download_name`. Normalize so callers can use the
-    # current Flask spelling regardless of the installed Quart version.
-    def _compat_download_name(async_fn):
-        @functools.wraps(async_fn)
-        def adapter(*args, **kwargs):
-            if 'download_name' in kwargs:
-                params = inspect.signature(async_fn).parameters
-                if 'download_name' not in params and 'attachment_filename' in params:
-                    kwargs['attachment_filename'] = kwargs.pop('download_name')
-            return async_fn(*args, **kwargs)
-        # Mark so _genuine() unwraps through this adapter on re-install,
-        # recovering the real async helper rather than stopping here.
-        adapter.__wrapped__ = async_fn
-        adapter._quart_async_wrapper = True
-        return adapter
-
-    # Replace in quart module so `from flask import send_from_directory`
-    # gets the sync-safe version
-    quart.send_from_directory = _sync_safe(_compat_download_name(_orig_send_from_directory))
-    quart.send_file = _sync_safe(_compat_download_name(_orig_send_file))
-    quart.make_response = _sync_safe(_orig_make_response)
-
-    # Expose originals at module level for async code that needs to await directly
-    global _orig_make_response_async
-    _orig_make_response_async = _orig_make_response
-
-    # ── Patch Request async methods/properties for sync route handlers ──
-    # In Quart, get_json(), form, files, data, and json are async. Sync
-    # route handlers (run in executor threads via run_sync) get coroutine
-    # objects instead of values. Monkey-patch the Request class to run
-    # the coroutine on the MAIN event loop — NOT a fresh child loop.
-    #
-    # The naive ``asyncio.run(coro)`` here is wrong: it spins up a new
-    # loop in the worker thread, and the coroutine then awaits hypercorn's
-    # request body Future, which lives on the main loop. Cross-loop
-    # awaits never wake up — symptom: large POST bodies hang server-side
-    # until the client times out, while small bodies (already inlined
-    # into the ASGI scope before dispatch) work fine. Fix: schedule via
-    # ``run_coroutine_threadsafe`` on the loop saved by
-    # ``hub.set_loop`` at startup.
-    from quart.wrappers import Request as _QuartRequest
-
-    _orig_get_json = _QuartRequest.get_json
-
-    def _run_coro_sync(coro):
-        """Run a coroutine from a sync context (executor thread).
-
-        The cross-thread wait is bounded by ``TOFU_SYNC_BODY_TIMEOUT`` (default
-        300s, see :func:`_resolve_sync_body_timeout`) so a wedged event loop can
-        never hang a worker thread forever and exhaust the sync-executor pool.
-        On timeout the coroutine is cancelled and
-        ``concurrent.futures.TimeoutError`` propagates instead of blocking
-        indefinitely. Delegates to the module-level :func:`_await_coro_on_loop`
-        so the bound is unit-testable.
-        """
-        if not inspect.iscoroutine(coro):
-            return coro
-        try:
-            from lib.push import hub as _push_hub
-            main_loop = getattr(_push_hub, '_loop', None)
-        except Exception:
-            main_loop = None
-        if main_loop is not None and main_loop.is_running():
-            return _await_coro_on_loop(
-                coro, main_loop, _resolve_sync_body_timeout())
-        return asyncio.run(coro)
-
-    def _sync_safe_get_json(self, *args, **kwargs):
-        return _run_coro_sync(_orig_get_json(self, *args, **kwargs))
-
-    # Stash the genuine async original ON the wrapper so async handlers can
-    # recover it regardless of how many times the shim is (re)installed or
-    # which module object holds it (test harnesses sometimes exec server.py as
-    # a second module). Always unwrap to the FIRST genuine coroutine fn.
-    _genuine_get_json = getattr(_orig_get_json, '_genuine_async_get_json', _orig_get_json)
-    _sync_safe_get_json._genuine_async_get_json = _genuine_get_json
-    _QuartRequest.get_json = _sync_safe_get_json
-
-    # Patch async properties: form, files, data, json
-    _orig_form_prop = _QuartRequest.form
-    _orig_files_prop = _QuartRequest.files
-    _orig_data_prop = _QuartRequest.data
-
-    def _make_sync_safe_property(orig_prop):
-        _fget = orig_prop.fget
-        @property
-        def _prop(self):
-            return _run_coro_sync(_fget(self))
-        return _prop
-
-    _QuartRequest.form = _make_sync_safe_property(_orig_form_prop)
-    _QuartRequest.files = _make_sync_safe_property(_orig_files_prop)
-    _QuartRequest.data = _make_sync_safe_property(_orig_data_prop)
-
-    # json property delegates to the already-patched sync get_json
-    @property
-    def _json_prop(self):
-        return self.get_json()
-    _QuartRequest.json = _json_prop
-
-    # Install the shim: make `import flask` resolve to quart
-    sys.modules['flask'] = quart
-    # Also shim sub-modules that code might import from
-    for attr in ('json', 'globals', 'helpers', 'wrappers', 'ctx'):
-        quart_sub = f'quart.{attr}'
-        flask_sub = f'flask.{attr}'
-        if quart_sub in sys.modules:
-            sys.modules[flask_sub] = sys.modules[quart_sub]
-
-    # Werkzeug exceptions are used directly in some places
-    # Quart re-exports them, but ensure werkzeug is still importable
-    import importlib.util
-    if importlib.util.find_spec('werkzeug') is None:
-        logging.getLogger(__name__).debug('werkzeug not importable; relying on quart re-exports')
-
-
-_install_flask_shim()
-
-
-# ── Now safe to import Quart (which the routes will see as 'flask') ──
-import quart  # noqa: F401  — kept so quart.* monkeypatches in _install_flask_shim resolve
-from quart import Quart, redirect, request
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Logging (reuse server.py's architecture)
@@ -1234,6 +1266,7 @@ from quart import Quart, redirect, request
 import mimetypes
 mimetypes.init()
 mimetypes.add_type('text/javascript', '.js')
+mimetypes.add_type('text/javascript', '.mjs')
 mimetypes.add_type('text/css', '.css')
 mimetypes.add_type('application/json', '.json')
 mimetypes.add_type('image/svg+xml', '.svg')
@@ -1251,6 +1284,39 @@ from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from lib.runtime_paths import data_root as _tofu_data_root, logs_root as _tofu_logs_root
 LOG_DIR = _tofu_logs_root()
 os.makedirs(LOG_DIR, exist_ok=True)
+
+# Acquire the process authority before importing ``lib.log_aggregates`` or
+# ``lib.database``.  Both can start database-backed background work during
+# module initialisation, so taking this lock in the old ``__main__`` block was
+# too late: a restart could migrate/verify the canonical database in two live
+# processes before one eventually lost the TCP bind race.
+_instance_lock_fd = None
+_instance_lock_bypassed = False
+_lock_dir = None
+_lock_path = None
+if __name__ == '__main__':
+    _lock_dir = _tofu_data_root()
+    os.makedirs(_lock_dir, exist_ok=True)
+    _lock_path = os.path.join(_lock_dir, '.server.lock')
+    _early_lock_log = logging.getLogger('server')
+    _lock_ok, _instance_lock_fd = _acquire_instance_lock(
+        _lock_path, _early_lock_log, mark_booting=True)
+    if not _lock_ok:
+        _skip = (os.environ.get('TOFU_SKIP_LOCK', '') or '').strip()
+        if _skip != '1':
+            _message = (
+                'Another server instance is already running from this project '
+                'directory. Set TOFU_SKIP_LOCK=1 to force start.')
+            _early_lock_log.critical(_message)
+            try:
+                sys.stderr.write('[server.py] ERROR: %s\n' % _message)
+                sys.stderr.flush()
+            except OSError:
+                pass
+            sys.exit(1)
+        _instance_lock_bypassed = True
+        _early_lock_log.warning(
+            '[Lock] TOFU_SKIP_LOCK=1 — bypassing instance lock')
 
 _LOG_FMT = '%(asctime)s [%(levelname)s] %(name)s [%(threadName)s]: %(message)s'
 _LOG_DATEFMT = '%Y-%m-%d %H:%M:%S'
@@ -1305,16 +1371,107 @@ class _QuietPollFilter(logging.Filter):
             return False
         return True
 
-_app_handler = TimedRotatingFileHandler(
+
+class _SizeAndTimeRotatingFileHandler(TimedRotatingFileHandler):
+    """Daily rotation with a per-file ceiling and a whole-family budget.
+
+    ``TimedRotatingFileHandler`` alone lets one runaway day create an
+    arbitrarily large file (9.1 GiB happened in production).  Multiple size
+    rotations within a day receive numeric suffixes, while the usual date
+    names and new-user behaviour remain intact.
+    """
+
+    def __init__(self, filename, *, max_bytes, total_budget_bytes, **kwargs):
+        self.maxBytes = max(0, int(max_bytes))
+        self.totalBudgetBytes = max(0, int(total_budget_bytes))
+        super().__init__(filename, **kwargs)
+        self._prune_total_budget()
+
+    def shouldRollover(self, record):
+        if super().shouldRollover(record):
+            return 1
+        if self.maxBytes <= 0:
+            return 0
+        if self.stream is None:
+            self.stream = self._open()
+        self.stream.seek(0, os.SEEK_END)
+        rendered = '%s\n' % self.format(record)
+        encoding = self.encoding or 'utf-8'
+        try:
+            incoming = len(rendered.encode(encoding, errors='replace'))
+        except LookupError:
+            incoming = len(rendered.encode('utf-8', errors='replace'))
+        return 1 if self.stream.tell() + incoming >= self.maxBytes else 0
+
+    def rotation_filename(self, default_name):
+        candidate = super().rotation_filename(default_name)
+        if not os.path.exists(candidate):
+            return candidate
+        # A time handler normally owns one file per date. Size rotation can
+        # happen repeatedly on that date, so choose a lexically ordered unique
+        # suffix instead of deleting/replacing the earlier chunk.
+        sequence = 1
+        while sequence <= 99999:
+            numbered = f'{candidate}.{sequence:05d}'
+            if not os.path.exists(numbered):
+                return numbered
+            sequence += 1
+        return f'{candidate}.{time.time_ns()}'
+
+    def doRollover(self):
+        super().doRollover()
+        self._prune_total_budget()
+
+    def _prune_total_budget(self):
+        """Delete oldest *rotated* chunks until the family fits its budget."""
+        if self.totalBudgetBytes <= 0:
+            return
+        directory = os.path.dirname(self.baseFilename) or '.'
+        prefix = os.path.basename(self.baseFilename) + '.'
+        rotated = []
+        total = 0
+        try:
+            total += os.path.getsize(self.baseFilename)
+        except OSError:
+            pass
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            return
+        for name in names:
+            if not name.startswith(prefix):
+                continue
+            path = os.path.join(directory, name)
+            try:
+                stat = os.stat(path)
+            except OSError:
+                continue
+            if not os.path.isfile(path):
+                continue
+            total += stat.st_size
+            rotated.append((stat.st_mtime_ns, name, path, stat.st_size))
+        for _mtime, _name, path, size in sorted(rotated):
+            if total <= self.totalBudgetBytes:
+                break
+            try:
+                os.remove(path)
+                total -= size
+            except OSError:
+                continue
+
+
+_app_handler = _SizeAndTimeRotatingFileHandler(
     os.path.join(LOG_DIR, 'app.log'),
-    when='midnight', backupCount=30, encoding='utf-8')
+    when='midnight', backupCount=30, encoding='utf-8',
+    max_bytes=64 * 1024 * 1024, total_budget_bytes=2 * 1024 * 1024 * 1024)
 _app_handler.setFormatter(_formatter)
 _app_handler.setLevel(logging.INFO)
 _app_handler.addFilter(_BizOnly())
 
-_access_handler = TimedRotatingFileHandler(
+_access_handler = _SizeAndTimeRotatingFileHandler(
     os.path.join(LOG_DIR, 'access.log'),
-    when='midnight', backupCount=14, encoding='utf-8')
+    when='midnight', backupCount=14, encoding='utf-8',
+    max_bytes=32 * 1024 * 1024, total_budget_bytes=512 * 1024 * 1024)
 _access_handler.setFormatter(_formatter)
 _access_handler.setLevel(logging.INFO)
 _access_handler.addFilter(_AccessOnly())
@@ -1333,9 +1490,10 @@ _vendor_handler.setFormatter(_formatter)
 _vendor_handler.setLevel(logging.WARNING)
 _vendor_handler.addFilter(_VendorOnly())
 
-_frontend_handler = TimedRotatingFileHandler(
+_frontend_handler = _SizeAndTimeRotatingFileHandler(
     os.path.join(LOG_DIR, 'frontend.log'),
-    when='midnight', backupCount=14, encoding='utf-8')
+    when='midnight', backupCount=14, encoding='utf-8',
+    max_bytes=32 * 1024 * 1024, total_budget_bytes=256 * 1024 * 1024)
 _frontend_handler.setFormatter(_formatter)
 _frontend_handler.setLevel(logging.INFO)
 _frontend_handler.addFilter(_FrontendOnly())
@@ -1357,12 +1515,13 @@ from lib.log_aggregates import (
     enabled as _log_agg_enabled,
     get_default_store as _log_agg_store,
     start_flusher as _log_agg_start_flusher,
+    stop_flusher as _log_agg_stop_flusher,
 )
 _log_agg_handler = _FingerprintHandler(_log_agg_store())
 _log_agg_handler.setLevel(logging.WARNING)
 _log_agg_handler.addFilter(_BizAndServerOnly())
 
-# ── Non-blocking logging: QueueHandler + QueueListener ──
+# ── Non-blocking, memory-bounded logging ──
 # The four file handlers + the stderr StreamHandler all do SYNCHRONOUS I/O
 # under a per-handler lock. error.log lives on a FUSE/NFS mount (see
 # _tofu_logs_root), so a WARNING/ERROR *storm* (e.g. a total upstream 502
@@ -1377,11 +1536,95 @@ _log_agg_handler.addFilter(_BizAndServerOnly())
 # touches the disk or the handler locks. A dedicated background thread
 # (QueueListener) drains the queue and performs the actual file/stderr I/O.
 # So a request/serving thread that logs during a storm returns immediately;
-# only the listener thread ever blocks on the slow mount. The queue is
-# unbounded (put_nowait never blocks/drops), so no log line is lost — a burst
-# just grows the in-memory queue and the listener catches up.
+# only the listener thread ever blocks on the slow mount. The queue is bounded:
+# a log storm may shed diagnostics, but can never retain LogRecords until OOM.
 import queue as _queue_mod
 from logging.handlers import QueueHandler, QueueListener
+
+
+def _log_queue_capacity() -> int:
+    """Bound pending LogRecord memory without requiring install-time tuning."""
+    try:
+        value = int(os.environ.get('TOFU_LOG_QUEUE_MAX', '') or '20000')
+    except (TypeError, ValueError):
+        value = 20000
+    return max(1000, min(500000, value))
+
+
+class _BoundedQueueHandler(QueueHandler):
+    """Shed a full async queue and summarize drops after it recovers.
+
+    The stdlib handler routes ``queue.Full`` through ``handleError``. During a
+    storm that emits a traceback per dropped record and creates another storm,
+    so Full is an expected overload signal here rather than an exception.
+    """
+
+    def __init__(self, log_queue):
+        super().__init__(log_queue)
+        self._drop_lock = threading.Lock()
+        self._dropped_pending = 0
+        self._dropped_total = 0
+
+    def enqueue(self, record):
+        try:
+            self.queue.put_nowait(record)
+        except _queue_mod.Full:
+            with self._drop_lock:
+                self._dropped_pending += 1
+                self._dropped_total += 1
+            return
+
+        with self._drop_lock:
+            dropped = self._dropped_pending
+            dropped_total = self._dropped_total
+        if not dropped:
+            return
+        notice = logging.LogRecord(
+            name='server.logging', level=logging.WARNING,
+            pathname=__file__, lineno=0,
+            msg=('Async log queue recovered; shed %d record(s) while full '
+                 '(capacity=%d, total_shed=%d).'),
+            args=(dropped, self.queue.maxsize, dropped_total), exc_info=None,
+        )
+        try:
+            self.queue.put_nowait(self.prepare(notice))
+        except _queue_mod.Full:
+            return
+        with self._drop_lock:
+            # Concurrent drops after the snapshot remain pending.
+            self._dropped_pending = max(0, self._dropped_pending - dropped)
+
+
+class _BoundedQueueListener(QueueListener):
+    """QueueListener whose shutdown is bounded even if a sink is wedged."""
+
+    def stop(self, timeout=5.0):
+        thread = self._thread
+        if thread is None:
+            return True
+        try:
+            wait_s = max(0.0, float(timeout))
+        except (TypeError, ValueError):
+            wait_s = 5.0
+        try:
+            self.queue.put(self._sentinel, timeout=min(1.0, wait_s))
+        except _queue_mod.Full:
+            # At shutdown an undrainable queue is already lossy. Free exactly
+            # one slot so the daemon listener can observe the sentinel.
+            try:
+                self.queue.get_nowait()
+                self.queue.task_done()
+            except _queue_mod.Empty:
+                pass
+            try:
+                self.queue.put_nowait(self._sentinel)
+            except _queue_mod.Full:
+                return False
+        thread.join(wait_s)
+        if thread.is_alive():
+            return False
+        self._thread = None
+        return True
 
 _real_log_handlers = [_app_handler, _access_handler, _error_handler,
                       _vendor_handler, _frontend_handler, _console_handler]
@@ -1410,15 +1653,14 @@ if _LOG_UNDER_PYTEST:
     )
 else:
     # SINGLE QueueHandler on the root logger. Its emit() is just a
-    # non-blocking SimpleQueue.put() — it never touches the disk or the
+    # non-blocking bounded-queue put — it never touches the disk or the
     # per-handler locks. A dedicated background thread (QueueListener) drains
     # the queue and performs the actual file/stderr I/O, so a request/serving
-    # thread that logs during a storm returns immediately; only the listener
-    # thread ever blocks on the slow FUSE mount. SimpleQueue is unbounded
-    # (put never blocks/drops), so no line is lost — a burst just grows the
-    # in-memory queue and the listener catches up.
-    _LOG_QUEUE = _queue_mod.SimpleQueue()
-    _queue_handler = QueueHandler(_LOG_QUEUE)
+    # thread that logs during a storm returns immediately. A bounded queue is
+    # essential: an upstream/FUSE outage must not turn retained LogRecords into
+    # an unbounded heap and let the kernel kill the server.
+    _LOG_QUEUE = _queue_mod.Queue(maxsize=_log_queue_capacity())
+    _queue_handler = _BoundedQueueHandler(_LOG_QUEUE)
     # CRITICAL: give the QueueHandler an explicit ``%(message)s`` formatter so
     # basicConfig() does NOT attach its default BASIC_FORMAT
     # (``LEVEL:name:message``) to it. QueueHandler.prepare() renders its
@@ -1439,23 +1681,51 @@ else:
     )
     # respect_handler_level=True so each real handler still applies its own
     # setLevel()/filters on the listener thread exactly as before.
-    _log_listener = QueueListener(
+    _log_listener = _BoundedQueueListener(
         _LOG_QUEUE, *_real_log_handlers, respect_handler_level=True)
+
+
+def _start_logging_runtime():
+    """Start log I/O owners from Quart's serving lifecycle."""
+    if _LOG_UNDER_PYTEST or _log_listener is None:
+        return False
+    thread = getattr(_log_listener, '_thread', None)
+    if thread is not None and thread.is_alive():
+        return False
     _log_listener.start()
     if _log_agg_enabled():
         _log_agg_start_flusher()
+    return True
 
+
+def _stop_logging_runtime(*, timeout=5.0, final_flush=True):
+    """Bound and stop aggregate/log threads; safe to call repeatedly."""
+    if _LOG_UNDER_PYTEST or _log_listener is None:
+        return True
+    aggregate_stopped = True
+    if _log_agg_enabled():
+        aggregate_stopped = _log_agg_stop_flusher(
+            final_flush=final_flush, timeout=timeout)
+    listener_stopped = _log_listener.stop(timeout=timeout)
+    return bool(aggregate_stopped and listener_stopped)
+
+
+if not _LOG_UNDER_PYTEST:
     # Drain + flush the queue on interpreter exit so the tail of the log isn't
-    # lost if the process stops while lines are still queued.
-    # QueueListener.stop() enqueues a sentinel and joins the drain thread.
+    # lost if the process stops before Quart can run its shutdown lifespan.
     import atexit as _atexit_mod
 
     def _stop_log_listener():
         try:
-            if _log_listener is not None:
-                _log_listener.stop()
-        except Exception:
-            pass  # shutdown best-effort — never raise from an atexit hook
+            _stop_logging_runtime(final_flush=False)
+        except Exception as exc:
+            # atexit must not raise; direct stderr is still available if the
+            # asynchronous listener itself is the failing component.
+            try:
+                sys.stderr.write(
+                    '[Server] logging atexit cleanup failed: %s\n' % exc)
+            except OSError:
+                pass
 
     _atexit_mod.register(_stop_log_listener)
 
@@ -1559,33 +1829,26 @@ def _boot(msg, *args):
 
 _boot('🫧 Tofu (async) starting up — loading core modules…')
 
-# ── Cap onnxruntime threads BEFORE any import can create an InferenceSession ──
-# pymupdf4llm → pymupdf_layout → onnxruntime (also rapidocr/cadtrans) spawns one
-# worker per HOST cpu and pins each via pthread_setaffinity_np. On a cpuset-
-# restricted host (containers, YARN/Hope, exported cluster deployments) the pins
-# fail with EINVAL → a stderr storm during `python server.py`. The guard must
-# run before the critical-import chain (tofu_search.fetch imports pymupdf4llm),
-# so install it here, first thing after the boot banner.
+# ── Keep the unused/broken PyMuPDF layout backend out of ordinary boot ──
+# pymupdf4llm auto-activates pymupdf.layout merely because it is installed.
+# That backend is incompatible with our RapidOCR version and Tofu explicitly
+# uses the classic Markdown implementation, yet activation still imported
+# ONNX and retained ~63 native threads + tens of MiB before the first request.
+# This stdlib-only policy must run before tofu_search imports pymupdf4llm.
+# Structured Docling parsing remains opt-in and installs the ONNX session guard
+# at its actual first use.
 try:
-    from lib.onnx_thread_guard import install_onnx_thread_guard
-    install_onnx_thread_guard()
-except Exception as _onnx_guard_err:  # never let the guard itself break boot
-    _boot('onnx thread guard install skipped: %s', _onnx_guard_err)
+    from runtime_guards import install_pymupdf_classic_policy
+    install_pymupdf_classic_policy()
+except Exception as _pdf_policy_err:  # never let an optional policy break boot
+    _boot('PyMuPDF classic policy install skipped: %s', _pdf_policy_err)
 
-from lib.database import close_db, init_db, warmup_db
+from lib.database import init_db, warmup_db
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Quart App
 # ═══════════════════════════════════════════════════════════════════════
-
-# Flask 3.1+ / newer Quart dropped PROVIDE_AUTOMATIC_OPTIONS from default
-# config, but add_url_rule (called during __init__ for the static route)
-# still reads it → KeyError.  Inject it into the class defaults before
-# instantiation so it's present from the very first add_url_rule call.
-_orig_default_config = Quart.default_config
-if 'PROVIDE_AUTOMATIC_OPTIONS' not in _orig_default_config:
-    Quart.default_config = {**_orig_default_config, 'PROVIDE_AUTOMATIC_OPTIONS': True}
 
 #  static_folder=None DISABLES Quart's built-in /static/<path> view. That view
 #  serves files via a NATIVE-ASYNC send_static_file → send_from_directory whose
@@ -1593,8 +1856,48 @@ if 'PROVIDE_AUTOMATIC_OPTIONS' not in _orig_default_config:
 #  stall there wedges the whole server (the proven root cause of the outage).
 #  Our own executor-offloaded /static route below replaces it (see
 #  _static_route). BASE_DIR/static lives on FUSE here.
-app = Quart(__name__, static_folder=None)
+from lib.app_factory import create_base_app
+
+app = create_base_app(__name__)
 STATIC_DIR = os.path.join(BASE_DIR, 'static')
+
+# Logging handlers are configured early so import/boot records are retained,
+# but their worker threads belong to the native application lifespan.
+
+
+async def _shutdown_logging_runtime():
+    await asyncio.to_thread(_stop_logging_runtime)
+
+
+def create_app(config: dict | None = None):
+    """Create a fully assembled, independent Quart ASGI application."""
+    from lib.app_assembly import create_application
+
+    return create_application(
+        __name__,
+        static_dir=STATIC_DIR,
+        logger=_lifecycle_log,
+        secret_key=_load_or_create_flask_secret_key(),
+        config=config,
+        body_policy=_HTTP_BODY_POLICY,
+        static_timeout=lambda: _STATIC_SEND_TIMEOUT,
+        static_offload=lambda loop, filename: _static_offload(loop, filename),
+        static_range_allows=lambda value, etag, mtime: _if_range_allows(
+            value, etag, mtime),
+        startup_handlers=(
+            ('tofu.logging.startup', _start_logging_runtime),
+        ),
+        shutdown_handlers=(
+            ('tofu.logging.shutdown', _shutdown_logging_runtime),
+        ),
+    )
+
+
+def create_production_app(config: dict | None = None):
+    """Create an ASGI app with the process-wide production lifespan attached."""
+    production_app = create_app(config)
+    register_server_runtime_lifecycle(production_app)
+    return production_app
 
 
 # ── Flask secret key (reuse server.py logic) ──
@@ -1630,167 +1933,20 @@ def _load_or_create_flask_secret_key():
     return _new_key
 
 
-app.secret_key = _load_or_create_flask_secret_key()
 # MAX_CONTENT_LENGTH is APP-GLOBAL, so it must fit the LARGEST legitimate
 # body any route accepts — the video upload cap (512 MiB, TOFU_VIDEO_MAX_BYTES)
 # plus multipart slack. Every OTHER route keeps the legacy 50 MiB ceiling via
 # the per-route guard below — raising the global must not silently open
 # big-body uploads on the whole API surface (owner ruling 2026-08-04).
-app.config['MAX_CONTENT_LENGTH'] = 520 * 1024 * 1024
 
-# Per-route request-body caps: first matching path prefix wins.
-_ROUTE_BODY_CAPS = (
-    ('/api/v1/videos/upload', 512 * 1024 * 1024),
-)
-_DEFAULT_BODY_CAP = 50 * 1024 * 1024
+# ── Long-lived response timeout + bounded request-body policy ──
+# Policy, parsing and the Quart before-request hook are owned by the native
+# assembly boundary; this module retains only the configured policy value.
+from lib.http_body_policy import build_http_body_policy
 
-
-@app.before_request
-async def _enforce_route_body_caps():
-    cl = request.content_length or 0
-    if cl <= 0:
-        return None
-    cap = _DEFAULT_BODY_CAP
-    for _prefix, _cap in _ROUTE_BODY_CAPS:
-        if request.path.startswith(_prefix):
-            cap = _cap
-            break
-    if cl > cap:
-        from lib.api_response import api_payload_too_large
-        logging.getLogger('server').warning(
-            '[BodyCap] %s %s rejected: Content-Length=%d > cap=%d',
-            request.method, request.path, cl, cap)
-        return api_payload_too_large(cap)
-    return None
-# ── Disable response/body timeouts for long-lived SSE streams ──
-# Quart's defaults (60s) silently kill /api/chat/stream connections during
-# long LLM responses, causing the UI to "stop updating without refresh".
-# SSE clients keep their own keepalive (15s comment ping in chat_stream),
-# so we set these to None to defer entirely to the SSE layer.
-app.config['RESPONSE_TIMEOUT'] = None
-app.config['BODY_TIMEOUT'] = None
-
-
-# ── Compression (Quart-native, no flask-compress dependency) ──
-# Quart does not use flask-compress. Instead, we add a simple
-# after_request hook for gzip. For heavy production use, Hypercorn
-# + a reverse proxy handle this better.
-_COMPRESS_MIMETYPES = frozenset([
-    'text/html', 'text/css', 'text/javascript',
-    'application/javascript', 'application/json',
-])
-_COMPRESS_MIN_SIZE = 256
-
-import gzip as _gzip
-
-from lib.ttl_cache import TTLCache
-
-try:
-    import brotli as _brotli
-except ImportError as _e:
-    _brotli = None
-    # _lifecycle_log is only bound further down this module (line ~1755); on a
-    # brotli-less box this except fires DURING import, before that binding —
-    # a bare reference here was a startup NameError. Import the logger locally.
-    from lib.log import get_logger as _get_logger
-    _get_logger('server.lifecycle').info(
-        '[Compress] brotli unavailable (%s) — gzip only', _e)
-
-# Compressed-artifact cache for CONTENT-ADDRESSED immutable assets.
-#
-# Without it every single page load re-compresses the whole JS bundle: measured
-# 1711 KB → 463 KB costs ~55 ms of executor CPU, paid again for every visitor
-# and every hard refresh. The bundle filename carries a content hash and the
-# ETag carries mtime+size+adler32, so the compressed bytes are a pure function
-# of the ETag — cache them and the cost is paid once per build instead of once
-# per request. This is what makes it affordable to spend a HIGHER brotli quality
-# on these bodies (see _BR_QUALITY_CACHED).
-_COMPRESS_CACHE = TTLCache(ttl=6 * 3600, max_size=48)
-# Don't let one pathological body evict the whole cache / balloon RSS.
-_COMPRESS_CACHE_MAX_BYTES = 8 * 1024 * 1024
-
-# Two-tier brotli quality, justified by the cache above:
-#   cached  — compressed once per build, so buy the extra ratio (387 KB @ ~92 ms)
-#   uncached— on the request's critical path, so stay cheap (~26 ms for 1.7 MB;
-#             microseconds for a typical API JSON body)
-_BR_QUALITY_CACHED = 9
-_BR_QUALITY_LIVE = 4
-
-
-def _compress_bytes(data, encoding, quality):
-    """Compress *data* with *encoding*. Runs in a worker thread (CPU-bound)."""
-    if encoding == 'br':
-        return _brotli.compress(data, quality=quality)
-    return _gzip.compress(data, 6)
-
-
-@app.after_request
-async def _compress_response(response):
-    """gzip/brotli compression for eligible responses.
-
-    Immutable content-addressed static assets are compressed ONCE and served
-    from ``_COMPRESS_CACHE`` thereafter; everything else is compressed live at
-    a cheaper setting so the per-request cost stays negligible.
-    """
-    # Skip SSE (buffering breaks streaming), small responses, already encoded
-    if (response.content_type
-            and 'text/event-stream' in response.content_type):
-        return response
-    if response.content_encoding:
-        return response
-    # Never compress partial / range / non-200 responses. Gzipping a 206 while
-    # keeping its Content-Range header (and rewriting Content-Length to the
-    # compressed slice length) hands the client a body it decodes as a corrupt
-    # byte-range — the empirically-confirmed cause of vendor .js "failed to
-    # load" on clients that issue Range requests for scripts (mobile
-    # Safari/Chrome, some tablet browsers). Only whole 200 bodies are safe.
-    if response.status_code != 200 or 'Content-Range' in response.headers:
-        return response
-    accept_enc = request.headers.get('Accept-Encoding', '')
-    # Prefer brotli when the client advertises it: measured on the real
-    # 1711 KB bundle, br q=9 lands 387 KB vs gzip's 463 KB (-16% transfer).
-    if _brotli is not None and 'br' in accept_enc:
-        encoding = 'br'
-    elif 'gzip' in accept_enc:
-        encoding = 'gzip'
-    else:
-        return response
-    mime = (response.content_type or '').split(';')[0].strip()
-    if mime not in _COMPRESS_MIMETYPES:
-        return response
-    data = await response.get_data()
-    if len(data) < _COMPRESS_MIN_SIZE:
-        return response
-
-    # Cache key: the ETag identifies the exact bytes, so a hit means the
-    # compressed body is still valid. Only immutable content-addressed static
-    # assets are cached — a dynamic API body would just churn the cache.
-    etag = response.headers.get('ETag', '')
-    cache_key = None
-    if etag and len(data) <= _COMPRESS_CACHE_MAX_BYTES and request.path.startswith('/static/'):
-        cache_key = (etag, encoding)
-
-    compressed = _COMPRESS_CACHE.get(cache_key) if cache_key else None
-    if compressed is None:
-        # Compression is CPU-bound; running it inline would block the event
-        # loop (and every other connection / SSE keepalive) for the duration.
-        # Offload to the sync executor so a multi-MB body doesn't stall the
-        # whole server.
-        quality = _BR_QUALITY_CACHED if cache_key else _BR_QUALITY_LIVE
-        loop = asyncio.get_running_loop()
-        compressed = await loop.run_in_executor(
-            None, _compress_bytes, data, encoding, quality)
-        if cache_key:
-            _COMPRESS_CACHE.set(cache_key, compressed)
-
-    if len(compressed) >= len(data):
-        return response
-    response.set_data(compressed)
-    response.headers['Content-Encoding'] = encoding
-    response.headers['Content-Length'] = len(compressed)
-    response.headers.pop('Vary', None)
-    response.headers['Vary'] = 'Accept-Encoding'
-    return response
+_HTTP_BODY_POLICY = build_http_body_policy()
+_HTTP_BODY_TIMEOUT_S = _HTTP_BODY_POLICY.body_timeout
+_HTTP_UPLOAD_BODY_TIMEOUT_S = _HTTP_BODY_POLICY.upload_body_timeout
 
 
 # ── Auth (legacy compat constants only) ──
@@ -1808,151 +1964,9 @@ if TUNNEL_TOKEN:
         'for now but new code paths target the unified auth gate.')
 
 
-# ── Method Override + CloudIDE JSON fix ──
-@app.before_request
-async def method_override():
-    override = request.args.get('_method')
-    if override:
-        request.scope['method'] = override.upper()
-    # CloudIDE sometimes double-encodes JSON bodies (sends a JSON string
-    # whose value is itself a JSON object). Detect and unwrap in-place so
-    # downstream ``request.get_json()`` returns the correct dict.
-    ct = request.content_type or ''
-    if request.method in ('POST', 'PUT') and 'json' in ct:
-        raw = (await request.get_data()).decode('utf-8', errors='replace')
-        if raw:
-            try:
-                data = json.loads(raw)
-                if isinstance(data, str):
-                    corrected = json.dumps(json.loads(data)).encode('utf-8')
-                    request._body = corrected
-            except (json.JSONDecodeError, TypeError) as e:
-                _lifecycle_log.debug('[method_override] body unwrap skipped: %s', e)
-
-
-# ── Request lifecycle logging ──
-from lib.log import (get_logger, set_req_id, req_id as _get_req_id,
-                     resolve_inbound_rid as _resolve_inbound_rid)
+from lib.log import get_logger
 
 _lifecycle_log = get_logger('server.lifecycle')
-_QUIET_PREFIXES = ('/api/browser/', '/api/desktop/', '/static/', '/api/task/')
-_SLOW_THRESHOLD_S = 2.0
-# Responses at/above this size are flagged even when the server returned
-# quickly — the "fast but heavy" case (e.g. a multi-MB conversation fetch)
-# that otherwise only shows up as a client-side timeout over a slow proxy.
-_HEAVY_RESPONSE_BYTES = 1_048_576  # 1 MiB
-
-
-def _response_size(response):
-    """Return the response body size in bytes from Content-Length, else None.
-
-    Streaming / chunked responses (SSE, ``Content-Range`` partials) carry no
-    reliable ``Content-Length``; we return None so the caller omits the size
-    rather than blocking to materialize the body.
-    """
-    try:
-        raw = response.headers.get('Content-Length')
-    except Exception:
-        return None
-    if raw is None:
-        return None
-    try:
-        n = int(raw)
-    except (ValueError, TypeError):
-        return None
-    return n if n >= 0 else None
-
-
-def _fmt_size(n):
-    """Format a byte count as a compact human string ('2.8MB'); '' if unknown."""
-    if not isinstance(n, int) or n < 0:
-        return ''
-    if n < 1024:
-        return '%dB' % n
-    if n < 1024 * 1024:
-        return '%.1fKB' % (n / 1024)
-    return '%.1fMB' % (n / (1024 * 1024))
-
-
-@app.before_request
-async def _assign_req_id_and_log():
-    rid = _resolve_inbound_rid(
-        request.headers.get('X-Request-ID'),
-        request.args.get('_rid'),
-    )
-    set_req_id(rid)
-    request._start_time = time.time()
-    path = request.path
-    is_quiet = any(path.startswith(p) for p in _QUIET_PREFIXES)
-    level = logging.DEBUG if is_quiet else logging.INFO
-    _lifecycle_log.log(level, '[%s] → %s %s', rid, request.method, path)
-
-
-@app.after_request
-async def _log_response(response):
-    rid = _get_req_id()
-    path = request.full_path.rstrip('?')
-    status = response.status_code
-    is_quiet = any(path.startswith(p) for p in _QUIET_PREFIXES)
-
-    size = _response_size(response)
-    size_str = _fmt_size(size)
-
-    # Elapsed is only meaningful when before_request stamped _start_time. Some
-    # early-error / middleware paths reach after_request without it — the old
-    # `time.time() - getattr(request, '_start_time', time.time())` evaluated
-    # the left clock BEFORE the default on the right, yielding a slightly
-    # NEGATIVE span that polluted the log. Detect the absence explicitly (emit
-    # size only), and clamp against clock skew when present.
-    _start = getattr(request, '_start_time', None)
-    if _start is None:
-        elapsed = None
-        timing = '(%s)' % size_str if size_str else '(elapsed n/a)'
-    else:
-        elapsed = max(0.0, time.time() - _start)
-        timing = '(%.3fs, %s)' % (elapsed, size_str) if size_str else '(%.3fs)' % elapsed
-
-    if status >= 500:
-        _lifecycle_log.error('[%s] ← %s %s %d %s', rid, request.method, path, status, timing)
-    elif status >= 400:
-        if status == 404 and request.path.startswith('/.well-known/'):
-            _lifecycle_log.debug('[%s] ← %s %s %d %s', rid, request.method, path, status, timing)
-        else:
-            _lifecycle_log.warning('[%s] ← %s %s %d %s', rid, request.method, path, status, timing)
-    elif elapsed is not None and elapsed >= _SLOW_THRESHOLD_S and not is_quiet:
-        _lifecycle_log.warning('[%s] ← %s %s %d SLOW %s', rid, request.method, path, status, timing)
-    elif size is not None and size >= _HEAVY_RESPONSE_BYTES and not is_quiet:
-        # Fast but heavy: the server was quick, yet a multi-MB body will feel
-        # slow to the client over a constrained proxy. Surface it at WARN so
-        # "fast server, heavy experience" is traceable in server logs.
-        _lifecycle_log.warning('[%s] ← %s %s %d HEAVY %s', rid, request.method, path, status, timing)
-    elif not is_quiet:
-        _lifecycle_log.info('[%s] ← %s %s %d %s', rid, request.method, path, status, timing)
-    else:
-        _lifecycle_log.debug('[%s] ← %s %s %d %s', rid, request.method, path, status, timing)
-
-    response.headers['X-Request-ID'] = rid
-    return response
-
-
-@app.teardown_request
-async def _clear_req_id(exc):
-    if exc:
-        rid = _get_req_id()
-        # Client disconnect mid-request (CancelledError during body read) is
-        # benign — log at debug. Real handler exceptions are already logged
-        # by _handle_uncaught with full context, so reaching teardown with
-        # any other exception means the framework swallowed it; warn so it's
-        # still visible without the alarming ERROR + traceback.
-        if isinstance(exc, asyncio.CancelledError):
-            _lifecycle_log.debug('[%s] Request teardown: client disconnected', rid)
-        else:
-            _lifecycle_log.warning('[%s] Request teardown with exception: %s', rid, exc)
-    set_req_id(None)
-
-
-# ── DB teardown ──
-app.teardown_appcontext(close_db)
 
 
 # ── Install the tofu-search bridge (LLM + browser + auth seams) ──
@@ -2000,24 +2014,6 @@ except Exception as _sb_err:
         'failed to install: %s. Every other subsystem is unaffected.',
         _sb_err, exc_info=True)
 
-# ── Register all Blueprints ──
-from routes import register_all
-register_all(app)
-
-
-# ── Unified auth gate (single middleware) ──
-# Replaces the legacy dual scheme (tunnel_auth + bearer_auth). One
-# before_request hook resolves an AuthContext from any of:
-#   - Authorization: Bearer / x-api-key header
-#   - tofu_session cookie  (set on first browser visit via ?token=…)
-#   - X-Tunnel-Token / TUNNEL_TOKEN  (deprecated back-compat shim)
-# Public routes (static, /, /api/health, /api/v1/capabilities, etc.)
-# bypass the gate — see _PUBLIC_EXACT in routes/api_v1/auth.py.
-from routes.api_v1.auth import attach_rate_headers, auth_before_request
-app.before_request(auth_before_request)
-app.after_request(attach_rate_headers)
-
-
 # ── First-boot personal key bootstrap ──
 # Only relevant when the auth gate is in ``private`` or ``multi-user``
 # mode. In ``open`` mode (the default for personal installs) no
@@ -2057,49 +2053,6 @@ def _bootstrap_personal_key_if_needed():
     if plaintext:
         _BOOTSTRAP_TOKEN = plaintext
 
-
-_bootstrap_personal_key_if_needed()
-
-
-# ── Billing janitor: release stale credit reservations ──
-# Spawns one daemon thread that sweeps the ledger every 5 minutes.
-# A no-op if multi-user mode never gets used (the sweep just finds 0
-# rows). Disabled with TOFU_BILLING_JANITOR=0.
-try:
-    from lib.billing.janitor import start_janitor as _start_billing_janitor
-    _start_billing_janitor()
-except Exception as _e:
-    logging.getLogger('server.boot').warning(
-        '[Billing] janitor failed to start: %s', _e)
-
-
-# ── Static file cache headers ──
-@app.after_request
-async def add_cache_headers(response):
-    if request.path.startswith('/static/'):
-        # A 3xx here is the stale-bundle self-heal redirect (see _handle_404).
-        # It MUST NOT inherit the immutable long-cache below — the redirect
-        # target changes on every rebuild, so freezing it would permanently
-        # pin a client to one now-stale mapping. Keep it uncached.
-        if 300 <= response.status_code < 400:
-            response.headers['Cache-Control'] = 'no-store'
-            return response
-        if request.path.endswith('.js'):
-            response.content_type = 'text/javascript; charset=utf-8'
-        elif request.path.endswith('.css'):
-            response.content_type = 'text/css; charset=utf-8'
-        if '/vendor/' in request.path or '/bundle-' in request.path:
-            response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
-        elif request.path.endswith(('.js', '.css')):
-            if 'v=' in request.query_string.decode('ascii', errors='ignore'):
-                response.headers['Cache-Control'] = 'public, max-age=604800, immutable'
-            else:
-                response.headers['Cache-Control'] = 'public, max-age=300, must-revalidate'
-        else:
-            response.headers['Cache-Control'] = 'public, max-age=86400'
-    return response
-
-
 # ── Static file serving — executor-offloaded (FUSE-stall safe) ──
 #
 # Quart's built-in /static route was DISABLED (static_folder=None) because its
@@ -2121,6 +2074,11 @@ async def add_cache_headers(response):
 #      add_cache_headers still stamps the immutable/max-age headers afterward.
 _STATIC_SEND_TIMEOUT = float(os.environ.get('TOFU_STATIC_SEND_TIMEOUT', '') or '12')
 
+from lib.static_serving import (
+    if_range_allows as _if_range_allows,
+    load_static_bytes as _read_static_bytes,
+)
+
 
 def _load_static_bytes(filename):
     """Resolve *filename* strictly under STATIC_DIR and read it (SYNC, runs in a
@@ -2132,18 +2090,7 @@ def _load_static_bytes(filename):
     ``os.path.isfile`` stat, and the full ``open().read()`` — are exactly what
     would wedge the loop if run inline; here they are on the thread.
     """
-    from werkzeug.utils import safe_join
-    from zlib import adler32
-    full = safe_join(STATIC_DIR, filename)
-    if full is None:
-        return None  # traversal / absolute path → treat as not found (never leak)
-    if not os.path.isfile(full):
-        return None
-    with open(full, 'rb') as f:
-        data = f.read()
-    st = os.stat(full)
-    etag = '%d-%d-%d' % (int(st.st_mtime), st.st_size, adler32(data) & 0xFFFFFFFF)
-    return data, st.st_mtime, etag
+    return _read_static_bytes(STATIC_DIR, filename)
 
 
 async def _static_offload(loop, filename):
@@ -2157,236 +2104,62 @@ async def _static_offload(loop, filename):
     return await loop.run_in_executor(None, _load_static_bytes, filename)
 
 
-def _if_range_allows(if_range, etag, mtime):
-    """RFC 9110 §13.1.5 conditional-range gate: return True iff a Range MAY be
-    honoured given the request's ``If-Range`` validator.
+# ── Proxy config ──
+def _load_saved_proxy_config():
+    """Apply persisted network settings during the serving lifecycle.
 
-    A conditional-range request carries the validator the client holds for its
-    partial copy. If that validator no longer matches (the file changed since
-    the client's partial), the Range MUST be ignored and the FULL current
-    representation served — otherwise the client stitches a slice of the NEW
-    file onto its OLD partial → silent corruption. Returns True when If-Range is
-    absent/empty, its etag equals ours, or its HTTP-date is >= our mtime.
+    Reading the settings file and mutating process-wide proxy state used to
+    happen while importing ``server``. Keeping it behind this explicit startup
+    function makes app imports safe for tests, schema tooling and desktop
+    probes. The netpath prober starts only after this function runs.
     """
-    if if_range is None or (if_range.etag is None and if_range.date is None):
-        return True
-    if if_range.etag is not None:
-        return if_range.etag == etag.strip('"')
-    return mtime <= if_range.date.timestamp()
-
-
-@app.route('/static/<path:filename>')
-async def _static_route(filename):
-    """Executor-offloaded, FUSE-stall-safe replacement for the built-in static
-    view. All blocking FS I/O runs in a thread under a hard timeout."""
-    from quart import abort, Response as _Resp
-    loop = asyncio.get_event_loop()
     try:
-        result = await asyncio.wait_for(
-            _static_offload(loop, filename),
-            timeout=_STATIC_SEND_TIMEOUT)
-    except asyncio.TimeoutError:
-        # FUSE wedge: the file read did not complete in time. Return a fast 503
-        # so the loop is NOT blocked (distinct from a 404 — a missing file is
-        # not a stalled disk). This is the whole point of the offload.
-        _lifecycle_log.critical(
-            '[Static] read timed out after %.1fs for %s — FUSE stall suspected; '
-            'returning 503 (loop preserved)', _STATIC_SEND_TIMEOUT, filename)
-        abort(503)
-    except OSError as e:
-        _lifecycle_log.error('[Static] I/O error serving %s: %s', filename, e)
-        abort(500)
+        from routes.config import _read_server_config
+        from lib.proxy import set_bypass_domains, set_proxy_config
 
-    if result is None:
-        # Missing / unsafe path → REAL 404 so _handle_404's stale-bundle
-        # self-heal (resolve_stale_bundle) can redirect a stale bundle hash.
-        abort(404)
-
-    data, mtime, etag = result
-    total = len(data)
-    ctype, _ = mimetypes.guess_type(filename)
-    ctype = ctype or 'application/octet-stream'
-
-    # Range / partial-content (HTTP 206) — handled HERE, not via Quart's
-    # make_conditional. Quart's _process_range_request emits a Content-Range
-    # whose end byte is off-by-one (it passes end-1 to a werkzeug ContentRange
-    # that already renders an exclusive stop), so a resumable-download client
-    # that trusts Content-Range would miscount. werkzeug's
-    # Range.range_for_length() correctly resolves closed (bytes=0-9), suffix
-    # (bytes=-500), and open (bytes=500-) forms to a half-open (begin, end),
-    # or None when unsatisfiable → 416. We slice the already-in-memory bytes
-    # (no extra FS I/O) and set the header ourselves.
-    # If-Range gate (RFC 9110 §13.1.5): honour the range only when the client's
-    # conditional-range validator still matches (see _if_range_allows).
-    range_ok = _if_range_allows(request.if_range, etag, mtime)
-
-    req_range = request.range
-    if range_ok and req_range is not None and req_range.units == 'bytes' and len(req_range.ranges) == 1:
-        resolved = req_range.range_for_length(total)
-        if resolved is None:
-            r416 = _Resp(b'', status=416,
-                         mimetype=ctype)
-            r416.headers['Content-Range'] = 'bytes */%d' % total
-            r416.headers['Accept-Ranges'] = 'bytes'
-            return r416
-        begin, end = resolved  # half-open: [begin, end)
-        part = _Resp(data[begin:end], status=206, mimetype=ctype)
-        part.headers['Content-Range'] = 'bytes %d-%d/%d' % (begin, end - 1, total)
-        part.headers['Accept-Ranges'] = 'bytes'
-        part.set_etag(etag)
-        part.last_modified = mtime
-        return part
-
-    # No range → full body + conditional 304 on the loop with NO filesystem I/O
-    # (size/mtime/etag were computed in the thread). mimetype is content-type
-    # only; add_cache_headers overrides .js/.css content-type + Cache-Control.
-    resp = _Resp(data, mimetype=ctype)
-    resp.set_etag(etag)
-    resp.last_modified = mtime
-    resp.headers['Accept-Ranges'] = 'bytes'
-    await resp.make_conditional(request, accept_ranges=True, complete_length=total)
-    return resp
+        saved_cfg = _read_server_config()
+        saved_proxy_config = saved_cfg.get('proxy_config', {})
+        if saved_proxy_config and any(
+                saved_proxy_config.get(key)
+                for key in ('http_proxy', 'https_proxy')):
+            set_proxy_config(
+                http_proxy=saved_proxy_config.get('http_proxy', ''),
+                https_proxy=saved_proxy_config.get('https_proxy', ''),
+            )
+        saved_bypass_domains = saved_cfg.get('proxy_bypass_domains', [])
+        if saved_bypass_domains:
+            set_bypass_domains(saved_bypass_domains)
+        # Ordered proxy pool (scoped subscription/global entries) is additive
+        # over the legacy single-proxy environment fallback above.
+        saved_pool = saved_cfg.get('proxy_pool') or []
+        if saved_pool:
+            from lib.proxy import set_proxy_pool
+            set_proxy_pool(saved_pool)
+    except Exception as exc:
+        _lifecycle_log.warning('Failed to load proxy config: %s', exc)
 
 
-# ── Proxy config (reuse server.py logic) ──
-try:
-    from routes.config import _read_server_config
-    from lib.proxy import set_bypass_domains, set_proxy_config
-    _saved_cfg = _read_server_config()
-    _saved_pc = _saved_cfg.get('proxy_config', {})
-    if _saved_pc and any(_saved_pc.get(k) for k in ('http_proxy', 'https_proxy')):
-        set_proxy_config(
-            http_proxy=_saved_pc.get('http_proxy', ''),
-            https_proxy=_saved_pc.get('https_proxy', ''),
-        )
-    _saved_proxy = _saved_cfg.get('proxy_bypass_domains', [])
-    if _saved_proxy:
-        set_bypass_domains(_saved_proxy)
-except Exception as _e:
-    _lifecycle_log.warning('Failed to load proxy config: %s', _e)
+from lib.app_assembly import configure_application
 
-
-# ── Adaptive direct-vs-proxy path prober ──
-try:
-    from lib.netpath import start_prober as _start_netpath_prober
-    _start_netpath_prober()
-except Exception as _e:
-    _lifecycle_log.warning('Failed to start netpath prober: %s', _e)
-
-
-# ── Global error handlers ──
-from lib.api_response import (
-    api_internal_error,
-    api_method_not_allowed,
-    api_not_found,
-    api_payload_too_large,
-    api_service_unavailable,
+configure_application(
+    app,
+    static_dir=STATIC_DIR,
+    logger=_lifecycle_log,
+    secret_key=_load_or_create_flask_secret_key(),
+    body_policy=_HTTP_BODY_POLICY,
+    static_timeout=lambda: _STATIC_SEND_TIMEOUT,
+    # Resolve compatibility seams per request so fault-injection tests and
+    # embedders can replace them without rebuilding the route table.
+    static_offload=lambda loop, filename: _static_offload(loop, filename),
+    static_range_allows=lambda value, etag, mtime: _if_range_allows(
+        value, etag, mtime),
+    startup_handlers=(
+        ('tofu.logging.startup', _start_logging_runtime),
+    ),
+    shutdown_handlers=(
+        ('tofu.logging.shutdown', _shutdown_logging_runtime),
+    ),
 )
-
-
-def _is_api_request():
-    return request.path.startswith('/api/')
-
-
-def _ws_safe_method_path():
-    """Return (method, path) tolerating contexts where request is unavailable."""
-    try:
-        return request.method, request.path
-    except RuntimeError:
-        from quart import websocket as _ws
-        try:
-            return 'WS', _ws.path
-        except RuntimeError:
-            return '?', '?'
-
-
-@app.errorhandler(404)
-async def _handle_404(exc):
-    # Self-heal a stale content-hashed bundle request. A client holding an old
-    # index.html (bfcache / long-lived tab / caching proxy defeating no-cache)
-    # asks for a bundle-/feature-<hash>.js whose hash was deleted on the last
-    # rebuild → 404 → LoadGuard banner. Redirect it to the current bundle of
-    # the same kind so the stale page self-heals with zero user action. Only a
-    # genuinely-built bundle name of a DIFFERENT hash is redirected; any other
-    # miss falls through to a real 404 (never masked). See routes/common.py.
-    if request.path.startswith('/static/js/'):
-        from lib.js_bundler import resolve_stale_bundle
-        requested = request.path.rsplit('/', 1)[-1]
-        current = resolve_stale_bundle(requested)
-        if current:
-            _lifecycle_log.warning(
-                '[StaleBundle] Self-healing stale request: %s -> %s (client held old index.html)',
-                requested, current)
-            resp = redirect('/static/js/' + current, code=302)
-            # Never let this mapping be cached — the target changes each rebuild.
-            resp.headers['Cache-Control'] = 'no-store'
-            return resp
-
-    if request.path.startswith('/.well-known/'):
-        _lifecycle_log.debug('404 (well-known probe): %s', request.path)
-    else:
-        _lifecycle_log.warning('404 Not Found: %s %s', request.method, request.path)
-    if _is_api_request():
-        return api_not_found('Not Found: %s' % request.path)
-    return await _orig_make_response_async(
-        '<h2>404 — Not Found</h2><p>The requested URL was not found.</p>', 404)
-
-
-@app.errorhandler(413)
-async def _handle_413(exc):
-    if _is_api_request():
-        return api_payload_too_large(app.config['MAX_CONTENT_LENGTH'])
-    return await _orig_make_response_async('<h2>413 — Payload Too Large</h2>', 413)
-
-
-@app.errorhandler(405)
-async def _handle_405(exc):
-    if _is_api_request():
-        return api_method_not_allowed()
-    return await _orig_make_response_async('<h2>405 — Method Not Allowed</h2>', 405)
-
-
-@app.errorhandler(500)
-async def _handle_500(exc):
-    rid = _get_req_id() or '-'
-    method, path = _ws_safe_method_path()
-    _lifecycle_log.error('500 ISE: [%s] %s %s', rid, method, path, exc_info=exc)
-    if path.startswith('/api/'):
-        return api_internal_error(exc, log_traceback=False)
-    return await _orig_make_response_async(
-        f'<h2>500</h2><p>Request ID: <code>{rid}</code></p>', 500)
-
-
-@app.errorhandler(Exception)
-async def _handle_uncaught(exc):
-    from werkzeug.exceptions import HTTPException
-    if isinstance(exc, HTTPException):
-        return exc
-    rid = _get_req_id() or '-'
-    method, path = _ws_safe_method_path()
-    # ── Transient DB-pool overload → 503, not 500 ──────────────────────
-    # A saturated connection pool (reconnection burst after a restart) is a
-    # transient overload, not a server bug. Shed load with 503 + Retry-After
-    # so polling clients back off instead of retrying harder and amplifying
-    # the storm. Logged at WARNING (not ERROR-with-traceback) — the pool
-    # snapshot is the diagnostic, a stack trace here is just noise ×N.
-    from lib.database import PoolExhaustedError
-    if isinstance(exc, PoolExhaustedError):
-        _lifecycle_log.warning('[%s] 503 pool-exhausted: %s %s (active=%d/%d '
-                               'pooled=%d tracked=%d)', rid, method, path,
-                               exc.active, exc.max_conns, exc.pooled, exc.tracked)
-        if path.startswith('/api/'):
-            return api_service_unavailable(
-                'Server busy (database pool saturated) — retry shortly',
-                retry_after=2, kind='overloaded')
-        return await _orig_make_response_async(
-            f'<h2>503</h2><p>Server busy — retry shortly. '
-            f'Request ID: <code>{rid}</code></p>', 503)
-    _lifecycle_log.error('[%s] Uncaught: %s %s: %s', rid, method, path, exc, exc_info=True)
-    if path.startswith('/api/'):
-        return api_internal_error(exc, log_traceback=False)
-    return await _orig_make_response_async(
-        f'<h2>500</h2><p>Request ID: <code>{rid}</code></p>', 500)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -2400,21 +2173,17 @@ _server_log = logging.getLogger('server')
 # (killed-recovery + autopilot-resume) on the SERVING loop, not the startup one.
 _DEFERRED_BOOT_DISPATCH = None
 
-# ── JS bundle ──
-# Built during server STARTUP (see _startup / _build_js_bundle), NOT at import
-# time. Importing this module must have no side effect on the live static/js/
-# artifact — otherwise every test-suite worker that imports `server` (e.g. 96
-# pytest-xdist workers) races to rebuild the production bundle into the shared
-# tree, clobbering the hash-named file mid-write. The build is idempotent and
-# lock-guarded, so running it once from the real startup path is sufficient;
-# a plain `import server` no longer touches the bundle.
-def _build_js_bundle():
-    """Build the JS bundle. Called from the server startup path only."""
+# Frontend assets are a release artifact. Runtime startup never invokes Node
+# or a Python JavaScript bundler; requests fail visibly with 503 when the graph
+# is missing so source checkouts can still start for backend work.
+def _check_frontend_artifact():
     try:
-        from lib.js_bundler import build_bundle
-        build_bundle()
-    except Exception as _bundle_err:
-        _server_log.warning('JS bundle build failed: %s', _bundle_err)
+        from lib.vite_assets import validate_vite_artifact
+        validate_vite_artifact()
+    except Exception as artifact_error:
+        _server_log.warning(
+            'Prebuilt frontend unavailable; UI routes will return 503: %s',
+            artifact_error)
 
 
 def _init_database():
@@ -2422,12 +2191,31 @@ def _init_database():
     _boot('Initialising database…')
     init_db()
     warmup_db()
+    # Existing row mirrors predate the fixed-width message_ts projection.
+    # Converge them AFTER schema init on a delayed daemon thread so direct
+    # ``python server.py`` keeps the same fast, dependency-free startup path.
+    try:
+        from lib.database.messages_rows import start_activity_projection_backfill
+        start_activity_projection_backfill()
+    except Exception as e:
+        _server_log.warning('Message activity projection backfill failed to start: %s', e)
     try:
         from lib.database import heal_toast_corruption
         heal_toast_corruption()
     except Exception as e:
         _server_log.warning('TOAST auto-heal failed: %s', e)
     _boot('Database ready.')
+    # Turn/attempt authority owns restart settlement for v2 work. This is a
+    # DB-only transaction: it preserves the latest projection, emits a durable
+    # terminal event and deliberately does NOT restart billable generation.
+    try:
+        from lib.turn_lifecycle import (
+            cleanup_superseded_attempts, recover_running_attempts,
+        )
+        recover_running_attempts()
+        cleanup_superseded_attempts()
+    except Exception as e:
+        _server_log.warning('Turn/attempt startup recovery failed: %s', e)
     # ── Clean-shutdown classification (OS-kill detection) ──
     # Read the marker LEFT BY THE PREVIOUS PROCESS, log/audit an unclean exit
     # loudly (the silent-OOM-SIGKILL incident), then re-arm the dirty-bit for
@@ -2452,6 +2240,24 @@ def _init_database():
             prev_shutdown=_prev_shutdown, dispatch=False)
     except Exception as e:
         _server_log.warning('Stale task recovery failed: %s', e)
+
+    # Orchestration run headers are durable, while their executor threads are
+    # process-local. Any non-terminal row visible at this point belongs to the
+    # previous process and cannot make further progress. Retire it explicitly
+    # so Task Mode replays the preserved events and stops polling instead of
+    # presenting an immortal "running" task.
+    try:
+        from lib.orchestration.run_service import OrchestrationRunService
+        _retired_runs = OrchestrationRunService().retire_interrupted(error={
+            'kind': 'worker_lost',
+            'message': 'Run interrupted by a server restart before completion.',
+            'source': 'orchestration.startup_recovery',
+        })
+        if _retired_runs:
+            _server_log.warning(
+                'Retired %d interrupted orchestration run(s)', _retired_runs)
+    except Exception as e:
+        _server_log.warning('Orchestration run recovery failed: %s', e)
 
     # ── Presence: reconcile the on-disk live-peer registry. A server that
     #    crashed mid-run left ghost peers marked "active" in each project's
@@ -2511,7 +2317,7 @@ def _validate_imports():
         raise ImportError('Missing dependencies:\n' + '\n'.join(msgs))
     _boot('All critical imports validated.')
 
-    # ── Eager-load heavy C extensions so mlockall pins their pages ──
+    # ── Eager-load heavy C extensions only when mlockall is enabled ──
     # These are the .so modules seen in past SIGBUS faulthandler dumps.
     # Loading them now (under mlockall MCL_FUTURE) ensures their code
     # pages are resident before any request arrives — the demand-fault
@@ -2532,311 +2338,118 @@ def _validate_imports():
         'psycopg2._psycopg',
         'yaml._yaml',
     ]
-    _boot('Eager-loading native extensions (FUSE SIGBUS mitigation)…')
-    for _mod in _NATIVE_PRELOADS:
-        try:
-            __import__(_mod)
-        except ImportError as _ie:
-            _server_log.warning('Native preload failed (required): %s — %s', _mod, _ie)
-    for _mod in _NATIVE_PRELOADS_OPTIONAL:
-        try:
-            __import__(_mod)
-        except ImportError as _ie:
-            _server_log.debug('Optional native preload %s unavailable: %s',
-                              _mod, _ie)  # optional — not all deployments have these
-    _boot('Native extensions preloaded.')
+    if _tofu_do_mlock:
+        _boot('Eager-loading native extensions (FUSE SIGBUS mitigation)…')
+        for _mod in _NATIVE_PRELOADS:
+            try:
+                __import__(_mod)
+            except ImportError as _ie:
+                _server_log.warning('Native preload failed (required): %s — %s', _mod, _ie)
+        for _mod in _NATIVE_PRELOADS_OPTIONAL:
+            try:
+                __import__(_mod)
+            except ImportError as _ie:
+                _server_log.debug('Optional native preload %s unavailable: %s',
+                                  _mod, _ie)  # optional — not all deployments have these
+        _boot('Native extensions preloaded.')
+    else:
+        _boot('Native extension preload skipped (mlock disabled).')
 
 
-def _start_background_workers():
-    """Launch optional background threads.
+def _start_background_workers(target_app=None):
+    """Compatibility seam for the extracted lifecycle service owner."""
+    from lib.server_background_services import start_background_services
 
-    Feature background workers (e.g. the trading intel + autopilot threads)
-    now start via the ``tofu.startup`` entry-point group, run from
-    ``routes.register_all`` after blueprints are mounted. Core no longer
-    imports any optional feature here.
-    """
-    # Crash-resume: re-spawn motion-video jobs left ``running`` on disk by a
-    # process that died mid-render. The stage-graph checkpoint + per-scene mp4
-    # skip make the re-run resume rather than restart (owner correctness
-    # contract, docs/PRODUCTION_PIPELINE_DESIGN.md). Best-effort — never blocks
-    # startup.
-    try:
-        from lib.motion_video.engine import resume_interrupted_jobs
-        n = resume_interrupted_jobs()
-        if n:
-            _server_log.info('[Server] resumed %d interrupted motion job(s)', n)
-    except Exception as e:
-        _server_log.warning('[Server] motion job resume failed: %s', e)
-    # Auto-research counterpart (R4): same checkpointed stage-graph contract —
-    # a job left 'running' on disk resumes from its last completed stage, so
-    # an already-harvested corpus is not re-crawled.
-    try:
-        from lib.research import resume_interrupted_research
-        n = resume_interrupted_research()
-        if n:
-            _server_log.info('[Server] resumed %d interrupted research job(s)', n)
-    except Exception as e:
-        _server_log.warning('[Server] research job resume failed: %s', e)
-    # Slide-deck counterpart: same checkpointed stage-graph contract — an
-    # authored page set is never re-authored on the re-run.
-    try:
-        from lib.slides.engine import resume_interrupted_decks
-        n = resume_interrupted_decks()
-        if n:
-            _server_log.info('[Server] resumed %d interrupted slides job(s)', n)
-    except Exception as e:
-        _server_log.warning('[Server] slides job resume failed: %s', e)
-    # Podcast counterpart (P-UX4): a 'generating' cache row can only belong
-    # to the process that just died — flip them to 'interrupted' so the tab
-    # says "被重启打断" instead of pretending nothing happened.
-    try:
-        from lib.paper.podcast_engine import mark_interrupted_podcasts
-        mark_interrupted_podcasts()
-    except Exception as e:
-        _server_log.warning('[Server] podcast interrupted sweep failed: %s', e)
-    # Desktop-agent LAN discovery responder (design §11.2.1 rung B): ON by
-    # default since 2026-08-04 (TOFU_DESKTOP_LAN_DISCOVERY=0 disables), and
-    # skipped when the effective bind is loopback-only (advertising a LAN
-    # url the server cannot be reached at would be a lie). Without THIS
-    # call the responder class was dead code — only tests ever instantiated
-    # it (owner review 2026-08-03).
-    try:
-        from lib.desktop.pairing import maybe_start_responder
-        _lan_responder = maybe_start_responder(
-            int(os.environ.get('_TOFU_RUNTIME_PORT') or '15000'),
-            bind_host=os.environ.get('_TOFU_RUNTIME_HOST') or '')
-        if _lan_responder is not None:
-            _server_log.info('[Server] LAN discovery responder up on UDP '
-                             '15001 (%s)', _lan_responder.url)
-    except Exception as e:
-        _server_log.warning('[Server] LAN discovery responder failed: %s', e)
-    return
+    return start_background_services(
+        target_app or app,
+        load_saved_proxy_config=_load_saved_proxy_config,
+        bootstrap_personal_key=_bootstrap_personal_key_if_needed,
+        logger=_server_log,
+    )
 
 
-def _detect_reverse_proxy():
-    """Detect whether we're running behind an HTTPS-terminating reverse proxy.
+def _start_storage_sidecar():
+    """Start the required storage authority and verify its ready handshake."""
+    from lib.storage import start_storage
 
-    Cloud IDEs / notebook platforms (VS Code port forwarding, GitHub
-    Codespaces, Gitpod, JupyterHub-fronted environments like Meituan
-    Codelab) expose the server on a public ``https://`` URL while talking
-    to our backend over plain HTTP. If we also enable TLS on our side the
-    proxy's plain-HTTP request hits our TLS listener and the connection is
-    reset — the browser/proxy reports ``socket hang up``.
-
-    Detection is signal-based, not host-name based, so it survives exports
-    to any host: we look for env vars these platforms inject into the
-    launch environment. Returns ``(behind_proxy: bool, proxy_name: str)``;
-    ``proxy_name`` is ``''`` when nothing is detected.
-    """
-    # Ordered most-specific → most-generic so the friendliest name wins.
-    if os.environ.get('VSCODE_PROXY_URI'):
-        return True, 'VS Code'
-    if os.environ.get('CODESPACES'):
-        return True, 'Codespaces'
-    if os.environ.get('GITPOD_WORKSPACE_URL'):
-        return True, 'Gitpod'
-    # JupyterHub-fronted platforms (Meituan Codelab, Binder, generic
-    # JupyterHub) always terminate HTTPS at the hub and proxy plain HTTP
-    # to single-user servers. JUPYTERHUB_* is set by the hub spawner;
-    # JUPYTER_SERVER_URL / JPY_* cover bare notebook/lab proxying.
-    if (os.environ.get('JUPYTERHUB_USER')
-            or os.environ.get('JUPYTERHUB_SERVICE_PREFIX')
-            or os.environ.get('JUPYTERHUB_API_URL')):
-        return True, 'JupyterHub'
-    # Codelab-specific belt-and-suspenders: the hub injects CODELAB_API_URL
-    # even in shells where JUPYTERHUB_* was not exported.
-    if os.environ.get('CODELAB_API_URL'):
-        return True, 'Codelab'
-    return False, ''
+    _boot('Starting storage sidecar…')
+    client = start_storage()
+    health = client.health(deadline=2.0)
+    if not health.get('ready'):
+        raise RuntimeError('storage sidecar did not report ready')
+    _server_log.info(
+        '[Storage] required sidecar ready backend=%s protocol=%s',
+        health.get('backend', 'unknown'), health.get('protocol', 'unknown'))
+    _boot('Storage sidecar ready.')
 
 
-def _find_free_port(start=15000, end=15100):
-    import socket
-    for p in range(start, end):
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(0.5)
-            result = s.connect_ex(('localhost', p))
-            s.close()
-            if result != 0:
-                return p
-        except Exception:
-            return p
-    return start
+from lib.server_network import (
+    detect_reverse_proxy as _detect_reverse_proxy,
+    find_free_port as _find_free_port,
+    resolve_tls_policy as _resolve_tls_policy,
+    wait_port_free as _wait_port_free,
+)
+from lib.server_tls import ensure_tls_certificates as _ensure_tls_certs
 
 
-def _wait_port_free(host, port, timeout=10.0):
-    """Block until ``host:port`` can be bound, or ``timeout`` seconds elapse.
-
-    Uses a real ``bind()`` probe rather than ``connect_ex`` so the server's
-    OWN lingering listener — which is briefly still present right after an
-    in-place re-exec restart — is correctly WAITED OUT instead of being
-    mistaken for a foreign process (the connect-probe would see it as "in
-    use" and silently shift the port). Returns True once the port is bindable.
-
-    Args:
-        host: Bind host (``0.0.0.0`` / ``::`` normalized to all-interfaces).
-        port: Port to wait for.
-        timeout: Max seconds to wait before giving up.
-
-    Returns:
-        True if the port became bindable within ``timeout``, else False.
-    """
-    import socket
-    import time as _t
-    bind_host = '' if host in ('', '0.0.0.0', '::') else host
-    deadline = _t.time() + timeout
-    while True:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind((bind_host, port))
-            return True
-        except OSError as e:
-            if _t.time() >= deadline:
-                _server_log.debug('[Port] %s:%d still busy after %.1fs wait: %s',
-                                  bind_host or '*', port, timeout, e)
-                return False
-            _t.sleep(0.25)
-        finally:
-            s.close()
+from lib.server_shutdown import (
+    graceful_shutdown_signals,
+    http_keep_alive_timeout_seconds,
+    request_graceful_shutdown as _request_graceful_shutdown,
+    shutdown_hard_deadline_seconds as shutdown_hard_deadline_seconds,
+    # Compatibility exports used by lifecycle tests and external launchers.
+    start_shutdown_hard_deadline as _start_shutdown_hard_deadline,  # noqa: F401
+)
 
 
-def _ensure_tls_certs(certfile='', keyfile=''):
-    """Ensure TLS certificates exist for HTTP/2 support.
+def register_server_production_lifecycle(
+        target_app, *, shutdown_requested=None, announce_ready=None):
+    """Attach the shared production bootstrap/cleanup recipe to ``target_app``."""
+    from lib.production_lifecycle import (
+        ProductionStartupSteps,
+        register_production_lifecycle,
+    )
 
-    Browsers only negotiate HTTP/2 over TLS (ALPN). Without certs the
-    server falls back to HTTP/1.1 and we lose the multiplexing benefit.
-
-    Strategy:
-      1. If user provides --certfile/--keyfile, use those.
-      2. If certs already exist at data/certs/tofu.{pem,key}, reuse them.
-      3. Otherwise, auto-generate via the `cryptography` library (pure Python).
-
-    Disable with TOFU_TLS=0 or --no-tls.
-
-    Returns:
-        (certfile_path, keyfile_path) or (None, None) if TLS unavailable.
-    """
-    _tls_log = logging.getLogger('server.tls')
-
-    if certfile and keyfile:
-        if os.path.isfile(certfile) and os.path.isfile(keyfile):
-            _tls_log.info('[TLS] Using provided certs: %s, %s', certfile, keyfile)
-            return certfile, keyfile
-        _tls_log.warning('[TLS] Provided cert/key files not found: %s, %s', certfile, keyfile)
-
-    cert_dir = os.path.join(_tofu_data_root(), 'certs')
-    cert_path = os.path.join(cert_dir, 'tofu.pem')
-    key_path = os.path.join(cert_dir, 'tofu.key')
-
-    if os.path.isfile(cert_path) and os.path.isfile(key_path):
-        _tls_log.info('[TLS] Reusing existing self-signed certs at %s', cert_dir)
-        return cert_path, key_path
-
-    _boot('Generating self-signed TLS certificate for HTTP/2…')
-    try:
-        from cryptography import x509
-        from cryptography.x509.oid import NameOID
-        from cryptography.hazmat.primitives import hashes, serialization
-        from cryptography.hazmat.primitives.asymmetric import rsa
-        import datetime
-        import ipaddress
-        import socket
-
-        os.makedirs(cert_dir, exist_ok=True)
-        hostname = socket.gethostname()
-
-        # Generate RSA 2048-bit key
-        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-
-        # Build X.509 certificate — valid 10 years, SAN for local access
-        subject = x509.Name([
-            x509.NameAttribute(NameOID.COMMON_NAME, f'Tofu Server ({hostname})'),
-        ])
-        now = datetime.datetime.now(datetime.timezone.utc)
-        cert = (
-            x509.CertificateBuilder()
-            .subject_name(subject)
-            .issuer_name(subject)
-            .public_key(key.public_key())
-            .serial_number(x509.random_serial_number())
-            .not_valid_before(now)
-            .not_valid_after(now + datetime.timedelta(days=3650))
-            .add_extension(
-                x509.SubjectAlternativeName([
-                    x509.DNSName('localhost'),
-                    x509.DNSName(hostname),
-                    x509.IPAddress(ipaddress.IPv4Address('127.0.0.1')),
-                    x509.IPAddress(ipaddress.IPv4Address('0.0.0.0')),
-                ]),
-                critical=False,
-            )
-            .add_extension(
-                x509.BasicConstraints(ca=False, path_length=None),
-                critical=True,
-            )
-            .sign(key, hashes.SHA256())
-        )
-
-        # Write key (mode 0600)
-        key_pem = key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.TraditionalOpenSSL,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
-        _fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            os.write(_fd, key_pem)
-        finally:
-            os.close(_fd)
-
-        # Write cert
-        cert_pem = cert.public_bytes(serialization.Encoding.PEM)
-        with open(cert_path, 'wb') as f:
-            f.write(cert_pem)
-
-        _tls_log.info('[TLS] Generated self-signed cert at %s (valid 10 years)', cert_dir)
-        _boot('TLS certificate ready (self-signed, valid 10 years).')
-        return cert_path, key_path
-    except ImportError:
-        _tls_log.warning('[TLS] cryptography library not installed — '
-                         'falling back to HTTP/1.1. Install: pip install cryptography')
-        return None, None
-    except Exception as e:
-        _tls_log.warning('[TLS] Certificate generation failed: %s — falling back to HTTP/1.1', e)
-        return None, None
+    return register_production_lifecycle(
+        target_app,
+        steps=ProductionStartupSteps(
+            build_assets=_check_frontend_artifact,
+            init_database=_init_database,
+            start_storage=_start_storage_sidecar,
+            validate_imports=_validate_imports,
+            start_workers=_start_background_workers,
+        ),
+        shutdown_requested=shutdown_requested,
+        logger=_server_log,
+        boot=_boot,
+        announce_ready=announce_ready,
+        request_graceful_shutdown=_request_graceful_shutdown,
+    )
 
 
-def graceful_shutdown_signals():
-    """Signals that must funnel into the graceful-drain path, not kill us.
+def register_server_runtime_lifecycle(
+        target_app, *, shutdown_requested=None, announce_ready=None,
+        host=None, port=None):
+    """Attach serving-loop owners before the fail-fast production bootstrap."""
+    from lib.server_runtime_lifecycle import register_runtime_lifecycle
 
-    SIGTERM/SIGINT are the deliberate stop signals. SIGHUP is included on
-    purpose: when the server is (wrongly) launched attached to a terminal —
-    e.g. ``python server.py`` in a code-server terminal — closing that
-    terminal makes the kernel deliver SIGHUP to the foreground process group,
-    whose default disposition is *terminate*. That single hangup would take
-    the server down along with the terminal session. Routing SIGHUP through
-    the same graceful-drain handler makes "close the terminal" a clean,
-    connection-draining shutdown instead of an abrupt death — defence in depth
-    for the case the supervisor launch path is bypassed. Only signals that
-    actually exist on this platform are returned (Windows has no SIGHUP).
-
-    Returns:
-        A list of signal numbers to register the graceful handler on.
-    """
-    names = ('SIGTERM', 'SIGINT', 'SIGHUP')
-    out = []
-    for name in names:
-        sig = getattr(signal, name, None)
-        if sig is not None:
-            out.append(sig)
-    return out
+    return register_runtime_lifecycle(
+        target_app,
+        production_registrar=register_server_production_lifecycle,
+        shutdown_requested=shutdown_requested,
+        announce_ready=announce_ready,
+        host=host,
+        port=port,
+        hooks=sys.modules[__name__],
+        fault_shm_log=_fault_shm_log,
+        fault_log=_fault_log,
+        deferred_dispatch_provider=lambda: _DEFERRED_BOOT_DISPATCH,
+        logger=_server_log,
+    )
 
 
 if __name__ == '__main__':
     try:
-        from hypercorn.config import Config as HypercornConfig
         from hypercorn.asyncio import serve as hypercorn_serve
     except ImportError:
         sys.stderr.write(
@@ -2861,32 +2474,28 @@ if __name__ == '__main__':
     parser.add_argument('--keyfile', default=os.environ.get('TLS_KEYFILE', ''))
     parser.add_argument('--no-tls', action='store_true',
                         help='Disable TLS (HTTP/1.1 only, no HTTP/2 in browsers)')
-    parser.add_argument('--workers', type=int, default=1)
+    parser.add_argument(
+        '--workers', type=int, default=1,
+        help='Must be 1. Scale with one process per replica behind the task-'
+             'affinity load balancer; programmatic Hypercorn ignores workers.')
     args = parser.parse_args()
+
+    # hypercorn.asyncio.serve() explicitly ignores Config.workers. Silently
+    # accepting --workers=N advertised isolation that did not exist and, worse,
+    # multiple local processes cannot share the live task registry.
+    if args.workers != 1:
+        parser.error(
+            '--workers must be 1. Run one chatui process per replica and use '
+            'deploy/nginx-task-affinity.conf.example for horizontal scale.')
 
     host = args.host
 
-    # ── Instance lock — prevent multiple servers on the same project dir ──
-    # Self-healing: a contended flock does NOT prove a live server (an OOM
-    # SIGKILL skips atexit/lock-release, and an orphaned child — or an
-    # unclean death on a FUSE mount — can keep the fd's flock held). So on
-    # contention we reclaim a stale LOCAL lock (dead recorded pid) by
-    # unlinking + retrying on a fresh inode, exactly as stop.sh does. See
-    # _acquire_instance_lock / _reclaim_stale_instance_lock.
-    _lock_dir = _tofu_data_root()
-    os.makedirs(_lock_dir, exist_ok=True)
-    _lock_path = os.path.join(_lock_dir, '.server.lock')
-
-    _lock_ok, _instance_lock_fd = _acquire_instance_lock(_lock_path, _server_log)
-    if not _lock_ok:
-        _skip = (os.environ.get('TOFU_SKIP_LOCK', '') or '').strip()
-        if _skip != '1':
-            _server_log.critical('Another server instance is already running from this project directory.\n'
-                                 '  Set TOFU_SKIP_LOCK=1 to force start.')
-            sys.exit(1)
-        _server_log.warning('[Lock] TOFU_SKIP_LOCK=1 — bypassing instance lock')
-
-    _boot('Instance lock acquired (PID=%d)', os.getpid())
+    # The executable acquired this before any database-backed import.  Keep the
+    # fd alive in module scope for the full process lifetime.
+    if _instance_lock_bypassed:
+        _boot('Instance lock explicitly bypassed (PID=%d)', os.getpid())
+    else:
+        _boot('Instance lock acquired before database imports (PID=%d)', os.getpid())
 
     # ── SIGTERM → graceful shutdown ──
     # Set a shutdown flag instead of calling sys.exit(0) from the signal
@@ -2925,14 +2534,11 @@ if __name__ == '__main__':
             sys.stderr.flush()
         except Exception:
             pass
-        # Flip the clean-shutdown dirty-bit so the next boot classifies this as
-        # a controlled exit, NOT an OS kill. One atomic write; never raises.
-        try:
-            from lib.shutdown_marker import mark_clean
-            mark_clean('signal')
-        except Exception as _sm_e:
-            _server_log.warning('[Server] mark_clean(signal) failed: %s', _sm_e)
-        _shutdown_requested.set()
+        # Arm the in-memory shutdown flag and hard deadline BEFORE the clean
+        # marker's FUSE write.  The marker remains best-effort, while recovery
+        # from a wedged storage call remains bounded.
+        _request_graceful_shutdown(
+            _shutdown_requested, logger=_server_log)
     # Passing a custom shutdown_trigger to hypercorn_serve suppresses
     # Hypercorn's own signal handlers, so we own these signals here and
     # funnel them into the same graceful-drain flag. SIGHUP is included so
@@ -2984,9 +2590,20 @@ if __name__ == '__main__':
             if port != args.port:
                 _server_log.info('Port %d in use — using %d', args.port, port)
     else:
-        port = _find_free_port(start=args.port)
-        if port != args.port:
-            _server_log.info('Port %d in use — using %d', args.port, port)
+        if os.environ.get('TOFU_SERVER_WORKER') == '1':
+            # The manager owns a stable configured endpoint. Moving to 15001+
+            # hides a foreign listener and collides with the manager API; fail
+            # clearly and let its conflict/crashloop state explain the cause.
+            if not _wait_port_free(host, args.port, timeout=0.1):
+                _server_log.critical(
+                    '[Server] configured port %d is already in use; managed '
+                    'workers never shift ports', args.port)
+                raise SystemExit(1)
+            port = args.port
+        else:
+            port = _find_free_port(start=args.port)
+            if port != args.port:
+                _server_log.info('Port %d in use — using %d', args.port, port)
 
     # Record the port we actually bound so an in-place restart (re-exec)
     # can reclaim it instead of re-probing. Read by _deferred_reexec in
@@ -2999,784 +2616,98 @@ if __name__ == '__main__':
 
     # ── TLS / HTTP/2 setup ──
     from lib.env_compat import getenv_compat
-    _force_tls = (getenv_compat('TOFU_TLS') or '').strip() == '1'
-    _force_no_tls = (args.no_tls
-                     or (getenv_compat('TOFU_TLS') or '').strip() == '0')
+    _tls_value = (getenv_compat('TOFU_TLS') or '').strip()
     # Auto-detect cloud-IDE / notebook reverse-proxy environments.
     # These proxies provide their own HTTPS+HTTP/2 on the public URL and
     # connect to our backend over plain HTTP. Adding TLS on our side causes
     # "socket hang up" because the proxy doesn't expect a TLS handshake.
     _behind_proxy, _proxy_name = _detect_reverse_proxy()
     _vscode_proxy = os.environ.get('VSCODE_PROXY_URI', '')
+    _use_tls, _tls_reason, _invalid_tls_value = _resolve_tls_policy(
+        no_tls=args.no_tls,
+        tls_value=_tls_value,
+        certfile=args.certfile,
+        keyfile=args.keyfile,
+        behind_proxy=_behind_proxy,
+    )
+    _force_no_tls = _tls_reason in ('command-line-disabled', 'explicitly-disabled')
+    if _invalid_tls_value:
+        _server_log.warning(
+            '[TLS] Ignoring unsupported TOFU_TLS=%r; expected 0/1, '
+            'false/true, no/yes, or off/on. Using HTTP.',
+            _invalid_tls_value)
+    if bool(args.certfile) != bool(args.keyfile):
+        _server_log.warning(
+            '[TLS] Both --certfile/TLS_CERTFILE and --keyfile/TLS_KEYFILE '
+            'are required; incomplete certificate configuration is ignored.')
 
-    if _force_no_tls:
+    if not _use_tls:
         _tls_cert, _tls_key = None, None
-        _boot('TLS disabled (--no-tls or TOFU_TLS=0).')
-    elif _behind_proxy and not _force_tls:
-        _tls_cert, _tls_key = None, None
-        _boot('TLS auto-disabled — %s proxy detected (provides its own HTTPS). '
-              'Force with TOFU_TLS=1.', _proxy_name or 'cloud IDE')
+        if _tls_reason == 'reverse-proxy':
+            _boot('TLS disabled — %s proxy detected (provides its own HTTPS). '
+                  'Force with TOFU_TLS=1.', _proxy_name or 'cloud IDE')
+        elif _force_no_tls:
+            _boot('TLS disabled (--no-tls or TOFU_TLS=0).')
+        else:
+            _boot('TLS disabled by proxy-safe default. Set TOFU_TLS=1 for '
+                  'direct HTTPS/HTTP2 or configure a trusted TLS ingress.')
     else:
-        _tls_cert, _tls_key = _ensure_tls_certs(args.certfile, args.keyfile)
+        _tls_cert, _tls_key = _ensure_tls_certs(
+            args.certfile,
+            args.keyfile,
+            bind_host=host,
+            data_root=_tofu_data_root(),
+            logger=logging.getLogger('server.tls'),
+            boot=_boot,
+        )
 
     # Persist the protocol we are ACTUALLY serving (after the certs are
     # settled, so a cert-generation failure records 'http' correctly).
     _record_serve_mode('https' if (_tls_cert and _tls_key) else 'http')
-
-    # ── Init DB + validate imports in app context ──
-    async def _startup():
-        async with app.app_context():
-            _build_js_bundle()
-            _init_database()
-            # Checkpoint: a ^C/SIGTERM during DB init/recovery set the flag —
-            # stop doing further startup work (heavy imports, MCP) and let the
-            # post-startup checkpoint take us to a clean exit before serving.
-            if _shutdown_requested.is_set():
-                _server_log.info('[Server] Shutdown requested during DB init — '
-                                 'skipping remaining startup phases.')
-                return {}, False
-            _validate_imports()
-            _start_background_workers()
-
-            # Shared-cgroup memory-pressure defenses (① self-check + ② monitor).
-            # Both graceful no-ops off-cgroup. See lib/cgroup_guard.py.
-            try:
-                from lib import cgroup_guard
-                cgroup_guard.startup_self_check()
-                cgroup_guard.start_monitor()
-            except Exception as e:
-                _server_log.warning('[cgroup] pressure defenses failed to start: %s', e)
-
-            if _shutdown_requested.is_set():
-                _server_log.info('[Server] Shutdown requested during import '
-                                 'validation — skipping MCP + background starts.')
-                return {}, False
-
-            # ── MCP auto-connect ──
-            _boot('Configuring MCP auto-connect…')
-            mcp_config = {}
-            try:
-                from lib.mcp.client import get_bridge
-                from lib.mcp.config import load_mcp_config
-                mcp_config = load_mcp_config()
-                enabled = sum(1 for c in (mcp_config or {}).values()
-                              if c.get('enabled', True))
-                import threading
-
-                def _mcp_auto():
-                    # Pre-warm vendored launchers (pip install off the event
-                    # loop) so a later App-Store install click is just the
-                    # fast handshake, never a cold pip that would freeze the
-                    # MCP loop. Runs even with zero configured servers — that
-                    # is exactly the fresh-install case we want fast.
-                    try:
-                        from lib.mcp.client import prewarm_all_vendored
-                        warmed = prewarm_all_vendored()
-                        if warmed:
-                            _server_log.info('[MCP] Pre-warm: %s', warmed)
-                    except Exception as e:
-                        _server_log.warning('[MCP] Pre-warm failed: %s', e)
-                    if enabled <= 0:
-                        return
-                    try:
-                        bridge = get_bridge()
-                        result = bridge.connect_all()
-                        total = sum(len(v) for v in result.values())
-                        _server_log.info('[MCP] Auto-connect: %d servers, %d tools', len(result), total)
-                        # MCP auto-connect runs on THIS background thread and
-                        # finishes seconds after boot — after a user may have
-                        # already opened a conversation and latched its tool
-                        # schema WITHOUT the (not-yet-connected) MCP tools. That
-                        # incomplete latch would then diverge on the next round,
-                        # surfacing a spurious "tools changed" banner. Clearing
-                        # every latch here mirrors the deliberate MCP-mutation
-                        # path in routes/api_v1/mcp.py: the next round of each
-                        # conversation re-latches from the now-complete tool
-                        # surface. Cost is self-limiting — a conversation whose
-                        # effective tool set is unchanged re-latches
-                        # byte-identically (no cache rebuild); only ones that
-                        # genuinely gained MCP tools pay a one-time rebuild.
-                        if total > 0:
-                            try:
-                                from lib.tools import clear_all_tool_list_latches
-                                n = clear_all_tool_list_latches()
-                                if n:
-                                    _server_log.info(
-                                        '[MCP] Auto-connect cleared %d '
-                                        'tool-schema latch(es) — MCP tools '
-                                        'now included next round', n)
-                            except Exception as e:
-                                _server_log.warning(
-                                    '[MCP] tool-latch invalidation after '
-                                    'auto-connect failed: %s', e)
-                    except Exception as e:
-                        _server_log.error('[MCP] Auto-connect failed: %s', e, exc_info=True)
-
-                threading.Thread(target=_mcp_auto, name='mcp-auto-connect', daemon=True).start()
-            except Exception as e:
-                _server_log.warning('[MCP] Auto-connect setup failed: %s', e)
-
-            # ── Local health checker ──
-            try:
-                from lib.llm_dispatch.health_local import start_local_health_checker
-                start_local_health_checker()
-            except Exception as e:
-                _server_log.warning('[HealthLocal] Failed: %s', e)
-
-            # ── Local engine auto-discovery (well-known loopback ports) ──
-            try:
-                from lib.llm_dispatch.autodiscover_local import start_local_autodiscovery
-                start_local_autodiscovery()
-            except Exception as e:
-                _server_log.warning('[AutoDiscover] Failed: %s', e)
-
-            # ── FS keepalive ──
-            try:
-                from lib.fs_keepalive import start_fs_keepalive
-                start_fs_keepalive()
-            except Exception as e:
-                _server_log.warning('FS keepalive failed: %s', e)
-
-            # ── code-server fileWatcher excludes sync ──
-            # Mirror the project's canonical watcherExclude globs into the
-            # User-scope code-server settings so opening a PARENT dir as the
-            # workspace root can't recurse into swebench_workdir/ and OOM the
-            # host via fileWatcher workers (see lib/code_server_excludes.py).
-            try:
-                from lib.code_server_excludes import start_code_server_excludes_sync
-                start_code_server_excludes_sync()
-            except Exception as e:
-                _server_log.warning('code-server excludes sync failed: %s', e)
-
-            # ── Cross-DC detection ──
-            try:
-                from lib.cross_dc import init_cross_dc_detection
-                init_cross_dc_detection()
-            except Exception as e:
-                _server_log.warning('Cross-DC detection failed: %s', e)
-
-            # ── Feishu Bot ──
-            feishu_ok = False
-            try:
-                from lib.feishu import start_bot as start_feishu_bot, ENABLED as FEISHU_ENABLED
-                if FEISHU_ENABLED:
-                    feishu_ok = start_feishu_bot()
-            except Exception as e:
-                _server_log.warning('Feishu Bot failed: %s', e)
-
-            return mcp_config, feishu_ok
-
-    mcp_config, feishu_ok = asyncio.run(_startup())
-
-    # ── Shutdown-during-startup checkpoint ──
-    # A ^C / SIGTERM received while _startup() ran only SET the flag (nothing
-    # awaited it yet). Honor it NOW: do not print the Ready banner or begin
-    # serving — go straight to a clean exit. The atexit PG-stop hook still runs.
-    if _shutdown_requested.is_set():
-        _server_log.info('[Server] Shutdown requested during startup — '
-                         'exiting before serving (no Ready).')
-        sys.exit(0)
-
-    # ── Banner ──
-    from lib.version import __version__ as _ver
-    _mcp_count = len(mcp_config)
     _has_tls = bool(_tls_cert and _tls_key)
-    _proto = 'https' if _has_tls else 'http'
-    if _has_tls:
-        _h2_status = 'HTTP/2 + HTTP/1.1 (TLS, auto-cert)'
-    elif _behind_proxy:
-        _h2_status = 'HTTP/1.1 (proxy provides HTTP/2)'
-    elif _force_no_tls:
-        _h2_status = 'HTTP/1.1 only (TLS disabled)'
-    else:
-        _h2_status = 'HTTP/1.1 (TLS unavailable — pip install cryptography)'
-    _banner_lines = [
-        '=' * 56,
-        f'  🫧 Tofu Server  v{_ver}  [ASYNC]',
-    ]
-    if _behind_proxy and _vscode_proxy:
-        _public_url = _vscode_proxy.replace('{{port}}', str(port))
-        _banner_lines.append(f'  {_public_url}')
-    _banner_lines.extend([
-        f'  {_proto}://{host}:{port}',
-        f'  Protocol: {_h2_status}',
-        '  Server: Hypercorn (ASGI)',
-    ])
-    if _has_tls and not args.certfile:
-        _banner_lines.append('  🔐  Self-signed cert (accept once in browser)')
-    if feishu_ok:
-        _banner_lines.append('  💬  Feishu Bot: ON')
-    if _mcp_count > 0:
-        _banner_lines.append(f'  🔌  MCP Apps: {_mcp_count} server(s)')
-    if TUNNEL_TOKEN:
-        _banner_lines.append('  🔒  Tunnel Auth: ON (deprecated — prefer API keys)')
-    # Auth mode banner. Always show so the operator knows whether the
-    # API surface is gated. Loud warning if open + non-loopback bind.
-    if _AUTH_MODE == 'open':
-        _banner_lines.append('  🔓  Auth: OPEN — no token required')
-        if host not in ('127.0.0.1', 'localhost', '::1'):
-            _banner_lines.append(
-                f'  ⚠️   Bound to {host}: API is reachable on the LAN '
-                'WITHOUT auth.')
-            _banner_lines.append(
-                '      Switch to private mode in Settings → API Keys, '
-                'or set TOFU_AUTH_MODE=private.')
-    elif _AUTH_MODE == 'private':
-        _banner_lines.append('  🔒  Auth: PRIVATE — Bearer token required')
-    elif _AUTH_MODE == 'multi-user':
-        _banner_lines.append('  👥  Auth: MULTI-USER — Bearer token required')
-    if _BOOTSTRAP_TOKEN:
-        _banner_lines.append('  🔑  Personal admin key minted (first boot)')
-        _banner_lines.append(f'      Token: {_BOOTSTRAP_TOKEN}')
-        _banner_lines.append(
-            f'      Open: {_proto}://{host}:{port}/?token={_BOOTSTRAP_TOKEN}')
-        _banner_lines.append(
-            '      Saved to data/config/.first_run_token (chmod 0600)')
-        _banner_lines.append(
-            '      (auto-cleared when this bootstrap key is revoked)')
-    # Loopback bind behind a cloud-IDE proxy (measured 2026-08-05): the SSO
-    # edge 401s every cookieless /api/* call, and the loopback bind kills
-    # the direct-LAN route too — so a desktop agent on another machine has
-    # NO path in at all. The banner must say so: the failure is otherwise
-    # invisible (zero agent requests ever reach the access log).
-    if host in ('127.0.0.1', 'localhost', '::1') and (
-            os.environ.get('VSCODE_PROXY_URI') or '').strip():
-        _banner_lines.append(
-            '  ⚠️   Bound to loopback behind a cloud-IDE proxy: remote '
-            'desktop agents can NEVER reach this server')
-        _banner_lines.append(
-            '      (the SSO edge rejects cookieless clients). Unset '
-            'BIND_HOST / use --host 0.0.0.0 and restart to allow')
-        _banner_lines.append(
-            '      direct LAN attach, or rely on the agent-side ssh '
-            'self-tunnel.')
-    _banner_lines.append('  ⏱  Boot time: %.1fs' % (time.time() - _BOOT_T0))
-    _banner_lines.append('=' * 56)
-    _banner = '\n'.join(_banner_lines)
-    _server_log.info('Server starting\n%s', _banner)
-    # ── Cache-fix generation self-report (deploy-acceptance ground truth) ──
-    # Print the IMPORTED module's CACHE_FIX_GEN — the bytecode ACTUALLY loaded
-    # into this process, not the on-disk source. The prefix-cache deploy verdict
-    # (tests/cache_acceptance_check.py) parses this from the boot window to prove
-    # the running code carries the whole cache-fix chain. Disk-freshness alone
-    # can't prove this (Python compiles .py at import and never re-reads it).
-    try:
-        from lib.llm.cache import CACHE_FIX_GEN as _cfg
-        # Bind the self-report to THIS process (pid + bootId). A restart storm
-        # produces many short-lived replicas whose boot lines land in the same
-        # app.log time window; without the pid tag a DEAD replica that printed
-        # gen=5 then lost the port race could have its gen credited to the OLD
-        # process still holding :15000 (a cross-attribution false-green). The
-        # deploy verdict matches this pid against the actual :15000 listener PID.
-        try:
-            from lib import boot_identity as _bi
-            _bid = _bi.BOOT_ID
-        except Exception:
-            _bid = '?'
-        _boot('[CacheFixGen] CACHE_FIX_GEN=%d pid=%d bootId=%s (in-memory)'
-              % (_cfg, os.getpid(), _bid))
-        # Also self-report the RESOLVED mid-anchor layout mode. The cache-cost
-        # acceptance analyzer reads this to POSITIVELY confirm the running
-        # process placed no mid stepping-stone (mode=drop) — so a post-restart
-        # cache_mid_out_of_window=0 is attributable to the fix, not merely to
-        # traffic too short to have armed a mid. In-memory (post-import) value,
-        # so it reflects the bytecode + env actually loaded.
-        try:
-            from lib.llm.cache import _mid_placement_mode as _mpm
-            _boot('[CacheMidMode] TOFU_CACHE_MID_MODE=%s pid=%d bootId=%s (in-memory)'
-                  % (_mpm(), os.getpid(), _bid))
-        except Exception as _mpm_e:
-            _boot_logger.warning('[CacheMidMode] self-report failed: %s', _mpm_e)
-    except Exception as _cfg_e:  # never let a diagnostic line block boot
-        _boot_logger.warning('[CacheFixGen] self-report failed: %s', _cfg_e)
 
-    # ── Source-tree fingerprint (restart-applied-my-edits ground truth) ──
-    # Warm + freeze the code fingerprint at boot so it reflects the on-disk
-    # source THIS process actually loaded (HEAD + uncommitted tracked edits).
-    # The restart UI captures the OLD process's digest and only declares
-    # "your changes are live" when the NEW process reports a DIFFERENT one.
-    try:
-        from lib import boot_identity as _bi2
-        _fp = _bi2.code_fingerprint()
-        _boot('[CodeFingerprint] head=%s dirty=%s digest=%s'
-              % (_fp.get('head'), _fp.get('dirty'), _fp.get('digest')))
-    except Exception as _fp_e:  # never let a diagnostic line block boot
-        _boot_logger.warning('[CodeFingerprint] self-report failed: %s', _fp_e)
+    def _announce_ready(mcp_config, feishu_ok):
+        from lib.server_boot_report import announce_server_ready
+        return announce_server_ready(
+            host=host,
+            port=port,
+            tls_enabled=_has_tls,
+            configured_cert=bool(args.certfile),
+            tls_requested=_use_tls,
+            behind_proxy=_behind_proxy,
+            force_no_tls=_force_no_tls,
+            vscode_proxy=_vscode_proxy,
+            feishu_ok=feishu_ok,
+            mcp_config=mcp_config,
+            tunnel_token=TUNNEL_TOKEN,
+            auth_mode=_AUTH_MODE,
+            bootstrap_token=_BOOTSTRAP_TOKEN,
+            boot_started_at=_BOOT_T0,
+            data_root=_tofu_data_root(),
+            boot=_boot,
+            logger=_server_log,
+            boot_logger=_boot_logger,
+        )
 
-    # Clear the re-exec marker (pt_aa3cd224b3b346e7): boot is done —
-    # tofu_guard may resume judging this process by the normal signals
-    # (listener / health / instance lock). Best-effort: a leftover marker
-    # just yields for the remainder of its 300s TTL, never blocks boot.
-    try:
-        os.unlink(os.path.join(_tofu_data_root(), '.reexec_in_progress'))
-    except FileNotFoundError:
-        pass
-    except Exception as _mkc_e:
-        _boot_logger.debug('[Update] re-exec marker clear failed: %s', _mkc_e)
-
-    _boot('Ready — handing off to Hypercorn.')
-    try:
-        sys.stderr.write('\n' + _banner + '\n\n')
-        sys.stderr.flush()
-    except OSError:
-        pass  # cosmetic console echo; broken inherited pipe must not block boot
-
-    # ── Configure Hypercorn ──
-    hconfig = HypercornConfig()
-    hconfig.bind = [f'{host}:{port}']
-    hconfig.accesslog = logging.getLogger('hypercorn.access')
-    hconfig.errorlog = logging.getLogger('hypercorn.error')
-    # SSE streams can last minutes (long LLM responses with tool use).
-    # Default keep_alive_timeout=5s is fine (it's idle-between-requests),
-    # but we increase it to avoid edge cases where a proxy holds a
-    # connection just past the threshold. Graceful timeout for shutdown.
-    hconfig.keep_alive_timeout = 600
-    # Shutdown drain window for in-flight connections. Kept short so Ctrl+C
-    # feels responsive on a local dev server (a second Ctrl+C force-quits —
-    # see _signal_shutdown). Override via TOFU_GRACEFUL_TIMEOUT.
-    try:
-        hconfig.graceful_timeout = float(
-            os.environ.get('TOFU_GRACEFUL_TIMEOUT', '') or '3')
-    except (ValueError, TypeError):
-        hconfig.graceful_timeout = 3.0
-
-    # ── Listen backlog ──
-    # Hypercorn's default (100) is small: if the event loop briefly stalls
-    # (CPU starvation from sibling processes, a burst of slow handlers), the
-    # kernel accept queue fills and further connections are dropped/reset —
-    # the page "goes dark" even though the process is alive and the port is
-    # bound. A larger backlog lets transient stalls QUEUE instead of failing,
-    # so the browser reconnect succeeds once the loop catches up. The kernel
-    # still caps this at net.core.somaxconn. Override via TOFU_LISTEN_BACKLOG.
-    try:
-        _listen_backlog = int(os.environ.get('TOFU_LISTEN_BACKLOG', '0') or '0')
-    except (ValueError, TypeError) as _e:
-        _server_log.debug('[Server] bad TOFU_LISTEN_BACKLOG, defaulting: %s', _e)
-        _listen_backlog = 0
-    if _listen_backlog <= 0:
-        _listen_backlog = 1024
-    hconfig.backlog = _listen_backlog
-
-    if _has_tls:
-        hconfig.certfile = _tls_cert
-        hconfig.keyfile = _tls_key
+    # ── Configure Hypercorn at a testable transport boundary ──
+    from lib.hypercorn_runtime import build_hypercorn_config
+    hconfig = build_hypercorn_config(
+        host, port,
+        keep_alive_timeout=http_keep_alive_timeout_seconds(),
+        tls_cert=_tls_cert if _has_tls else '',
+        tls_key=_tls_key if _has_tls else '',
+        logger=_server_log,
+    )
 
     # ── Run ──
     async def _serve():
-        loop = asyncio.get_running_loop()
-
-        # Uncaught exceptions in coroutines / callbacks never reach
-        # sys.excepthook — asyncio routes them here. Default behavior only
-        # logs to the root 'asyncio' logger at ERROR; funnel through our
-        # 'server' logger at ERROR with the traceback so they land in
-        # error.log with full context.
-        def _loop_exception_handler(_loop, ctx):
-            msg = ctx.get('message') or 'Unhandled exception in event loop'
-            exc = ctx.get('exception')
-            _server_log.error('[asyncio] %s', msg,
-                              exc_info=exc if exc else False)
-        loop.set_exception_handler(_loop_exception_handler)
-
-        # ── Event-loop BLOCKING guard (sub-stall early warning) — OPT-IN ──
-        # The always-on stall watchdog (LoopWatch, 5s) is the safe 24/7 net:
-        # it's a separate sampling thread with ZERO per-step instrumentation
-        # and dumps once per stall — no overhead, no log flood, and it already
-        # names the culprit top frame via _extract_loop_top_frame.
-        #
-        # THIS guard is the finer, sub-stall detector: it catches a SINGLE
-        # on-loop step that hogs the loop past TOFU_LOOP_SLOW_CALLBACK_SECS
-        # BEFORE it snowballs. It relies on ``loop.set_debug(True)``, and here
-        # is the cost that makes it UNSAFE as a default on a high-concurrency
-        # SSE/WebSocket service: in CPython, debug mode makes EVERY call_soon
-        # run format_helpers.extract_stack() (a Python stack walk) per Handle,
-        # and the slow-callback timing/logging is gated on ``self._debug``.
-        # On a long-connection storm the per-schedule stack-walk cost is real,
-        # and a burst of just-over-threshold steps would flood the 'asyncio'
-        # logger into error.log (log I/O can itself back-pressure the loop —
-        # the diagnostic aggravating the very stall it hunts).
-        #
-        # So this guard is DEFAULT OFF. Enable it deliberately for a diagnostic
-        # window via TOFU_LOOP_DEBUG_GUARD=1 (threshold via
-        # TOFU_LOOP_SLOW_CALLBACK_SECS, default 1.0s). When on, a rate-limiting
-        # filter caps the 'asyncio' warnings so it can't flood the log even if
-        # many steps trip at once. Normal production pays NOTHING and keeps the
-        # cheap LoopWatch net.
-        _debug_guard = (os.environ.get('TOFU_LOOP_DEBUG_GUARD', '') or '').strip().lower()
-        _guard_on = _debug_guard in ('1', 'true', 'yes', 'on')
-        try:
-            _slow_cb = float(os.environ.get('TOFU_LOOP_SLOW_CALLBACK_SECS', '') or '1.0')
-        except (ValueError, TypeError) as _e:
-            _server_log.debug('[Server] bad TOFU_LOOP_SLOW_CALLBACK_SECS, using 1.0: %s', _e)
-            _slow_cb = 1.0
-        if _guard_on and _slow_cb > 0:
-            loop.slow_callback_duration = _slow_cb
-            loop.set_debug(True)
-            _asyncio_log = logging.getLogger('asyncio')
-            _asyncio_log.setLevel(logging.WARNING)
-            # Rate-limit so a burst of just-over-threshold steps can't flood
-            # error.log (and back-pressure the loop via log I/O). Token-ish:
-            # at most _burst warnings per _window seconds, then a single
-            # suppression note. Cheap, allocation-free, no lock (loop thread
-            # touches it; the 'asyncio' logger emits from the loop thread).
-            class _SlowCallbackRateLimit(logging.Filter):
-                def __init__(self, burst=20, window=10.0):
-                    super().__init__()
-                    self._burst = burst
-                    self._window = window
-                    self._win_start = 0.0
-                    self._count = 0
-                    self._suppressed = 0
-
-                def filter(self, record):
-                    now = time.monotonic()
-                    if now - self._win_start >= self._window:
-                        if self._suppressed:
-                            record.msg = ('%s [+%d more slow-callback warnings '
-                                          'suppressed in the last %.0fs]'
-                                          % (record.getMessage(), self._suppressed,
-                                             self._window))
-                            record.args = ()
-                        self._win_start = now
-                        self._count = 0
-                        self._suppressed = 0
-                    if self._count < self._burst:
-                        self._count += 1
-                        return True
-                    self._suppressed += 1
-                    return False
-
-            _asyncio_log.addFilter(_SlowCallbackRateLimit())
-            _server_log.info('[Server] Loop blocking-guard armed '
-                             '(slow_callback_duration=%.1fs, rate-limited) — a '
-                             'single on-loop step over this logs "Executing … '
-                             'took N seconds". DIAGNOSTIC MODE (debug loop).', _slow_cb)
-        else:
-            _server_log.info('[Server] Loop blocking-guard OFF (default) — cheap '
-                             'LoopWatch 5s net remains active. Set '
-                             'TOFU_LOOP_DEBUG_GUARD=1 to enable sub-stall detection.')
-
-        # ── Size the default executor ──
-        # Every sync route handler runs in this loop's default executor via
-        # Quart's run_sync. Python's default ThreadPoolExecutor is capped at
-        # min(32, os.cpu_count()+4) — too small once long-lived sync handlers
-        # (chat_send, upload, PDF parse) and per-stream poll storms coexist:
-        # the pool saturates and new requests queue behind it. Size it
-        # explicitly. Override via TOFU_SYNC_WORKERS.
-        from concurrent.futures import ThreadPoolExecutor
-        try:
-            _sync_workers = int(os.environ.get('TOFU_SYNC_WORKERS', '0') or '0')
-        except (ValueError, TypeError) as _e:
-            _server_log.debug('[Server] bad TOFU_SYNC_WORKERS, auto-sizing: %s', _e)
-            _sync_workers = 0
-        if _sync_workers <= 0:
-            _sync_workers = min(128, (os.cpu_count() or 4) * 8)
-        _executor = ThreadPoolExecutor(max_workers=_sync_workers,
-                                       thread_name_prefix='tofu-sync')
-        loop.set_default_executor(_executor)
-        _server_log.info('[Server] Sync route executor sized to %d threads', _sync_workers)
-
-        # ── Dedicated agent-worker executor ──
-        # spawn_task() runs run_task on a thread; if it shared the default
-        # executor with sync route handlers, long agent runs would starve
-        # request handling (and vice-versa). Give agent workers their own
-        # pool so the two cannot deadlock each other. Sized to the
-        # in-flight ceiling + headroom; override via TOFU_AGENT_WORKERS.
-        try:
-            _agent_workers = int(os.environ.get('TOFU_AGENT_WORKERS', '') or '0')
-        except (ValueError, TypeError) as _e:
-            _server_log.debug('[Server] bad TOFU_AGENT_WORKERS, auto-sizing: %s', _e)
-            _agent_workers = 0
-        if _agent_workers <= 0:
-            _agent_workers = min(256, (os.cpu_count() or 4) * 16)
-        _agent_executor = ThreadPoolExecutor(
-            max_workers=_agent_workers, thread_name_prefix='tofu-agent')
-        try:
-            from lib.tasks_pkg import set_agent_executor, set_serving_loop
-            set_agent_executor(_agent_executor)
-            # F3 (pt_1acd0bcdb2174566): let spawn_task hop onto THIS loop from
-            # loop-less worker threads (queue dispatch / reaper successors)
-            # instead of degrading to untracked daemon threads.
-            set_serving_loop(loop)
-            _server_log.info('[Server] Agent-worker executor sized to %d threads',
-                             _agent_workers)
-        except Exception as _ae_err:
-            _server_log.warning('[Server] could not install agent executor: %s',
-                                _ae_err)
-
-        from lib.push import hub as _push_hub
-        _push_hub.set_loop(loop)
-
-        # ── Periodic finished-task reaper ──
-        # The headless agent-API path (agent/run, compat adapters,
-        # /api/v1/chat) never calls cleanup_old_tasks() opportunistically
-        # the way the UI chat routes do, so on a headless-only deployment
-        # the in-memory task registry would grow without bound. Run a
-        # cheap sweep on the loop every TOFU_TASK_CLEANUP_INTERVAL seconds
-        # (default 60). Finished-only + TTL-bounded — never touches a
-        # running task. Disable with the interval set to 0.
-        try:
-            _cleanup_interval = int(
-                os.environ.get('TOFU_TASK_CLEANUP_INTERVAL', '') or '60')
-        except (ValueError, TypeError) as _e:
-            _server_log.debug('[Server] bad TOFU_TASK_CLEANUP_INTERVAL, using 60: %s', _e)
-            _cleanup_interval = 60
-
-        async def _task_reaper():
-            from lib.tasks_pkg import cleanup_old_tasks
-            while not _shutdown_requested.is_set():
-                await asyncio.sleep(_cleanup_interval)
-                try:
-                    await asyncio.to_thread(cleanup_old_tasks)
-                except Exception as _reap_err:
-                    _server_log.warning('[Server] task reaper sweep failed: %s',
-                                        _reap_err)
-
-        if _cleanup_interval > 0:
-            loop.create_task(_task_reaper())
-            _server_log.info('[Server] Finished-task reaper every %ds',
-                             _cleanup_interval)
-
-
-        # ── Event-loop stall watchdog ──
-        # We have no supervisor and faulthandler only fires on C-level fatal
-        # signals, so a wedged event loop (a blocking call on the loop thread,
-        # a starved executor, a FUSE/PG stall) currently goes SILENT: the port
-        # stops accept()ing while the process stays alive, and we get no stack
-        # to diagnose it. This turns that into a captured all-thread dump.
-        #
-        # TWO complementary capture paths:
-        #
-        #  (A) GUARANTEED, GIL-INDEPENDENT — faulthandler.dump_traceback_later.
-        #      The async heartbeat acts as a watchdog PET: on each bump it
-        #      cancels + re-arms a C-timer set to fire in _stall_threshold s.
-        #      While the loop is healthy the timer is petted before it fires;
-        #      when the loop wedges — even inside a single monolithic
-        #      GIL-holding C call (the documented json.dumps / catastrophic-
-        #      regex pit) — the timer's DEDICATED C THREAD fires WITHOUT taking
-        #      the GIL and writes an all-thread dump to the FUSE-resilient
-        #      /dev/shm sink. This is the path that covers the one root cause
-        #      the project has proven can happen.
-        #
-        #  (B) COMPLEMENTARY, human-readable — an off-loop daemon thread watches
-        #      the heartbeat timestamp and, on a stall, emits an ERROR log line
-        #      (with measured duration) + a dump to the FUSE log sink. It works
-        #      for GIL-RELEASING stalls (blocking syscalls: FUSE/PG) but is
-        #      BLIND to a GIL-held wedge (it must take the GIL to run) — hence
-        #      it is a signal, never the sole guarantee. Path (A) is.
-        #
-        # One dump per stall episode; both re-arm on recovery.
-        # Set TOFU_LOOP_STALL_SECS=0 to disable both.
-        try:
-            _stall_threshold = float(
-                os.environ.get('TOFU_LOOP_STALL_SECS', '') or '5')
-        except (ValueError, TypeError) as _e:
-            _server_log.debug('[Server] bad TOFU_LOOP_STALL_SECS, using 5.0: %s', _e)
-            _stall_threshold = 5.0
-        try:
-            _stall_bump_interval = float(
-                os.environ.get('TOFU_LOOP_HEARTBEAT_SECS', '') or '1')
-        except (ValueError, TypeError) as _e:
-            _server_log.debug('[Server] bad TOFU_LOOP_HEARTBEAT_SECS, using 1.0: %s', _e)
-            _stall_bump_interval = 1.0
-        if _stall_bump_interval <= 0:
-            _stall_bump_interval = 1.0
-
-        # The C-timer must fire AFTER a healthy heartbeat would have petted it,
-        # so its timeout must exceed the bump interval; guarantee headroom.
-        _ctimer_timeout = max(_stall_threshold, _stall_bump_interval * 2.0)
-        _arm_ctimer = _should_arm_ctimer(_stall_threshold, _fault_shm_log)
-
-        _loop_heartbeat = {'ts': time.monotonic()}
-        _listen_state = {'was_bound': False, 'misses': 0}
-        _LISTENER_LOSS_K = 5   # consecutive 1s-bump misses ⇒ serve death
-        # Probe the bind host; a wildcard bind answers on loopback too.
-        _listen_probe_host = host if host not in ('0.0.0.0', '::', '') else '127.0.0.1'
-
-        async def _loop_heartbeat_task():
-            # Pet path (A): re-arm the GIL-independent C-timer on every bump.
-            while not _shutdown_requested.is_set():
-                _loop_heartbeat['ts'] = time.monotonic()
-                # Persist a wall-clock heartbeat to the local-disk sidecar so a
-                # RESTARTING process can tell this loop is alive AND healthy. A
-                # wedge (FUSE syscall) stops these bumps → the file ages → the
-                # lock-reclaim path treats us as wedged and can take over.
-                _write_heartbeat()
-                # Serve-listener liveness (second layer): a Hypercorn
-                # serve-task death with a LIVE loop is invisible to every
-                # external probe — the watchdog sees a live pid + fresh
-                # heartbeat and yields forever (the 2026-08-03 11:14 state).
-                # Die loudly instead so the watchdog gets a clean death it
-                # can relaunch from. A broken probe never kills the server.
-                try:
-                    _bound = await asyncio.to_thread(
-                        _port_bound, port, _listen_probe_host)
-                except Exception:
-                    _bound = True
-                _was, _miss, _serve_dead = _listener_death_decide(
-                    _listen_state['was_bound'], _bound,
-                    _listen_state['misses'], _LISTENER_LOSS_K)
-                _listen_state['was_bound'], _listen_state['misses'] = _was, _miss
-                if _serve_dead:
-                    _server_log.critical(
-                        '[LoopWatch] serve listener on :%d lost for %d consecutive '
-                        'checks while the loop is alive — serve task is dead; '
-                        'exiting so the watchdog relaunches', port, _miss)
-                    try:
-                        from lib.log import audit_log as _audit
-                        _audit('serve_listener_death', port=port, misses=_miss,
-                               pid=os.getpid())
-                    except Exception:
-                        pass
-                    os._exit(1)
-                if _arm_ctimer:
-                    try:
-                        faulthandler.cancel_dump_traceback_later()
-                        # exit=False: capture the hang, do NOT abort the process.
-                        faulthandler.dump_traceback_later(
-                            _ctimer_timeout, repeat=False,
-                            file=_fault_shm_log, exit=False)
-                    except Exception as _ct_err:
-                        _server_log.warning('[LoopWatch] could not arm C-timer: %s', _ct_err)
-                await asyncio.sleep(_stall_bump_interval)
-            if _arm_ctimer:
-                try:
-                    faulthandler.cancel_dump_traceback_later()
-                except Exception:
-                    pass
-
-        def _loop_stall_watch():
-            # Poll fast enough to notice a stall promptly, but never faster
-            # than a fraction of the threshold. Runs off-loop as a daemon.
-            poll = max(0.5, min(_stall_bump_interval, _stall_threshold / 2.0))
-            already_dumped = False
-            while not _shutdown_requested.is_set():
-                _shutdown_requested.wait(poll)
-                if _shutdown_requested.is_set():
-                    break
-                age = time.monotonic() - _loop_heartbeat['ts']
-                should_dump, already_dumped = _loop_stall_decide(
-                    age, _stall_threshold, already_dumped)
-                if not should_dump:
-                    continue
-                # Structured, grep-able culprit line so the NEXT stall needs no
-                # stack-diving: pull the event-loop thread's current frame and
-                # name the deepest application frame (skips stdlib leaves like
-                # ssl.read → names segment_backfill.py:257). audit_log is
-                # thread-safe; best-effort — a failure must not skip the dump.
-                _top_frame = ''
-                try:
-                    import sys as _sys
-                    _loop_tid = threading.main_thread().ident
-                    _frames = _sys._current_frames()
-                    _top_frame = _extract_loop_top_frame(_frames.get(_loop_tid))
-                except Exception as _tf_err:
-                    _server_log.debug('[LoopWatch] top-frame extract failed: %s', _tf_err)
-                _pressure = _stall_pressure_context()
-                try:
-                    from lib.log import audit_log as _audit_log
-                    _audit_log('event_loop_stall', duration=round(age, 1),
-                               threshold=_stall_threshold, top_frame=_top_frame,
-                               pressure=_pressure, pid=os.getpid())
-                except Exception as _al_err:
-                    _server_log.debug('[LoopWatch] audit_log failed: %s', _al_err)
-                _server_log.error(
-                    '[LoopWatch] event loop STALLED ~%.1fs (threshold=%.1fs) at %s%s — '
-                    'dumping all-thread stacks to faulthandler sinks',
-                    age, _stall_threshold, _top_frame or '?',
-                    (' [' + _pressure + ']') if _pressure else '')
-                for _sink in (_fault_shm_log, _fault_log):
-                    if _sink is None:
-                        continue
-                    try:
-                        _sink.write('\n=== LOOP STALL pid=%d age=%.1fs at %s ===\n'
-                                    % (os.getpid(), age, time.strftime('%Y-%m-%d %H:%M:%S')))
-                        _sink.flush()
-                        faulthandler.dump_traceback(file=_sink, all_threads=True)
-                        _sink.flush()
-                    except Exception as _dump_err:
-                        _server_log.warning('[LoopWatch] dump to sink failed: %s', _dump_err)
-
-        if _stall_threshold > 0:
-            loop.create_task(_loop_heartbeat_task())
-            _stall_thread = threading.Thread(
-                target=_loop_stall_watch, name='tofu-loopwatch', daemon=True)
-            _stall_thread.start()
-            _server_log.info(
-                '[Server] Loop-stall watchdog armed (threshold=%.1fs, heartbeat=%.1fs, '
-                'GIL-independent C-timer=%s @ %.1fs)',
-                _stall_threshold, _stall_bump_interval,
-                'on' if _arm_ctimer else 'off', _ctimer_timeout)
-        else:
-            _server_log.info('[Server] Loop-stall watchdog disabled (TOFU_LOOP_STALL_SECS=0)')
-
-        # ── Write-freshness token replay ──
-        # Restore the read/write fingerprints saved by the previous image
-        # (re-exec or clean exit) so the shared-tree overwrite guard is NOT
-        # fail-open in the post-restart window. Must run BEFORE the
-        # deferred boot dispatch below (which spawns tasks that write).
-        try:
-            from lib import write_freshness as _wf
-            _wf.load_snapshot()
-        except Exception as _wf_err:
-            _server_log.warning('[Server] write-freshness snapshot replay failed: %s',
-                                _wf_err)
-
-        # ── HEAD-moved auto-restart watcher (opt-in) ──
-        # The "effective" contract for agent work on a shared checkout: a
-        # commit only counts once the RUNNING process serves it. With
-        # TOFU_AUTO_RESTART=1 this daemon re-execs the server when the
-        # checked-out HEAD moves while idle (no in-flight tasks, shutdown
-        # not requested) — the same guard the manual restart endpoint uses.
-        try:
-            from lib.auto_restart import maybe_start_auto_restart_watch
-            if maybe_start_auto_restart_watch(shutdown_requested=_shutdown_requested):
-                _server_log.info('[Server] Auto-restart watcher armed (TOFU_AUTO_RESTART=1)')
-        except Exception as _ar_err:
-            _server_log.warning('[Server] Auto-restart watcher setup failed: %s', _ar_err)
-
-        # ── Deferred BILLED boot dispatch ──
-        # killed-recovery + autopilot-resume were split out of the startup path
-        # (they SPAWN carriers). Run them HERE, on the SERVING loop, so a
-        # re-dispatched carrier is scheduled on THIS loop (which keeps running
-        # under Hypercorn) — NOT the startup loop, whose asyncio.run() teardown
-        # would otherwise block until the carrier finished (the 297s boot).
-        # Gated on the shutdown flag: a ^C during startup skips it entirely.
-        if _DEFERRED_BOOT_DISPATCH is not None and not _shutdown_requested.is_set():
-            async def _run_deferred_boot_dispatch():
-                try:
-                    from lib.tasks_pkg import run_deferred_boot_dispatch
-                    await asyncio.to_thread(
-                        run_deferred_boot_dispatch, _DEFERRED_BOOT_DISPATCH,
-                        should_continue=lambda: not _shutdown_requested.is_set(),
-                        stop_event=_shutdown_requested)
-                except Exception as _dbd_err:
-                    _server_log.warning('[Server] deferred boot dispatch failed: %s',
-                                        _dbd_err)
-            loop.create_task(_run_deferred_boot_dispatch())
-
-        # ── Orphaned-queue re-dispatch (message_queue) ──
-        #   A human message QUEUED while a task was running lives ONLY in
-        #   message_queue (never in conversations.messages). Nothing drains it
-        #   on a fresh boot for a conv whose running task died with the process
-        #   → the message is shown in the queue bar but never processed = total
-        #   loss. Drain it on the SERVING loop (blocking DB + spawn work → a
-        #   thread), gated on the shutdown flag so a ^C during boot skips it.
-        #   Runs AFTER recover_stale_tasks_on_startup cleared dead activeTaskId
-        #   pointers, so it cannot double-dispatch (plus a per-conv live guard).
-        async def _run_orphan_queue_redispatch():
-            if _shutdown_requested.is_set():
-                return
-            try:
-                from lib.message_queue import redispatch_orphaned_queue_on_startup
-                spawned = await asyncio.to_thread(redispatch_orphaned_queue_on_startup)
-                if spawned:
-                    _server_log.info('[Server] orphaned-queue redispatch spawned '
-                                     '%d task(s) from stranded queue rows',
-                                     len(spawned))
-            except Exception as _oq_err:
-                _server_log.warning('[Server] orphaned-queue redispatch failed: %s',
-                                    _oq_err)
-        loop.create_task(_run_orphan_queue_redispatch())
+        register_server_runtime_lifecycle(
+            app,
+            shutdown_requested=_shutdown_requested,
+            announce_ready=_announce_ready,
+            host=host,
+            port=port,
+        )
 
         # Bridge the SIGTERM threading.Event to an async trigger Hypercorn
         # awaits. When set, Hypercorn stops accepting new connections and
@@ -3787,49 +2718,6 @@ if __name__ == '__main__':
                 await asyncio.sleep(0.25)
 
         await hypercorn_serve(app, hconfig, shutdown_trigger=_shutdown_trigger)
-
-        # ── Shutdown quiesce (ordering fix) ──
-        # Hypercorn has drained HTTP; now signal every RUNNING agent task to
-        # abort and give the agent-worker pool a BOUNDED window to stop, BEFORE
-        # the atexit stop_local_pg_if_owned hook stops PG. Without this, live
-        # carriers keep hitting get_thread_db while PG is shutting down → the
-        # "database system is shutting down" + "cannot schedule new futures
-        # after interpreter shutdown" cascade. Best-effort, time-boxed.
-        try:
-            from lib.tasks_pkg import quiesce_running_tasks
-            _n_quiesced = quiesce_running_tasks(reason='server_shutdown')
-        except Exception as _q_err:
-            _server_log.warning('[Server] task quiesce failed: %s', _q_err)
-            _n_quiesced = 0
-        try:
-            _drain_secs = float(os.environ.get('TOFU_SHUTDOWN_DRAIN_SECS', '') or '3')
-        except (ValueError, TypeError):
-            _drain_secs = 3.0
-        if _n_quiesced and _drain_secs > 0:
-            _server_log.info('[Server] Draining %d aborted task(s) up to %.0fs '
-                             'before PG stop…', _n_quiesced, _drain_secs)
-            # Terminal feedback so the post-HTTP drain isn't a silent wait; a
-            # Ctrl+C here hits _signal_shutdown (flag already set) → force-quit.
-            try:
-                sys.stderr.write(
-                    '\033[33m[Server] Waiting up to %.0fs for %d running task(s) '
-                    'to stop (Ctrl+C to skip)…\033[0m\n'
-                    % (_drain_secs, _n_quiesced))
-                sys.stderr.flush()
-            except Exception:
-                pass
-            _deadline = time.monotonic() + _drain_secs
-            try:
-                from lib.tasks_pkg import tasks as _tasks, tasks_lock as _tasks_lock
-                while time.monotonic() < _deadline:
-                    with _tasks_lock:
-                        _still = sum(1 for _t in _tasks.values()
-                                     if _t.get('status') == 'running')
-                    if _still == 0:
-                        break
-                    await asyncio.sleep(0.25)
-            except Exception as _dr_err:
-                _server_log.warning('[Server] shutdown drain wait failed: %s', _dr_err)
 
     try:
         asyncio.run(_serve())

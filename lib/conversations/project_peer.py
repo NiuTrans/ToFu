@@ -256,24 +256,19 @@ def _titles_by_conv(conv_ids) -> dict:
             else:
                 missing.append(r['id'])
         if missing:
-            import json
             from lib.conversations.title_gen import first_user_text
-            ph2 = ','.join('?' * len(missing))
-            mrows = db.execute(
-                f'SELECT id, messages FROM conversations WHERE id IN ({ph2})',
-                tuple(missing)).fetchall()
-            for r in mrows:
+            from lib.database.conversation_repository import load_conversation
+            for missing_id in missing:
                 try:
-                    msgs = r['messages']
-                    if isinstance(msgs, str):
-                        msgs = json.loads(msgs or '[]')
-                    snippet = first_user_text(msgs or [], max_chars=60)
+                    snapshot = load_conversation(db, missing_id)
+                    snippet = first_user_text(
+                        snapshot.messages if snapshot else [], max_chars=60)
                 except Exception as _pe:
                     logger.debug('[PeerStatus] first-user snippet failed conv=%s: %s',
-                                 (r['id'] or '')[:8], _pe)
+                                 (missing_id or '')[:8], _pe)
                     snippet = ''
                 if snippet:
-                    out[r['id']] = snippet
+                    out[missing_id] = snippet
     except Exception as e:
         logger.debug('[PeerStatus] title backfill failed: %s', e)
     return out
@@ -414,50 +409,6 @@ def _resolve_target_conv_id(to_conv_id: str) -> tuple:
         if len(tid) < _FULL_CONV_ID_LEN:
             return '', 'resolve_failed'
         return tid, ''
-
-
-def render_peer_protocol_block(project_path: str) -> str:
-    """The ambient ``[PEER MESSAGING PROTOCOL]`` system-prompt block.
-
-    Injected in project mode (system_context.py §4.47) so the model has AMBIENT
-    guidance that ``project_message`` / ``project_intervene`` write to ANOTHER
-    AGENT — mirroring the ``[PROJECT BOARD]`` block's imperative style. Without
-    this the model's only steer was the tool description, which biased it to
-    narrate status for a human reader (Pillar #6 Symptom-C).
-
-    Returns '' outside project mode (no ``project_path``) so it splices to
-    nothing.
-    """
-    if not project_path:
-        return ''
-    return (
-        '[PEER MESSAGING PROTOCOL]\n'
-        'project_message / project_intervene write to ANOTHER AGENT (a sibling '
-        'conversation of this project), NOT to a human. Use the imperative '
-        'agent-to-agent coordination register — the four coordination acts:\n'
-        '  \u2022 CLAIM work you are taking ("taking the parser refactor, stand '
-        'down on lib/parser/").\n'
-        '  \u2022 CONFIRM a boundary before you cross it ("are you touching '
-        'styles.css? I am about to rewrite it").\n'
-        '  \u2022 HAND OFF context a peer needs ("the schema bump you needed is '
-        'done on the shared tree").\n'
-        '  \u2022 WARN of an OVERLAP ("your epic duplicates the one I already '
-        'own — re-check the board").\n'
-        'Do NOT send status updates, progress narration, or FYI notes as if '
-        'reporting to a human — a peer message that does not change what the '
-        'peer DOES is wasted budget. The peer sees your message on its NEXT turn '
-        '(never mid-stream) and acts autonomously; it '
-        'decides how to act.\n'
-        'When you RECEIVE a peer message (it arrives as a turn prefixed '
-        '"[Peer message from a sibling conversation …]" and carries a reply '
-        'id), you MAY reply EXACTLY ONCE via '
-        'project_message(to_conv_id=<that reply id>) — but only to CONFIRM a '
-        'boundary, HAND OFF context, or DECLINE. If a reply would not change '
-        'what the peer does, do NOT acknowledge for its own sake: incorporate '
-        'the message and keep working. Your rate-limit budget is the ceiling '
-        '— this is coordination, not a chat channel, so never reply just to '
-        'be polite.'
-    )
 
 
 def _live_drain_eligible_task(conv_id: str) -> str:

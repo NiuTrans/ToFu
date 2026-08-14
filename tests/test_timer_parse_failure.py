@@ -158,4 +158,7 @@ def test_timer_poll_log_has_new_columns():
     Backend-agnostic: a SELECT of the two columns succeeds only if they exist.
     """
     db = get_thread_db(DOMAIN_SYSTEM)
-    db.execute('SELECT poll_id, raw_output FROM timer_poll_log LIMIT 1').fetchall()
+    cur = db.execute(
+        'SELECT poll_id, raw_output FROM timer_poll_log LIMIT 1')
+    cur.fetchall()
+    assert [item[0] for item in cur.description] == ['poll_id', 'raw_output']

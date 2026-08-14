@@ -188,6 +188,25 @@ def test_non_tip_edit_without_hint_is_missed_by_design(conv_env):
     assert _row_contents(db, conv_id)[0] == 'msg 0 EDITED-EARLY'
 
 
+def test_full_put_dirty_set_finds_non_tip_edits_and_shifted_rows():
+    """The full-array PUT can edit any position, so count/tip inference is
+    insufficient. Exact comparison stays sparse for an early in-place edit
+    and expands across every shifted position for an insertion."""
+    before = _msgs(4)
+    edited = [dict(m) for m in before]
+    edited[1]['content'] = 'edited early'
+    assert mr.changed_message_seqs(before, edited) == [1]
+
+    inserted = before[:1] + [
+        {'role': 'assistant', 'content': 'inserted', '_msgId': 'new'}
+    ] + before[1:]
+    assert mr.changed_message_seqs(before, inserted) == [1, 2, 3, 4]
+
+    # Tail removal needs no dirty upsert; _mirror_conv_rows' range DELETE owns
+    # truncation repair.
+    assert mr.changed_message_seqs(before, before[:2]) == []
+
+
 def test_hint_out_of_range_and_truncation_repair(conv_env):
     """Hinted seqs beyond the blob are ignored; rows beyond the blob tail
     are still cleaned even on the hint path."""
@@ -235,8 +254,44 @@ def test_incremental_sequence_keeps_parity(conv_env):
 
     verdict = mr.verify_conv_parity(db, conv_id)
     assert verdict['ok'] is True, f'parity after incremental sequence: {verdict}'
+    assert verdict['mirror_current'] is True
     db_execute_with_retry(db, 'DELETE FROM conversations WHERE id=? AND user_id=1', (conv_id,))
     db.commit()
+
+
+def test_failed_multirow_mirror_rolls_back_the_whole_prefix(conv_env,
+                                                            monkeypatch):
+    """A failure on row N must not leave rows 0..N-1 pending for commit.
+
+    The mirror is best-effort, but *partial* best-effort data is unsafe: a
+    later commit can make an equal-count, mixed-version transcript durable.
+    The savepoint makes one mirror attempt all-or-nothing without touching the
+    authoritative conversation transaction.
+    """
+    from lib.database import _core_schema
+
+    db, conv_id = conv_env
+    original = _msgs(3)
+    mr.backfill_conv(db, conv_id, original)
+    real_upsert = _core_schema.upsert
+    calls = 0
+
+    def _fail_second(db_arg, table, row, **kwargs):
+        nonlocal calls
+        if getattr(table, 'name', '') == 'conversation_messages':
+            calls += 1
+            if calls == 2:
+                raise RuntimeError('injected row-2 failure')
+        return real_upsert(db_arg, table, row, **kwargs)
+
+    monkeypatch.setattr(_core_schema, 'upsert', _fail_second)
+    edited = [dict(m, content=f'edited-{i}') for i, m in enumerate(original)]
+    assert mr.dual_write_conv(
+        db, conv_id, edited, changed_seqs=[0, 1, 2]) is False
+    db.commit()  # would make a leaked prefix durable in the pre-fix shape
+    assert _row_contents(db, conv_id) == {
+        0: 'msg 0 ', 1: 'msg 1 ', 2: 'msg 2 ',
+    }
 
 
 # ── 4. Duplicate _msgId robustness (the pt_97f32163 incident shape) ───────

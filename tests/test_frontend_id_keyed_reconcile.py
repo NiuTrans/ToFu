@@ -43,11 +43,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = runtime_sections_dir()
 ESCAPE_HTML = os.path.join(JS_DIR, 'core', 'escape_html.js')
 SAFE_HTML = os.path.join(JS_DIR, 'core', 'safe_html.js')
 CHAT_RENDER = os.path.join(JS_DIR, 'ui', 'chat_render.js')
@@ -277,6 +279,36 @@ for (const el of nodes) {
 }
 check('body_matches_identity', bodyMismatch === null, bodyMismatch || '');
 
+// ── 4) V2 ACK replaces the optimistic id-less turn projection. The old
+//       optimistic DOM node must not survive beside the authoritative human
+//       and assistant turns, and live action lookup must resolve by turnId. ──
+const inner = win.document.getElementById('chatInner');
+inner.innerHTML = '';
+conv.messages = [mkMsg('tmp-user', 'user', 'optimistic question')];
+renderChat(conv, true);
+check('v2_optimistic_seeded', domNodes().length === 1);
+
+conv.messages = [
+  { role:'user', _turnId:'turn-user', _turnStatus:'completed',
+    _projectionRevision:1, content:'authoritative question' },
+  { role:'assistant', _turnId:'turn-assistant', _turnStatus:'completed',
+    _projectionRevision:2, content:'authoritative answer' },
+];
+__W.from = 0; __W.to = Infinity; __W.convId = null;
+renderChat(conv, false);
+const v2Nodes = domNodes();
+const v2TurnIds = v2Nodes.map(el => el.getAttribute('data-turn-id'));
+check('v2_ack_removes_optimistic_node', v2Nodes.length === 2,
+  'got=' + v2Nodes.length + ' turns=' + v2TurnIds.join(','));
+check('v2_ack_has_only_authoritative_turns',
+  v2TurnIds.join(',') === 'turn-user,turn-assistant',
+  'got=' + v2TurnIds.join(','));
+check('v2_ack_has_no_identityless_message',
+  v2Nodes.every(el => !!el.getAttribute('data-turn-id')));
+check('v2_live_action_index_uses_turn_id',
+  win._msgElIndex(v2Nodes[0]) === 0,
+  'got=' + win._msgElIndex(v2Nodes[0]));
+
 console.log(out.join('\n'));
 process.exit(0);
 """
@@ -330,7 +362,11 @@ def test_id_keyed_reconcile_survives_mid_history_insert():
                 'dom_order_matches_array', 'body_matches_identity',
                 'reused_c_state_preserved', 'reused_d_state_preserved',
                 'reused_is_same_node_object', 'reused_id_restamped',
-                'positional_id_preserved'):
+                'positional_id_preserved',
+                'v2_ack_removes_optimistic_node',
+                'v2_ack_has_only_authoritative_turns',
+                'v2_ack_has_no_identityless_message',
+                'v2_live_action_index_uses_turn_id'):
         assert lines.get(key) == 'PASS', f'{key} not PASS:\n{output}'
 
 

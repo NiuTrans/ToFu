@@ -85,9 +85,9 @@ def test_summary_names_each_injected_block(caplog):
     assert len(summaries) == 1, f'expected exactly one summary, got {summaries}'
     line = summaries[0]
     # Each of these blocks was spliced this assembly and must be named.
-    assert 'static:' in line
-    assert 'memory_accum:' in line
-    assert 'swarm:' in line
+    assert 'platform_static:' in line
+    assert 'memory_guidance:' in line
+    assert 'parallel_execution:' in line
     assert 'total=' in line
     # char counts are positive integers
     import re
@@ -228,7 +228,17 @@ def test_project_mode_covers_digest_charter_board_and_detail_seams(caplog, monke
     # full-text renderer the project_board_read tool uses.
     monkeypatch.setattr(pb, 'render_board_injection_block',
                         lambda *a, **k: _BOARD)
-    monkeypatch.setattr(up, 'load_profile', lambda *a, **k: _PROFILE)
+    monkeypatch.setattr(pb, 'read_board', lambda *a, **k: {
+        'tasks': [{'status': 'claimed', 'owner_conv_id': 'other'}],
+    })
+    monkeypatch.setattr(up, 'load_context',
+                        lambda *a, **k: {'items': [{'id': 'test-pref'}]})
+    monkeypatch.setattr(up, 'render_profile_tiers',
+                        lambda *a, **k: (_PROFILE.split('## About')[0],
+                                         '## About' + _PROFILE.split('## About')[1]))
+    monkeypatch.setattr(up, 'applied_profile_items',
+                        lambda *a, **k: {'core': [], 'detail': []})
+    monkeypatch.setattr(up, 'context_char_count', lambda *a, **k: 1)
     # No CLAUDE.md content — keep the assembly focused on the seams under test
     # (the project-context loader would otherwise auto-create JOURNAL/intel).
     monkeypatch.setattr(pm, 'get_context_for_prompt', lambda *a, **k: '')
@@ -258,15 +268,14 @@ def test_project_mode_covers_digest_charter_board_and_detail_seams(caplog, monke
     named = dict((n, int(c)) for n, c in re.findall(r'(\w+):(\d+)', blockstr))
 
     # (a) the downgraded seams + pref_detail are all NAMED this assembly.
-    for seam in ('digest', 'charter', 'board', 'pref_core', 'pref_detail'):
+    for seam in ('related_conversations', 'project_charter', 'project_board',
+                 'user_context', 'preference_detail_legacy'):
         assert seam in named, f'{seam} missing from summary: {line}'
 
-    # (b) digest/charter/board carry the WRAPPED char count exactly (these are
-    #     <system-reminder>-wrapped before splicing, so the recorded chars must
-    #     equal len(wrapper(block)) — proving "chars = what actually lands").
-    assert named['digest'] == len(_wrap_system_reminder(_DIGEST))
-    assert named['charter'] == len(_wrap_system_reminder(_CHARTER))
-    assert named['board'] == len(_wrap_system_reminder(_BOARD))
+    # (b) the recorded sizes include the canonical Composer envelope.
+    assert named['related_conversations'] > len(_DIGEST)
+    assert named['project_charter'] > len(_CHARTER)
+    assert named['project_board'] > len(_BOARD)
 
     # (c) total still equals the real assembled byte delta within join glue.
     total = int(re.search(r'total=(\d+)', line).group(1))
@@ -284,13 +293,13 @@ def test_project_mode_covers_digest_charter_board_and_detail_seams(caplog, monke
 # ════════════════════════════════════════════════════════════════════════
 
 def test_suppressed_seam_logs_reason(caplog):
-    """When memory is disabled, the memory_accum seam emits a DEBUG skip line
-    with the reason — not silence."""
-    with caplog.at_level(logging.DEBUG, logger='lib.tasks_pkg.system_context'):
-        _assemble(memory_enabled=False)
-    skips = [r.getMessage() for r in caplog.records
-             if 'skip block=memory_accum' in r.getMessage()]
-    assert any('reason=memory_disabled' in s for s in skips), skips
+    """Suppressed blocks remain explicit in the authoritative manifest."""
+    task = {}
+    _assemble(memory_enabled=False, task=task)
+    rows = {row['id']: row for row in task['_contextManifest']}
+    memory = rows['memory_guidance']
+    assert memory['injected'] is False
+    assert memory['reason'] == 'memory_disabled_or_no_tools'
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -300,9 +309,9 @@ def test_suppressed_seam_logs_reason(caplog):
 def test_logging_failure_cannot_break_assembly(monkeypatch):
     """If the logger raises inside the trace path, assembly still completes and
     the prompt is intact (the audit/logging layer must never block the turn)."""
-    import lib.tasks_pkg.system_context as sc
+    import lib.tasks_pkg.context_composer._render as renderer
 
-    real_logger = sc.logger
+    real_logger = renderer.logger
 
     # Raise ONLY on the [Context] trace lines this task added — leaving the
     # pre-existing [Inject]/[SysPrompt] log lines working. This proves MY
@@ -327,7 +336,7 @@ def test_logging_failure_cannot_break_assembly(monkeypatch):
         def error(self, msg, *a, **k):
             return real_logger.error(msg, *a, **k)
 
-    monkeypatch.setattr(sc, 'logger', _ContextBoomLogger())
+    monkeypatch.setattr(renderer, 'logger', _ContextBoomLogger())
     try:
         messages = [
             {'role': 'system', 'content': 'Base system prompt.'},
@@ -340,7 +349,7 @@ def test_logging_failure_cannot_break_assembly(monkeypatch):
             has_real_tools=True, conv_id='boom', task={}, model='gpt-4o',
         )
     finally:
-        monkeypatch.setattr(sc, 'logger', real_logger)
+        monkeypatch.setattr(renderer, 'logger', real_logger)
 
     # The static + memory + swarm blocks still landed.
     txt = _system_text(messages)

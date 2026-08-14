@@ -34,11 +34,17 @@ Design invariants (owner-locked 2026-07-08; see docs/PROJECT_BRAIN_STATUS_LANE.m
 from __future__ import annotations
 
 import json
+import queue
 import threading
 import time
 import uuid
 
-from lib.database import DOMAIN_CHAT, get_thread_db
+from lib.database import (
+    DOMAIN_CHAT,
+    allocate_scoped_sequence,
+    pooled_db,
+    write_transaction,
+)
 from lib.log import audit_log, get_logger
 from lib.timeutil import now_ms
 
@@ -50,10 +56,6 @@ _SNAPSHOTS_KEEP = 200
 
 # Bounded narrative so a snapshot row stays cheap to store + render.
 _NARRATIVE_MAX_CHARS = 2400
-
-# Serializes the read-max-then-insert of the per-project monotonic seq so two
-# concurrent writers for the SAME project can't mint the same (path, seq) PK.
-_snapshot_lock = threading.Lock()
 
 _SYSTEM_PROMPT = (
     'You are the status synthesizer for a software project that multiple AI '
@@ -76,6 +78,101 @@ _SYSTEM_PROMPT = (
 
 
 _now_ms = now_ms
+
+
+# Event-driven status refreshes are intentionally asynchronous, but a raw
+# ``Thread(...).start()`` per charter commit turns a burst into an unbounded
+# number of simultaneous LLM calls.  Keep a small process-wide worker lane and
+# coalesce by project: one project has at most one active synthesis, and a
+# change that arrives during it causes one follow-up pass over the newest
+# state.  Different projects still make bounded progress in parallel.
+_BACKGROUND_WORKERS = 2
+_background_queue: queue.Queue[str] = queue.Queue()
+_background_lock = threading.Lock()
+_background_jobs: dict[str, dict] = {}
+_background_started = False
+
+
+def _background_worker() -> None:
+    while True:
+        project_path = _background_queue.get()
+        try:
+            while True:
+                with _background_lock:
+                    state = _background_jobs.get(project_path)
+                    if state is None:
+                        break
+                    trigger = state['trigger']
+                    force = bool(state['force'])
+                    state['running'] = True
+                    state['dirty'] = False
+                    state['force'] = False
+                try:
+                    _build_status_snapshot_blocking(
+                        project_path, trigger=trigger, force=force)
+                except Exception as exc:
+                    # The blocking builder is already fail-soft, but the lane
+                    # must survive an unexpected regression in that contract.
+                    logger.warning(
+                        '[ProjStatus] background worker failed proj=%.40r: %s',
+                        project_path, exc, exc_info=True)
+                with _background_lock:
+                    state = _background_jobs.get(project_path)
+                    if state is not None and state['dirty']:
+                        continue
+                    _background_jobs.pop(project_path, None)
+                    break
+        finally:
+            _background_queue.task_done()
+
+
+def _ensure_background_workers_locked() -> None:
+    global _background_started
+    if _background_started:
+        return
+    for index in range(_BACKGROUND_WORKERS):
+        threading.Thread(
+            target=_background_worker,
+            name=f'projstatus-worker-{index + 1}',
+            daemon=True,
+        ).start()
+    _background_started = True
+
+
+def _schedule_background_snapshot(project_path: str, *, trigger: str,
+                                  force: bool) -> None:
+    """Coalesce one non-blocking refresh into the bounded worker lane."""
+    enqueue = False
+    with _background_lock:
+        _ensure_background_workers_locked()
+        state = _background_jobs.get(project_path)
+        if state is None:
+            _background_jobs[project_path] = {
+                'trigger': trigger,
+                'force': bool(force),
+                'running': False,
+                'dirty': False,
+            }
+            enqueue = True
+        else:
+            state['trigger'] = trigger
+            state['force'] = bool(state['force'] or force)
+            if state['running']:
+                state['dirty'] = True
+    if enqueue:
+        _background_queue.put(project_path)
+
+
+def _wait_for_background_status(timeout: float = 5.0) -> bool:
+    """Wait until the status lane is idle; lifecycle/test diagnostic seam."""
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while time.monotonic() < deadline:
+        with _background_lock:
+            if not _background_jobs:
+                return True
+        time.sleep(0.01)
+    with _background_lock:
+        return not _background_jobs
 
 
 def collect_pillar_state(project_path: str) -> dict:
@@ -296,12 +393,12 @@ def _read_latest_snapshot(project_path: str) -> dict | None:
     if not project_path:
         return None
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT project_path, seq, snapshot_id, narrative, pillar_state, '
-            '       trigger, ts FROM project_status_snapshots '
-            'WHERE project_path=? ORDER BY seq DESC LIMIT 1',
-            (project_path,)).fetchone()
+        with pooled_db(DOMAIN_CHAT) as db:
+            row = db.execute(
+                'SELECT project_path, seq, snapshot_id, narrative, pillar_state, '
+                '       trigger, ts FROM project_status_snapshots '
+                'WHERE project_path=? ORDER BY seq DESC LIMIT 1',
+                (project_path,)).fetchone()
     except Exception as e:
         logger.debug('[ProjStatus] latest read failed proj=%.40r: %s',
                      project_path, e)
@@ -335,12 +432,12 @@ def read_status_history(project_path: str, limit: int = 30) -> dict:
         return out
     limit = max(1, min(int(limit or 30), _SNAPSHOTS_KEEP))
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        rows = db.execute(
-            'SELECT project_path, seq, snapshot_id, narrative, pillar_state, '
-            '       trigger, ts FROM project_status_snapshots '
-            'WHERE project_path=? ORDER BY seq DESC LIMIT ?',
-            (project_path, limit)).fetchall()
+        with pooled_db(DOMAIN_CHAT) as db:
+            rows = db.execute(
+                'SELECT project_path, seq, snapshot_id, narrative, pillar_state, '
+                '       trigger, ts FROM project_status_snapshots '
+                'WHERE project_path=? ORDER BY seq DESC LIMIT ?',
+                (project_path, limit)).fetchall()
     except Exception as e:
         logger.warning('[ProjStatus] history read failed proj=%.40r: %s',
                        project_path, e)
@@ -362,24 +459,21 @@ def _persist_snapshot(project_path: str, narrative: str, pillar_state: dict,
         logger.debug('[ProjStatus] pillar_state dump failed, defaulting: %s', e)
         pillar_json = '{}'
     try:
-        with _snapshot_lock:
-            db = get_thread_db(DOMAIN_CHAT)
-            row = db.execute(
-                'SELECT COALESCE(MAX(seq), 0) AS m FROM project_status_snapshots '
-                'WHERE project_path=?', (project_path,)).fetchone()
-            seq = (row['m'] if row and row['m'] is not None else 0) + 1
-            db.execute(
-                'INSERT INTO project_status_snapshots '
-                '(project_path, seq, snapshot_id, narrative, pillar_state, '
-                ' trigger, ts) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                (project_path, seq, snapshot_id, narrative, pillar_json,
-                 trigger or 'manual', ts))
-            if seq > _SNAPSHOTS_KEEP:
+        with pooled_db(DOMAIN_CHAT) as db:
+            with write_transaction(db, label='project-status-append'):
+                seq = allocate_scoped_sequence(
+                    db, 'project_status_snapshots', project_path)
                 db.execute(
-                    'DELETE FROM project_status_snapshots '
-                    'WHERE project_path=? AND seq <= ?',
-                    (project_path, seq - _SNAPSHOTS_KEEP))
-            db.commit()
+                    'INSERT INTO project_status_snapshots '
+                    '(project_path, seq, snapshot_id, narrative, pillar_state, '
+                    ' trigger, ts) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    (project_path, seq, snapshot_id, narrative, pillar_json,
+                     trigger or 'manual', ts))
+                if seq > _SNAPSHOTS_KEEP:
+                    db.execute(
+                        'DELETE FROM project_status_snapshots '
+                        'WHERE project_path=? AND seq <= ?',
+                        (project_path, seq - _SNAPSHOTS_KEEP))
     except Exception as e:
         logger.warning('[ProjStatus] persist failed proj=%.40r: %s',
                        project_path, e)
@@ -419,11 +513,8 @@ def build_status_snapshot(project_path: str, *, trigger: str = 'manual',
 
     if not blocking:
         cached = _read_latest_snapshot(project_path)
-        threading.Thread(
-            target=_build_status_snapshot_blocking,
-            args=(project_path,), kwargs={'trigger': trigger, 'force': force},
-            name=f'projstatus-{project_path[-8:]}', daemon=True,
-        ).start()
+        _schedule_background_snapshot(
+            project_path, trigger=trigger, force=force)
         return cached
 
     return _build_status_snapshot_blocking(project_path, trigger=trigger,

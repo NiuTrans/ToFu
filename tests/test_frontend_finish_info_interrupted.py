@@ -32,11 +32,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_FILE = os.path.join(ROOT, 'static', 'js', 'ui', 'finish_info.js')
+JS_FILE = runtime_section_path('ui/finish_info.js')
 
 _FN_START = 'function renderFinishInfo(msg, isLiveTail) {'
 _FN_END = '  if (parts.length === 0) return "";\n  return `<div class="message-finish">${parts.join("")}</div>`;\n}'

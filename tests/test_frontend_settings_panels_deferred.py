@@ -13,7 +13,7 @@ Census (2026-08-01, grep-verified):
   * BOOT WIRING (deferral hazards, fixed in the same slice):
       - update.js ran its version check off `window 'load'` — a deferred
         module lands AFTER load fired, so the listener would never run.
-        Converted to _onReady (feature-loader.js, core).
+        Converted to _onReady (feature-bridge.js, core).
       - timer.js `_startTimerPolling()` + optimizer.js
         `_startOptimizerPolling()` / badge-bind IIFE run top-level — they
         self-arm whenever the feature bundle lands (idle prefetch ~2s),
@@ -23,7 +23,7 @@ Census (2026-08-01, grep-verified):
     real function then CLOBBERs the wrapper when the bundle lands
     (mobile bottom-sheet behaviour lost). Fix: the wrap is re-runnable +
     identity-tracked and re-runs on 'tofu:feature-bundle-loaded'
-    (dispatched by feature-loader.js); a pre-land mobile open kicks the
+    (dispatched by feature-bridge.js); a pre-land mobile open kicks the
     load and fills the sheet on resolve.
   * skills_install.js (stays core) called _populateSkillsTab BARE after
     a zip install — typeof-gated here (install succeeds regardless).
@@ -47,7 +47,7 @@ pytestmark = pytest.mark.unit
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUNDLER_PY = ROOT / 'lib' / 'js_bundler.py'
 INDEX_HTML = ROOT / 'index.html'
-FEATURE_LOADER = ROOT / 'static' / 'js' / 'feature-loader.js'
+FEATURE_LOADER = ROOT / 'static' / 'js' / 'feature-bridge.js'
 UPDATE_JS = ROOT / 'static' / 'js' / 'update.js'
 SKILLS_INSTALL = ROOT / 'static' / 'js' / 'skills_install.js'
 MOBILE_PANELS = ROOT / 'static' / 'js' / 'mobile_panels.js'
@@ -80,7 +80,7 @@ def test_six_files_in_deferred():
     _bf, deferred, _ep, _crit = _manifest()
     missing = [f for f in PANEL_FILES if f not in deferred]
     assert not missing, (
-        f'{missing} must move to _DEFERRED_FILES — ~123KB of '
+        f'{missing} must move to _CLASSIC_ASSET_FILES — ~123KB of '
         f'user-triggered settings panels out of the render-blocking core')
 
 
@@ -99,14 +99,14 @@ def test_panel_stubs_in_py_table():
     _bf, _df, entry_points, _crit = _manifest()
     missing = [s for s in PANEL_STUBS if s not in entry_points]
     assert not missing, (
-        f'_DEFERRED_ENTRY_POINTS is missing panel stubs: {missing}')
+        f'_FEATURE_ENTRY_POINTS is missing panel stubs: {missing}')
 
 
 def test_panel_stubs_in_loader_table():
     loader = FEATURE_LOADER.read_text()
     missing = [s for s in PANEL_STUBS if f"'{s}'" not in loader]
     assert not missing, (
-        f'feature-loader.js is missing panel stubs: {missing}')
+        f'feature-bridge.js is missing panel stubs: {missing}')
 
 
 def test_internals_not_stubbed():
@@ -143,34 +143,30 @@ def test_mobile_wrap_re_runnable_and_tracked():
     src = MOBILE_PANELS.read_text()
     assert '_wrapPanelToggles' in src, (
         'mobile_panels must factor the toggle wraps into a re-runnable fn')
-    assert 'tofu:feature-bundle-loaded' in src, (
-        'mobile_panels must re-wrap on feature-bundle land — the real '
-        'toggle clobbers the wrapper installed over the stub')
+    assert 'tofu:feature-domain-loaded' in src, (
+        'mobile_panels must re-wrap when the explicit domain owner is ready')
     assert '_capturedImpl' in src and '_installedWrap' in src, (
         'the wrap must be identity-tracked (never double-wrap, never '
         'capture its own wrapper)')
 
 
-def test_feature_loader_dispatches_land_event():
-    loader = FEATURE_LOADER.read_text()
-    assert 'tofu:feature-bundle-loaded' in loader, (
-        'feature-loader must dispatch tofu:feature-bundle-loaded on '
-        'bundle land — mobile_panels re-wraps its captured toggles on it')
+def test_classic_bridge_dispatches_domain_ready_event():
+    loader = (ROOT / 'frontend/src/classic-assets.ts').read_text()
+    assert 'tofu:feature-domain-loaded' in loader
 
 
 def test_mobile_preland_kick():
     src = MOBILE_PANELS.read_text()
-    assert '_loadFeatureBundle()' in src, (
-        'a pre-land mobile open must kick the feature-bundle load and '
-        'fill the sheet on resolve (never an empty dead-end panel)')
+    assert 'window.TofuModules.prepareFeature(name)' in src, (
+        'a pre-ready mobile open must prepare its explicit Vite owner')
+    assert '_loadFeatureBundle' not in src
 
 
 # ---------------------------------------------------------------------------
-# 5. dev-fallback tags (six files keep their index.html script tags)
+# 5. The page shell contains no raw app-script inventory
 # ---------------------------------------------------------------------------
-def test_dev_fallback_script_tags_kept():
+def test_index_has_no_raw_settings_panel_scripts():
     html = INDEX_HTML.read_text()
-    missing = [f for f in PANEL_FILES if f'static/js/{f}' not in html]
-    assert not missing, (
-        f'index.html lost dev-fallback tags for {missing} — deferred '
-        f'modules keep their tags so the dev fallback still loads them')
+    present = [f for f in PANEL_FILES if f'static/js/{f}' in html]
+    assert not present
+    assert '<!-- TOFU_APP_ASSETS -->' in html

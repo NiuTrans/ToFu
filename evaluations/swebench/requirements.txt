@@ -1,0 +1,7 @@
+# Local core: no cloud sandbox SDKs. Re-audit config compatibility and Harbor's
+# SWE-bench parity evidence before
+# changing either pin. Keep this environment separate from Tofu's app venv.
+# Harbor 0.21.0 was not available from the Python index used by our shared
+# hosts when this framework was validated, so pin the audited upstream commit.
+harbor @ git+https://github.com/harbor-framework/harbor.git@ea2fee78517f2e591bad69fcf1e6731f9c23ec99
+swebench==4.1.0

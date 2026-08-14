@@ -42,13 +42,12 @@ def execute_tool(rnd, tc): ...
 
 outcome = run_agent_loop(
     abort=abort,
-    max_tool_rounds=8,        # 第 8+1 轮 tools=None,强制模型给最终答案
     round_tools=MY_TOOLS,
     dispatch=dispatch,
     execute_tool=execute_tool,
     on_round_result=lambda rnd, msg, finish, usage: accumulate(usage),   # 可选
     on_tool_round=lambda rnd, msg: messages.append(assistant_turn(msg)), # 可选
-    retry_bonus=detect_premature_close,  # 可选:流过早关闭时奖励一轮(上限 max_retry_bonus)
+    retry_bonus=detect_premature_close,  # 可选:识别流过早关闭并重试
 )
 
 if outcome.aborted:
@@ -57,6 +56,8 @@ if outcome.aborted:
 
 **契约要点:**
 - `dispatch(rnd, tools)` 返回 `(msg, finish, usage)`;`msg['tool_calls']` 非空则驱动工具执行。
+- `round_tools` 每轮保持可用；没有“工具轮数”超参数。模型返回无工具调用的
+  assistant 消息时自然结束。不要靠末轮撤掉工具来逼模型收束。
 - `execute_tool` 只在「工具间中止检查」通过后被调;它负责发自己的 `tool_start`/`tool_done` 事件并把 `role:'tool'` 消息追加进 messages。
 - 循环**不捕异常**——dispatcher 的 `AbortedError` 原样传播到你的 handler。
 - `AbortSignal` 实例可直接传给 `dispatch_stream(abort_check=signal.is_set)`。
@@ -87,8 +88,8 @@ web_search / fetch_url 工具,**直接复用** `_execute_report_tool`(它复用 
 
 **⚠️ 顺序是 orchestrator 在前、endpoint 在后,这与「成本从低到高」的直觉相反,原因是依赖关系:** endpoint 的 Worker turn 调用的 `_run_single_turn` 定义在 `lib.tasks_pkg.orchestrator` 里——**endpoint 的 dispatch 就是 run_task 本尊**。先迁 endpoint 等于把 1400 行私有循环塞进底盘的 dispatch 钩,两层循环语义嵌套,比任何一种单层都糟,且真正的私有循环一行没少。orchestrator 上了底盘之后,endpoint 的驱动循环(Planner→Worker→Critic)迁移才有意义且近乎机械。
 
-1. ~~swarm 子代理~~ —— **已迁移(2026-07-27,第一个出祖父清单)**。`AbortSignal.from_callback` 直接吃下它的 abort_check 回调;timeout 走底盘新增的 `before_round` halt 缝;并行工具池走底盘新增的 `execute_tools` 批量钩;`tools_terminal_round=False` 保留它「轮轮带工具 + 历史抢救部分答案」的语义。对偶测试 `tests/test_swarm_agent_loop_chassis.py` 六条路径逐条钉。**它就是后续迁移的施工图。**
-2. **主编排器 run_task**(`lib/tasks_pkg/orchestrator/_run.py`,~790L 流式主循环)——阻塞在 ~30-40 个跨迭代 locals 的 `_RoundState` 设计(owner-scoped,前置清点文档 `docs/ROUND_STATE_LOCALS_INVENTORY.md`)。底盘的 `retry_bonus` 机制已为它的 premature-retry 天花板扩展预留了同形接口。
+1. ~~swarm 子代理~~ —— **已迁移(2026-07-27,第一个出祖父清单)**。`AbortSignal.from_callback` 直接吃下它的 abort_check 回调;timeout 走底盘新增的 `before_round` halt 缝;并行工具池走底盘新增的 `execute_tools` 批量钩;每轮都保留工具并在模型不给出工具调用时自然结束。对偶测试 `tests/test_swarm_agent_loop_chassis.py` 六条路径逐条钉。**它就是后续迁移的施工图。**
+2. **主编排器 run_task**(`lib/tasks_pkg/orchestrator/_run.py`,~790L 流式主循环)——跨迭代 locals 已拆入 `_RoundState` 等 seam（前置清点文档 `docs/ROUND_STATE_LOCALS_INVENTORY.md`）；循环持续供给工具，premature close 的重试由流分析器独立约束。
 3. **endpoint 驱动**(`lib/tasks_pkg/endpoint/_run.py`)——**等 2 落地后动工**。届时 Worker turn 已经是底盘调用,驱动循环自身的迁移只剩 Planner/Critic 单发调用的接线。
 
 ## 6.  checklist(提交前自查)

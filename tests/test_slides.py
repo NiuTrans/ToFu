@@ -148,6 +148,19 @@ elements:
         assert 'unsupported shape' in blob
         assert 'columnWidths must sum to 1' in blob
 
+    def test_allow_overlap_must_be_explicit_boolean(self, tmp_path):
+        page = _COVER.replace('elementType: text',
+                              'elementType: text\n    allowOverlap: yes-please', 1)
+        findings = validate_deck(parse_deck(_write_deck(tmp_path, [page])))
+        assert any('allowOverlap must be boolean' in f for f in findings)
+
+    def test_text_fit_mode_is_validated(self, tmp_path):
+        page = _COVER.replace('style: "$title"',
+                              'style: "$title"\n      fit: overflow', 1)
+        findings = validate_deck(parse_deck(_write_deck(tmp_path, [page])))
+        assert any('text fit must be shrink|none|resize' in f
+                   for f in findings)
+
     def test_theme_resolution(self, tmp_path):
         deck = parse_deck(_write_deck(tmp_path, [_COVER]))
         assert pptd.resolve_color('$primary', deck.theme) == '#16283C'
@@ -190,6 +203,16 @@ class TestRichText:
         paras = parse_rich_text('<p><strong>未闭合', {})
         assert paras and '未闭合' in paras[0].runs[0].text
 
+    def test_pretty_printed_sibling_paragraphs_do_not_create_blank_lines(self):
+        from lib.slides.richtext import parse_rich_text
+        paras = parse_rich_text(
+            '<p>澎程不是子品牌,</p>\n'
+            '        <p>是小米汽车旗下平级的</p>\n'
+            '        <p>第二大产品系列。</p>', {})
+        assert len(paras) == 3
+        assert [''.join(r.text for r in p.runs) for p in paras] == [
+            '澎程不是子品牌,', '是小米汽车旗下平级的', '第二大产品系列。']
+
 
 # ── HTML renderer ─────────────────────────────────────────
 
@@ -204,6 +227,8 @@ class TestRenderHtml:
         assert '#16283C' in a               # $primary resolved
         assert '1280px' in a and '720px' in a
         assert '一寸万象' in a
+        assert 'data-element-id="title"' in a
+        assert 'data-allow-overlap="false"' in a
 
     def test_gradient_angle_mapping(self):
         from lib.slides.render_html import _gradient_css
@@ -272,6 +297,63 @@ class TestExportPptx:
             xml = z.read('ppt/slides/slide1.xml').decode()
         assert '<a:ea typeface=' in xml     # CJK font on the ea slot
 
+    def test_text_boxes_are_fixed_shrink_to_fit_with_zero_para_spacing(
+            self, tmp_path):
+        pytest.importorskip('pptx')
+        import zipfile
+        from lib.slides.export_pptx import export_pptx
+        deck = parse_deck(_write_deck(tmp_path, [_COVER]))
+        out = str(tmp_path / 'out.pptx')
+        export_pptx(deck, out)
+        with zipfile.ZipFile(out) as z:
+            xml = z.read('ppt/slides/slide1.xml').decode()
+        assert '<a:normAutofit' in xml
+        assert '<a:spAutoFit' not in xml
+        assert '<a:spcBef><a:spcPts val="0"/></a:spcBef>' in xml
+        assert '<a:spcAft><a:spcPts val="0"/></a:spcAft>' in xml
+
+
+class TestLayoutQA:
+    def test_real_line_rect_collision_overflow_and_escape_hatch(self):
+        from lib.slides.layout_qa import _page_findings
+        records = [
+            {'id': 'overflowing', 'visible': True, 'allowOverlap': False,
+             'outer': {'left': 0, 'top': 0, 'right': 100, 'bottom': 30},
+             'rects': [{'left': 2, 'top': 2, 'right': 120, 'bottom': 24}]},
+            {'id': 'collision', 'visible': True, 'allowOverlap': False,
+             'outer': {'left': 80, 'top': 0, 'right': 180, 'bottom': 30},
+             'rects': [{'left': 82, 'top': 2, 'right': 150, 'bottom': 24}]},
+            {'id': 'decorative', 'visible': True, 'allowOverlap': True,
+             'outer': {'left': 0, 'top': 0, 'right': 180, 'bottom': 30},
+             'rects': [{'left': 0, 'top': 2, 'right': 180, 'bottom': 24}]},
+        ]
+        findings = _page_findings(records, 0, tolerance=1.5)
+        kinds = [f['type'] for f in findings]
+        assert kinds.count('text_overflow') == 1
+        assert kinds.count('text_collision') == 1
+        assert findings[-1]['elements'] == ['overflowing', 'collision']
+
+    def test_powerpoint_metric_reserve_and_later_image_occlusion(self):
+        from lib.slides.layout_qa import _page_findings
+        title = {
+            'id': 'title', 'z': 0, 'visible': True, 'allowOverlap': False,
+            'fontSize': 40,
+            'outer': {'left': 20, 'top': 20, 'right': 500, 'bottom': 120},
+            'rects': [
+                {'left': 20, 'top': 24, 'right': 300, 'bottom': 64},
+                {'left': 20, 'top': 68, 'right': 340, 'bottom': 112},
+            ],
+        }
+        image = {
+            'id': 'hero', 'type': 'image', 'z': 1, 'visible': True,
+            'outer': {'left': 20, 'top': 124, 'right': 500, 'bottom': 400},
+        }
+        findings = _page_findings([title], 0, tolerance=1.5,
+                                  occluders=[image])
+        assert [f['type'] for f in findings] == [
+            'pptx_text_overflow_risk', 'text_image_occlusion_risk']
+        assert findings[-1]['elements'] == ['title', 'hero']
+
 
 # ── Recipe (mocked LLM) ───────────────────────────────────
 
@@ -313,6 +395,9 @@ class TestRecipe:
                     '      text: |\n'
                     '        <p>标题</p>\n'), {}
         monkeypatch.setattr(recipe, '_llm_chat', _llm)
+        monkeypatch.setattr(
+            recipe, '_run_research',
+            lambda ctx: {'cards': [], 'degraded': True, 'reason': 'test'})
         import lib.slides.author as author
         monkeypatch.setattr(author, '_llm',
                             lambda messages, **kw: _llm(messages, **kw))
@@ -323,6 +408,9 @@ class TestRecipe:
         import lib.design_sys.visual_qa as vqa
         monkeypatch.setattr(vqa, 'visual_qa_available',
                             lambda: (False, 'test'))
+        monkeypatch.setattr(
+            "lib.slides._asset_preflight.prepare_deck_assets",
+            lambda *a, **k: {"by_page": {}, "records": [], "findings": []})
 
         out = recipe.build_deck_from_topic('测试主题', str(tmp_path / 'job'))
         assert os.path.isfile(out['pptx_path'])
@@ -351,6 +439,9 @@ class TestRecipe:
                 return outline_json, {}
             return '这不是 YAML: [{{{', {}
         monkeypatch.setattr(recipe, '_llm_chat', _llm)
+        monkeypatch.setattr(
+            recipe, '_run_research',
+            lambda ctx: {'cards': [], 'degraded': True, 'reason': 'test'})
         monkeypatch.setattr(author, '_llm',
                             lambda messages, **kw: _llm(messages, **kw))
         monkeypatch.setattr(recipe, '_run_render',
@@ -358,10 +449,65 @@ class TestRecipe:
         import lib.design_sys.visual_qa as vqa
         monkeypatch.setattr(vqa, 'visual_qa_available',
                             lambda: (False, 'test'))
+        monkeypatch.setattr(
+            "lib.slides._asset_preflight.prepare_deck_assets",
+            lambda *a, **k: {"by_page": {}, "records": [], "findings": []})
         out = recipe.build_deck_from_topic('x', str(tmp_path / 'job'))
         assert os.path.isfile(out['pptx_path'])
         assert out['authored_pages'] == 0   # all fell back — deck survived
         assert out['pages'] == 3
+
+    @pytest.mark.parametrize('improves', [True, False])
+    def test_layout_qa_accepts_only_measured_improvement(
+            self, tmp_path, monkeypatch, improves):
+        from lib.slides import recipe
+        manifest = _write_deck(tmp_path, [_COVER])
+        deck_dir = os.path.dirname(manifest)
+        page_path = os.path.join(deck_dir, 'pages', '01.page')
+        original = open(page_path, encoding='utf-8').read()
+        finding = {
+            'type': 'text_overflow', 'page': 1, 'elements': ['title'],
+            'message': 'page 1: text "title" overflows its bounds',
+        }
+        initial = {'ran': True, 'ok': False, 'findings': [finding],
+                   'pages': [{'index': 0, 'findings': [finding]}]}
+        clean = {'ran': True, 'ok': True, 'findings': [],
+                 'pages': [{'index': 0, 'findings': []}]}
+        measurements = [initial, clean if improves else initial]
+        if not improves:
+            measurements.append(initial)  # remeasure after exact rollback
+
+        import lib.slides.layout_qa as layout_qa
+        monkeypatch.setattr(layout_qa, 'inspect_deck_layout',
+                            lambda deck: measurements.pop(0))
+        import lib.slides.author as author
+        candidate = original.replace('[72, 200, 1136, 120]',
+                                     '[72, 190, 1136, 140]')
+        monkeypatch.setattr(
+            author, 'author_page',
+            lambda *a, **k: {'mode': 'authored', 'yaml': candidate})
+        import lib.slides.render_png as render_png
+        monkeypatch.setattr(render_png, 'render_page_png',
+                            lambda *a, **k: str(tmp_path / 'preview.png'))
+        ctx = {
+            'deck_dir': deck_dir,
+            'lang': 'zh',
+            'model': 'kimi-k3',
+            'artifacts': {
+                'render': {'previews': ['dummy.png']},
+                'outline': {'pages': [{'key_message': '标题'}]},
+                'design': {'theme_id': 'paper-engineer'},
+                'author': {},
+            },
+        }
+        result = recipe._run_layout_qa(ctx)
+        on_disk = open(page_path, encoding='utf-8').read()
+        if improves:
+            assert result['repaired'] == 1
+            assert on_disk == candidate
+        else:
+            assert result['repaired'] == 0
+            assert on_disk == original
 
 
 # ── Runtime / starter contract ────────────────────────────
@@ -372,6 +518,63 @@ class TestRuntimeContract:
         registers — a mismatch means a job you can start but never poll."""
         from lib.slides.runtime import _slides_runtime
         assert _slides_runtime.kind == 'slides-deck'
+
+    def test_task_persists_requested_model(self, tmp_path):
+        from lib.slides.runtime import _new_slides_task, _slides_task_id
+        task = _new_slides_task(
+            _slides_task_id(), topic='小米澎程', workdir=str(tmp_path),
+            lang='zh', style='brand film', max_pages=8, size=(1280, 720),
+            model='kimi-k3')
+        assert task['model'] == 'kimi-k3'
+
+    def test_local_input_images_are_copied_into_deck(self, tmp_path):
+        from lib.slides.recipe import _materialise_input_images
+
+        source = tmp_path / 'outside' / 'hero.png'
+        source.parent.mkdir()
+        source.write_bytes(b'png-ish test bytes')
+        deck_dir = tmp_path / 'job' / 'deck'
+        deck_dir.mkdir(parents=True)
+
+        paths, findings = _materialise_input_images(
+            [str(source), 'https://example.test/reference.png'], str(deck_dir))
+
+        assert findings == []
+        assert paths[0].startswith('media/input_01_')
+        assert (deck_dir / paths[0]).read_bytes() == source.read_bytes()
+        assert paths[1] == 'https://example.test/reference.png'
+
+    def test_missing_local_input_is_omitted_with_finding(self, tmp_path):
+        from lib.slides.recipe import _materialise_input_images
+
+        paths, findings = _materialise_input_images(
+            ['/definitely/missing/hero.png'], str(tmp_path))
+
+        assert paths == []
+        assert len(findings) == 1
+
+    def test_topic_builder_normalises_relative_workdir(self, tmp_path,
+                                                       monkeypatch):
+        from lib.slides import recipe
+
+        seen = {}
+
+        def fake_stages(stages, ctx, **kwargs):
+            seen['workdir'] = ctx['workdir']
+            return {
+                'outline': {'title': 'T', 'scenario': 'brand-creative',
+                            'pages': []},
+                'design': {'theme_id': 'editorial-ink'},
+                'author': {'total': 0, 'authored': 0},
+                'render': {'previews': []},
+                'visual_qa': {},
+                'export': {'pptx_path': str(tmp_path / 'x.pptx'), 'bytes': 0},
+            }
+
+        monkeypatch.setattr(recipe, 'run_stages', fake_stages)
+        recipe.build_deck_from_topic('x', 'relative-slide-job')
+
+        assert os.path.isabs(seen['workdir'])
 
     def test_fallback_page_validates(self, tmp_path):
         from lib.slides.author import fallback_page
@@ -398,6 +601,8 @@ class TestRuntimeContract:
         assert PRODUCE_SLIDES_TOOL['function']['name'] == 'produce_slides'
         assert 'topic' in PRODUCE_SLIDES_TOOL['function']['parameters'][
             'required']
+        assert 'model' in PRODUCE_SLIDES_TOOL['function']['parameters'][
+            'properties']
 
 
 # ── P4: native chart / font embedding / import round-trip ──
@@ -418,6 +623,30 @@ elements:
 
 
 class TestP4:
+    def test_missing_fonttools_degrades_without_runtime_install(
+            self, tmp_path, monkeypatch):
+        """A request must never invoke pip or mutate the serving environment."""
+        import builtins
+
+        from lib.design_sys import fonts as _fonts
+        from lib.slides.export_pptx import _font_file_for_embedding
+
+        font_path = tmp_path / 'font.ttf'
+        font_path.write_bytes(b'fake-font')
+        monkeypatch.setattr(
+            _fonts, 'ensure_font', lambda _font_id, _weight: str(font_path))
+
+        real_import = builtins.__import__
+
+        def _without_fonttools(name, *args, **kwargs):
+            if name == 'fontTools.ttLib':
+                raise ImportError('injected missing dependency')
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, '__import__', _without_fonttools)
+        assert _font_file_for_embedding('missing', 400) == (
+            b'', False, False)
+
     def test_chart_is_native_ooxml(self, tmp_path):
         """A chart element must export as a real OOXML chart part (selectable
         in PowerPoint), not a flattened image."""
@@ -451,6 +680,9 @@ class TestP4:
         out = str(tmp_path / 'out.pptx')
         summary = export_pptx(deck, out)
         assert summary['embeddedFonts'] >= 1
+        assert summary['embeddedFontParts'] == 1
+        assert summary['fontSubsetting'] is True
+        assert summary['embeddedGlyphs'] < 500
         with zipfile.ZipFile(out) as z:
             assert z.testzip() is None
             parts = [n for n in z.namelist() if n.startswith('ppt/fonts/')]
@@ -465,7 +697,7 @@ class TestP4:
         assert pres.index('<p:embeddedFontLst>') > pres.index('<p:notesSz')
         lst = re.search(r'<p:embeddedFontLst>.*?</p:embeddedFontLst>',
                         pres, re.DOTALL).group(0)
-        assert lst.count('<p:regular ') <= 1 and lst.count('<p:bold ') <= 1
+        assert '<p:bold ' in lst and '<p:regular ' not in lst
         # python-pptx must still open the re-zipped package
         from pptx import Presentation
         assert len(Presentation(out).slides) == 1
@@ -475,6 +707,56 @@ class TestP4:
         for n, blob in blobs.items():
             f = TTFont(io.BytesIO(blob))
             assert 'glyf' in f, f'{n} is not a glyf-outline font'
+            cmap = f.getBestCmap()
+            assert all(ord(ch) in cmap for ch in '一寸万象')
+            assert len(f.getGlyphOrder()) < 500
+
+    def test_font_usage_uses_actual_family_and_style_slot(self, tmp_path):
+        """An unused theme face must not embed; a one-source display face
+        used as bold must occupy PowerPoint's bold slot, not regular."""
+        pytest.importorskip('pptx')
+        pytest.importorskip('fontTools')
+        from lib.design_sys import fonts as _fonts
+        if not _fonts.ensure_font('smiley-sans', 400):
+            pytest.skip('smiley sans not staged locally')
+        page = '''pageType: content
+background: {type: solid, color: "$bg"}
+elements:
+  - elementId: display
+    elementType: text
+    bounds: [80, 120, 800, 100]
+    content:
+      fontFamily: "Smiley Sans"
+      fontSize: 48
+      bold: true
+      text: "澎程 A"
+'''
+        theme = {
+            'colors': {'bg': '#FFFFFF'},
+            'textStyles': {
+                'unused': {'fontFamily': 'MiSans', 'fontSize': 20},
+            },
+        }
+        deck = parse_deck(_write_deck(tmp_path, [page], theme=theme))
+        from lib.slides.export_pptx import _collect_font_usage, export_pptx
+        usage = _collect_font_usage(deck)
+        assert set(usage) == {'Smiley Sans'}
+        assert set(usage['Smiley Sans']) == {'bold'}
+        assert set('澎程 A') <= usage['Smiley Sans']['bold']
+
+        import re
+        import zipfile
+        out = str(tmp_path / 'actual-slot.pptx')
+        summary = export_pptx(deck, out)
+        assert summary['embeddedFonts'] == 1
+        assert summary['embeddedFontParts'] == 1
+        with zipfile.ZipFile(out) as z:
+            pres = z.read('ppt/presentation.xml').decode()
+        lst = re.search(r'<p:embeddedFontLst>.*?</p:embeddedFontLst>',
+                        pres, re.DOTALL).group(0)
+        assert 'typeface="Smiley Sans"' in lst
+        assert '<p:bold ' in lst and '<p:regular ' not in lst
+        assert 'MiSans' not in lst
 
     def test_import_round_trip_table_text(self, tmp_path):
         """Export → import: table cell text must survive the loop (the DJI

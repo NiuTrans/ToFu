@@ -41,7 +41,7 @@ SEG_TOOL_RESULT = 'tool_result'
 # never be mistaken for something the user said. It gets a display-only chip and
 # is excluded from every replay projection, exactly like the other three.
 SYNTHETIC_INBOX_MARKERS = ('_inboxInject', '_peerInject', '_userSteerInject',
-                           '_stallNudge')
+                           '_stallNudge', '_programSynthetic')
 
 
 def is_synthetic_inbox_round(round_dict) -> bool:

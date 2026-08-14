@@ -438,8 +438,9 @@ def _ctx(project_enabled: bool):
 
 def test_motion_tools_registered_with_project():
     from lib.tools.registry import assemble_tool_list
-    tools, _ = assemble_tool_list(_ctx(True))
-    names = {t['function']['name'] for t in tools}
+    ctx = _ctx(True)
+    assemble_tool_list(ctx)
+    names = {t['function']['name'] for t in ctx.enabled_tool_catalog}
     from lib.tools.motion_video import MOTION_VIDEO_TOOL_NAMES
     assert MOTION_VIDEO_TOOL_NAMES <= names
 
@@ -666,6 +667,18 @@ def test_concat_narrations_merges_with_pause(monkeypatch, tmp_path):
     assert res['duration'] == pytest.approx(1.0 + 2.0 + 0.25, abs=0.03)
 
 
+def test_concat_narrations_default_does_not_double_pad_scene_timeline(
+        tmp_path):
+    w1 = tmp_path / 'a.wav'
+    w1.write_bytes(_tts_mod.silence_wav_bytes(1.0))
+    w2 = tmp_path / 'b.wav'
+    w2.write_bytes(_tts_mod.silence_wav_bytes(2.0))
+    out = tmp_path / 'narration.wav'
+    res = mv.concat_narrations([str(w1), str(w2)], str(out))
+    assert res['ok']
+    assert res['duration'] == pytest.approx(3.0, abs=0.03)
+
+
 def test_mux_happy_path(monkeypatch, tmp_path):
     video = tmp_path / 'v.mp4'
     video.write_bytes(b'vv')
@@ -704,13 +717,34 @@ def test_mux_requires_audio_track_post_check(monkeypatch, tmp_path):
                         lambda path, **kw: {'codec': 'h264', 'width': 1080,
                                             'height': 1440, 'fps': 30.0,
                                             'duration': 8.0, 'has_audio': False})
-    res = mv.mux_audio_video(str(video), str(audio), str(tmp_path / 'o.mp4'))
+    output = tmp_path / 'o.mp4'
+    output.write_bytes(b'last-good')
+    res = mv.mux_audio_video(str(video), str(audio), str(output))
     assert res['ok'] is False
     assert 'no audio track' in res['detail']
+    assert output.read_bytes() == b'last-good'
+    assert not list(tmp_path.glob('.o.mp4-*.tmp.mp4'))
 
 
 def test_motion_tools_include_p2_tools_with_project():
     from lib.tools.registry import assemble_tool_list
-    tools, _ = assemble_tool_list(_ctx(True))
-    names = {t['function']['name'] for t in tools}
+    ctx = _ctx(True)
+    assemble_tool_list(ctx)
+    names = {t['function']['name'] for t in ctx.enabled_tool_catalog}
     assert {'motion_video_narrate', 'motion_video_mux'} <= names
+
+
+def test_motion_tool_schema_exposes_shared_timeline_and_audio_contracts():
+    from lib.tools.motion_video import MOTION_VIDEO_TOOLS
+
+    tools = {item['function']['name']: item['function']
+             for item in MOTION_VIDEO_TOOLS}
+    concat = tools['motion_video_concat']['parameters']
+    mux = tools['motion_video_mux']['parameters']
+
+    assert 'transitions' in concat['properties']
+    transition = concat['properties']['transitions']['items']
+    assert transition['properties']['duration_s']['maximum'] == 0.8
+    assert 'fade' in transition['properties']['ffmpeg']['enum']
+    assert mux['required'] == ['video', 'output']
+    assert {'audio_plan_path', 'scenes_path'} <= set(mux['properties'])

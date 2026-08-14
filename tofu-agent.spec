@@ -97,7 +97,7 @@ excludes = [
     'onnxruntime', 'onnx',
     # ── The server stack (this is the point of the component) ──
     'server',
-    'quart', 'flask', 'flask_compress', 'jinja2',
+    'quart', 'jinja2',
     'hypercorn', 'cryptography',
     'psycopg2', 'sqlite3',
     'playwright',

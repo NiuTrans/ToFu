@@ -10,7 +10,7 @@ import random
 
 from lib.agent_core.events import EventType, Phase, build_event, emit_phase
 from lib.log import get_logger
-from lib.tasks_pkg.manager import append_event
+from lib.tasks_pkg.manager import append_event, reset_task_text
 
 from lib.tasks_pkg.stream_handler._audit import _maybe_audit_phase_scope
 from lib.tasks_pkg.stream_handler._budget import (
@@ -64,19 +64,21 @@ def _reset_round_to_base(task, round_num):
         _discarded_t = task['thinking']
         _bc = task.get('_round_base_content')
         _bt = task.get('_round_base_thinking')
-        if _bc is not None:
-            task['content'] = _bc
-        if _bt is not None:
-            task['thinking'] = _bt
-        _shrunk = (task['content'] != _discarded_c
-                   or task['thinking'] != _discarded_t)
+    _new_c = _discarded_c if _bc is None else _bc
+    _new_t = _discarded_t if _bt is None else _bt
+    _shrunk = (_new_c != _discarded_c or _new_t != _discarded_t)
     if _shrunk:
         _residue = task.setdefault('_floor_retry_residue', [])
         if len(_residue) < 8:
             _residue.append({'content': _discarded_c,
                              'thinking': _discarded_t})
+        content_epoch = reset_task_text(
+            task, content=_new_c, thinking=_new_t)
+    else:
+        content_epoch = int(task.get('_contentEpoch') or 0)
     append_event(task, build_event(
-        EventType.DELTA_RESET, roundNum=round_num, discard=True))
+        EventType.DELTA_RESET, roundNum=round_num, discard=True,
+        contentEpoch=content_epoch))
 
 
 def analyse_stream_result(
@@ -190,6 +192,42 @@ def analyse_stream_result(
                 'content=%dchars',
                 tid, round_num, model, len(task.get('content') or ''),
             )
+            return result
+
+        # Programmatic Tool Calling may complete its program in one Responses
+        # item and deliver the final assistant message only in the following
+        # response. Persist/replay the opaque program state and continue once;
+        # treating this protocol-defined empty message as EMPTY_STOP would
+        # discard the program result and retry the wrong request.
+        if (usage or {}).get('_program_pending'):
+            from lib.tasks_pkg.orchestrator._programmatic import (
+                admit_program_continuation,
+            )
+            allowed, continuations, continuation_limit = (
+                admit_program_continuation(task, assistant_msg))
+            if allowed:
+                replay = {'role': 'assistant',
+                          'content': assistant_msg.get('content') or ''}
+                for field in ('reasoning_content', '_responses_items',
+                              '_anthropic_content_blocks'):
+                    if assistant_msg.get(field):
+                        replay[field] = assistant_msg[field]
+                messages.append(replay)
+                logger.info(
+                    '[%s] Programmatic tool program completed without final '
+                    'message at round %d — replaying program_output and '
+                    'continuing (%d/%d)', tid, round_num, continuations,
+                    continuation_limit)
+                result['action'] = 'program_continue'
+                return result
+            logger.error(
+                '[%s] Programmatic continuation exceeded %d rounds at round %d; '
+                'ending to prevent a protocol loop', tid, continuation_limit,
+                round_num)
+            result['action'] = 'break'
+            result['last_finish_reason'] = 'abnormal_stop'
+            result['loop_exit_reason'] = (
+                f'program_continuation_exhausted_round_{round_num}')
             return result
 
         # ── Detect PREMATURE STREAM CLOSE / ABNORMAL STOP ──
@@ -477,11 +515,10 @@ def analyse_stream_result(
             #   reducer to clear WITHOUT the tool-round prose-capture guard:
             #   this round issued no tool calls, so there is no batch to
             #   stamp onto and the freeze guard would keep the text forever.
-            with task['content_lock']:
-                task['content'] = ''
-                task['thinking'] = ''
+            content_epoch = reset_task_text(task)
             append_event(task, build_event(
-                EventType.DELTA_RESET, roundNum=round_num, discard=True))
+                EventType.DELTA_RESET, roundNum=round_num, discard=True,
+                contentEpoch=content_epoch))
             emit_phase(task, Phase.RETRYING,
                        attempt=_premature_retry_count,
                        max=_CANNED_GREETING_RETRY_MAX,
@@ -668,12 +705,14 @@ def analyse_stream_result(
         # (content-shape) both structurally miss. Only for a genuine content
         # stop; abort / error / anomaly paths above have already returned.
         _todo_max = _todo_continuation_max()
-        if _todo_max and round_content.strip():
+        if round_content.strip():
             from lib.tools.todo import incomplete_todos, render_todo_list
             _todos = task.get('_todos') or []
             _incomplete = incomplete_todos(_todos)
+            _actionable = [item for item in _incomplete
+                           if item.get('status') != 'blocked']
             _nudges = int(task.get('_todo_continuation_count') or 0)
-            if _incomplete and _nudges < _todo_max:
+            if _actionable and _todo_max and _nudges < _todo_max:
                 task['_todo_continuation_count'] = _nudges + 1
                 messages.append({
                     'role': 'user',
@@ -683,9 +722,11 @@ def analyse_stream_result(
                         f'item(s):\n{render_todo_list(_todos)}\n\n'
                         'Do NOT end your turn yet. Continue working and complete '
                         'ALL items, updating the checklist with todo_write as you '
-                        'go. If an item is genuinely impossible or no longer '
-                        'applies, either remove it or mark it completed with a '
-                        'one-line explanation — then finish.'
+                        'go. If the scope changed, use todo_write operation='
+                        '"replan" with a reason instead of silently deleting '
+                        'unfinished items. If an item is genuinely impossible, '
+                        'mark it blocked and explain the blocker; blocked work '
+                        'settles explicitly as incomplete, never as success.'
                     ),
                 })
                 logger.info(
@@ -700,11 +741,30 @@ def analyse_stream_result(
                                    f'继续执行 ({_nudges + 1}/{_todo_max})…'))
                 result['action'] = 'continue'
                 return result
-            if _incomplete and _nudges >= _todo_max:
+            if _incomplete:
+                # The runaway budget is an automatic-continuation ceiling, not
+                # a success escape hatch. Settle as an explicitly incomplete /
+                # blocked turn so every client keeps Continue available and no
+                # task with declared unfinished work is reported as completed.
+                _only_blocked = not _actionable
+                task['_todo_blocked'] = {
+                    'reason': ('todo_items_blocked' if _only_blocked else
+                               'todo_continuation_budget_exhausted'),
+                    'incomplete': len(_incomplete),
+                    'continuations': _nudges,
+                    'max': _todo_max,
+                    'todos': _incomplete,
+                }
                 logger.warning(
-                    '[%s] 📋 Todo-continuation cap reached (%d/%d) with %d '
-                    'incomplete item(s) — allowing stop to avoid runaway loop',
-                    tid, _nudges, _todo_max, len(_incomplete))
+                    '[%s] 📋 Todo checklist cannot finish: nudges=%d/%d, '
+                    'incomplete=%d, only_blocked=%s — settling as incomplete, '
+                    'never success',
+                    tid, _nudges, _todo_max, len(_incomplete), _only_blocked)
+                result['action'] = 'break'
+                result['last_finish_reason'] = 'incomplete'
+                result['loop_exit_reason'] = (
+                    f'todo_incomplete_budget_exhausted_round_{round_num}')
+                return result
 
         # ── Intent-stall nudge (epic pt_33ba079f5cea4841) ──
         # The model's previous tool call was rejected/errored, and this round
@@ -845,19 +905,22 @@ def analyse_stream_result(
                     _discarded_t = task['thinking']
                     _bc = task.get('_round_base_content')
                     _bt = task.get('_round_base_thinking')
-                    if _bc is not None:
-                        task['content'] = _bc
-                    if _bt is not None:
-                        task['thinking'] = _bt
-                    _shrunk = (task['content'] != _discarded_c
-                               or task['thinking'] != _discarded_t)
+                _new_c = _discarded_c if _bc is None else _bc
+                _new_t = _discarded_t if _bt is None else _bt
+                _shrunk = (_new_c != _discarded_c
+                           or _new_t != _discarded_t)
                 if _shrunk:
                     _residue = task.setdefault('_floor_retry_residue', [])
                     if len(_residue) < 8:
                         _residue.append({'content': _discarded_c,
                                          'thinking': _discarded_t})
+                    content_epoch = reset_task_text(
+                        task, content=_new_c, thinking=_new_t)
+                else:
+                    content_epoch = int(task.get('_contentEpoch') or 0)
                 append_event(task, build_event(
-                    EventType.DELTA_RESET, roundNum=round_num, discard=True))
+                    EventType.DELTA_RESET, roundNum=round_num, discard=True,
+                    contentEpoch=content_epoch))
                 emit_phase(task, Phase.RETRYING,
                            attempt=_premature_retry_count,
                            max=_PREMATURE_RETRY_MAX_CLASSIC,

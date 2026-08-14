@@ -389,7 +389,7 @@ def inject_and_run_task(
     Returns:
         The agentic ``task_id`` on success, or ``None`` on failure.
     """
-    from lib.database import DOMAIN_CHAT, db_execute_with_retry, get_thread_db, json_dumps_pg
+    from lib.database import DOMAIN_CHAT, get_thread_db
     from lib.tasks_pkg import spawn_task
     from lib.tasks_pkg.manager import create_task as create_agentic_task
 
@@ -397,24 +397,16 @@ def inject_and_run_task(
         db = get_thread_db(DOMAIN_CHAT)
 
         # 1. Load conversation ────────────────────────────────────────
-        row = db.execute(
-            'SELECT messages, settings FROM conversations WHERE id=? AND user_id=1',
-            (conv_id,)
-        ).fetchone()
-
-        if not row:
+        from lib.database.conversation_repository import load_conversation
+        snapshot = load_conversation(
+            db, conv_id, metadata_columns=('settings',))
+        if snapshot is None:
             logger.error('%s Conversation %s not found', log_prefix, conv_id)
             return None
+        messages = snapshot.messages
 
         try:
-            messages = json.loads(row['messages'] or '[]')
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.debug('%s Failed to parse conv messages, defaulting to []: %s',
-                         log_prefix, e)
-            messages = []
-
-        try:
-            settings = json.loads(row['settings'] or '{}')
+            settings = json.loads(snapshot.get('settings') or '{}')
         except (json.JSONDecodeError, TypeError) as e:
             logger.debug('%s Failed to parse conv settings, defaulting to {}: %s',
                          log_prefix, e)
@@ -452,38 +444,29 @@ def inject_and_run_task(
         # 4. Write messages back to DB ───────────────────────────────
         from lib.conversations import build_search_text
 
-        messages_json = json_dumps_pg(messages)
         search_text = build_search_text(messages)
         now_ms = int(time.time() * 1000)
-        db_execute_with_retry(db,
-            """UPDATE conversations SET messages=?, updated_at=?, msg_count=?,
-                   search_text=?
-               WHERE id=? AND user_id=1""",
-            (messages_json, now_ms, len(messages),
-             search_text, conv_id)
-        )
-        # Phase 5 dual-write (flag-gated, inert when off): user+assistant append.
-        # Guarded separately: the messages are already committed, so a mirror
-        # failure must not reach this function's `except` and return None —
-        # that would leave the injected turn on disk with NO task ever spawned.
-        try:
-            from lib.database.messages_rows import mirror_write_and_commit
-            mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms)
-        except Exception as _mirror_err:
-            logger.warning('%s row mirror failed (non-fatal, messages already '
-                           'durable): %s', log_prefix, _mirror_err, exc_info=True)
-        from lib.conversations import update_conversation_fts
-        update_conversation_fts(db, conv_id, search_text)
+        from lib.database.conversation_repository import replace_messages
+        write_result = replace_messages(
+            db, conv_id, messages,
+            expected_rev=snapshot['rev'],
+            metadata={
+                'updated_at': now_ms,
+                'msg_count': len(messages),
+                'search_text': search_text,
+            })
+        if not write_result.applied:
+            logger.info('%s Conversation %s advanced during scheduler inject; '
+                        'standing down so the next poll can retry safely',
+                        log_prefix, conv_id)
+            return None
 
         # Event-driven cross-device sync: a proactive/timer turn appended a new
         # user+assistant pair, so push the post-write rev → a sibling tab with
         # this conv open surfaces the new turn without a manual refresh.
         try:
             from lib.conversations import notify_conv_changed as _notify_cc
-            _sch_rev_row = db.execute(
-                'SELECT rev FROM conversations WHERE id=? AND user_id=1',
-                (conv_id,)).fetchone()
-            _notify_cc(conv_id, rev=(_sch_rev_row[0] if _sch_rev_row else None))
+            _notify_cc(conv_id, rev=write_result.rev)
         except Exception as _ne:
             logger.debug('%s conv-changed notify skipped: %s', log_prefix, _ne)
 

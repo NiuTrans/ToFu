@@ -8,7 +8,6 @@
   <a href="https://github.com/rangehow/ToFu/actions/workflows/ci.yml"><img src="https://github.com/rangehow/ToFu/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776ab?logo=python&logoColor=white" alt="Python" />
   <img src="https://img.shields.io/badge/SQLite-3-003B57?logo=sqlite&logoColor=white" alt="SQLite" />
-  <img src="https://img.shields.io/badge/PostgreSQL-18+ (optional)-336791?logo=postgresql&logoColor=white" alt="PostgreSQL optional" />
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
   <img src="https://img.shields.io/badge/platform-Linux%20·%20macOS%20·%20Windows-lightgrey" alt="Platform" />
 </p>
@@ -82,12 +81,38 @@ the browser engine, and starts the server — no flags, no follow-up
 steps. On Linux/macOS the installer uses a fast [uv](https://github.com/astral-sh/uv)
 path (prebuilt wheels, ~1–2 min) and falls back automatically to conda on
 older systems (glibc < 2.28); pass `--use-conda` to force conda. The
-database defaults to **SQLite** (zero-config); add `--with-postgres`
-only if you need PostgreSQL's higher concurrency (100+ users).
+default storage backend is **SQLite** (zero-config, WAL); PostgreSQL is an
+equal, explicit `TOFU_DB_BACKEND=postgres` option. Both run behind the same
+project-local Storage Sidecar, and an unavailable selected backend fails
+closed rather than switching engines. See
+[the storage contract](docs/STORAGE_REDESIGN.md).
+
+For a source checkout, the everyday lifecycle command remains:
+
+```bash
+python server.py
+```
+
+It now starts or contacts the project-local manager and returns once the one
+managed server is ready; running it twice never creates a second instance.
+Use `python serverctl.py status|stop|restart|doctor` for operations and
+`python serverctl.py logs -f` for the console log. A deliberate `stop` stays
+stopped, while crashes and OOM exits are recovered automatically.
+Run `python serverctl.py install` once if this checkout should also recover the
+manager after a host/session restart; the command safely replaces legacy
+`tofu_guard` cron entries without restarting a healthy server.
+For production memory isolation, alert thresholds, backup/restore drills and
+Kubernetes baselines, follow the [reliability runbook](docs/RELIABILITY_RUNBOOK.md).
 
 > Need to pre-set an API key, change the port, or recover from a failed
 > install? See **[docs/INSTALL.md](docs/INSTALL.md)** for all flags and
 > troubleshooting recipes.
+
+> **No root or Docker daemon on a Linux benchmark machine?** The optional
+> [rootless local VM runner](docs/ROOTLESS_VM_SANDBOX.md) builds QEMU entirely
+> below a private user prefix and runs Harbor/Terminal-Bench tasks in disposable
+> TCG guests. Public HTTP(S) can be enabled through its restricted proxy; it
+> never uses a cloud sandbox or mounts the host project into the guest.
 
 ---
 
@@ -106,6 +131,8 @@ Click **⚙️ Settings → 🔗 Providers** and add your API keys. Tofu works w
 | Azure OpenAI | Template available with deployment-specific base URL |
 
 **Multiple keys per provider** — add several API keys and Tofu automatically rotates between them when one hits rate limits. Across providers, the smart dispatcher routes requests based on real-time latency scoring and error-rate tracking.
+
+**Model catalogues stay current automatically** — a template is only the starting metadata. After you save a provider key, Tofu periodically reconciles the configured list with that account's authenticated `/models` catalogue: newly available models appear automatically, while a missing model is removed only after two consecutive successful snapshots. Network errors or empty responses retain the last-good list, and manually added private deployments are pinned. The per-provider switch in Settings opts out; `TOFU_MODEL_CATALOG_SYNC=0` disables the worker globally.
 
 **Local engine auto-discovery** — Tofu probes the canonical loopback ports (Ollama `:11434`, vLLM `:8000`, SGLang `:30000`, plus `$OLLAMA_HOST`) shortly after startup and every 2 minutes. When an engine answers with a non-empty model list it is registered as a normal local provider automatically — health checks and the Settings card work exactly like a manually added one. Deleting an auto-added provider dismisses its port permanently (no zombie re-adding). Set `TOFU_LOCAL_AUTODISCOVER=0` to opt out.
 
@@ -189,6 +216,24 @@ The core experience: pick a model from the dropdown, type a message, get a strea
 1. **Micro-compaction** (zero cost): old tool results are replaced with summaries, keeping only the recent "hot tail"
 2. **Structural truncation**: thinking blocks, oversized arguments, and redundant screenshots are trimmed
 3. **LLM summary** (force-triggered): when context pressure is high, a cheap model evaluates each turn for relevance and compresses accordingly
+
+Agent loops also enforce a **128K-token economic working set** by default, even
+when a model advertises a 1M-token window. This bounds the prompt that is paid
+for and replayed on every tool round; set `compaction.workingSetTokens` per
+request or `TOFU_WORKING_CONTEXT_TOKENS` process-wide (`0` restores the old
+window-only trigger). GPT-5.6 Responses requests additionally use a stable
+hashed cache namespace, an explicit stable-prefix breakpoint, encrypted
+reasoning replay, and stateless server compaction as a safety net.
+
+To evaluate the savings safely, **Settings → Advanced** includes a default-off,
+conversation-sticky **Cost Optimization A/B Experiment**. It compares the
+compatibility baseline (inline MCP schemas, window-only compaction) with the
+current optimized policy, shows each finished turn's arm, and reports
+provider-usage × persisted-price cost, pricing coverage, tokens, cache ratio,
+latency and an error-free completion proxy. Explicit per-request overrides are
+excluded. First enablement is a 10% canary; changing traffic/split for a saved
+experiment requires a new ID so old conversations cannot switch arms.
+Disabling the switch is an immediate rollback.
 
 **When you want to organize your conversations** — create folders in the sidebar to group related threads. Drag conversations between folders, or leave them unfiled.
 
@@ -292,13 +337,12 @@ Point Tofu at any codebase and it becomes a coding assistant that can read, sear
 | `grep_search` | Search across files with ripgrep (regex, context lines, count mode) |
 | `find_files` | Find files by glob pattern |
 | `write_file` | Create or overwrite files |
-| `apply_diff` | Surgical search-and-replace edits (batch mode for multiple edits) |
-| `insert_content` | Add code before/after an anchor without replacing it |
+| `edit_file` | Replace text or insert before/after an anchor; supports mixed batches |
 | `run_command` | Execute shell commands in the project directory |
 
 **When you need to understand a new codebase** — "Give me an overview of this project's architecture." The assistant explores the directory tree, reads key files, and maps out the structure.
 
-**When you need to fix a bug** — "The login page shows a blank screen after submitting." The assistant greps for relevant code, reads the components, identifies the issue, and applies a fix with `apply_diff`.
+**When you need to fix a bug** — "The login page shows a blank screen after submitting." The assistant greps for relevant code, reads the components, identifies the issue, and applies a focused fix with `edit_file`.
 
 **When you want safe experimentation** — every file modification is tracked per-conversation with full undo support. Click the undo button to roll back any changes the assistant made.
 
@@ -460,6 +504,26 @@ When you're reading research papers — arXiv PDFs, conference proceedings, inte
 
 > ⚠️ **Beta:** Paper Reader is actively being iterated on. Feedback welcome on [GitHub Issues](https://github.com/rangehow/ToFu/issues).
 
+#### Default PDF stack and repair
+
+`install.sh` installs the default rich parser as one exact, compatible trio
+(`pymupdf`, `pymupdf_layout`, and `pymupdf4llm`) and runs a real in-memory
+Markdown extraction before declaring the install healthy. Check an existing
+environment with:
+
+```bash
+python scripts/verify_pdf_stack.py
+```
+
+If it reports a missing or mismatched package, reinstall the versions pinned
+in `requirements.txt` together (not `pymupdf4llm` alone), then rerun the check:
+
+```bash
+python -m pip install --upgrade --force-reinstall \
+  "pymupdf==1.27.2.3" "pymupdf_layout==1.27.2.3" "pymupdf4llm==1.27.2.3"
+python scripts/verify_pdf_stack.py
+```
+
 #### Optional: Layout-aware PDF parsing with Docling
 
 The default PDF pipeline (`pymupdf4llm`) does a good job on most papers, but
@@ -500,21 +564,38 @@ Multi-model dispatch cycles across Gemini and GPT image models, automatically re
 
 ---
 
+### 📊 Presentation decks (editable PPTX)
+
+Ask for a deck from a topic and Tofu builds an editable PowerPoint without depending on the Kimi website or editor. The pipeline researches URL-grounded fact cards, plans the whole deck's narrative and layout rhythm, generates required hero visuals before page authoring, renders page previews, reviews both individual pages and a whole-deck contact sheet, then exports native PPTX.
+
+- **Deck-first creative plan** — every page receives a narrative role, a named layout archetype, density, adjacent-page context, and an asset obligation; consecutive content pages cannot silently collapse into the same card template
+- **Grounded and time-aware claims** — decks and topic videos share one evidence kernel: factual topics concurrently search a current-status lane, official-source candidates, and evergreen background; deck freshness is one month while news video uses one week with an evergreen fallback; cards retain publication date, query lane, and research cutoff, cross-host price consensus is separated from single-source snippets, and the same current-fact gate rejects content that ignores or contradicts release/presale/price evidence
+- **Asset-first authoring** — every required editorial image names the exact judgment or visible object it must support, then is generated and cached before a page is written; validation rejects a page that ignores its prepared visual
+- **Whole-deck QA** — a labelled contact sheet checks identity consistency, layout repetition, and asset relevance; per-page VLM review traces every callout line to its visible endpoint so labels cannot point at the wrong object or part; Chromium measures real glyph line boxes with a PowerPoint font-metric reserve, catches overflow, text collisions, and later images covering text, then feeds exact element IDs into a minimal repair loop
+- **Native deliverable** — text, shapes, tables, charts, and images remain editable in PowerPoint/WPS; fixed text bounds default to native shrink-to-fit, source indentation cannot become phantom paragraphs, and fonts are minimally subset-embedded by actual characters and regular/bold/italic slot; later chat instructions can re-author and re-export one page
+
+---
+
 ### 🎬 Motion Video (MG animation)
 
 Turn a subtitle transcript (SRT) into a vertical MG-animated video — Tofu storyboards the transcript into scenes, authors a HyperFrames HTML animation per scene, renders each scene in headless Chrome, and stitches `final.mp4`. No external agent CLIs, no video editor.
 
 **How to use:** Attach a project (Studio), paste an SRT (or a topic to narrate), and ask for a video — e.g. "turn this transcript into a vertical short video". The assistant works under `.tofu/motion_video/<slug>/` and reports the final MP4 path.
 
+- **Source-linked topic scripts** — topic videos use the same time-aware research bundle and current-fact gate as presentation decks; every factual beat keeps its supporting `S#` IDs through `scenes.json`, while the silent end card remains attribution rather than a substitute for shot-level grounding
 - **Deterministic renders** — every frame is computed from its timestamp (seekable GSAP timeline); re-render just one scene and re-concat when a single shot looks off
+- **Structured shot recipes** — every scene gets a renderer-neutral `motion-shot-v1` contract: narrative role, one of 13 proven recipes, motion family, energy, duration range, phase count, resolved-state hold, QA anchors, constraints, signature move, and transition intent; the matching HyperFrames blueprint body is injected before authoring, while adjacent auto-planned shots avoid repeating the same motion grammar
+- **Real overlap transitions** — `motion-timeline-v1` separates spoken content duration from visual handles: push, wipe, and dissolve are real FFmpeg `xfade` overlaps while the final duration, subtitle clock, and narration clock stay unchanged; the scene panel exposes the actual transition and duration
+- **Asset-first scenes** — required subject/diagram briefs name a concrete semantic target (the visible object, part, or relationship that supports the line), are generated and cached before composition authoring, and the quality record flags prepared files that the HTML never uses
+- **Recipe-aware temporal visual QA** — each recipe chooses four meaningful timeline anchors (setup / peak / settle / resolved hold); capture waits for fonts and every image to decode, then the vision reviewer sees the contact sheet with the shot's semantic constraints, exposing blank openings, wrong mid-animation evidence, collisions, and unfinished settles instead of reviewing one arbitrary final frame
 - **Zero-LLM quality gates** — storyboard timeline validation (full coverage, duration sum ±0.1s), HyperFrames lint/validate/inspect before every render, and ffprobe spec checks (resolution / fps / duration / silence) after
 - **Self-bootstrapping toolchain** — `motion_video_env_check` installs the pinned HyperFrames CLI on first use; ffmpeg comes from `imageio-ffmpeg` and ffprobe from a static build (both no-root); Chrome reuses the Playwright cache
 - **Failure classification** — render errors come back categorized (`env_missing` / `lint` / `chrome` / `timeout` / `aborted`) with upstream fix hints instead of raw logs
-- **TTS narration (音画合成)** — `motion_video_narrate` voices each scene from its subtitle text (reusing the podcast chain's TTS slots), audio-led timing extends scenes that need more room, and `motion_video_mux` finishes with loudness-normalized AAC; without a TTS slot the pipeline degrades to silent video instead of failing
-- **Headless API + parallel rendering** — `POST /api/v1/motion/videos` runs the whole pipeline server-side (zero-LLM storyboard + template compositions, bounded-parallel scene renders, dedup-join on repeat requests) and serves the result over Range-enabled `/api/v1/motion/videos/<id>/file` with an aligned sidecar SRT
+- **Professional audio timeline** — `motion_video_narrate` establishes real TTS timing; optional `motion-audio-v1` adds licensed, source-traceable, content-hashed local BGM/SFX at film level, with action-peak, scene-progress, or verified-beat targeting, narration-driven BGM ducking, target loudness, and a delivered attribution manifest; without TTS it can still make a silent or BGM/SFX-only film
+- **Headless API + parallel rendering** — `POST /api/v1/motion/videos` runs the whole pipeline server-side (normalized film plan + per-scene authored compositions, bounded-parallel scene renders, dedup-join on repeat requests) and serves the result over Range-enabled `/api/v1/motion/videos/<id>/file` with an aligned sidecar SRT
 - **Single-scene regen + burn-in** — re-render just one shot and re-assemble (`POST …/scenes/<id>/regen`, stable final URL), list per-scene status (`GET …/scenes`), and optionally hard-burn subtitles (`burn_in: true`, libass, CJK fonts supported)
 - **Paper video abstract** — one call turns a paper report into a short narrated MG video (`POST /api/v1/paper/video/start`, report-gated like the podcast chain)
-- **Paper "Video" tab** — the paper reader's fifth tab: generate card (lang/quality/voice/narration/burn-in), live phase progress, an inline player, and a per-scene grid where every shot has its own preview and a re-render button
+- **Paper "Video" tab** — the paper reader's fifth tab: generate card (lang/quality/voice/narration/burn-in), live phase progress, an inline player, and a per-scene grid where every shot exposes its recipe/energy/real transition beside its preview and re-render button; audio attribution is downloadable, while `GET /api/v1/motion/shot-recipes` and `/audio-contract` expose the shared contracts for future studios and renderer adapters
 - **Deep knowledge packs** — the 29 motion rules, 13 scene blueprints, and 20+ design frame presets from vibe-motion/auto-motion are one click away in Settings → Skills (search "hyperframes")
 
 ---
@@ -532,6 +613,14 @@ When the assistant produces something you'd rather *see* than scroll past — a 
 When you want to connect external tool servers — GitHub, databases, custom APIs — MCP bridges them into Tofu's tool system.
 
 **How it works:** MCP servers run either as local subprocesses (stdio) or as remote HTTP endpoints (`streamable-http` / `sse`), all speaking JSON-RPC 2.0. Tofu translates their tools into OpenAI function-calling format, so the LLM can discover and invoke them alongside native tools.
+
+Large catalogs use **progressive disclosure** automatically: up to 16 MCP tools
+stay inline; above that, the request carries only three stable tools for catalog
+search, read-only calls, and write calls. Search returns the exact schema only
+when needed, while read/write annotations continue to control parallelism and
+approval. Override with `mcpToolExposure=inline|progressive|auto` and
+`mcpInlineToolLimit`, or the matching `TOFU_MCP_TOOL_EXPOSURE` /
+`TOFU_MCP_INLINE_TOOL_LIMIT` environment variables.
 
 **Setup:** Go to **Settings** or configure in `data/config/mcp_servers.json`:
 ```json
@@ -630,9 +719,9 @@ When your team communicates in Feishu and you want AI assistance directly in gro
 
 When the assistant discovers something useful — a bug pattern, a project convention, your preferred coding style — it can save that knowledge as a **memory** for future sessions.
 
-**How it works:** Project-scoped memories are Markdown files stored in `.tofu/memories/` inside your project; global memories (shared across all projects) live in the server-side store `data/memories/global/`. The assistant creates them proactively or when you ask. In future conversations, relevant memories are automatically loaded into context.
+**How it works:** Project-scoped memories are Markdown files stored in `.tofu/memories/` inside your project; global memories (shared across all projects) live in the server-side store `data/memories/global/`. The assistant creates them proactively or when you ask. Each new task runs a local, metadata-only confidence check and can surface at most two strong matches; the assistant can explicitly search the full corpus when needed. Memory retrieval makes no hidden LLM call.
 
-**Tools:** `create_memory`, `update_memory`, `delete_memory`, `merge_memories` — the assistant manages its own knowledge base across sessions.
+**Tools:** `search_memories`, `create_memory`, `update_memory`, `delete_memory`, `merge_memories` — the assistant manages its own knowledge base across sessions. Turning Memory off removes both its prompt context and these tools.
 
 **When to use:** "Remember that our API always returns snake_case" — the assistant saves this convention and applies it in all future code generation for this project.
 
@@ -643,6 +732,8 @@ When the assistant discovers something useful — a bug pattern, a project conve
 When you want to give the assistant reusable, packaged know-how — a set of instructions and helper scripts for a specific task — install a **Skill**.
 
 **How it works:** Skills follow the open Claude / OpenClaw / AgentSkills format (a `SKILL.md` plus optional reference files and scripts). Go to **Settings → Skills** to browse a **Catalog** of recommended packs (e.g. Anthropic's docx / xlsx / pdf / skill-creator skills) and **install with one click**, or **drag-and-drop a local `.zip`**. New installs land in the **global** scope by default (usable in every conversation; the header selector can target the current project instead). Installed skills appear under the **Installed** tab, where you can view files, move them between global/project scope, or uninstall. Bundled `install.sh` scripts are surfaced as hints — never auto-executed.
+
+The model sees only a compact index until a task matches. It then calls `load_skill` with the exact id to disclose the guide for that task. “Enabled” is persistent Settings state; loading is not activation state. Skills are user-installed workflows, while memories are model-authored experience notes.
 
 **Key configuration:** A skill that needs an API key (e.g. FlyAI travel) lists the required env vars on its card — click **Set**, paste the value, done. Values live encrypted in the **credential vault** (`data/config/`, chmod 600, never committed, never exported) and are injected into tool subprocesses automatically — no server restart, no pasting keys into chat. Uninstalling a skill removes its vault keys too.
 
@@ -678,7 +769,7 @@ All configuration is done through the **⚙️ Settings** panel (top-right gear 
 | **📦 Display** | Which models appear in dropdowns, default model, fallback model |
 | **🔍 Search & Fetch** | Result count, timeouts, character limits, blocked domains, content filter |
 | **🌐 Translation** | Machine translation provider (NiuTrans / Custom), API key, endpoint |
-| **🌐 Network** | HTTP/HTTPS proxy, bypass domains |
+| **🌐 Network** | Proxy pool (ordered, scoped: subscription-only / global, automatic failover, credentials vaulted, per-entry connectivity test), bypass domains |
 | **🔀 Subscription Login** | Log in to Claude Pro/Max or ChatGPT and use it as a provider |
 | **🐦 Feishu** | App credentials, default project, allowed users |
 | **🔗 MCP** | Model Context Protocol servers (App-Store catalog + custom) |
@@ -709,6 +800,10 @@ The `.env.example` file documents all supported variables. Key ones:
 | `BIND_HOST` | Bind address | `0.0.0.0` (all interfaces) |
 | `TOFU_AUTH_MODE` | Force auth mode and lock the UI: `open` / `private` / `multi-user` | *(file-driven)* |
 | `TOFU_AUTO_KEY` | Set to `0` to skip first-boot admin-key bootstrap | `1` |
+| `TOFU_MODEL_CATALOG_SYNC` | Keep remote provider model lists current; `0` opts out globally | `1` |
+| `TOFU_WORKING_CONTEXT_TOKENS` | Economic prompt working-set ceiling; `0` disables it | `128000` |
+| `TOFU_MCP_TOOL_EXPOSURE` | MCP schemas: `auto`, `inline`, or `progressive` | `auto` |
+| `TOFU_MCP_INLINE_TOOL_LIMIT` | Maximum MCP catalog size kept inline in `auto` mode | `16` |
 | `TUNNEL_TOKEN` | **DEPRECATED** back-compat shim — use the API-keys system instead | *(disabled)* |
 | `TRADING_ENABLED` | Enable trading module (`1`/`0`) | `0` |
 | `PDF_TEXT_MODE` | Default PDF text-extract strategy: `rich` (pymupdf4llm, default), `structured` (Docling; requires `pip install docling`), `fast` | `rich` |
@@ -730,7 +825,9 @@ The `.env.example` file documents all supported variables. Key ones:
 │   ├── agent_core/            Reusable agent base (run loop, dispatch, TaskRuntime, push, profiles)
 │   ├── llm/                   LLM API client package (build_body / stream / cache / diagnostics)
 │   ├── llm_dispatch/          Multi-key multi-model smart dispatcher
-│   ├── database/              Dual backend — SQLite default, PostgreSQL opt-in via --with-postgres
+│   ├── storage/               storage.v1 client + supervisor (no database drivers)
+│   ├── storage_sidecar/       exclusive SQLite/PostgreSQL driver + transaction owner
+│   ├── database/              repositories migrating to named storage operations
 │   ├── tasks_pkg/             Task orchestration & context compaction
 │   │   ├── orchestrator/      Main LLM ↔ tool loop (package)
 │   │   ├── executor/          Tool execution engine (package)
@@ -742,7 +839,7 @@ The `.env.example` file documents all supported variables. Key ones:
 │   ├── research/             Auto-research pipeline (harvest → survey → ideate)
 │   ├── longform/             Long-form research reports
 │   ├── motion_video/         Motion-graphics video pipeline
-│   ├── production/           Production substrate (stage graph, crash-resume)
+│   ├── production/           Production substrate (stage graph, evidence/content contracts, crash-resume)
 │   ├── tts/                  Text-to-speech / narration
 │   ├── skills/               User-installed skill packages (AgentSkills format)
 │   ├── browser/               Browser extension bridge
@@ -778,8 +875,8 @@ The `.env.example` file documents all supported variables. Key ones:
 | Feature | Linux | macOS | Windows |
 |---|:---:|:---:|:---:|
 | Core chat & tools | ✅ | ✅ | ✅ |
-| SQLite (default, zero-config) | ✅ | ✅ | ✅ |
-| PostgreSQL (opt-in via `--with-postgres`) | ✅ | ✅ | ✅ |
+| SQLite Sidecar backend | ✅ | ✅ | ✅ |
+| PostgreSQL Sidecar backend | ✅ | ✅ | ✅ |
 | Project co-pilot | ✅ | ✅ | ✅ |
 | Shell commands | ✅ | ✅ | ✅ (`cmd.exe`) |
 | Desktop agent | ✅ | ✅ | ✅ |
@@ -803,7 +900,7 @@ python -m pytest tests/test_visual_e2e.py
 # Or via the Makefile (parallelized; tune with JOBS=N)
 make test-unit        # fast unit tier
 make test-api         # API integration tier
-make test-frontend    # jsdom frontend suites
+make test-frontend    # Vite/ESM owner, artifact, and serving contracts
 make test-all         # everything
 ```
 
@@ -820,6 +917,8 @@ Tofu has a tri-state auth model, persisted at `data/config/auth.json` and switch
 | `multi-user` | Same gate as `private`, plus per-user wallets + signup pages | Paid relay station serving many users |
 
 **Default bind is `0.0.0.0`** — the API is reachable from the LAN out of the box (the desktop-agent pairing flow depends on it). Pass `--host 127.0.0.1` or `BIND_HOST=127.0.0.1` to bind loopback only; the packaged desktop app does this for itself. With open-by-default auth mode that means LAN reachability without a token — the boot banner warns loudly in that combination, so switch to `private` mode (Settings → API Keys) on untrusted networks.
+
+**Open-mode throttling is exposure-scoped.** The per-IP anti-hammer cap on expensive surfaces (chat / agent / search / generate) auto-arms at 120 req/min only when `TOFU_OPEN_MODE_ALLOW_REMOTE=1` admits unauthenticated remote peers. A loopback-only personal install ships **uncapped** — the only traffic the bucket could ever see is your own tabs and background polls, and ambient UI reads (task polls, status probes) never count even when the cap is armed. `TOFU_OPEN_MODE_RPM=<n>` overrides in both directions (n>0 arms, `0` disarms). Behind a same-host tunnel every visitor presents as `127.0.0.1`, so an IP cap can't tell you from a stranger there — the protection for that shape is `private` mode or an API key, never IP throttling.
 
 **First-boot bootstrap** (private/multi-user only) — when the api_keys store is empty and `TUNNEL_TOKEN` is unset, Tofu mints one `tofu_admin_<hex>` key on startup, prints the plaintext + a one-shot `?token=<...>` URL to stderr, and writes the plaintext to `data/config/.first_run_token` (chmod 0600). Disable with `TOFU_AUTO_KEY=0`.
 
@@ -867,4 +966,3 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide. Quick version:
 ## License
 
 MIT
-<!-- ci trigger -->

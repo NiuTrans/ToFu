@@ -67,6 +67,8 @@ def test_persist_does_not_mutate_the_sse_event():
     before = json.dumps(ev, sort_keys=True, ensure_ascii=False)
     try:
         append_persistent_event(tid, 0, ev)
+        from lib.tasks_pkg.event_log import flush_pending
+        flush_pending(tid)  # drain before _cleanup so the writer can't re-insert after it
         after = json.dumps(ev, sort_keys=True, ensure_ascii=False)
         assert after == before, (
             'persistence MUTATED the event object — SSE subscribers would '
@@ -94,6 +96,8 @@ def test_stored_row_is_delta_but_reads_back_full():
             {'role': 'tool', 'content': 'T' * 100}]
         append_persistent_event(tid, 0, r1)
         append_persistent_event(tid, 1, r2)
+        from lib.tasks_pkg.event_log import flush_pending
+        flush_pending(tid)  # write-behind lane: drain before asserting rows
 
         db = get_thread_db(DOMAIN_CHAT)
         raw = db.execute(
@@ -203,7 +207,18 @@ def test_neuter_dropping_snapshot_from_tier_list_reaps_it():
                         ['delta', 'messages_snapshot', 'round_usage'])
         from lib.database import DOMAIN_CHAT, get_thread_db
         with neutered_source(_TARGET, fixed, broken) as mod:
-            mod._opportunistic_prune(get_thread_db(DOMAIN_CHAT))
+            db = get_thread_db(DOMAIN_CHAT)
+
+            class _GenericPlan:
+                # The on-disk SQLite partial index was created from the real
+                # policy. A source-only NC cannot migrate that schema, so use
+                # the equivalent generic selector while testing policy.
+                dialect = ''
+
+                def __getattr__(self, name):
+                    return getattr(db, name)
+
+            mod._opportunistic_prune(_GenericPlan())
         left = _types_left(tid)
         assert 'messages_snapshot' not in left, (
             'NC did not take effect — snapshot survived without being in the '

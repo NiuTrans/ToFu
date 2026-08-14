@@ -92,8 +92,8 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
-REDUCER = os.path.join(JS_DIR, 'core', 'conv_state_reducer.js')
+JS_DIR = os.path.join(ROOT, 'frontend', 'src', 'runtime')
+REDUCER = os.path.join(JS_DIR, 'app-runtime.js')
 
 
 def _node_available() -> bool:
@@ -149,6 +149,18 @@ def test_server_rev_strictly_increases_within_process():
             'consecutive mints must strictly increase (got %r then %r); an '
             'equal value is dropped by the strict gate' % (prev, cur))
         prev = cur
+
+
+def test_server_rev_strictly_increases_when_clock_repeats(monkeypatch):
+    """A coarse monotonic clock may legally return the same tick twice."""
+    from lib.agent_core import rev_clock
+
+    monkeypatch.setattr(rev_clock.time, 'monotonic_ns', lambda: 123456789)
+    first = rev_clock._running_task_ids_rev()[0]
+    second = rev_clock._running_task_ids_rev()[0]
+    assert second == first + 1, (
+        'equal monotonic ticks must be disambiguated; otherwise the frontend '
+        'strict-greater gate drops the second state frame')
 
 
 def test_server_rev_survives_restart():
@@ -489,6 +501,7 @@ _HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
 global.window = global;
+global.runtimeScope = global;
 global.debugLog = () => {};
 global.saveConversations = () => {};
 global.activeStreams = new Map();
@@ -501,8 +514,8 @@ function check(name, cond, detail) {
 
 // With `node -e SCRIPT ARG`, the script's own path is absent from argv, so the
 // first user argument lands at argv[1] (NOT argv[2] as in `node file.js ARG`).
-const JS_DIR = process.argv[1];
-(0, eval)(fs.readFileSync(path.join(JS_DIR, 'core/conv_state_reducer.js'), 'utf8'));
+const REDUCER = process.argv[1];
+(0, eval)(fs.readFileSync(REDUCER, 'utf8'));
 
 const M = new Map();
 
@@ -658,8 +671,23 @@ console.log(out.join('\n'));
 
 
 def _run_harness():
-    proc = subprocess.run(['node', '-e', _HARNESS, JS_DIR],
+    source = open(REDUCER, encoding='utf-8').read()
+    marker = '/* ===== migrated source: core/conv_state_reducer.js ===== */'
+    start = source.index(marker)
+    next_marker = source.find('/* ===== migrated source:', start + len(marker))
+    reducer = source[start:next_marker if next_marker >= 0 else len(source)]
+    import tempfile
+    fd, path = tempfile.mkstemp(prefix='_conv_state_reducer_', suffix='.js')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(reducer)
+        proc = subprocess.run(['node', '-e', _HARNESS, path],
                           capture_output=True, text=True, timeout=60)
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
     assert proc.returncode == 0, (
         'harness crashed (rc=%s)\nstdout:\n%s\nstderr:\n%s'
         % (proc.returncode, proc.stdout, proc.stderr))

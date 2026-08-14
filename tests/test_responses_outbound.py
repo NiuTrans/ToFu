@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import time
+import uuid
 
 import pytest
 
@@ -135,6 +136,19 @@ class TestRequestConversion:
             {'model': 'gpt-5.2-codex', 'messages': []}, profile='codex')
         assert out['reasoning'] == {'effort': 'medium', 'summary': 'auto'}
 
+    @pytest.mark.parametrize(('model', 'incoming', 'expected'), [
+        ('gpt-5.4', 'minimal', 'none'),
+        ('gpt-5.4', 'max', 'xhigh'),
+        ('gpt-5.6-sol', 'ultra', 'max'),
+    ])
+    def test_codex_reasoning_normalizes_to_subscription_registry(
+            self, model, incoming, expected):
+        out, _rev = openai_body_to_responses(
+            {'model': model, 'messages': [],
+             'reasoning_effort': incoming},
+            profile='codex', stream=True)
+        assert out['reasoning']['effort'] == expected
+
     def test_assistant_content_and_tool_calls_both_emitted(self):
         """An assistant turn with text AND tool_calls must produce the
         message item AND the function_call items — dropping either half
@@ -206,9 +220,181 @@ class TestRequestConversion:
                             'image_url': 'data:image/png;base64,AA'}
 
     def test_internal_keys_never_leak(self):
-        body = {'model': 'm', 'messages': [], '_task_id': 't123'}
+        body = {'model': 'm', 'messages': [], '_task_id': 't123',
+                '_conv_id': 'c123', '_working_set_tokens': 128000,
+                '_tool_search_mode': 'auto',
+                '_frontend_selected_tool_names': ['x'],
+                '_tool_namespace_by_name': {'x': 'custom'},
+                '_responses_transport': 'websocket',
+                '_reasoning_mode': 'pro', '_text_verbosity': 'high',
+                '_image_detail': 'original',
+                '_multi_agent_mode': 'read_only',
+                '_safety_identifier': 'private',
+                '_responses_feature_profile': 'compatible'}
         out, _rev = openai_body_to_responses(body, profile='default')
         assert '_task_id' not in out
+        assert '_conv_id' not in out
+        assert '_working_set_tokens' not in out
+        assert not any(key.startswith('_') for key in out)
+
+    def test_gpt56_explicit_cache_floor_and_stable_hashed_namespace(self):
+        body = {'model': 'gpt-5.6-sol', '_task_id': 'task-secret',
+                '_responses_feature_profile': 'openai',
+                '_conv_id': 'conversation-secret',
+                '_working_set_tokens': 128000,
+                'messages': [
+                    {'role': 'system', 'content': 'stable instruction'},
+                    {'role': 'user', 'content': 'dynamic question'},
+                ]}
+        out, _rev = openai_body_to_responses(body, profile='default')
+        assert str(uuid.UUID(out['prompt_cache_key'])) == out['prompt_cache_key']
+        assert 'conversation-secret' not in out['prompt_cache_key']
+        marker = out['input'][0]['content'][0]['prompt_cache_breakpoint']
+        assert marker == {'mode': 'explicit'}
+        assert out['context_management'] == [{
+            'type': 'compaction', 'compact_threshold': 128000}]
+        assert 'reasoning.encrypted_content' in out['include']
+        assert out['reasoning']['context'] == 'all_turns'
+
+        same, _ = openai_body_to_responses(dict(body), profile='default')
+        assert same['prompt_cache_key'] == out['prompt_cache_key']
+
+    def test_codex_gpt56_omits_public_only_cache_and_compaction_fields(self):
+        body = {'model': 'gpt-5.6-luna', '_conv_id': 'conversation-secret',
+                '_working_set_tokens': 128000,
+                'messages': [
+                    {'role': 'system', 'content': 'stable instruction'},
+                    {'role': 'user', 'content': 'dynamic question'},
+                ]}
+        out, _rev = openai_body_to_responses(body, profile='codex')
+
+        # Codex CLI's subscription protocol keeps the stable cache namespace
+        # and reasoning replay, but chatgpt.com's Codex backend rejects the
+        # public Responses API's explicit marker on Luna.
+        assert str(uuid.UUID(out['prompt_cache_key'])) == out['prompt_cache_key']
+        assert out['reasoning']['context'] == 'all_turns'
+        assert 'reasoning.encrypted_content' in out['include']
+        assert 'prompt_cache_breakpoint' not in out['input'][0]['content'][0]
+        assert 'context_management' not in out
+
+    def test_gpt56_fields_do_not_leak_to_generic_responses_provider(self):
+        body = {'model': 'deepseek-v4-flash', '_conv_id': 'c',
+                '_working_set_tokens': 128000,
+                'messages': [{'role': 'system', 'content': 'instruction'}]}
+        out, _rev = openai_body_to_responses(body, profile='default')
+        assert 'prompt_cache_key' not in out
+        assert 'context_management' not in out
+        assert 'prompt_cache_breakpoint' not in out['input'][0]['content'][0]
+
+    def test_response_format_maps_to_responses_text_format(self):
+        out, _ = openai_body_to_responses({
+            'model': 'gpt-5.6-sol',
+            '_responses_feature_profile': 'openai',
+            'messages': [{'role': 'user', 'content': 'return json'}],
+            'response_format': {
+                'type': 'json_schema',
+                'json_schema': {
+                    'name': 'answer', 'strict': True,
+                    'schema': {
+                        'type': 'object',
+                        'properties': {'ok': {'type': 'boolean'}},
+                        'required': ['ok'], 'additionalProperties': False,
+                    },
+                },
+            },
+        })
+        assert out['text']['format']['type'] == 'json_schema'
+        assert out['text']['format']['name'] == 'answer'
+        assert out['text']['format']['strict'] is True
+        assert out['text']['format']['schema']['required'] == ['ok']
+        assert 'response_format' not in out
+
+    def test_gpt56_pro_verbosity_safety_and_original_image_detail(self):
+        out, _ = openai_body_to_responses({
+            'model': 'gpt-5.6-sol',
+            '_responses_feature_profile': 'openai',
+            'messages': [{'role': 'user', 'content': [
+                {'type': 'text', 'text': 'inspect'},
+                {'type': 'image_url',
+                 'image_url': {'url': 'data:image/png;base64,AA'}},
+            ]}],
+            '_reasoning_mode': 'pro', '_text_verbosity': 'low',
+            '_image_detail': 'original',
+            '_safety_identifier': 'tofu_0123456789abcdef',
+        })
+        assert out['reasoning']['mode'] == 'pro'
+        assert out['text']['verbosity'] == 'low'
+        assert out['safety_identifier'] == 'tofu_0123456789abcdef'
+        image = out['input'][0]['content'][1]
+        assert image['type'] == 'input_image'
+        assert image['detail'] == 'original'
+
+    def test_tool_search_defers_only_non_pinned_catalog(self):
+        tools = [{
+            'type': 'function',
+            'function': {
+                'name': f'tool_{index}', 'description': f'tool {index}',
+                'parameters': {'type': 'object', 'properties': {}},
+            },
+        } for index in range(24)]
+        out, _ = openai_body_to_responses({
+            'model': 'gpt-5.6-sol',
+            '_responses_feature_profile': 'openai',
+            'messages': [{'role': 'user', 'content': 'work'}],
+            'tools': tools, '_tool_search_mode': 'auto',
+            '_frontend_selected_tool_names': ['tool_0', 'tool_1'],
+            '_tool_namespace_by_name': {
+                f'tool_{index}': ('project' if index < 12 else 'automation')
+                for index in range(24)
+            },
+        })
+        assert out['tools'][0] == {'type': 'tool_search'}
+        direct = [tool for tool in out['tools']
+                  if tool.get('type') == 'function']
+        assert {tool['name'] for tool in direct} == {'tool_0', 'tool_1'}
+        assert all('defer_loading' not in tool for tool in direct)
+        namespaces = [tool for tool in out['tools']
+                      if tool.get('type') == 'namespace']
+        assert namespaces and all(len(ns['tools']) <= 10 for ns in namespaces)
+        deferred = [tool for ns in namespaces for tool in ns['tools']]
+        assert len(deferred) == 22
+        assert all(tool['defer_loading'] is True for tool in deferred)
+        assert {tool['name'] for tool in direct + deferred} == {
+            f'tool_{index}' for index in range(24)}
+
+    def test_tool_choice_is_hoisted_out_of_tool_search(self):
+        tools = [{
+            'type': 'function',
+            'function': {'name': f'tool_{index}',
+                         'parameters': {'type': 'object'}},
+        } for index in range(20)]
+        out, _ = openai_body_to_responses({
+            'model': 'gpt-5.6-sol',
+            '_responses_feature_profile': 'openai',
+            'messages': [{'role': 'user', 'content': 'work'}],
+            'tools': tools, '_tool_search_mode': 'auto',
+            'tool_choice': {
+                'type': 'function', 'function': {'name': 'tool_19'}},
+        })
+        direct_names = {tool.get('name') for tool in out['tools']
+                        if tool.get('type') == 'function'}
+        assert 'tool_19' in direct_names
+        assert out['tool_choice'] == {
+            'type': 'function', 'name': 'tool_19'}
+
+    def test_multi_agent_beta_omits_explicit_compaction(self):
+        out, _ = openai_body_to_responses({
+            'model': 'gpt-5.6-sol', '_working_set_tokens': 128000,
+            '_responses_feature_profile': 'openai',
+            '_multi_agent_mode': 'read_only',
+            '_multi_agent_max_concurrent_subagents': 4,
+            'messages': [{'role': 'user', 'content': 'compare modules'}],
+        })
+        assert out['multi_agent'] == {
+            'enabled': True, 'max_concurrent_subagents': 4}
+        assert 'context_management' not in out
+        wire = json.dumps(out['input'], ensure_ascii=False)
+        assert 'Native subagents are read-only analysts' in wire
 
 
 # ──────────────────────────────────────────────────────────────
@@ -223,7 +409,8 @@ class TestSSETranslation:
             _text('你好'), _text('，世界'),
             _completed({'input_tokens': 100, 'output_tokens': 7,
                         'total_tokens': 107,
-                        'input_tokens_details': {'cached_tokens': 64},
+                        'input_tokens_details': {
+                            'cached_tokens': 64, 'cache_write_tokens': 16},
                         'output_tokens_details': {'reasoning_tokens': 3}}),
         ])
         msg, finish, usage = acc.finalize()
@@ -232,7 +419,9 @@ class TestSSETranslation:
         assert usage['prompt_tokens'] == 100
         assert usage['completion_tokens'] == 7
         assert usage['total_tokens'] == 107
-        assert usage['prompt_tokens_details'] == {'cached_tokens': 64}
+        assert usage['prompt_tokens_details'] == {
+            'cached_tokens': 64, 'cache_write_tokens': 16}
+        assert usage['cache_write_tokens'] == 16
         assert usage['completion_tokens_details'] == {'reasoning_tokens': 3}
 
     def test_reasoning_text_delta_maps_to_reasoning_content(self):
@@ -248,6 +437,52 @@ class TestSSETranslation:
         _feed(acc, [_reason_summary('thinking…'), _text('done'), _completed()])
         msg, _f, _u = acc.finalize()
         assert msg['reasoning_content'] == 'thinking…'
+
+    def test_reasoning_summary_parts_get_paragraph_separators(self):
+        """OpenAI summary parts are markdown headlines; without a separator
+        at part boundaries adjacent '**…**' headlines fuse ('**A****B**')."""
+        acc = _acc(ResponsesSSETranslator())
+        _feed(acc, [
+            {'type': 'response.output_item.added',
+             'item': {'type': 'reasoning', 'id': 'rs_1'}},
+            {'type': 'response.reasoning_summary_part.added'},
+            _reason_summary('**Planning the endpoint**'),
+            {'type': 'response.reasoning_summary_part.done'},
+            {'type': 'response.reasoning_summary_part.added'},
+            _reason_summary('**Designing the query**'),
+            {'type': 'response.reasoning_summary_part.done'},
+            _text('done'), _completed()])
+        msg, _f, _u = acc.finalize()
+        assert msg['reasoning_content'] == (
+            '**Planning the endpoint**\n\n**Designing the query**')
+
+    def test_reasoning_part_boundary_never_leading_separator(self):
+        """The FIRST part boundary is a no-op — no leading '\n\n'."""
+        acc = _acc(ResponsesSSETranslator())
+        _feed(acc, [
+            {'type': 'response.reasoning_summary_part.added'},
+            _reason_summary('solo'),
+            _text('done'), _completed()])
+        msg, _f, _u = acc.finalize()
+        assert msg['reasoning_content'] == 'solo'
+
+    def test_second_reasoning_item_also_separated(self):
+        """A response with two reasoning blocks gets the same boundary."""
+        acc = _acc(ResponsesSSETranslator())
+        _feed(acc, [
+            {'type': 'response.output_item.added',
+             'item': {'type': 'reasoning', 'id': 'rs_1'}},
+            {'type': 'response.reasoning_summary_part.added'},
+            _reason_summary('block one'),
+            {'type': 'response.output_item.done',
+             'item': {'type': 'reasoning', 'id': 'rs_1'}},
+            {'type': 'response.output_item.added',
+             'item': {'type': 'reasoning', 'id': 'rs_2'}},
+            {'type': 'response.reasoning_summary_part.added'},
+            _reason_summary('block two'),
+            _text('done'), _completed()])
+        msg, _f, _u = acc.finalize()
+        assert msg['reasoning_content'] == 'block one\n\nblock two'
 
     def test_single_tool_call(self):
         acc = _acc(ResponsesSSETranslator())
@@ -355,6 +590,42 @@ class TestSSETranslation:
         assert msg['content'] == 'ok'
         assert finish == 'stop'
 
+    def test_opaque_reasoning_and_compaction_items_survive_stream(self):
+        reasoning = {'type': 'reasoning', 'id': 'rs_1',
+                     'encrypted_content': 'opaque-reasoning'}
+        compact = {'type': 'compaction', 'id': 'cmp_1',
+                   'encrypted_content': 'opaque-compaction'}
+        acc = _acc(ResponsesSSETranslator(model='gpt-5.6-sol'),
+                   model='gpt-5.6-sol')
+        _feed(acc, [
+            {'type': 'response.output_item.done', 'item': reasoning},
+            _text('done'),
+            {'type': 'response.completed', 'response': {
+                'status': 'completed', 'output': [reasoning, compact],
+                'usage': {'input_tokens': 10, 'output_tokens': 2}}},
+        ])
+        msg, _finish, _usage = acc.finalize()
+        assert msg['_responses_items'] == [reasoning, compact]
+
+    def test_tool_search_and_multi_agent_items_survive_stream(self):
+        searched = {'type': 'tool_search_call', 'id': 'ts_1',
+                    'status': 'completed'}
+        delegated = {'type': 'multi_agent_call', 'id': 'ma_1',
+                     'status': 'completed'}
+        acc = _acc(ResponsesSSETranslator(model='gpt-5.6-sol'),
+                   model='gpt-5.6-sol')
+        _feed(acc, [
+            {'type': 'response.output_item.done', 'item': searched},
+            {'type': 'response.output_item.done', 'item': delegated},
+            _text('done'),
+            {'type': 'response.completed', 'response': {
+                'id': 'resp_1', 'status': 'completed',
+                'output': [searched, delegated],
+                'usage': {'input_tokens': 5, 'output_tokens': 1}}},
+        ])
+        msg, _finish, _usage = acc.finalize()
+        assert msg['_responses_items'] == [searched, delegated]
+
 
 # ──────────────────────────────────────────────────────────────
 #  Non-stream back-conversion
@@ -387,6 +658,15 @@ class TestFromResponses:
         assert tc['function']['name'] == 'read_files'
         assert out['usage']['prompt_tokens_details'] == {'cached_tokens': 11}
 
+    def test_multi_part_summary_joined_with_blank_line(self):
+        out = responses_response_to_openai({
+            'status': 'completed',
+            'output': [{'type': 'reasoning', 'summary': [
+                {'type': 'summary_text', 'text': '**Part one**'},
+                {'type': 'summary_text', 'text': '**Part two**'}]}]})
+        assert out['choices'][0]['message']['reasoning_content'] == (
+            '**Part one**\n\n**Part two**')
+
     def test_failed_status_yields_error_envelope(self):
         out = responses_response_to_openai({
             'status': 'failed',
@@ -401,6 +681,38 @@ class TestFromResponses:
             'output': [{'type': 'message', 'content': [
                 {'type': 'output_text', 'text': 'cut'}]}]})
         assert out['choices'][0]['finish_reason'] == 'length'
+
+    def test_nonstream_opaque_items_are_attached_for_next_turn(self):
+        reasoning = {'type': 'reasoning', 'id': 'rs_1',
+                     'encrypted_content': 'abc'}
+        compact = {'type': 'compaction', 'id': 'cmp_1',
+                   'encrypted_content': 'xyz'}
+        out = responses_response_to_openai({
+            'status': 'completed', 'output': [reasoning, compact]})
+        assert out['choices'][0]['message']['_responses_items'] == [
+            reasoning, compact]
+
+    def test_compaction_replay_prunes_old_dynamic_history(self):
+        compact = {'type': 'compaction', 'id': 'cmp_1',
+                   'encrypted_content': 'opaque'}
+        body = {'model': 'gpt-5.6-sol', '_conv_id': 'c1',
+                '_responses_feature_profile': 'openai',
+                'messages': [
+                    {'role': 'system', 'content': 'stable'},
+                    {'role': 'user', 'content': 'old user turn'},
+                    {'role': 'assistant', 'content': 'old answer'},
+                    {'role': 'assistant', 'content': 'after compact',
+                     '_responses_items': [compact]},
+                    {'role': 'user', 'content': 'new question'},
+                ]}
+        converted, _ = openai_body_to_responses(body, profile='default')
+        assert converted['input'][0]['role'] == 'developer'
+        assert converted['input'][1] == compact
+        wire_text = json.dumps(converted['input'], ensure_ascii=False)
+        assert 'old user turn' not in wire_text
+        assert 'old answer' not in wire_text
+        assert 'after compact' in wire_text
+        assert 'new question' in wire_text
 
 
 # ──────────────────────────────────────────────────────────────
@@ -540,6 +852,21 @@ class TestPrepareRequestGate:
         assert plan.body['temperature'] == 0.3
         assert plan.body['max_output_tokens'] == 64
         assert plan.body['store'] is False
+
+    def test_websocket_and_multi_agent_transport_metadata(self):
+        from lib.llm._sse_core import prepare_request
+        plan = prepare_request({
+            'model': 'gpt-5.6-sol', '_task_id': 'task-ws',
+            '_responses_feature_profile': 'openai',
+            '_responses_transport': 'websocket',
+            '_multi_agent_mode': 'read_only',
+            'messages': [{'role': 'user', 'content': 'compare'}],
+        }, api_key='k', base_url='https://api.openai.com/v1',
+           api_protocol='responses')
+        assert plan.responses_transport == 'websocket'
+        assert plan.responses_state_key == 'task-ws'
+        assert plan.responses_profile == 'default'
+        assert 'responses_multi_agent=v1' in plan.hdrs['OpenAI-Beta']
 
     def test_codex_oauth_slot_uses_codex_profile(self, monkeypatch):
         """oauth='codex' + protocol='responses' → codex profile (instructions,

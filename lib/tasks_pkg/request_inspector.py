@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import json
 
-from lib.database import DOMAIN_CHAT, get_thread_db
+from lib.database import DOMAIN_CHAT, pooled_db
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -130,20 +130,23 @@ def _read_events_uncached(task_id: str) -> list:
     and rounds 7+ all rendered "mirror expired". Structural rows are a few
     per round, so the same cap now spans thousands of rounds.
     """
-    try:
-        db = get_thread_db(DOMAIN_CHAT)
-    except Exception as e:
-        logger.debug('[RequestInspector] thread db unavailable: %s', e)
-        return []
-    from lib.tasks_pkg.event_log import STRUCTURAL_EVENT_TYPES
+    from lib.tasks_pkg.event_log import (
+        STRUCTURAL_EVENT_TYPES, pending_event_rows)
+    # Lane-aware (docs/STORAGE_REDESIGN.md §4): snapshot the write-behind
+    # lane's pending structural rows BEFORE the DB read — a row mid
+    # commit→shadow-pop must not vanish from the inspector for one poll.
+    _pending = [r for r in pending_event_rows(task_id)
+                if r['type'] in STRUCTURAL_EVENT_TYPES
+                or r['type'].startswith('endpoint_')]
     _struct_ph = ','.join(['?'] * len(STRUCTURAL_EVENT_TYPES))
     try:
-        rows = db.execute(
-            'SELECT event_id, type, payload, ts_ms FROM task_events '
-            f'WHERE task_id=? AND (type IN ({_struct_ph}) '
-            "OR type LIKE 'endpoint\\_%' ESCAPE '\\') "
-            'ORDER BY event_id ASC LIMIT 10000',
-            (task_id, *STRUCTURAL_EVENT_TYPES)).fetchall()
+        with pooled_db(DOMAIN_CHAT) as db:
+            rows = db.execute(
+                'SELECT event_id, type, payload, ts_ms FROM task_events '
+                f'WHERE task_id=? AND (type IN ({_struct_ph}) '
+                "OR type LIKE 'endpoint\\_%' ESCAPE '\\') "
+                'ORDER BY event_id ASC LIMIT 10000',
+                (task_id, *STRUCTURAL_EVENT_TYPES)).fetchall()
     except Exception as e:
         logger.warning('[RequestInspector] read failed for task=%s: %s',
                        task_id[:8], e)
@@ -167,6 +170,10 @@ def _read_events_uncached(task_id: str) -> list:
         except (TypeError, ValueError) as e:
             logger.debug('[RequestInspector] row skipped for task=%s: %s',
                          task_id[:8], e)
+    if _pending:
+        seen = {r['event_id'] for r in out}
+        out.extend(r for r in _pending if r['event_id'] not in seen)
+        out.sort(key=lambda r: r['event_id'])
     return _rebuild_snapshot_rows(out)
 
 
@@ -240,6 +247,68 @@ def _est_tokens(messages: list) -> int:
     return max(1, round(chars / 3.5)) if chars else 0
 
 
+def _operation_keys(messages: list, axis: str) -> tuple[set[str], bool]:
+    """Return unique tool-operation keys and whether every key is exact.
+
+    Request/state snapshots are cumulative, so summing calls in every
+    snapshot wildly over-counts a long task. Stable tool-call ids let us fold
+    the snapshots into one set. Stable ids are task-global: the same historical
+    call can appear in planner, worker and state snapshots and must still count
+    once. Legacy/provider messages without ids fall back to their axis plus
+    message/block position; that remains useful but is marked approximate so
+    the UI does not invent precision.
+
+    Both OpenAI-shaped ``assistant.tool_calls`` / ``role=tool`` messages and
+    Anthropic-shaped ``tool_use`` / ``tool_result`` content blocks are read.
+    Result records share the call id and therefore never double-count the
+    matching call.
+    """
+    keys: set[str] = set()
+    exact = True
+
+    def add(call_id, fallback: str) -> None:
+        nonlocal exact
+        if call_id:
+            keys.add(f'id:{call_id}')
+        else:
+            exact = False
+            keys.add(f'legacy:{axis}:{fallback}')
+
+    for msg_idx, msg in enumerate(messages or []):
+        if not isinstance(msg, dict):
+            continue
+        calls = msg.get('tool_calls')
+        if isinstance(calls, list):
+            for call_idx, call in enumerate(calls):
+                call = call if isinstance(call, dict) else {}
+                fn = call.get('function')
+                name = ((fn or {}).get('name') if isinstance(fn, dict)
+                        else call.get('name')) or ''
+                add(call.get('id') or call.get('call_id'),
+                    f'{msg_idx}:call:{call_idx}:{name}')
+
+        # OpenAI tool-result message. It may be the only surviving half after
+        # compaction, so it is also evidence that one operation happened.
+        if msg.get('role') in ('tool', 'function'):
+            add(msg.get('tool_call_id') or msg.get('call_id'),
+                f'{msg_idx}:result')
+
+        content = msg.get('content')
+        if not isinstance(content, list):
+            continue
+        for block_idx, block in enumerate(content):
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get('type')
+            if block_type == 'tool_use':
+                add(block.get('id') or block.get('tool_use_id'),
+                    f'{msg_idx}:use:{block_idx}:{block.get("name") or ""}')
+            elif block_type == 'tool_result':
+                add(block.get('tool_use_id') or block.get('id'),
+                    f'{msg_idx}:result-block:{block_idx}')
+    return keys, exact
+
+
 def fold_request_log(task_id: str) -> dict:
     """Fold a task's persisted events into the Request Inspector rows.
 
@@ -250,12 +319,19 @@ def fold_request_log(task_id: str) -> dict:
     requests = []
     states = []
     attempts: dict[str, list] = {}
+    operation_keys: set[str] = set()
+    operation_count_exact = True
+    operation_count_available = False
     endpoint_seen = False
     for e in events:
         p = e['payload']
         et = e['type']
         if et == _SNAPSHOT:
+            operation_count_available = True
             msgs = p.get('messages') or []
+            op_keys, exact = _operation_keys(msgs, p.get('turn') or 'main')
+            operation_keys.update(op_keys)
+            operation_count_exact = operation_count_exact and exact
             if _snapshot_kind(p) == 'state':
                 states.append({
                     'roundNum': p.get('roundNum'),
@@ -322,6 +398,9 @@ def fold_request_log(task_id: str) -> dict:
         'states': states,
         'eventsAvailable': bool(events),
         'requestCount': len(requests),
+        'operationCount': len(operation_keys),
+        'operationCountAvailable': operation_count_available,
+        'operationCountApproximate': not operation_count_exact,
     }
     if endpoint_seen and not has_turn_tags:
         # Legacy endpoint log: planner/worker/critic rounds share numbers
@@ -378,6 +457,7 @@ def get_request_payload(task_id: str, round_num, turn: str = '',
         'label': p.get('label') or '',
         'messages': p.get('messages') or [],
         'tools': p.get('tools') or [],
+        'contextManifest': p.get('contextManifest') or [],
     }
     # §10.3: a round that could not be exactly reconstructed says so — the
     # UI must never present a partial rebuild as the real request.
@@ -413,12 +493,12 @@ def list_conv_tasks(conv_id: str, limit: int = 15) -> dict:
     except Exception as e:
         logger.debug('[RequestInspector] live registry read failed: %s', e)
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        trs = db.execute(
-            'SELECT task_id, status, created_at, completed_at '
-            'FROM task_results WHERE conv_id=? '
-            'ORDER BY created_at DESC LIMIT ?',
-            (conv_id, limit)).fetchall()
+        with pooled_db(DOMAIN_CHAT) as db:
+            trs = db.execute(
+                'SELECT task_id, status, created_at, completed_at '
+                'FROM task_results WHERE conv_id=? '
+                'ORDER BY created_at DESC LIMIT ?',
+                (conv_id, limit)).fetchall()
         for r in trs:
             tid = _row_get(r, 'task_id', 0)
             if tid in rows:
@@ -442,10 +522,26 @@ def list_conv_tasks(conv_id: str, limit: int = 15) -> dict:
     parent_ids = {t['taskId'] for t in tasks}
     if parent_ids:
         try:
-            db = get_thread_db(DOMAIN_CHAT)
-            like_rows = db.execute(
-                "SELECT DISTINCT task_id FROM task_events "
-                "WHERE task_id LIKE '%#agent:%'").fetchall()
+            # The old leading-wildcard query scanned the entire event table
+            # every time the drawer opened (12M rows / 10 GiB in the live DB).
+            # Child ids have a strict ``{parent}#agent:{id}`` namespace, so
+            # probe only each visible parent's lexicographic prefix range.
+            # Managed PostgreSQL databases use C collation; SQLite's binary
+            # text order has the same property.  The existing
+            # (task_id, type) index then serves this as a bounded index scan.
+            ranges = []
+            range_params = []
+            for parent in sorted(parent_ids):
+                prefix = f'{parent}#agent:'
+                # ':' + 1 == ';': every string beginning with ``prefix`` is
+                # in [prefix, parent#agent;) under the supported collations.
+                ranges.append('(task_id >= ? AND task_id < ?)')
+                range_params.extend((prefix, f'{parent}#agent;'))
+            with pooled_db(DOMAIN_CHAT) as db:
+                like_rows = db.execute(
+                    "SELECT DISTINCT task_id FROM task_events "
+                    "WHERE type='messages_snapshot' AND (" +
+                    ' OR '.join(ranges) + ')', tuple(range_params)).fetchall()
             by_parent = {t['taskId']: t for t in tasks}
             for r in like_rows:
                 cid = _row_get(r, 'task_id', 0)
@@ -467,14 +563,14 @@ def list_conv_tasks(conv_id: str, limit: int = 15) -> dict:
     ids = [t['taskId'] for t in tasks]
     if ids:
         try:
-            db = get_thread_db(DOMAIN_CHAT)
             placeholders = ','.join(['?'] * len(ids))
-            counts = db.execute(
-                "SELECT task_id, json_extract(payload, '$.kind') AS k, "
-                "COUNT(*) AS n FROM task_events "
-                f"WHERE task_id IN ({placeholders}) "
-                "AND type='messages_snapshot' GROUP BY task_id, k",
-                tuple(ids)).fetchall()
+            with pooled_db(DOMAIN_CHAT) as db:
+                counts = db.execute(
+                    "SELECT task_id, json_extract(payload, '$.kind') AS k, "
+                    "COUNT(*) AS n FROM task_events "
+                    f"WHERE task_id IN ({placeholders}) "
+                    "AND type='messages_snapshot' GROUP BY task_id, k",
+                    tuple(ids)).fetchall()
             by_id = {t['taskId']: t for t in tasks}
             for c in counts:
                 row = by_id.get(_row_get(c, 'task_id', 0))

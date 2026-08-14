@@ -15,10 +15,10 @@ the updater (_update_pricing_locked / _do_update_pricing) live here too.
 guarantees they share the same object by reference.
 """
 
-import json
 import re
 import threading
 import time
+import uuid
 
 from lib.log import get_logger
 from lib.http_client import http_get
@@ -31,6 +31,9 @@ logger = get_logger(__name__)
 
 _pricing_lock = threading.Lock()
 _refresh_lock = threading.Lock()  # Guards refresh dedup — acquire(blocking=False) for non-blocking skip
+_refresh_owner_lock = threading.Lock()
+_refresh_stop = threading.Event()
+_refresh_thread = None
 _pricing_data = {
     'model': '', 'inputPrice': 15.0, 'outputPrice': 75.0,  # model populated at runtime
     'cacheWriteMul': 1.25, 'cacheReadMul': 0.10,
@@ -38,6 +41,11 @@ _pricing_data = {
     'pricingUpdated': 0, 'pricingSource': 'default',
     'exchangeRateSource': 'none', 'onlineMatchedModel': None,
 }
+
+
+def _storage(*, write: bool = False):
+    from lib.storage import get_storage_client
+    return get_storage_client(write=write)
 
 # ══════════════════════════════════════════════════════
 #  Public API
@@ -50,16 +58,52 @@ def get_pricing_data():
 
 
 def refresh_pricing_async():
-    """Trigger a background pricing refresh. Non-blocking, deduped."""
+    """Trigger the single owned pricing refresh worker, without blocking."""
+    global _refresh_thread
     if not _refresh_lock.acquire(blocking=False):
         logger.debug('[Pricing] Refresh already in progress — skipping duplicate request')
         return
+    thread = None
     try:
-        threading.Thread(target=_update_pricing_locked, daemon=True).start()
+        with _refresh_owner_lock:
+            _refresh_stop.clear()
+            thread = threading.Thread(
+                target=_update_pricing_locked,
+                daemon=True,
+                name='pricing-refresh',
+            )
+            _refresh_thread = thread
+            thread.start()
     except Exception:
         logger.error('[Pricing] Failed to start pricing refresh thread', exc_info=True)
+        with _refresh_owner_lock:
+            if thread is not None and _refresh_thread is thread:
+                _refresh_thread = None
         _refresh_lock.release()
         raise
+
+
+def stop_pricing_refresh(timeout=2.0):
+    """Signal and bounded-join an in-flight refresh during app shutdown."""
+    global _refresh_thread
+    _refresh_stop.set()
+    with _refresh_owner_lock:
+        thread = _refresh_thread
+    if thread is None:
+        return True
+    try:
+        wait_seconds = max(0.0, float(timeout))
+    except (TypeError, ValueError, OverflowError) as exc:
+        logger.debug('[Pricing] invalid stop timeout; using 2.0: %s', exc)
+        wait_seconds = 2.0
+    if thread is not threading.current_thread():
+        thread.join(timeout=wait_seconds)
+    if thread.is_alive():
+        return False
+    with _refresh_owner_lock:
+        if _refresh_thread is thread:
+            _refresh_thread = None
+    return True
 
 # ══════════════════════════════════════════════════════
 #  Internal Fetchers
@@ -119,16 +163,37 @@ def _fetch_model_pricing_online(model_name):
 
 def _update_pricing_locked():
     """Wrapper that owns _refresh_lock; used only by refresh_pricing_async."""
+    global _refresh_thread
+    from lib.observability import background_job_finished, background_job_started
+    started_at = time.monotonic()
+    outcome = 'success'
+    background_job_started('pricing_refresh')
     try:
         _do_update_pricing()
+        if _refresh_stop.is_set():
+            outcome = 'cancelled'
+    except BaseException:
+        outcome = 'error'
+        raise
     finally:
+        background_job_finished(
+            'pricing_refresh', outcome, time.monotonic() - started_at)
+        with _refresh_owner_lock:
+            if _refresh_thread is threading.current_thread():
+                _refresh_thread = None
         _refresh_lock.release()
 
 def _do_update_pricing():
     import lib as _lib  # deferred to avoid circular import
+    if _refresh_stop.is_set():
+        return
     now_ms = int(time.time() * 1000)
     rate = _fetch_exchange_rate()
+    if _refresh_stop.is_set():
+        return
     online = _fetch_model_pricing_online(_lib.LLM_MODEL)
+    if _refresh_stop.is_set():
+        return
     with _pricing_lock:
         if rate:
             _pricing_data['usdToCny'] = rate
@@ -147,21 +212,17 @@ def _do_update_pricing():
                 pricingSource='known_table', pricingUpdated=now_ms,
             )
         data_copy = dict(_pricing_data)
-    # Persist to DB
-    db = None
+    # Regenerable cache: one semantic Sidecar write, never a local connection.
     try:
-        from lib.database import DOMAIN_SYSTEM, get_thread_db
-        from lib.database._core_schema import PRICING_CACHE, upsert
-        db = get_thread_db(DOMAIN_SYSTEM)
-        # Backend-agnostic UPSERT (replaces INSERT OR REPLACE + _PK_MAP regex
-        # translation). conflict_cols defaults to the PK ('key').
-        upsert(db, PRICING_CACHE,
-               {'key': 'pricing', 'value': json.dumps(data_copy), 'updated_at': now_ms},
-               commit=True)
+        _storage(write=True).command('record.put', {
+            'namespace': 'pricing_cache', 'key': 'pricing',
+            'value': data_copy,
+        }, f'pricing-cache:{uuid.uuid4().hex}', priority='event')
     except Exception as e:
-        logger.warning('[Pricing] failed to persist pricing to DB: %s', e, exc_info=True)
+        logger.warning(
+            '[Pricing] failed to persist pricing cache: %s',
+            type(e).__name__)
 
 # ══════════════════════════════════════════════════════
 #  Background Worker
 # ══════════════════════════════════════════════════════
-

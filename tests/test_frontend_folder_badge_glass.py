@@ -28,7 +28,7 @@ def _strip_comments(css: str) -> str:
     Delegates to the SINGLE shared implementation (charter #24).
 
     EQUIVALENCE, MEASURED on the real 22k-line static/styles.css rather than
-    assumed: the local ``re.sub(r'/\*.*?\*/', '', css, flags=re.DOTALL)`` this
+    assumed: the local ``re.sub(r'/\\*.*?\\*/', '', css, flags=re.DOTALL)`` this
     replaced and ``strip_comments(lang='css', inline=True)`` produce an
     IDENTICAL selector set (6466 rules, 0 selectors unique to either side) and
     a byte-identical whitespace-stripped content signature. They differ only in
@@ -126,13 +126,14 @@ def test_NC_bevel_is_flagged():
         '[data-theme="tofu"] .folder-badge{border-top-color:rgba(221,214,196,0.8);'
         'box-shadow:0 2px 0 rgba(168,152,120,0.45);', 1)
     body = _rule_body(poisoned, '[data-theme="tofu"] .folder-badge')
-    bit = False
-    try:
-        assert "border-top-color:" not in body
-        assert not re.search(r"box-shadow:[^;]*\b0 2px 0 ", body)
-    except AssertionError:
-        bit = True
-    assert bit, "neuter did not bite — the bevel/block-drop guard is not load-bearing"
+    violations = []
+    if "border-top-color:" in body:
+        violations.append('four-colour bevel')
+    if re.search(r"box-shadow:[^;]*\b0 2px 0 ", body):
+        violations.append('hard block drop')
+    assert violations == ['four-colour bevel', 'hard block drop'], (
+        'neuter did not trigger both load-bearing guards: '
+        f'violations={violations}')
 
 
 if __name__ == "__main__":

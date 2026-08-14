@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 
-from flask import Blueprint, request
+from quart import Blueprint, request
 
 from lib.api_response import (
     api_bad_request, api_internal_error, api_not_found, api_ok, safe_route,

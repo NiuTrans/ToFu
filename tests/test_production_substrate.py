@@ -99,6 +99,49 @@ def test_behaviour_unchanged_through_new_path(tmp_path):
     assert calls == ['b2']  # 'a' resumed from the checkpoint, not re-run
 
 
+def test_expired_or_versioned_checkpoint_reruns_the_dependency_suffix(
+        tmp_path, monkeypatch):
+    """Fresh research must never be combined with an old downstream deck."""
+    from lib.production import stages as st
+
+    now = {'value': 1000.0}
+    monkeypatch.setattr(st.time, 'time', lambda: now['value'])
+    state_path = str(tmp_path / 'state.json')
+    calls = []
+
+    def graph(label, revision='facts-v1'):
+        return [
+            st.Stage('research',
+                     lambda c: calls.append(f'research-{label}') or {'v': label},
+                     resume_ttl_s=10, checkpoint_version=revision),
+            st.Stage('outline',
+                     lambda c: calls.append(f'outline-{label}') or {
+                         'from': c['artifacts']['research']['v']}),
+        ]
+
+    st.run_stages(graph('first'), {}, state_path=state_path)
+    assert calls == ['research-first', 'outline-first']
+
+    calls.clear()
+    now['value'] = 1005.0
+    out = st.run_stages(graph('fresh'), {}, state_path=state_path)
+    assert calls == []
+    assert out['outline']['from'] == 'first'
+
+    calls.clear()
+    now['value'] = 1020.0
+    out = st.run_stages(graph('expired'), {}, state_path=state_path)
+    assert calls == ['research-expired', 'outline-expired']
+    assert out['outline']['from'] == 'expired'
+
+    calls.clear()
+    now['value'] = 1021.0
+    out = st.run_stages(graph('revision', 'facts-v2'), {},
+                        state_path=state_path)
+    assert calls == ['research-revision', 'outline-revision']
+    assert out['outline']['from'] == 'revision'
+
+
 def test_recipe_uses_the_new_home_not_the_shim():
     """The live caller was repointed at the real home; the shim exists only
     for back-compat. If this ever regresses, the shim silently becomes load-

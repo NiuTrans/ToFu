@@ -269,10 +269,103 @@ def test_diag_seam_is_wired_into_the_shared_macros():
         'TOFU_PAGE_ART')
     assert '!insertmacro TOFU_DIAG_HW "label" $0' in label_macro, (
         'label-level diag fell out of TOFU_LABEL')
+    assert '!insertmacro TOFU_DIAG_TEXT "label" $0' in label_macro, (
+        'the label text-length probe fell out of TOFU_LABEL')
+    fonts_macro = tmpl.split('!macro TOFU_CREATE_FONTS')[1] \
+                      .split('!macroend')[0]
+    assert '!insertmacro TOFU_DIAG_FONTS' in fonts_macro, (
+        'the font-pipeline probe fell out of TOFU_CREATE_FONTS')
     assert '!ifdef TOFU_DIAG' in tmpl and 'OnTofuDiagProbe' in tmpl, (
         'the diag block / live-page probe timer went missing')
     # The empty-expansion else branch is what keeps production builds
     # byte-clean of the seam.
-    assert tmpl.count('!macro TOFU_DIAG_WRITE') == 2, (
-        'TOFU_DIAG_* macros must exist in BOTH an ifdef and an '
-        'empty-else form')
+    for name in ('TOFU_DIAG_WRITE', 'TOFU_DIAG_HW', 'TOFU_DIAG_PAGE',
+                 'TOFU_DIAG_HEADER', 'TOFU_DIAG_TEXT', 'TOFU_DIAG_FONTS',
+                 'TOFU_DIAG_MARK', 'TOFU_DIAG_RETITLE'):
+        assert tmpl.count(f'!macro {name}') == 2, (
+            f'{name} must exist in BOTH an ifdef and an empty-else form')
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  The page-function probe coverage (2026-08-07 round 2 of the seam)
+# ═══════════════════════════════════════════════════════════════════
+# The owner's screenshot showed even the nav-button RETITLE absent on
+# the welcome page — the widened seam must log every page reaching
+# nsDialogs::Show and audit the retitle lane end to end.
+
+_PAGES = ('WelcomePageCreate', 'DirPageCreate', 'ProgressPageCreate',
+          'FinishPageCreate', 'un.ConfirmPageCreate',
+          'un.ProgressPageCreate', 'un.FinishPageCreate')
+_RETITLING = {'WelcomePageCreate': 'welcome', 'FinishPageCreate': 'finish',
+              'un.ConfirmPageCreate': 'un.confirm',
+              'un.FinishPageCreate': 'un.finish'}
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  The art-source contract: File → $PLUGINSDIR → LR_LOADFROMFILE
+# ═══════════════════════════════════════════════════════════════════
+# The 2026-08-07 CI pixel run proved the prior exe-resource approach
+# was broken: $EXEHANDLE is NOT a real NSIS variable (it expands to
+# empty → LoadImage(p 0, i 900, …) returns NULL → image_handle=0 on
+# every page), and !packhdr cannot embed RT_RCDATA (it post-processes
+# the exehead stub, it does not add resources). The documented NSIS
+# pattern is File (extracts bmp into $PLUGINSDIR) + LoadImage with
+# LR_LOADFROMFILE (0x10).
+
+def test_art_loads_from_pluginsdir_via_file_and_loadimage():
+    tmpl = (_ROOT / 'desktop' / 'installer.nsi.tmpl').read_text(
+        encoding='utf-8')
+    macro = tmpl.split('!macro TOFU_PAGE_ART')[1].split('!macroend')[0]
+    assert '$EXEHANDLE' not in macro, (
+        '$EXEHANDLE is not a real NSIS variable — it expands to empty '
+        'and LoadImage returns NULL (root cause of the 2026-08-07 '
+        'blank wizard, image_handle=0 on every page)')
+    assert 'LoadImage' in macro and 'LR_LOADFROMFILE' in macro, (
+        'the page art must load from $PLUGINSDIR via LR_LOADFROMFILE')
+    assert '$PLUGINSDIR' in macro, (
+        'LoadImage must reference $PLUGINSDIR (extracted by File in '
+        '.onInit)')
+    assert '!packhdr' not in tmpl, (
+        '!packhdr cannot embed resources — it post-processes the '
+        'exehead stub; the dead line was removed')
+    calls = re.findall(r'!insertmacro TOFU_PAGE_ART "(\w+\.bmp)"',
+                       tmpl)
+    assert sorted(calls) == sorted([
+        'welcome.bmp', 'welcome.bmp',
+        'directory.bmp',
+        'progress.bmp', 'progress.bmp',
+        'finish.bmp', 'finish.bmp']), calls
+    # The .onInit File instructions that extract the bmps into $PLUGINSDIR
+    for bmp in ('welcome.bmp', 'directory.bmp',
+                'progress.bmp', 'finish.bmp'):
+        assert f'File "@ART_DIR@/{bmp}"' in tmpl, (
+            f'{bmp} must be extracted via File in .onInit/un.onInit')
+
+
+def test_no_exehandle_anywhere_in_template():
+    """The exe-module-handle pseudo-variable is not a real NSIS variable
+    — any occurrence would expand to empty and silently break any API
+    call that receives it."""
+    tmpl = (_ROOT / 'desktop' / 'installer.nsi.tmpl').read_text(
+        encoding='utf-8')
+    assert '$EXEHANDLE' not in tmpl, (
+        'the exe-handle pseudo-variable appeared in the template — it is '
+        'not a valid NSIS variable (see NSIS docs §4.2)')
+
+
+def test_every_page_logs_reached_show_before_show():
+    for script, target in ((_FULL, 'full'), (_AGENT, 'agent')):
+        for page in _PAGES:
+            body = script.split(f'Function {page}')[1] \
+                         .split('FunctionEnd')[0]
+            assert 'reached Show' in body, (target, page)
+            assert body.index('reached Show') < \
+                body.index('nsDialogs::Show'), (target, page)
+
+
+def test_retitling_pages_probe_the_button_lane():
+    for script, target in ((_FULL, 'full'), (_AGENT, 'agent')):
+        for page, tag in _RETITLING.items():
+            body = script.split(f'Function {page}')[1] \
+                         .split('FunctionEnd')[0]
+            assert f'TOFU_DIAG_RETITLE "{tag}"' in body, (target, page)

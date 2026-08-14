@@ -11,6 +11,7 @@ Bare-CI-safe: no live PG/redis/node. D1 is tested via the extracted pure helper
 """
 import os
 import sys
+import threading
 
 import pytest
 
@@ -21,16 +22,20 @@ pytestmark = pytest.mark.unit
 # ══════════════════════════════════════════════════════════════════════
 #  D1 — fail-closed PG guarantee
 # ══════════════════════════════════════════════════════════════════════
-def test_d1_require_pg_unavailable_raises():
-    """TOFU_REQUIRE_PG=1 + PG unavailable ⇒ boot MUST raise (NOT fall through
-    to SQLite). This is the decisive D1 property."""
+def test_d1_legacy_require_flag_does_not_override_canonical_sqlite_choice():
+    """The retired second PG flag cannot contradict TOFU_DB_BACKEND."""
     from lib.database import _core
+    old_backend = os.environ.get('TOFU_DB_BACKEND')
     os.environ['TOFU_REQUIRE_PG'] = '1'
+    os.environ['TOFU_DB_BACKEND'] = 'sqlite'
     try:
-        with pytest.raises(RuntimeError, match='refusing to fall back'):
-            _core._assert_pg_available_or_raise(pg_ok=False, pgdata='/tmp/x')
+        _core._assert_pg_available_or_raise(pg_ok=False, pgdata='/tmp/x')
     finally:
         os.environ.pop('TOFU_REQUIRE_PG', None)
+        if old_backend is None:
+            os.environ.pop('TOFU_DB_BACKEND', None)
+        else:
+            os.environ['TOFU_DB_BACKEND'] = old_backend
 
 
 def test_d1_require_pg_but_pg_ok_does_not_raise():
@@ -48,25 +53,62 @@ def test_d1_unset_falls_back_gracefully():
     proceeds to the SQLite fallback exactly as before (byte-identical)."""
     from lib.database import _core
     os.environ.pop('TOFU_REQUIRE_PG', None)
-    _core._assert_pg_available_or_raise(pg_ok=False, pgdata='/tmp/x')  # must NOT raise
+    old_backend = os.environ.get('TOFU_DB_BACKEND')
+    os.environ['TOFU_DB_BACKEND'] = 'sqlite'
+    try:
+        _core._assert_pg_available_or_raise(pg_ok=False, pgdata='/tmp/x')  # must NOT raise
+    finally:
+        if old_backend is None:
+            os.environ.pop('TOFU_DB_BACKEND', None)
+        else:
+            os.environ['TOFU_DB_BACKEND'] = old_backend
 
 
-def test_NC_d1_flag_ignored_would_mask_the_serializing_fallback():
-    """NEGATIVE CONTROL: if the guard ignored the flag (the pre-D1 behaviour),
-    a scale-declared deployment would silently proceed to write-serializing
-    SQLite. We prove the flag is load-bearing: with it set + PG down the guard
-    RAISES; simulate 'ignored' by not setting it → no raise (the masked bug)."""
+def test_d1_explicit_postgres_is_fail_closed_without_second_flag():
+    """The installer's backend choice alone is an authoritative decision."""
     from lib.database import _core
-    # Flag honoured → raises (protection ON).
-    os.environ['TOFU_REQUIRE_PG'] = 'true'
+    old_backend = os.environ.get('TOFU_DB_BACKEND')
+    os.environ.pop('TOFU_REQUIRE_PG', None)
+    os.environ['TOFU_DB_BACKEND'] = 'postgres'
+    try:
+        with pytest.raises(RuntimeError, match='refusing to fall back'):
+            _core._assert_pg_available_or_raise(False, '/tmp/x')
+    finally:
+        if old_backend is None:
+            os.environ.pop('TOFU_DB_BACKEND', None)
+        else:
+            os.environ['TOFU_DB_BACKEND'] = old_backend
+
+
+def test_existing_pg_history_never_falls_back_to_sqlite():
+    from lib.database import _core
+    with pytest.raises(RuntimeError, match='divergent SQLite'):
+        _core._assert_sqlite_fallback_has_no_pg_history(True, '/data/pgdata')
+    _core._assert_sqlite_fallback_has_no_pg_history(False, '/data/pgdata')
+
+
+def test_NC_d1_canonical_postgres_selection_is_load_bearing():
+    """PostgreSQL selection itself is the fail-closed authority."""
+    from lib.database import _core
+    old_backend = os.environ.get('TOFU_DB_BACKEND')
+    os.environ['TOFU_DB_BACKEND'] = 'postgres'
     try:
         with pytest.raises(RuntimeError):
             _core._assert_pg_available_or_raise(False, '/tmp/x')
     finally:
-        os.environ.pop('TOFU_REQUIRE_PG', None)
-    # Flag absent (== a guard that ignored it) → NO raise = the pre-D1 silent
-    # degradation. This asserts the difference the flag makes.
-    _core._assert_pg_available_or_raise(False, '/tmp/x')
+        if old_backend is None:
+            os.environ.pop('TOFU_DB_BACKEND', None)
+        else:
+            os.environ['TOFU_DB_BACKEND'] = old_backend
+    old_backend = os.environ.get('TOFU_DB_BACKEND')
+    os.environ['TOFU_DB_BACKEND'] = 'sqlite'
+    try:
+        _core._assert_pg_available_or_raise(False, '/tmp/x')
+    finally:
+        if old_backend is None:
+            os.environ.pop('TOFU_DB_BACKEND', None)
+        else:
+            os.environ['TOFU_DB_BACKEND'] = old_backend
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -104,7 +146,8 @@ class _FakeDB:
 
 def _row(i, uid):
     return {'id': 'c%d-u%d' % (i, uid), 'title': 't%d' % i,
-            'created_at': i, 'updated_at': i, 'settings': None, 'msg_count': i}
+            'created_at': i, 'updated_at': i, 'settings': None,
+            'msg_count': i, 'rev': i + 10}
 
 
 def _reset_mc():
@@ -159,6 +202,134 @@ def test_d4_query_is_bounded_by_limit():
         assert params == (1, 50), 'user_id + limit must be bound params'
     finally:
         os.environ.pop('TOFU_SIDEBAR_MAX', None)
+
+
+def test_d4_sidebar_payload_carries_authoritative_rev():
+    """The poll protocol must carry the DB CAS/staleness version.
+
+    Omitting it silently sends the browser back to skew-prone ``updatedAt``
+    comparisons and leaves cold sidebar shells indistinguishable from
+    never-synced offline drafts.
+    """
+    import json
+    import lib.conversations.meta_cache as mc
+
+    _reset_mc()
+    payload, _etag = mc.refresh_meta_cache_if_stale(
+        _FakeDB({1: [_row(7, 1)]}), user_id=1)
+    item = json.loads(payload)[0]
+    assert item['rev'] == 17
+    # Assert against the actual recorded query as well: constructing ``rev``
+    # in Python is insufficient if production rows never selected the column.
+    db = _FakeDB({1: [_row(8, 1)]})
+    _reset_mc()
+    mc.refresh_meta_cache_if_stale(db, user_id=1)
+    sql, _params = db.calls[-1]
+    assert 'REV' in sql.upper().split('FROM', 1)[0]
+
+
+class _BlockingSnapshotDB(_FakeDB):
+    """Capture the first list snapshot, then pause before returning it."""
+
+    def __init__(self, rows_by_user):
+        super().__init__(rows_by_user)
+        self.list_started = threading.Event()
+        self.release_first_list = threading.Event()
+        self.list_calls = 0
+
+    def execute(self, sql, params=()):
+        if 'COUNT(' in sql.upper():
+            return super().execute(sql, params)
+        self.calls.append((sql, params))
+        self.list_calls += 1
+        rows = list(self.rows_by_user.get(params[0], []))
+        if self.list_calls == 1:
+            self.list_started.set()
+            assert self.release_first_list.wait(3), 'test did not release DB read'
+        return _FakeCursor(rows, self)
+
+
+def test_d4_invalidation_fences_inflight_stale_rebuild():
+    """A pre-mutation snapshot must not overwrite a later invalidation."""
+    import json
+    import lib.conversations.meta_cache as mc
+
+    _reset_mc()
+    db = _BlockingSnapshotDB({1: [_row(1, 1)]})
+    result = []
+    worker = threading.Thread(
+        target=lambda: result.append(
+            mc.refresh_meta_cache_if_stale(db, user_id=1)[0]))
+    worker.start()
+    assert db.list_started.wait(3), 'cache rebuild did not reach list query'
+    db.rows_by_user[1] = [_row(2, 1)]
+    mc.invalidate_meta_cache(user_id=1)
+    db.release_first_list.set()
+    worker.join(3)
+    assert not worker.is_alive()
+    assert [item['id'] for item in json.loads(result[0])] == ['c2-u1']
+    assert db.list_calls == 2, 'generation change must force a fresh DB read'
+
+
+def test_d4_concurrent_cache_misses_are_singleflight():
+    """Two tabs hitting an invalidated cache cause one DB rebuild, not two."""
+    import lib.conversations.meta_cache as mc
+
+    _reset_mc()
+    db = _BlockingSnapshotDB({1: [_row(1, 1)]})
+    results = []
+    entered_second = threading.Event()
+    first = threading.Thread(
+        target=lambda: results.append(
+            mc.refresh_meta_cache_if_stale(db, user_id=1)))
+
+    def _second():
+        entered_second.set()
+        results.append(mc.refresh_meta_cache_if_stale(db, user_id=1))
+
+    second = threading.Thread(target=_second)
+    first.start()
+    assert db.list_started.wait(3)
+    second.start()
+    assert entered_second.wait(3)
+    db.release_first_list.set()
+    first.join(3)
+    second.join(3)
+    assert not first.is_alive() and not second.is_alive()
+    assert len(results) == 2 and results[0] == results[1]
+    assert db.list_calls == 1
+
+
+def test_d4_sidebar_settings_are_projected_not_full_history():
+    """The hot sidebar poll must not transport conversation-sized sidecars."""
+    import json
+    import lib.conversations.meta_cache as mc
+
+    _reset_mc()
+    row = _row(1, 1)
+    row['settings'] = json.dumps({
+        'folderId': 'folder-1',
+        'pinned': True,
+        'source': 'feishu',
+        'lastFinishReason': 'stop',
+        'activeTaskId': 'task-1',
+        'autopilotSummaries': {'run-1': {'content': 'x' * 100_000}},
+        'autopilotVuHistory': ['y' * 100_000],
+        'projectSummary': {'text': 'z' * 100_000},
+        'projectPaths': ['/large/project/tree'],
+    })
+    payload, _etag = mc.refresh_meta_cache_if_stale(
+        _FakeDB({1: [row]}), user_id=1)
+    settings = json.loads(payload)[0]['settings']
+
+    assert settings == {
+        'folderId': 'folder-1',
+        'pinned': True,
+        'source': 'feishu',
+        'lastFinishReason': 'stop',
+        'activeTaskId': 'task-1',
+    }
+    assert len(payload) < 2_000, 'large non-sidebar settings leaked into poll'
 
 
 def test_d4_cached_total_captures_full_count():

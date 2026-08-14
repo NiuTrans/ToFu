@@ -32,6 +32,7 @@ from lib.project_mod.scanner import (
     _safe_path,
     _should_ignore,
 )
+from lib.project_mod.grep_engine import SearchRequest, run_search
 
 logger = get_logger(__name__)
 
@@ -760,8 +761,8 @@ def _build_rg_cmd(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, c
         cmd.extend(['-g', include])
     if ctx_n > 0 and not count_only:
         cmd.extend(['-C', str(ctx_n)])
-    if not count_only:
-        cmd.extend(['-m', str(cap)])
+    # Do not use rg -m here: it is a PER-FILE limit. The shared executor
+    # enforces ``cap`` globally and terminates the backend once reached.
     # Safety caps: skip huge files and limit search depth
     cmd.extend(['--max-filesize', _RG_MAX_FILESIZE])
     cmd.extend(['--max-depth', str(_TOOL_MAX_DEPTH)])
@@ -790,8 +791,7 @@ def _build_grep_cmd(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS,
         cmd.extend(['--include', include])
     if ctx_n > 0 and not count_only:
         cmd.extend(['-C', str(ctx_n)])
-    if not count_only:
-        cmd.extend(['-m', str(cap)])
+    # GNU grep -m is also per file. Global limiting belongs to grep_engine.
     cmd.extend(['--', pattern, target])
     return cmd
 
@@ -984,7 +984,7 @@ def _gitignore_match(rel_path, is_dir, patterns):
     return ignored
 
 
-def _run_grep_subprocess(cmd, base, io_timeout):
+def _run_grep_subprocess(cmd, base, io_timeout, max_matches=None):
     """Run a grep-family subprocess and return ``(stdout, timed_out)``.
 
     On timeout, kills the process and returns whatever stdout has been
@@ -993,28 +993,29 @@ def _run_grep_subprocess(cmd, base, io_timeout):
 
     Returns ``(None, False)`` if the binary is missing.
     """
-    try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, cwd=base, errors='replace')
-    except FileNotFoundError as _e_audit:
-        logger.debug('[read_tools] _run_grep_subprocess caught %s: %s', type(_e_audit).__name__, _e_audit)
-        return None, False
-    try:
-        stdout, _ = proc.communicate(timeout=io_timeout)
-        return stdout, False
-    except subprocess.TimeoutExpired:
-        proc.kill()
+    binary = os.path.basename(cmd[0]) if cmd else ''
+    is_rg = binary == 'rg'
+
+    def _is_match_line(line):
         try:
-            stdout, _ = proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired as e:
-            logger.debug('[read_tools] grep communicate timed out, using fallback: %s', e)
-            stdout = ''
-        # Drop the last (possibly truncated) line — same trick as
-        # claude-code/src/utils/ripgrep.ts so we don't emit a half-line.
-        if stdout:
-            nl = stdout.rfind('\n')
-            stdout = stdout[:nl] if nl != -1 else ''
-        return stdout, True
+            return bool(_RG_MATCH_LINE.match(line.decode('utf-8', errors='replace')))
+        except Exception as exc:
+            logger.debug('grep match-line classification failed: %s', exc)
+            return False
+
+    request = SearchRequest(
+        cwd=base,
+        rg_argv=tuple(cmd) if is_rg else (),
+        gnu_argv=tuple(cmd) if not is_rg else (),
+        preferred_backend='rg' if is_rg else 'gnu',
+        max_results=max_matches,
+        timeout=io_timeout,
+        match_line=_is_match_line,
+    )
+    result = run_search(request)
+    if result.unavailable:
+        return None, False
+    return result.stdout.decode('utf-8', errors='replace'), result.timed_out
 
 
 def _format_grep_timeout(base, target, pattern, include, ctx_n, cap, count_only,
@@ -1050,7 +1051,8 @@ def _run_rg(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, count_o
     cmd = _build_rg_cmd(base, target, pattern, include, ctx_n, cap, count_only)
     io_timeout = _get_io_timeout(base)
     try:
-        stdout, timed_out = _run_grep_subprocess(cmd, base, io_timeout)
+        stdout, timed_out = _run_grep_subprocess(
+            cmd, base, io_timeout, None if count_only else cap)
         if stdout is None:
             logger.warning('[Tools] rg binary not found despite detection at startup')
             return None
@@ -1070,7 +1072,8 @@ def _run_gnu_grep(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, c
     cmd = _build_grep_cmd(base, target, pattern, include, ctx_n, cap, count_only)
     io_timeout = _get_io_timeout(base)
     try:
-        stdout, timed_out = _run_grep_subprocess(cmd, base, io_timeout)
+        stdout, timed_out = _run_grep_subprocess(
+            cmd, base, io_timeout, None if count_only else cap)
         if stdout is None:
             logger.debug('[Tools] GNU grep binary not found, will try fallback')
             return None
@@ -1086,11 +1089,14 @@ def _run_gnu_grep(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, c
 
 
 def _python_grep(base, target, pattern, include=None, cap=MAX_GREP_RESULTS, count_only=False):
+    capability_note = (
+        '[limited Python fallback: rg and GNU grep are unavailable; supports '
+        'case-insensitive Python regex, one include glob, and text files only]\n')
     try:
         regex = re.compile(pattern, re.IGNORECASE)
     except re.error as e:
         logger.debug('[Tools] python_grep invalid regex pattern: %s', e, exc_info=True)
-        return f'Invalid pattern: {e}'
+        return capability_note + f'Invalid pattern: {e}'
     gi_patterns = _load_gitignore_patterns(base)
     match_count = 0
     matches = []
@@ -1149,10 +1155,10 @@ def _python_grep(base, target, pattern, include=None, cap=MAX_GREP_RESULTS, coun
         hdr = f'grep "{pattern}"'
         if include:
             hdr += f' ({include})'
-        return f'{hdr} \u2014 {match_count} matches (count only)'
+        return capability_note + f'{hdr} \u2014 {match_count} matches (count only)'
 
     if not matches:
-        return f'No matches found for: {pattern}'
+        return capability_note + f'No matches found for: {pattern}'
     max_line_len = 300
     max_total_chars = 12000
     truncated = []
@@ -1165,7 +1171,9 @@ def _python_grep(base, target, pattern, include=None, cap=MAX_GREP_RESULTS, coun
             truncated.append(f'\u2026 (output truncated at {max_total_chars} chars)')
             break
         truncated.append(m)
-    return f'grep results ({len(matches)} matches):\n\n' + '\n'.join(truncated)
+    return (capability_note
+            + f'grep results ({len(matches)} matches):\n\n'
+            + '\n'.join(truncated))
 
 
 def _fd_find(target, base, pattern, cap):

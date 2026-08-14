@@ -7,9 +7,8 @@ into
 lib.tasks_pkg.orchestrator._tool_call_prelude
     .append_assistant_tool_call_message().
 
-The cluster runs RIGHT AFTER the ``if rs.tool_round_num >
-max_tool_rounds`` budget check and BEFORE ``if task['aborted']`` early
-exit. Three sequential mutations that all belong together — they are
+The cluster runs after the per-round budget gate and before the abort check.
+Three sequential mutations that all belong together — they are
 the "we've decided to call tools this round" bracket:
 
     * Assemble the live-tail assistant/tool_call message through the

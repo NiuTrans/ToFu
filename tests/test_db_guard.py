@@ -420,22 +420,44 @@ def test_guard_forces_sqlite_in_subprocess_under_ambient_pg():
 
 
 def _pg_backend_resolvable_here() -> bool:
-    """True when THIS host can actually resolve a PG backend at import time.
+    """True only when the configured PostgreSQL target is already reachable.
 
     The double-neuter probe asserts that an ambient ``TOFU_DB_BACKEND=postgres``
     (no guard) freezes ``_BACKEND='pg'``. That only happens when the DB
-    layer's PG bootstrap genuinely succeeds — which requires psycopg2 AND
-    local PostgreSQL server binaries (pg_ctl/initdb). On a host without them
-    (public CI), the honest resolution is the SQLite fallback and there is no
-    'pg' to freeze onto — the assertion's precondition does not exist there.
+    This is a negative-control test, not permission to create/start a database
+    cluster during ``make test-unit``.  Binaries alone are not a sufficient
+    precondition: after the optional PG authority is retired, treating
+    ``initdb`` as "resolvable" can bootstrap an empty cluster just to prove a
+    test.  Probe the configured target with a one-second read-only connection;
+    when it is absent the assertion's precondition does not exist here.
     """
     try:
-        import psycopg2  # noqa: F401
+        import psycopg2
     except Exception:
         return False
     try:
-        from lib.database._bootstrap import _pg_binaries_present
-        return bool(_pg_binaries_present())
+        values = {}
+        env_path = os.path.join(_REPO_ROOT, '.env')
+        if os.path.isfile(env_path):
+            with open(env_path, encoding='utf-8') as fh:
+                for raw in fh:
+                    line = raw.strip()
+                    if not line or line.startswith('#') or '=' not in line:
+                        continue
+                    key, _, value = line.partition('=')
+                    values[key.strip()] = value.strip()
+        def configured(name, default):
+            return os.environ.get(name) or values.get(name) or default
+        conn = psycopg2.connect(
+            host=configured('TOFU_PG_HOST', '127.0.0.1'),
+            port=int(configured('TOFU_PG_PORT', '5432')),
+            user=configured('TOFU_PG_USER', os.environ.get('USER', 'postgres')),
+            password=configured('TOFU_PG_PASSWORD', ''),
+            dbname=configured('TOFU_PG_DBNAME', 'tofu'),
+            connect_timeout=1,
+        )
+        conn.close()
+        return True
     except Exception:
         return False
 

@@ -45,6 +45,12 @@ import server
 pytestmark = pytest.mark.unit
 
 
+def test_plain_import_does_not_arm_or_write_crash_sinks():
+    """Tools/tests importing helpers must have zero faulthandler file side effects."""
+    assert server._fault_log is None
+    assert server._fault_shm_log is None
+
+
 class TestLoopStallDecide:
     def test_disabled_when_threshold_zero(self):
         # threshold<=0 means the watchdog is off — never dump regardless of age.
@@ -117,6 +123,38 @@ class TestPruneStaleFaultDumps:
         assert removed == 0
 
 
+class TestBoundedFaultDumps:
+    def test_budget_keeps_newest_dead_evidence_and_live_file(self, tmp_path):
+        old = tmp_path / 'tofu_faulthandler_101.log'
+        newest = tmp_path / 'tofu_faulthandler_102.log'
+        live = tmp_path / 'tofu_faulthandler_103.log'
+        for path in (old, newest, live):
+            path.write_bytes(b'x' * 16)
+        os.utime(old, ns=(1, 1))
+        os.utime(newest, ns=(2, 2))
+        os.utime(live, ns=(3, 3))
+
+        removed = server._prune_fault_dump_budget(
+            str(tmp_path), pid_alive=lambda pid: pid == 103,
+            max_dead_files=1, max_dead_bytes=32)
+
+        assert removed == 1
+        assert not old.exists()
+        assert newest.exists(), 'newest crash evidence must survive next boot'
+        assert live.exists(), 'a live process sink must never be retention-pruned'
+
+    def test_live_sink_is_truncated_in_place_only_after_cap(self, tmp_path):
+        path = tmp_path / 'tofu_faulthandler_777.log'
+        with open(path, 'w+', buffering=1) as sink:
+            sink.write('x' * 33)
+            fd = sink.fileno()
+            assert server._trim_fault_sink_if_oversize(
+                sink, 32, header='retained\n') is True
+            assert sink.fileno() == fd
+            assert path.read_text() == 'retained\n'
+            assert server._trim_fault_sink_if_oversize(sink, 32) is False
+
+
 class TestPidAlive:
     def test_self_is_alive(self):
         assert server._pid_alive(os.getpid()) is True
@@ -180,16 +218,14 @@ class TestStallPressureContext:
         assert 'cgmem' not in out and 'load1=' in out
 
     def test_stall_line_carries_pressure_suffix(self):
-        """Source pin: the STALLED log call must append the context."""
+        """Source pin: the extracted owner still appends pressure context."""
         import inspect
-        src = inspect.getsource(server._loop_stall_watch) \
-            if hasattr(server, '_loop_stall_watch') else ''
-        # _loop_stall_watch is a closure inside _serve; pin via the module src.
-        with open(server.__file__, encoding='utf-8') as f:
-            mod_src = f.read()
-        assert '_pressure = _stall_pressure_context()' in mod_src
-        assert "(' [' + _pressure + ']') if _pressure else ''" in mod_src
-        assert 'pressure=_pressure' in mod_src
+        from lib.server_loop_watchdog import LoopWatchdog
+
+        source = inspect.getsource(LoopWatchdog._stall_watch)
+        assert 'pressure = self.hooks._stall_pressure_context()' in source
+        assert "(' [' + pressure + ']') if pressure else ''" in source
+        assert 'pressure=pressure' in source
 
 
 class TestGilHeldCapture:

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -76,6 +77,26 @@ def test_dedup_index_prunes_vanished_task():
     assert r.dedup_index == {}
 
 
+def test_claim_task_is_atomic_under_concurrent_identical_starts():
+    """The old index_get→create→register sequence was a race: four identical
+    research starts produced four live jobs and raced their shared corpus."""
+    r = _rt()
+
+    def claim(i):
+        task, existing = r.claim_task(('same',), f't{i}', fields={'i': i})
+        return task, existing
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(claim, range(24)))
+    winners = [task for task, existing in results if task is not None]
+    joined = [existing for task, existing in results if existing is not None]
+    assert len(winners) == 1
+    assert len(joined) == 23
+    winner_id = winners[0]['task_id']
+    assert set(joined) == {winner_id}
+    assert list(r.tasks) == [winner_id]
+
+
 def test_append_event_touches_updated_at():
     r = _rt()
     t = r.create_task('t1')
@@ -90,12 +111,13 @@ def test_cleanup_stale_uses_updated_at_and_prunes_index():
     r = _rt(ttl=10)
     live = r.create_task('live')
     old = r.create_task('old')
+    r.index_register(('k',), 'old')
     old['status'] = 'done'
     old['updated_at'] = 0.0                     # long past the TTL
-    r.index_register(('k',), 'old')
     assert r.cleanup_stale() == 1
     assert r.get('old') is None and r.get('live') is live
     assert r.dedup_index == {}                  # orphan entry pruned
+    assert r.dedup_stats()['evictions']['ttl'] == 1
 
 
 def test_cleanup_keeps_recent_terminal_task():
@@ -104,6 +126,42 @@ def test_cleanup_keeps_recent_terminal_task():
     t['status'] = 'done'
     assert r.cleanup_stale() == 0
     assert r.get('t1') is t
+
+
+def test_dedup_retention_never_drops_active_authority():
+    """Capacity pressure is visible, but cannot launch duplicate live work."""
+    r = ProductionRuntime(
+        'dedup-bounded', id_prefix='db', max_tasks=4, max_dedup_keys=2)
+    for index in range(3):
+        task = r.create_task(f't{index}')
+        task['status'] = 'running'
+        r.index_register((index,), task['id'])
+
+    stats = r.dedup_stats()
+    assert stats['size'] == 3
+    assert stats['capacity'] == 2
+    assert stats['over_capacity'] == 1
+    assert all(r.index_get((index,)) == f't{index}' for index in range(3))
+
+
+def test_dedup_retention_prunes_terminal_and_orphan_keys_with_counts():
+    r = ProductionRuntime(
+        'dedup-prune', id_prefix='dp', max_tasks=4, max_dedup_keys=2)
+    terminal = r.create_task('terminal')
+    r.index_register(('terminal',), terminal['id'])
+    terminal['status'] = 'done'
+    assert r.index_get(('terminal',)) is None
+
+    live = r.create_task('live')
+    r.index_register(('live',), live['id'])
+    with r.lock:
+        r.tasks.pop(live['id'])
+    r.index_register(('new',), 'not-yet-created')
+
+    stats = r.dedup_stats()
+    assert stats['size'] == 0
+    assert stats['evictions']['terminal'] == 1
+    assert stats['evictions']['orphan'] == 2
 
 
 # ══════════════════════════════════════════════════════════

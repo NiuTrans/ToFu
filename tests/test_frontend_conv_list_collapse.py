@@ -28,7 +28,8 @@ import os
 
 import pytest
 
-from tests._jsdom import JS_DIR, run_harness
+from tests._jsdom import run_harness
+from tests._runtime_sections import runtime_section_path
 
 pytestmark = pytest.mark.unit
 
@@ -125,7 +126,7 @@ report();
 
 def test_conv_list_collapse_never_hides_all_rows():
     run_harness(
-        target_js=os.path.join(JS_DIR, 'ui', 'conversation_list.js'),
+        target_js=runtime_section_path('ui/conversation_list.js'),
         body_js=_BODY,
         min_pass=6,
         label='conv-list collapse',

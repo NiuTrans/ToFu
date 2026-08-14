@@ -13,9 +13,9 @@
 > 2 次 `PG appears dead: timeout expired`、`GET /api/v1/timer/list` 500 的
 > 共同温床。
 >
-> **2026-08-05 起播种改为 DEFAULT-ON（owner 指令「别设计开关，用户只会
-> `python server.py`」）：任何一次普通启动在本地 pgdata 未播种时自动执行，
-> 无需带任何环境变量。** `TOFU_DB_SEED_LOCAL=0` 仅作推迟用的逃生门。
+> **历史说明（已被 2026-08-06 终裁覆盖）：** 2026-08-05 曾短暂设计为
+> DEFAULT-ON；当前代码已经撤回为默认关闭，普通 `python server.py` 绝不会
+> 把数据库部署到 `/tmp`。本文以下命令仅为事故/设计档案，不得执行。
 >
 > 机制源码：`lib/database/_pg_seed.py::_migrate_local_primary_if_due`
 > （幂等，verify-before-canonical，失败自动 quarantine 本地半成品、legacy
@@ -48,10 +48,11 @@ PGGSSENCMODE=disable psql -h 127.0.0.1 -p 15439 -U "$USER" -d tofu -tAc \
 curl -s http://127.0.0.1:15000/api/health
 ```
 
-## 2. 执行（DEFAULT-ON：一次普通重启全完成）
+## 2. 历史执行过程（已撤回，禁止执行）
 
 ```bash
-python server.py        # 或 ./restart_15000.sh —— 任何形式的重启都行，无需 env
+# 档案：旧方案需要显式设置 TOFU_DB_SEED_LOCAL=1。
+# 当前不得运行；普通 python server.py 保持项目目录内的数据库不变。
 ```
 
 - 启动序列（单启动原子）：DB bootstrap Step -1 触发迁移 → legacy 在运行则直接
@@ -84,7 +85,7 @@ curl -s http://127.0.0.1:15000/api/health
 | 情形 | 自动行为 | 操作 |
 |---|---|---|
 | dump 失败 / restore 失败 / 校验行数不符 | 半成品 `/tmp/tofu/pgdata` 被 **quarantine**（改名隔离，永不过 gate），legacy 保持权威，CRITICAL 日志 | 什么都不用做——下次启动**自动重试**（自愈设计）；先查 error.log `[DB-Seed]` 段排掉根因（如 /tmp 满） |
-| 想推迟某次启动的播种 | — | `TOFU_DB_SEED_LOCAL=0 python server.py`（仅本次推迟） |
+| 保持当前受支持行为 | — | 普通 `python server.py`（播种默认关闭） |
 | 播种成功后才发现异常 | local 已是权威 | 停服 → `mv /tmp/tofu/pgdata /tmp/tofu/pgdata.bad-$(date +%s)` → `TOFU_DB_LOCAL_SPLIT=0` 重启（split 关闭时播种不触发，解析直接回 legacy） |
 
 - **legacy `data/pgdata` 不要删**：种子成功日志也明说 PRESERVED。稳定运行

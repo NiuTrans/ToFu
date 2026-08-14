@@ -5,12 +5,15 @@ import time
 
 import orjson  # noqa: F401  (module attribute — tests/test_chat_stream_snapshot_offload.py NC asserts chat_mod.orjson.dumps is what _dumps_yielding uses)
 
-from flask import Blueprint, request
+from quart import Blueprint, request
 
 from lib.agent_core.events import EventType, build_event
 from lib.database import DOMAIN_CHAT
 from lib.log import get_logger
-from lib.api_response import api_bad_request, api_error, api_internal_error, api_not_found, api_ok, sse_response
+from lib.api_response import (
+    api_bad_request, api_error, api_internal_error, api_not_found, api_ok,
+    api_typed_error, sse_response,
+)
 from lib.request_parser import parse_body
 from routes.api_v1.auth import current_auth, require_scope
 
@@ -44,6 +47,28 @@ logger = get_logger(__name__)
 chat_bp = Blueprint('chat', __name__)
 
 
+def _legacy_turn_protocol_retired():
+    """Return a destructive-cutover response once normalized turns own chat."""
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            "SELECT value FROM schema_meta WHERE key='_turn_schema_version'"
+        ).fetchone()
+        active = bool(row and str(row['value'] if hasattr(row, 'keys') else row[0]) == '2')
+    except Exception as exc:
+        # A metadata probe failure must not accidentally retire the established
+        # protocol before a verified maintenance-window migration.
+        logger.debug('[Chat] turn cutover marker probe failed: %s', exc)
+        active = False
+    if not active:
+        return None
+    return api_error({
+        'kind': 'legacy_turn_protocol_retired',
+        'message': 'This generation endpoint was retired by the turn-v2 cutover.',
+        'use': '/api/v2/conversations/{conversationId}/turns',
+    }, status=410)
+
+
 # ─── Pure helpers extracted to routes/chat_helpers.py (pt_04686ac6 slice 1) ───
 # The four functions below (_dumps_yielding, _running_checkpoint_verdict,
 # _log_poll_task_id_mismatch, _loads_yielding) moved to routes/chat_helpers.py.
@@ -62,14 +87,17 @@ from routes.api_v1.chat import api_v1_chat_bp  # noqa: E402
 @api_v1_chat_bp.route('/api/v1/chat/active', methods=['GET'], endpoint='ui_chat_active')
 @require_scope('chat')
 def chat_active():
-    """List in-memory tasks (id, conv, status, abort flag).
+    """List reconnectable live tasks (id, conv, status, abort flag).
 
     Used by the frontend on reload to decide whether to resume polling
-    a task it knew about before navigation. Cleans up stale finished
-    tasks as a side effect.
+    a task it knew about before navigation. Terminal/aborted entries stay in
+    the registry briefly for poll/SSE replay but must never appear here: the
+    client interprets membership as permission to reconnect. Cleans up stale
+    finished tasks as a side effect.
     """
     cleanup_old_tasks()
     with tasks_lock:
+        local_task_ids = set(tasks)
         # ``tasks`` is a process-global registry mutated by many code paths
         # (the orchestrator, external/eval harnesses, tests). A malformed
         # entry missing optional keys must not 500 this status endpoint, so
@@ -91,9 +119,68 @@ def chat_active():
         from lib.tasks_pkg.manager import is_carrier_task
         result = [{'id': t.get('id', ''), 'convId': t.get('convId', ''),
                    'status': t.get('status', ''),
-                   'aborted': bool(t.get('aborted'))}
+                   'aborted': bool(t.get('aborted')),
+                   **({'affinityKey': t.get('_affinityKey')}
+                      if t.get('_affinityKey') else {})}
                   for t in tasks.values()
-                  if not is_carrier_task(t)]
+                  if not is_carrier_task(t)
+                  and not t.get('_turnProtocolV2')
+                  and t.get('status') in ('pending', 'running')
+                  and not t.get('aborted')]
+
+    # A global /active request may land on any replica, while task starts are
+    # deliberately distributed by browser-minted affinity keys. Under the
+    # Redis scale-out backend, merge direct browser tasks from the shared DB's
+    # durable-at-birth rows. The persisted reconnectable bit excludes hidden
+    # carriers; local ids always win so a locally-aborted task cannot be
+    # resurrected briefly by its still-running checkpoint.
+    try:
+        from lib.env_compat import getenv_compat
+        _sharded = ((getenv_compat('TOFU_RUNTIME_STATE_BACKEND') or 'inproc')
+                    .strip().lower() == 'redis')
+    except Exception as e:
+        logger.debug('[Chat] active backend probe failed: %s', e)
+        _sharded = False
+    if _sharded:
+        try:
+            db = get_thread_db(DOMAIN_CHAT)
+            rows = db.execute(
+                "SELECT task_id,conv_id,status,metadata FROM task_results "
+                "WHERE status='running'").fetchall()
+            _auth = current_auth()
+            _scope_user = str(getattr(_auth, 'user_id', '') or '') if _auth else ''
+            for row in rows:
+                tid = row['task_id'] or ''
+                if not tid or tid in local_task_ids:
+                    continue
+                try:
+                    raw_meta = row['metadata'] or {}
+                    meta = (raw_meta if isinstance(raw_meta, dict)
+                            else json.loads(raw_meta))
+                except (TypeError, ValueError) as exc:
+                    logger.debug('[Chat] malformed reconnect metadata task=%s: %s',
+                                 tid, exc)
+                    continue
+                # v2 attempts reconnect through their durable event cursor;
+                # exposing the executor task here would revive the retired
+                # placeholder/adoption recovery path in older boot code.
+                if meta.get('turnProtocolV2') or meta.get('_turnProtocolV2'):
+                    continue
+                if not meta.get('reconnectable') or not meta.get('affinityKey'):
+                    continue
+                row_user = str(meta.get('userId') or '')
+                if _scope_user and row_user != _scope_user:
+                    continue
+                result.append({
+                    'id': tid,
+                    'convId': row['conv_id'] or '',
+                    'status': 'running',
+                    'aborted': False,
+                    'affinityKey': meta['affinityKey'],
+                })
+        except Exception as e:
+            # Active discovery is fail-open: local reconnects remain usable.
+            logger.warning('[Chat] cross-replica active merge failed: %s', e)
     # Coordinated bare-array migration (batch 11): the array moves under
     # ``items``; Api.chat.active unwraps (null-preserving — probe semantics)
     # and activeResponse's caller unwraps with an Array.isArray fallback.
@@ -113,6 +200,9 @@ def chat_start():
 
     Returns ``{taskId}``; the client polls ``/api/v1/chat/poll/<taskId>``.
     """
+    retired = _legacy_turn_protocol_retired()
+    if retired is not None:
+        return retired
     data = parse_body()
     conv_id = data.get('convId', '')
     cfg = data.get('config', {})
@@ -156,11 +246,11 @@ def chat_start():
         _raw_tail = None
         try:
             _db_guard = get_thread_db(DOMAIN_CHAT)
-            _guard_row = _db_guard.execute(
-                'SELECT messages FROM conversations WHERE id=? AND user_id=?',
-                (conv_id, DEFAULT_USER_ID)).fetchone()
-            if _guard_row:
-                _guard_msgs = json.loads(_guard_row['messages'] or '[]')
+            from lib.database.conversation_repository import load_conversation
+            _guard_snapshot = load_conversation(
+                _db_guard, conv_id, user_id=DEFAULT_USER_ID)
+            if _guard_snapshot is not None:
+                _guard_msgs = _guard_snapshot.messages
                 if _guard_msgs:
                     _raw_tail = _guard_msgs[-1]
         except (json.JSONDecodeError, TypeError) as _guard_e:
@@ -195,15 +285,15 @@ def chat_start():
                         '(%s) — dropping stub and starting fresh',
                         conv_id[:8], (_ct_outcome.payload or {}).get('reason', '?'))
             _db_start = get_thread_db(DOMAIN_CHAT)
-            _raw_row = _db_start.execute(
-                'SELECT messages, title FROM conversations WHERE id=? AND user_id=?',
-                (conv_id, DEFAULT_USER_ID)).fetchone()
-            if _raw_row:
-                _raw_msgs = json.loads(_raw_row['messages'] or '[]')
+            _raw_snapshot = load_conversation(
+                _db_start, conv_id, user_id=DEFAULT_USER_ID,
+                metadata_columns=('title',))
+            if _raw_snapshot is not None:
+                _raw_msgs = _raw_snapshot.messages
                 if _raw_msgs and _raw_msgs[-1].get('role') == 'assistant':
                     _raw_msgs.pop()
                     _persist_conv_messages(_db_start, conv_id, _raw_msgs,
-                                           _raw_row['title'], None)
+                                           _raw_snapshot['title'], None)
             messages = build_api_messages_from_db(conv_id, cfg,
                                                   exclude_last=exclude_last)
             if not messages:
@@ -236,12 +326,17 @@ def chat_start():
     from lib.agent_core.admission import controller as _admission, on_terminal
     if not _admission.try_acquire():
         _stats = _admission.stats()
-        logger.warning('[Chat] /chat/start refused for conv=%s — at inflight '
-                       'capacity (%d/%d)', conv_id[:8],
+        _reason = _stats.get('last_refusal_reason') or 'capacity'
+        logger.warning('[Chat] /chat/start refused for conv=%s — reason=%s '
+                       'inflight=%d/%d', conv_id[:8], _reason,
                        _stats['in_flight'], _stats['capacity'])
-        return api_error({'kind': 'capacity',
-                          'detail': 'Server is at task capacity. Retry shortly.',
-                          'retry_after_s': 3}, status=503)
+        _detail = ('Server memory pressure is high. Retry shortly.'
+                   if _reason == 'memory_pressure'
+                   else 'Server is at task capacity. Retry shortly.')
+        return api_typed_error(
+            'server_busy', status=503, detail=_detail,
+            source='routes.chat.admission',
+            extensions={'retry_after_s': 3})
     on_terminal(task['id'], lambda _tid: _admission.release())
 
     from lib.tasks_pkg import spawn_task
@@ -363,6 +458,9 @@ def chat_send():
     Returns on queue:
         { queued: true, queueId, position, convId, title, userMessage, isNew, msgCount }
     """
+    retired = _legacy_turn_protocol_retired()
+    if retired is not None:
+        return retired
     data = parse_body()
     conv_id = data.get('convId', '')
     if not conv_id:
@@ -503,6 +601,9 @@ def chat_branch_start():
 
     Returns: { taskId }
     """
+    retired = _legacy_turn_protocol_retired()
+    if retired is not None:
+        return retired
     data = parse_body()
     conv_id = data.get('convId', '')
     if not conv_id:
@@ -578,6 +679,9 @@ def chat_regenerate():
 
     Returns: { taskId, convId, title, msgCount, userMessage? }
     """
+    retired = _legacy_turn_protocol_retired()
+    if retired is not None:
+        return retired
     data = parse_body()
     conv_id = data.get('convId', '')
     if not conv_id:
@@ -602,21 +706,14 @@ def chat_regenerate():
 
     try:
         db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT messages, title FROM conversations WHERE id=? AND user_id=?',
-            (conv_id, DEFAULT_USER_ID)
-        ).fetchone()
-
-        if not row:
+        from lib.database.conversation_repository import load_conversation
+        snapshot = load_conversation(
+            db, conv_id, user_id=DEFAULT_USER_ID,
+            metadata_columns=('title',))
+        if snapshot is None:
             return api_not_found('Conversation not found')
-
-        try:
-            messages = json.loads(row['messages'] or '[]')
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.warning('[Regen] Failed to parse messages for conv=%s: %s', conv_id[:8], e)
-            return api_internal_error('Failed to parse conversation')
-
-        title = row['title']
+        messages = snapshot.messages
+        title = snapshot['title']
 
         # ── Phase 3: msgId is authoritative; index is the fallback ──
         # The client sends ``truncateToMsgId`` (the stable id of the user
@@ -831,6 +928,7 @@ from lib.chat_dispatch import execute_chat_continue
 
 @api_v1_chat_bp.route('/api/v1/chat/continue', methods=['POST'], endpoint='ui_chat_continue')
 @require_scope('chat')
+@idempotent_post()
 def chat_continue():
     """Atomic continue: roll back the last assistant message to its last
     complete tool-call checkpoint, persist the rolled-back state to DB,
@@ -861,6 +959,9 @@ def chat_continue():
     (``monkeypatch.setattr('routes.chat._start_task_for_conv', ...)``) keep
     steering the route exactly as before the extraction.
     """
+    retired = _legacy_turn_protocol_retired()
+    if retired is not None:
+        return retired
     data = parse_body()
     conv_id = data.get('convId', '')
     if not conv_id:
@@ -944,7 +1045,7 @@ async def chat_stream(task_id):
     task['_sse_gen_id'] = _sse_gen
 
     # ★ Item 6: Last-Event-ID reconnection — if the client provides a cursor,
-    #   skip the full state snapshot and resume from that event index.
+    #   skip the full state snapshot and resume from that absolute event id.
     #   The Last-Event-ID parse + _warm_resume_serviceable verdict now
     #   live in ``plan_warm_resume`` (pt_04686ac6 slice 7). Capture the
     #   raw header here so the closure below can hand it to the planner.
@@ -991,15 +1092,14 @@ async def chat_stream(task_id):
         # Last-Event-ID cursor, verdict _warm_resume_serviceable, build
         # the leading resume state — all under events_lock inside
         # plan_warm_resume. Returns None when the client sent no cursor
-        # OR the cursor is ahead of the buffer (trimmed / stale) → fall
-        # through to build_fresh_state_snapshot.
+        # OR the cursor falls outside the retained absolute window → fall
+        # through to build_connect_snapshot for a flavor-aware full resync.
         from lib.chat_dispatch import plan_warm_resume, build_connect_snapshot
         _warm_plan = plan_warm_resume(task, _last_event_id_hdr, task_id[:8])
 
         if _warm_plan is not None:
-            resume_from = _warm_plan.resume_from
-            missed_evts = _warm_plan.replay_events
-            cursor = resume_from
+            missed_frames = _warm_plan.replay_frames
+            cursor = _warm_plan.next_cursor
             # ★ VU carrier: resume_state is None by design (chat_dispatch
             #   plan_warm_resume) — yield nothing before the replay; the
             #   client's intact VU bubble only needs the missed frames.
@@ -1007,20 +1107,17 @@ async def chat_stream(task_id):
                 _resume_state_payload = json.dumps(_warm_plan.resume_state, ensure_ascii=False)
                 yield f'data: {_resume_state_payload}\n\n'
                 _events_sent += 1
-            for idx, ev in enumerate(missed_evts):
-                eid = resume_from + idx
+            for eid, ev in missed_frames:
                 yield f'id: {eid}\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n'
                 _events_sent += 1
                 if ev.get('type') == 'done':
                     return
-            cursor = resume_from + len(missed_evts)
-            if _task_terminal() and not missed_evts:
+            if _task_terminal() and not missed_frames:
                 # ★ VU carrier: close with the MINIMAL carrier done (no
                 #   agent meta), mirroring the live-tick carrier branch.
                 if task.get('_vu_subtask'):
                     from lib.chat_dispatch import build_carrier_terminal_done
-                    yield (f'id: {cursor}\n'
-                           f'data: {json.dumps(build_carrier_terminal_done(task), ensure_ascii=False)}\n\n')
+                    yield f'data: {json.dumps(build_carrier_terminal_done(task), ensure_ascii=False)}\n\n'
                     return
                 late_done = build_event(EventType.DONE)
                 late_meta = _extract_task_meta(task)
@@ -1028,7 +1125,7 @@ async def chat_stream(task_id):
                 if task['error']:
                     late_done['error'] = task['error']
                 _apply_autopilot_baton(late_done)
-                yield f'id: {cursor}\ndata: {json.dumps(late_done, ensure_ascii=False)}\n\n'
+                yield f'data: {json.dumps(late_done, ensure_ascii=False)}\n\n'
                 return
         else:
             # Fresh connection path: build the full-state snapshot via
@@ -1068,7 +1165,7 @@ async def chat_stream(task_id):
                 if task['error']:
                     done_evt['error'] = task['error']
                 _apply_autopilot_baton(done_evt)
-                yield f'id: {cursor}\ndata: {json.dumps(done_evt, ensure_ascii=False)}\n\n'
+                yield f'data: {json.dumps(done_evt, ensure_ascii=False)}\n\n'
                 return
 
         # LIVE-path main loop (pt_04686ac6 slice 8): every tick's
@@ -1109,9 +1206,22 @@ async def chat_stream(task_id):
                         return
                 cursor = _tick.next_cursor
                 continue
+            if _tick.kind == 'resync':
+                # The reader fell behind a burst larger than the retained
+                # rolling window (or arrived with a future/corrupt cursor).
+                # Rebuild the flavor-aware authoritative snapshot atomically:
+                # normal tasks receive ``state``; VU carriers receive
+                # ``autopilot_vu_start`` + replaySnapshot. Synthetic snapshots
+                # intentionally carry no SSE id and therefore cannot corrupt
+                # the producer-owned Last-Event-ID cursor.
+                state, _meta, cursor = build_connect_snapshot(task)
+                _state_payload = await asyncio.to_thread(_dumps_yielding, state)
+                yield f'data: {_state_payload}\n\n'
+                _events_sent += 1
+                last_t = time.time()
+                continue
             if _tick.kind == 'late_done':
-                yield (f'id: {_tick.next_cursor}\n'
-                       f'data: {json.dumps(_tick.late_done_evt, ensure_ascii=False)}\n\n')
+                yield f'data: {json.dumps(_tick.late_done_evt, ensure_ascii=False)}\n\n'
                 return
             if _tick.kind == 'superseded':
                 # ★ A NEWER READER for this task took over (reconnect / second
@@ -1196,12 +1306,12 @@ async def chat_stream(task_id):
         logger.warning('[Chat] SSE stream refused for principal=%s task=%s — '
                        'at concurrent-stream cap (%d active, cap=%d)',
                        _sse_principal, task_id[:8], _active, _sse_limiter.cap)
-        resp, _st429 = api_error({
-            'kind': 'rate_limited',
-            'detail': 'Too many concurrent streams for this '
-                      'principal. Close an existing stream or '
-                      'retry shortly.',
-            'retry_after_s': 5}, status=429)
+        resp, _st429 = api_typed_error(
+            'ratelimit', status=429,
+            detail='Too many concurrent streams for this principal. '
+                   'Close an existing stream or retry shortly.',
+            source='routes.chat.stream_admission',
+            extensions={'retry_after_s': 5})
         resp.headers['Retry-After'] = '5'
         return resp, _st429
 

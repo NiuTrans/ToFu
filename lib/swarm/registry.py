@@ -21,103 +21,41 @@ logger = get_logger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════
-#  Model Tier System — Single Source-of-Truth
+#  Model Tier System — Evidence-backed ecosystem selection
 # ═══════════════════════════════════════════════════════════
 #
-# Tier semantics:
-#   light    — fast / cheap.  Summaries, formatting, simple lookups.
-#   standard — the parent model itself.  Default for most agents.
-#   heavy    — strongest available.  Complex reasoning, code generation.
-#
-# The parent model is always "standard".  Light and heavy are derived
-# from a known-family table when possible, otherwise they fall back
-# to the parent model (safe: never picks an unknown model).
-
-# Known model families — used to derive lighter / heavier variants
-# when the user picks a model from a recognised family.
-_MODEL_FAMILIES: dict[str, dict[str, str]] = {
-    'gpt-4': {
-        'light':    'gpt-4o-mini',
-        'standard': 'gpt-4o',
-        'heavy':    'gpt-4o',
-    },
-    'gpt-3.5': {
-        'light':    'gpt-3.5-turbo',
-        'standard': 'gpt-3.5-turbo',
-        'heavy':    'gpt-4o',
-    },
-    # NOTE: Claude family intentionally omitted.
-    # The API requires deployment-prefixed names (e.g. 'aws.claude-sonnet-4.6')
-    # that vary per environment.  _derive_tiers() will use the parent model
-    # (from the user's selection / CLAUDE_SONNET_MODEL) for all tiers, which
-    # is already correct.  Add entries here only when light/heavy variants
-    # with known API names become available.
-    'qwen': {
-        'light':    'qwen3-30b-a3b',
-        'standard': 'qwen3-235b-a22b',
-        'heavy':    'qwen3-235b-a22b',
-    },
-    'deepseek': {
-        'light':    'deepseek-v4-flash',
-        'standard': 'deepseek-v4-flash',
-        'heavy':    'deepseek-v4-pro',
-    },
-    'gemini': {
-        'light':    'gemini-2.0-flash',
-        'standard': 'gemini-2.5-flash',
-        'heavy':    'gemini-2.5-pro',
-    },
-}
-
-# ── Runtime tier cache (populated by configure_model_tiers) ──────────
+# Role declarations keep the small light/standard/heavy vocabulary. Concrete
+# model selection is delegated to lib.model_profiles, which considers ONLY
+# configured models carrying strong enough evidence. A newly discovered name
+# with no declaration or benchmark never auto-promotes itself.
 
 _current_parent_model: str = ''
-_resolved_tiers: dict[str, str] = {}   # tier → model name
+_resolved_tiers: dict[str, str] = {}
 _tier_lock = threading.Lock()
 
 
 def _detect_family(model: str) -> str:
-    """Detect the model family from a model name string."""
-    model_lower = model.lower()
-    for family in _MODEL_FAMILIES:
-        if family in model_lower:
-            return family
-    return ''
+    """Backward-compatible family query over the profile parser."""
+    from lib.model_profiles import infer_model_family
+    return infer_model_family(model)
 
 
-def _derive_tiers(parent_model: str) -> dict[str, str]:
-    """Build a ``{tier: model_name}`` dict from *parent_model*.
-
-    * ``standard`` is always *parent_model*.
-    * ``light`` / ``heavy`` come from ``_MODEL_FAMILIES`` when the family
-      is recognised; otherwise they fall back to *parent_model*.
-    """
-    tiers: dict[str, str] = {
-        'light':    parent_model,
-        'standard': parent_model,
-        'heavy':    parent_model,
+def _derive_tiers(parent_model: str, *, provider_id: str = '',
+                  providers: list | None = None) -> dict[str, str]:
+    from lib.model_profiles import select_model_for_tier
+    return {
+        tier: select_model_for_tier(
+            tier, parent_model=parent_model, provider_id=provider_id,
+            providers=providers)
+        for tier in ('light', 'standard', 'heavy')
     }
-    family = _detect_family(parent_model)
-    if family and family in _MODEL_FAMILIES:
-        family_map = _MODEL_FAMILIES[family]
-        tiers['light'] = family_map.get('light', parent_model)
-        tiers['heavy'] = family_map.get('heavy', parent_model)
-        # standard is *always* the parent — don't override
-    return tiers
 
 
 def configure_model_tiers(user_model: str) -> dict[str, str]:
-    """Set up the global tier cache from a single source-of-truth model.
+    """Cache an inspectable snapshot; request-time calls still re-resolve.
 
-    Call this once when the swarm session starts.  Subsequent calls to
-    ``resolve_model_for_tier()`` (without an explicit *parent_model*) will
-    use the cached mapping.
-
-    Args:
-        user_model: The model the user selected in the chat UI.
-
-    Returns:
-        The derived ``{tier: model_name}`` mapping (for inspection / logging).
+    Catalogues and provider prices can refresh while a process is running, so
+    this cache is compatibility/UI state, not the routing authority.
     """
     global _current_parent_model, _resolved_tiers
     with _tier_lock:
@@ -125,45 +63,24 @@ def configure_model_tiers(user_model: str) -> dict[str, str]:
         _resolved_tiers = _derive_tiers(user_model)
     logger.info('[Registry] Model tiers configured from %r → %s',
                 user_model, _resolved_tiers)
-    return dict(_resolved_tiers)  # return a copy
+    return dict(_resolved_tiers)
 
 
-def resolve_model_for_tier(tier: str, parent_model: str = '') -> str:
-    """Resolve a tier hint to a concrete model name.
+def resolve_model_for_tier(tier: str, parent_model: str = '', *,
+                           role: str = '', provider_id: str = '',
+                           providers: list | None = None) -> str:
+    """Resolve a role tier against the live configured model ecosystem.
 
-    Resolution strategy (in priority order):
-      1. If *parent_model* is provided, derive tiers on the fly from it.
-      2. Else use the cached tiers from ``configure_model_tiers()``.
-      3. If nothing is configured, return ``''`` (caller should handle).
-
-    Args:
-        tier: ``'light'``, ``'standard'``, or ``'heavy'``.
-        parent_model: Optional override; if given, tiers are derived from
-            this model instead of the cached one.
-
-    Returns:
-        Resolved model name string.
+    ``provider_id`` is a hard boundary for BYO/provider-pinned swarms. Weak or
+    absent profile evidence falls back to the parent instead of guessing.
     """
+    parent = parent_model or _current_parent_model or ''
     if tier not in ('light', 'standard', 'heavy'):
-        return parent_model or _current_parent_model or ''
-
-    # If caller supplied an explicit parent, derive on the fly
-    if parent_model:
-        tiers = _derive_tiers(parent_model)
-        resolved = tiers.get(tier, parent_model)
-        logger.debug('[Registry] tier=%s parent=%s → %s (ad-hoc)',
-                     tier, parent_model, resolved)
-        return resolved
-
-    # Use the cached mapping
-    if _resolved_tiers:
-        resolved = _resolved_tiers.get(tier, _current_parent_model)
-        logger.debug('[Registry] tier=%s → %s (cached)', tier, resolved)
-        return resolved
-
-    # Nothing configured — return empty string
-    logger.debug('[Registry] tier=%s → "" (no model configured)', tier)
-    return ''
+        return parent
+    from lib.model_profiles import select_model_for_tier
+    return select_model_for_tier(
+        tier, parent_model=parent, role=role, provider_id=provider_id,
+        providers=providers)
 
 
 # Backward-compatible property: read-only snapshot of the current tiers.
@@ -236,11 +153,10 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
         'system_prompt_suffix': (
             'You are a coding specialist. Focus on reading, writing, '
             'and modifying code. Use project tools (read_files, write_file, '
-            'grep_search, run_command, apply_diff) effectively. '
+            'grep_search, run_command, edit_file) effectively. '
             'Follow existing code conventions. Test your changes.'
         ),
-        'tools_hint': ['read_files', 'write_file', 'apply_diff', 'apply_diffs',
-                       'insert_content', 'insert_contents',
+        'tools_hint': ['read_files', 'write_file', 'edit_file',
                        'grep_search', 'find_files', 'list_dir', 'run_command'],
         'model_hint': 'heavy',      # code generation benefits from strong models
     },
@@ -271,16 +187,17 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
         'system_prompt_suffix': (
             'You are a browser automation specialist. Use browser tools '
             'to navigate, read, click, and extract information from web pages. '
-            'Use browser_read_page to extract content, browser_click / '
-            'browser_type with text= to interact, and browser_execute_js for '
-            'complex interactions.'
+            'The concrete browser tools available vary by the current client '
+            'and permission scope: use only tools present in this run\'s tool '
+            'schemas, and report a missing capability instead of emulating it '
+            'with shell commands.'
         ),
         'tools_hint': ['browser_list_tabs', 'browser_read_page',
                        'browser_execute_js', 'browser_screenshot',
                        'browser_click', 'browser_type', 'browser_press_key',
                        'browser_menu_click', 'browser_fill_form',
                        'browser_navigate', 'browser_close_tab',
-                       'fetch_url'],
+                       'browser_preview_page', 'fetch_url'],
         'model_hint': 'standard',
     },
 
@@ -501,9 +418,9 @@ def scope_tools_for_role(role: str, all_tools: list) -> list:
 
       1. **Role-specific allow-list** — tools whose ``function.name`` appears
          in the role's ``tools_hint``.  When the hint is empty (e.g.
-         ``general``), all tools pass this filter.  A safety fallback expands
-         to all tools if scoping produced fewer than 2 — keeps mis-configured
-         roles from becoming useless.
+         ``general``), all tools pass this filter.  A partial/empty match stays
+         partial/empty: capability gates are authority boundaries, never a
+         reason to expand a specialist to unrelated privileged tools.
       2. **Sub-agent deny-list** — swarm-control tools (``spawn_agents``,
          ``await_agents``, ``get_agent_result``) and ``ask_human`` are ALWAYS
          stripped, regardless of role.  Sub-agents must not be able to spawn
@@ -529,9 +446,6 @@ def scope_tools_for_role(role: str, all_tools: list) -> list:
             if isinstance(tool, dict)
             and tool.get('function', {}).get('name', '') in hint_set
         ]
-        # Safety fallback: empty / near-empty scoping expands to all tools
-        if len(scoped) < 2 and len(all_tools) > 2:
-            scoped = list(all_tools)
     else:
         scoped = list(all_tools)  # general role → all tools
 

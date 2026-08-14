@@ -1,0 +1,10 @@
+export function bootAdmin(): Promise<void>;
+export function refreshTabVisibility(): Promise<void>;
+export function relayAdminCopyCodes(element: HTMLElement): Promise<void>;
+export function relayAdminCreateUser(): Promise<void>;
+export function relayAdminMintCodes(): Promise<void>;
+export function relayAdminSaveMargin(): Promise<void>;
+export function relayAdminSwitch(elementOrName: HTMLElement | string): void;
+export function relayAdminToggleStatus(element: HTMLElement): Promise<void>;
+export function relayAdminTopup(element: HTMLElement): Promise<void>;
+export function relayAdminViewPayments(element: HTMLElement): Promise<void>;

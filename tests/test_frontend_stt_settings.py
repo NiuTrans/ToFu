@@ -17,13 +17,19 @@ backend depends on:
 Run: make test-frontend  (skips cleanly when node/jsdom aren't installed)
 """
 
+import json
 import os
+import subprocess
+from pathlib import Path
 
 import pytest
 
 from tests._jsdom import JS_DIR, run_harness
 
 pytestmark = pytest.mark.unit
+ROOT = Path(__file__).resolve().parents[1]
+MODULE_TS = ROOT / 'frontend/src/features/settings/speech.ts'
+ESBUILD = ROOT / 'node_modules/.bin/esbuild'
 
 _BODY = r'''
 const { setup } = require(process.env.JSDOM_HARNESS);
@@ -64,6 +70,16 @@ const { window, document, check, report } = setup({
     Api: { audio: { capabilities: async () => ({ available: false, models: [] }) } },
   },
 });
+
+for (const name of ['HTMLElement', 'HTMLInputElement', 'HTMLSelectElement',
+                    'AbortController', 'AbortSignal']) {
+  global[name] = window[name];
+}
+// Classic scripts declare globals directly; the native module deliberately
+// exports only its compatibility surface on window.
+for (const name of ['_applySttToProviders', '_switchSttProvider']) {
+  if (typeof window[name] === 'function') global[name] = window[name];
+}
 
 const $ = (id) => document.getElementById(id);
 const sttProv = () => _stgProviders.filter((p) => p.id === 'stt')[0] || null;
@@ -168,3 +184,92 @@ def test_stt_settings_frontend():
         min_pass=21,
         label='stt-settings',
     )
+
+
+@pytest.mark.skipif(not ESBUILD.is_file(), reason='esbuild not installed')
+def test_vite_stt_settings_matches_classic_write_contract(tmp_path):
+    built = tmp_path / 'speech.js'
+    compiled = subprocess.run(
+        [str(ESBUILD), str(MODULE_TS), '--bundle', '--format=iife',
+         '--platform=browser', f'--outfile={built}'],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+    run_harness(
+        target_js=str(built),
+        body_js=_BODY,
+        min_pass=21,
+        label='vite stt-settings',
+    )
+
+
+@pytest.mark.skipif(not ESBUILD.is_file(), reason='esbuild not installed')
+def test_vite_stt_status_generation_and_panel_lifecycle(tmp_path):
+    built = tmp_path / 'speech-lifecycle.js'
+    compiled = subprocess.run(
+        [str(ESBUILD), str(MODULE_TS), '--bundle', '--format=iife',
+         '--platform=browser', f'--outfile={built}'],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+    script = r'''
+const { JSDOM } = require('jsdom');
+const dom = new JSDOM('<!doctype html><body>' +
+  '<input type="checkbox" id="settingSttEnabled">' +
+  '<div id="sttProviderFields"></div>' +
+  '<select id="settingSttProvider"><option value="openai">o</option>' +
+    '<option value="custom">c</option></select>' +
+  '<div id="sttCardOpenai"></div><div id="sttCardGroq"></div>' +
+  '<div id="sttCardOmni"></div><div id="sttCardCustom"></div>' +
+  '<div id="sttStatusBanner"></div><span id="sttStatusText"></span>' +
+  '</body>');
+global.window = dom.window;
+global.document = dom.window.document;
+for (const name of ['HTMLElement', 'HTMLInputElement', 'HTMLSelectElement',
+                    'AbortController', 'AbortSignal']) global[name] = dom.window[name];
+global._stgProviders = [];
+window.t = (key) => key;
+const resolvers = [];
+window.Api = { audio: { capabilities: () => new Promise(
+  (resolve) => resolvers.push(resolve)) } };
+require(BUILT_PATH);
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+(async () => {
+  window._populateSpeechTab();       // probe generation 1
+  const select = document.getElementById('settingSttProvider');
+  select.value = 'custom';
+  select.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  const switchOwned = document.getElementById('sttCardCustom').style.display === ''
+    && document.getElementById('sttCardOpenai').style.display === 'none';
+
+  window._refreshSttStatus();        // probe generation 2
+  resolvers[1]({ available: false, models: [] });
+  await tick();
+  resolvers[0]({ available: true, models: [{ model: 'STALE' }] });
+  await tick();
+  const staleWon = document.getElementById('sttStatusText').textContent.includes('STALE');
+
+  const fields = document.getElementById('sttProviderFields');
+  window._destroySpeechTab();
+  document.getElementById('settingSttEnabled').checked = true;
+  document.getElementById('settingSttEnabled').dispatchEvent(
+    new dom.window.Event('change', { bubbles: true }));
+  console.log(JSON.stringify({
+    switchOwned,
+    staleWon,
+    listenerSurvivedDestroy: fields.style.display !== 'none',
+  }));
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+'''.replace('BUILT_PATH', json.dumps(str(built)))
+    run = subprocess.run(
+        ['node', '-e', script], cwd=ROOT,
+        capture_output=True, text=True,
+    )
+    assert run.returncode == 0, run.stderr
+    result = json.loads(run.stdout.strip().splitlines()[-1])
+    assert result == {
+        'switchOwned': True,
+        'staleWon': False,
+        'listenerSurvivedDestroy': False,
+    }

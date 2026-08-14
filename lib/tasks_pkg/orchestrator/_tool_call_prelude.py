@@ -86,11 +86,17 @@ def append_assistant_tool_call_message(
     #   tool-loop turn replays a signed thinking block). All those gates
     #   now live in ONE place, so a future field can never re-diverge
     #   between the two paths. See build_assistant_tool_call_message.
-    clean_msg = build_assistant_tool_call_message(
+    _builder_kwargs = dict(
         tool_calls=assistant_msg['tool_calls'],
         content=assistant_msg.get('content'),
         reasoning_content=assistant_msg.get('reasoning_content'),
         thinking_signature=assistant_msg.get('thinking_signature'))
+    if assistant_msg.get('_responses_items'):
+        _builder_kwargs['responses_items'] = assistant_msg['_responses_items']
+    if assistant_msg.get('_anthropic_content_blocks'):
+        _builder_kwargs['anthropic_content_blocks'] = (
+            assistant_msg['_anthropic_content_blocks'])
+    clean_msg = build_assistant_tool_call_message(**_builder_kwargs)
     messages.append(clean_msg)
 
     # ★ Discard the inter-round narration this round streamed before

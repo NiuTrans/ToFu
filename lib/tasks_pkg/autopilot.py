@@ -354,7 +354,12 @@ def run_virtual_user(task: dict, vu_msg_id: str | None = None) -> dict | None:
     # compaction; falls back to deriving from the live messages.
     # ★ Attribute the (silent, up to tens of seconds) pre-stream window so the
     #   VU bubble names what's blocking instead of a bare "Autopilot…".
-    _emit_vu_setup_phase(task, vu_msg_id, 'Autopilot：核对助手回答、确定下一步…')
+    _emit_vu_setup_phase(
+        task,
+        vu_msg_id,
+        'Autopilot is checking the assistant answer to decide the next step…',
+        detail_key='stream.phase.vuVerifyAssistant',
+    )
     objective = _get_or_persist_objective(task.get('convId') or '',
                                            parent_messages)
     objective_block = ''
@@ -398,7 +403,12 @@ def run_virtual_user(task: dict, vu_msg_id: str | None = None) -> dict | None:
     # ``_inline_messages=True`` keeps it out of the conv DB sync path;
     # ``_endpoint_managed=True`` suppresses the orchestrator's done event
     # + autopilot recursion.
-    _emit_vu_setup_phase(task, vu_msg_id, 'Autopilot：整理对话上下文，准备生成回复…')
+    _emit_vu_setup_phase(
+        task,
+        vu_msg_id,
+        'Autopilot is assembling conversation context to compose a reply…',
+        detail_key='stream.phase.vuAssembleContext',
+    )
     from lib.tasks_pkg import create_task
     from lib.tasks_pkg.orchestrator import _run_single_turn
 
@@ -828,10 +838,6 @@ def _maybe_run_autopilot_inner(task: dict) -> dict | None:
         logger.info('[Autopilot %s] Skip — task ended in error: %.120s',
                     tid, str(task.get('error')))
         return None
-    if task.get('finishReason') == 'tool_rounds_exhausted':
-        logger.info('[Autopilot %s] Skip — tool rounds exhausted', tid)
-        return None
-
     if _has_pending_real_message(conv_id):
         logger.info('[Autopilot %s] Skip — real user message queued '
                     '(it takes priority)', tid)
@@ -1025,10 +1031,16 @@ def _maybe_run_autopilot_inner(task: dict) -> dict | None:
     # pre-hook sync may have been skipped (it gates on is_autopilot_enabled
     # evaluated a few lines earlier), so do it here too — idempotent.
     _presync_parent_reply(task)
-    vu_msg = _append_vu_message_to_conv(
-        conv_id, vu_msg_id, vu_text_clean, rounds=vu_rounds, run_id=run_id,
-        segments=vu_segments,
-    )
+    if task.get('_turnProtocolV2'):
+        from lib.tasks_pkg.autopilot_baton import _append_v2_autopilot_turns
+        vu_msg = _append_v2_autopilot_turns(
+            task, conv_id, vu_msg_id, vu_text_clean, rounds=vu_rounds,
+            run_id=run_id, segments=vu_segments)
+    else:
+        vu_msg = _append_vu_message_to_conv(
+            conv_id, vu_msg_id, vu_text_clean, rounds=vu_rounds, run_id=run_id,
+            segments=vu_segments,
+        )
     if vu_msg is None:
         # The append did not land. Every reason for that (row gone, CAS budget
         # exhausted, or a real human turn arriving mid-flight so we must NOT
@@ -1048,7 +1060,8 @@ def _maybe_run_autopilot_inner(task: dict) -> dict | None:
     # the assistant/critic safety net), so without this a VU turn is left
     # untranslated unless a viewer fires a manual translate. Row index resolved
     # from the persisted _msgId (not guessed); best-effort, never blocks.
-    _maybe_auto_translate_vu(conv_id, vu_msg_id, vu_text_clean)
+    if not task.get('_turnProtocolV2'):
+        _maybe_auto_translate_vu(conv_id, vu_msg_id, vu_text_clean)
 
     # Tell the frontend the VU bubble is fully baked.  Carries the
     # final content + rounds so a client that lazily built the bubble

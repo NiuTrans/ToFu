@@ -1,0 +1,54 @@
+// Presentation-heavy Studio/Task Mode owners live behind a second dynamic
+// boundary so the orchestration command/runtime entry remains below the
+// per-chunk budget. These modules publish the same temporary window ports as
+// their classic predecessors before the compatibility domain is evaluated.
+import './orchestration/dialog';
+import './orchestration/roving-items';
+import './orchestration/responsive';
+import './orchestration/task-mode-services';
+import './orchestration/task-mode-shell-template';
+import './orchestration/task-mode-shell';
+import './orchestration/task-mode-panel-selection';
+import './orchestration/task-mode-panel-layout';
+import './orchestration/bounded-state';
+import './orchestration/scroll-state';
+import './orchestration/disclosure-state';
+import './orchestration/node-summary';
+import './orchestration/node-catalogue';
+import './orchestration/task-mode-node-presentation';
+import './orchestration/task-mode-timeline';
+import './orchestration/task-mode-graph-projection';
+import './orchestration/task-mode-graph';
+import './orchestration/task-mode-gate-presentation';
+import './orchestration/task-mode-gate-view';
+import './orchestration/task-mode-inspector-presentation';
+import './orchestration/task-mode-inspector';
+import './orchestration/task-mode-view-registry';
+import './orchestration/task-mode-transition-projector';
+import './orchestration/task-mode-workspace';
+import './orchestration/task-mode-controller-hub';
+import './orchestration/task-mode-root-controller';
+import './orchestration/task-mode-run-time';
+import './orchestration/request-reader';
+import './orchestration/task-mode-list-focus';
+import './orchestration/task-mode-list-paging';
+import './orchestration/task-mode-list-error';
+import './orchestration/task-mode-run-status-presentation';
+import './orchestration/task-mode-list-presentation';
+import './orchestration/task-mode-list';
+import './orchestration/task-mode-list-controller';
+import './orchestration/task-mode-run-title-view';
+import './orchestration/task-mode-run-final-view';
+import './orchestration/task-mode-run-view';
+import './orchestration/task-mode-contract-session';
+import './orchestration/task-mode-contract-controller';
+import './orchestration/task-mode-run-store';
+import './orchestration/task-mode-mutation-reconciler';
+import './orchestration/task-mode-actions';
+import './orchestration/task-mode-run-command-controller';
+import './orchestration/task-mode-command-controller';
+import './orchestration/task-mode-run-reader';
+import './orchestration/task-mode-run-replay-controller';
+import './orchestration/task-mode-run-controller';
+import './orchestration/task-mode-event-controller';
+import './orchestration/task-mode';

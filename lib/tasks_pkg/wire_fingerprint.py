@@ -132,7 +132,8 @@ def _text_of(content: Any) -> str:
             parts.append(str(block))
             continue
         btype = block.get('type')
-        if btype == 'text' or ('text' in block and not btype):
+        if btype in ('text', 'input_text', 'output_text') or (
+                'text' in block and not btype):
             parts.append('\x02text\x03' + (block.get('text') or ''))
         elif btype == 'image_url':
             url = (block.get('image_url') or {}).get('url', '')
@@ -177,6 +178,26 @@ def _fields_of(msg: dict) -> dict[str, str]:
     tool_use + thinking blocks). The output field set is the SAME regardless
     of envelope so a protocol switch alone never registers as a change.
     """
+    item_type = msg.get('type', '')
+    if item_type == 'function_call':
+        spec = ((msg.get('call_id') or msg.get('id') or '') + '\x03'
+                + (msg.get('name') or '') + '\x03'
+                + _canon_args(msg.get('arguments')))
+        return {'role': _md5('assistant'), 'tool_calls': _md5(spec)}
+    if item_type == 'function_call_output':
+        spec = ((msg.get('call_id') or '') + '\x03'
+                + _text_of(msg.get('output')))
+        return {'role': _md5('toolresult'), 'tool_result': _md5(spec)}
+    if item_type in ('reasoning', 'compaction'):
+        try:
+            opaque = json.dumps(_strip_cache_control(msg), sort_keys=True,
+                                ensure_ascii=False)
+        except (TypeError, ValueError) as exc:
+            logger.debug('[WireFingerprint] opaque %s payload is not JSON serializable: %s',
+                         item_type, exc)
+            opaque = str(msg)
+        return {'role': _md5(item_type), item_type: _md5(opaque)}
+
     role = msg.get('role', '')
     content = msg.get('content')
 
@@ -288,6 +309,13 @@ def _tool_id_token(tool_id) -> str:
 
 def _brief(msg: dict) -> str:
     """Short human token for a message (for readable diff output)."""
+    item_type = msg.get('type', '')
+    if item_type == 'function_call':
+        return f'assistant/tool_call({msg.get("name") or "?"})'
+    if item_type == 'function_call_output':
+        return f'tool_result({_tool_id_token(msg.get("call_id"))})'
+    if item_type in ('reasoning', 'compaction'):
+        return f'{item_type}({_tool_id_token(msg.get("id"))})'
     role = msg.get('role', '?')
     if role == 'tool':
         return f'tool_result({_tool_id_token(msg.get("tool_call_id"))})'
@@ -528,7 +556,7 @@ def marker_signature(body: dict) -> dict[str, Any]:
     # (the sawtooth whole-prefix rewrite). A block ≈ one content entry; an
     # assistant ``tool_calls`` turn also emits one tool_use block per call.
     _cum_blocks = 0
-    for msg in body.get('messages') or ():
+    for msg in body.get('messages') or body.get('input') or ():
         if not isinstance(msg, dict):
             _cum_blocks += 1
             continue
@@ -542,7 +570,9 @@ def marker_signature(body: dict) -> dict[str, Any]:
             _cum_blocks += _blocks_here
             continue
         marked = [bi for bi, b in enumerate(content)
-                  if isinstance(b, dict) and b.get('cache_control')]
+                  if (isinstance(b, dict)
+                      and (b.get('cache_control')
+                           or b.get('prompt_cache_breakpoint')))]
         if marked:
             entry = {'role': msg.get('role', ''),
                      'fields': _fields_of(msg), 'brief': _brief(msg)}
@@ -557,7 +587,7 @@ def marker_signature(body: dict) -> dict[str, Any]:
             # unrelated to the real mid→tail geometry. ``body_msg_blocks`` keeps
             # only the BODY (non-system) message markers so the predicate
             # measures the true mid→tail span.
-            _is_head = msg.get('role') == 'system'
+            _is_head = msg.get('role') in ('system', 'developer')
             for bi in marked:
                 sig['msg'].append((key, bi))
                 sig['msg_blocks'].append(_cum_blocks + bi)
@@ -567,6 +597,10 @@ def marker_signature(body: dict) -> dict[str, Any]:
                 _cc = content[bi].get('cache_control')
                 if isinstance(_cc, dict):
                     _ttls.append((f'msg:{key}', _cc.get('ttl', '')))
+                _pcb = content[bi].get('prompt_cache_breakpoint')
+                if isinstance(_pcb, dict):
+                    _ttls.append((f'msg:{key}',
+                                  f"explicit:{_pcb.get('mode', '')}"))
         _cum_blocks += _blocks_here
 
     # Hoisted system (Anthropic path: list of blocks) + tools.
@@ -966,7 +1000,7 @@ def static_prefix_hash(messages: list) -> str:
         if not isinstance(msg, dict):
             continue
         role = msg.get('role', '')
-        if role == 'system':
+        if role in ('system', 'developer'):
             parts.append('sys\x03' + _text_of(msg.get('content')))
         elif role == 'user':
             parts.append('user\x03' + _text_of(msg.get('content')))

@@ -101,16 +101,16 @@ _EVENTTYPE_RE = re.compile(r"""\bEventType\.([A-Z_][A-Z0-9_]*)\b""")
 _JS_TYPE_RE = re.compile(r"""\.type\s*===\s*['"]([a-z_]+)['"]""")
 
 _FRONTEND_FILES = [
-    'static/js/ui/sse_pipeline.js',
-    'static/js/branch.js',
-    # Cross-conversation presence strip — handles the 'presence' push event
-    # (.type === "presence"); proves the type is frontend-handled, not just
-    # backend-emitted.
-    'static/js/presence.js',
+    '@runtime:ui/sse_pipeline.js',
+    '@runtime:branch.js',
+    '@runtime:presence.js',
 ]
 
 
 def _read(rel: str) -> str:
+    if rel.startswith('@runtime:'):
+        from tests._runtime_sections import runtime_section
+        return runtime_section(rel.removeprefix('@runtime:'))
     path = os.path.join(REPO, rel)
     with open(path, 'r', encoding='utf-8') as f:
         return f.read()
@@ -129,6 +129,14 @@ def _resolve_scan_targets(entries: list[str]) -> tuple[list[str], list[str]]:
     resolved: list[str] = []
     unresolved: list[str] = []
     for rel in entries:
+        if rel.startswith('@runtime:'):
+            try:
+                _read(rel)
+            except AssertionError:
+                unresolved.append(rel)
+            else:
+                resolved.append(rel)
+            continue
         p = os.path.join(REPO, rel)
         if os.path.isfile(p):
             resolved.append(rel)

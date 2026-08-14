@@ -15,7 +15,8 @@ logger = get_logger(__name__)
 
 
 def _bm25_top_n(memories: list[dict], query: str,
-                top_n: int = PREFETCH_BM25_TOP_N) -> list[tuple[int, float]]:
+                top_n: int = PREFETCH_BM25_TOP_N,
+                *, include_body: bool = False) -> list[tuple[int, float]]:
     """Return [(memory_index, score), ...] sorted by BM25 score descending.
 
     Only memories with score > 0 are returned.  Uses the same tokenizer
@@ -29,7 +30,7 @@ def _bm25_top_n(memories: list[dict], query: str,
     if not q_tokens or not memories:
         return []
 
-    docs = [_build_memory_doc(m, include_body=True) for m in memories]
+    docs = [_build_memory_doc(m, include_body=include_body) for m in memories]
     doc_lens = [len(d) for d in docs]
     n = len(memories)
     avg_dl = (sum(doc_lens) / n) if n > 0 else 1.0

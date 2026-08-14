@@ -33,7 +33,11 @@ logger = get_logger(__name__)
 #: DELIBERATELY (a dated, reviewed bump) to adopt newer server releases —
 #: that is the whole point: upgrades become an explicit edit with a diff,
 #: instead of something that happens to whoever resolves next.
-_SUPPLY_CUTOFF_DEFAULT = '2026-07-27T00:00:00Z'
+# The 2026-08-14 ceiling is a reviewed bump which includes
+# ``overleaf-mcp-plus==0.3.1`` and MCP SDK v2.0.0 used by the adopted
+# hope/llm/xuecheng snapshots. Keep the cutoff, but move it only alongside an
+# explicit, tested dependency upgrade.
+_SUPPLY_CUTOFF_DEFAULT = '2026-08-14T00:00:00Z'
 
 #: Marker file written into each npm ``_npx/<hash>/`` slot recording the
 #: cutoff its ``package-lock.json`` was resolved under.
@@ -369,7 +373,7 @@ def _reload_vendored_if_changed() -> None:
 # freshly-vendored snapshot look "stale" forever.
 _VENDOR_EXCLUDE_DIRS = frozenset({
     '.git', '__pycache__', '.pytest_cache', '.ruff_cache', 'build', 'dist',
-    '.tofu', '.chatui', '.venv', 'venv',
+    '.tofu', '.tofu_trash', '.chatui', '.oa-skills-ref', '.venv', 'venv',
 })
 
 
@@ -378,7 +382,11 @@ def _vendor_excluded_dir(name: str) -> bool:
 
 
 def _vendor_excluded_file(name: str) -> bool:
-    return name.endswith('.pyc') or name.endswith('.egg-link')
+    return (
+        name.endswith('.pyc')
+        or name.endswith('.egg-link')
+        or name in {'JOURNAL.md', 'citadel (1).zip'}
+    )
 
 
 def _vendor_tree_signature(base: str) -> dict[str, tuple[int, int]]:

@@ -38,8 +38,11 @@ installed.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -47,7 +50,34 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+RUNTIME = Path(ROOT) / 'frontend' / 'src' / 'runtime' / 'app-runtime.js'
+
+
+def _runtime_section(name: str) -> str:
+    """Read one retained vanilla section from the shipped Vite runtime."""
+    source = RUNTIME.read_text(encoding='utf-8')
+    marker = f'/* ===== migrated source: {name} ===== */'
+    start = source.find(marker)
+    assert start >= 0, f'migrated runtime section not found: {name}'
+    next_marker = source.find('/* ===== migrated source:', start + len(marker))
+    end = next_marker if next_marker >= 0 else len(source)
+    return ('var runtimeScope = typeof window !== "undefined" '
+            '? window : globalThis;\n' + source[start:end])
+
+
+def _extract_js_function(source: str, name: str) -> str:
+    match = re.search(rf'function {re.escape(name)}\s*\(', source)
+    assert match, f'{name} not found in runtime source'
+    brace = source.index('{', match.start())
+    depth = 0
+    for index in range(brace, len(source)):
+        if source[index] == '{':
+            depth += 1
+        elif source[index] == '}':
+            depth -= 1
+            if depth == 0:
+                return source[match.start():index + 1]
+    raise AssertionError(f'unbalanced braces extracting {name}')
 
 
 def _node_deps_available() -> bool:
@@ -139,10 +169,23 @@ const conv = {
 };
 win.conversations = global.conversations = [conv];
 
+// Carrier/parent handoff shape from the production incident: the live stream
+// remains bound to an assistant-side control object while the actual visible
+// owner is the trailing VU user message.  The VU tail must win for both lane
+// identity and document projection; otherwise the rebuild produces an Agent
+// bubble backed by this empty object.
+const detachedCarrierAssistant = {
+  role: 'assistant', content: '', thinking: '', toolRounds: [], _msgId: 'carrier-dummy',
+};
+win.activeStreams = global.activeStreams = new Map([['C1', {
+  taskId: 'task-vu-carrier', assistantMsg: detachedCarrierAssistant,
+  _detachedCarrier: 'autopilot-kick',
+}]]);
+
 // Load the REAL shipped render deps under one shared scope.
-eval(fs.readFileSync(path.join(ROOT, 'static', 'js', 'ui', 'streaming_ui.js'), 'utf8'));
-eval(fs.readFileSync(path.join(ROOT, 'static', 'js', 'ui', 'streaming_render.js'), 'utf8'));
-eval(fs.readFileSync(path.join(ROOT, 'static', 'js', 'ui', 'stream_lifecycle.js'), 'utf8'));
+eval(fs.readFileSync(process.argv[3], 'utf8'));
+eval(fs.readFileSync(process.argv[4], 'utf8'));
+eval(fs.readFileSync(process.argv[5], 'utf8'));
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -179,17 +222,23 @@ console.log(out.join('\n'));
 
 
 def _run():
-    harness = os.path.join(HERE, '_autopilot_vu_rerender_harness.js')
-    with open(harness, 'w') as f:
-        f.write(_HARNESS)
-    try:
-        proc = subprocess.run(['node', harness, ROOT],
-                              capture_output=True, text=True, timeout=60)
-    finally:
-        try:
-            os.remove(harness)
-        except OSError:
-            pass
+    with tempfile.TemporaryDirectory(prefix='tofu-vu-rerender-') as tmp:
+        temp_root = Path(tmp)
+        harness = temp_root / 'harness.js'
+        harness.write_text(_HARNESS, encoding='utf-8')
+        section_paths = []
+        for index, name in enumerate((
+            'ui/streaming_ui.js',
+            'ui/streaming_render.js',
+            'ui/stream_lifecycle.js',
+        )):
+            path = temp_root / f'section-{index}.js'
+            path.write_text(_runtime_section(name), encoding='utf-8')
+            section_paths.append(str(path))
+        proc = subprocess.run(
+            ['node', str(harness), ROOT, *section_paths],
+            capture_output=True, text=True, timeout=60,
+        )
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     return output
@@ -206,18 +255,81 @@ def test_vu_tail_rerender_recreates_live_streaming_bubble():
     assert output.count('PASS') >= 6, f'expected >=6 PASS lines, got:\n{output}'
 
 
+_FRAME_HARNESS = r"""
+'use strict';
+const out = [];
+function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
+const streamSessions = new Map([['C1', {
+  phase: { phase: 'working', detail: 'Autopilot is preparing tools…' },
+}]]);
+const vuTail = {
+  role: 'user', content: 'VISIBLE-VU-CONTENT', thinking: '', toolRounds: [],
+  _msgId: 'vu-42', _isVirtualUser: true, _streamingVu: true,
+};
+const conversations = [{ id: 'C1', messages: [
+  { role: 'assistant', content: 'settled worker' }, vuTail,
+] }];
+const detachedCarrier = {
+  role: 'assistant', content: '', thinking: '', toolRounds: [],
+  _msgId: 'carrier-dummy',
+};
+const activeStreams = new Map([['C1', {
+  taskId: 'task-vu-carrier', assistantMsg: detachedCarrier,
+}]]);
+function getToolRoundsFromMsg(msg) { return (msg && msg.toolRounds) || []; }
+function _resolveAssistantById(conv, msgId) {
+  return conv.messages.find(msg => msg && msg._msgId === msgId) || null;
+}
+__FRAME_FUNCTION__
+const frame = _streamFrameArg('C1');
+check('vu_document_wins_over_detached_assistant_carrier',
+      frame && frame.content === 'VISIBLE-VU-CONTENT');
+check('backend_phase_survives_frame_projection',
+      frame && frame.phase && frame.phase.detail === 'Autopilot is preparing tools…');
+console.log(out.join('\n'));
+"""
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_vu_stream_frame_projects_vu_tail_over_detached_carrier():
+    """The coalesced timer must repaint from the VU document, not from the
+    empty assistant-side carrier left behind during the parent→VU handoff."""
+    health = _runtime_section('core/health_stream_timer.js')
+    frame_fn = _extract_js_function(health, '_streamFrameArg')
+    proc = subprocess.run(
+        ['node', '-'],
+        input=_FRAME_HARNESS.replace('__FRAME_FUNCTION__', frame_fn),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=ROOT,
+    )
+    output = proc.stdout.strip()
+    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
+    fails = [line for line in output.splitlines() if line.startswith('FAIL')]
+    assert not fails, 'VU stream-frame projection failures:\n' + output
+
+
+
 def test_source_guard_vu_tail_arm_present():
     """Source-level guard: showStreamingUIForConv must recognise a VU-streaming
     tail as owning the streaming bubble AND emit the autopilot bubble for it.
     This is what stops a mid-stream rebuild from freezing the VU turn on the
     static warm-up pulse."""
-    sl = os.path.join(JS_DIR, 'ui', 'stream_lifecycle.js')
-    with open(sl, encoding='utf-8') as f:
-        src = f.read()
+    src = _runtime_section('ui/stream_lifecycle.js')
     assert '_last._isVirtualUser && _last._streamingVu' in src, (
         'regression: showStreamingUIForConv no longer counts a streaming VU tail '
         'as _lastIsStreamingBubble — a mid-stream renderChat rebuild will paint '
         'the VU turn statically and freeze it on "Autopilot starting…".')
+    assert '_vuTailOwnsStream ? lastMsg : (_boundMsg || lastMsg)' in src, (
+        'regression: showStreamingUIForConv lets an assistant-bound carrier '
+        'override the trailing VU document as _smSrc — the live bubble changes '
+        'back to Agent and projects an empty control object as “Waiting…”.')
+    health = _runtime_section('core/health_stream_timer.js')
+    assert 'last._isVirtualUser && last._streamingVu' in health, (
+        'regression: the coalesced stream frame no longer projects from the '
+        'live VU document, so phase repaints fall back to Agent · Waiting…')
     assert "_streamingBubbleHTML('autopilot'" in src, (
         'regression: showStreamingUIForConv no longer emits the autopilot '
         'streaming bubble for a VU tail.')

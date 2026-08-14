@@ -55,7 +55,7 @@ global.debugLog = () => {};
 global.escapeHtml = (s) => String(s);
 global.t = (k) => k;
 global.addEventListener = () => {};
-global._onReady = () => {};   // feature-loader.js's deferred-ready hook (Epic-E sub-9)
+global._onReady = () => {};   // feature-bridge.js's deferred-ready hook (Epic-E sub-9)
 global.setTimeout = () => 1;
 global.clearTimeout = () => {};
 global.requestAnimationFrame = () => 0;

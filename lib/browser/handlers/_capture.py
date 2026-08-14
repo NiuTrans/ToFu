@@ -160,6 +160,15 @@ def _handle_get_cookies(fn_args):
     if error:
         return f'Error getting cookies: {error}'
     if isinstance(result, list):
+        try:
+            from lib.browser.access import is_read_allowed
+            from lib.browser.queue import _get_active_client, client_user_id
+            uid = client_user_id(_get_active_client())
+            result = [row for row in result if is_read_allowed(
+                uid, row.get('domain') or fn_args.get('url') or '')]
+        except Exception as exc:
+            logger.debug('cookie access filtering failed closed: %s', exc)
+            result = []
         lines = [f'Cookies ({len(result)} found):\n']
         for c in result:
             lines.append(f'  {c.get("name", "?")} = {str(c.get("value", ""))[:100]}')
@@ -177,6 +186,15 @@ def _handle_get_history(fn_args):
     if error:
         return f'Error getting history: {error}'
     if isinstance(result, list):
+        try:
+            from lib.browser.access import is_read_allowed
+            from lib.browser.queue import _get_active_client, client_user_id
+            uid = client_user_id(_get_active_client())
+            result = [row for row in result
+                      if is_read_allowed(uid, row.get('url') or '')]
+        except Exception as exc:
+            logger.debug('history access filtering failed closed: %s', exc)
+            result = []
         lines = [f'History ({len(result)} entries):\n']
         for h in result:
             lines.append(f'  {h.get("title", "(no title)")}')

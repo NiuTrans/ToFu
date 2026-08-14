@@ -19,7 +19,6 @@ suite stays green on a vanilla box.
 
 import asyncio
 import os
-import sys
 import unittest
 
 import pytest
@@ -38,24 +37,6 @@ def _ft_available() -> bool:
         return False
 
 
-def _install_shim():
-    import quart
-    sys.modules['flask'] = quart
-    for attr in ('json', 'globals', 'helpers', 'wrappers', 'ctx'):
-        qs = f'quart.{attr}'
-        if qs in sys.modules:
-            sys.modules[f'flask.{attr}'] = sys.modules[qs]
-    import inspect
-    from quart.wrappers import Request as _QR
-    if inspect.iscoroutinefunction(_QR.get_json):
-        _orig = _QR.get_json
-
-        def _sync_get_json(self, *a, **kw):
-            import asyncio as _a
-            return _a.run(_orig(self, *a, **kw))
-        _QR.get_json = _sync_get_json
-
-
 def _new_loop_run(coro):
     loop = asyncio.new_event_loop()
     try:
@@ -69,7 +50,6 @@ class DetectLanguageForceFasttextTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        _install_shim()
         # Pin the DEFAULT backend so the neuter twin genuinely exercises the
         # script+heuristic tier (the production default), not an env leak.
         cls._prev_backend = os.environ.get('TOFU_LANGDETECT_BACKEND')
@@ -86,7 +66,8 @@ class DetectLanguageForceFasttextTest(unittest.TestCase):
         api_keys._cache_loaded = False
 
         from quart import Quart
-        cls.app = Quart(__name__)
+        cls.app = Quart(__name__, static_folder=None)
+        cls.app.config.setdefault('PROVIDE_AUTOMATIC_OPTIONS', True)
         cls.app.config['TESTING'] = True
         from routes.api_v1.auth import (
             attach_rate_headers, bearer_auth_before_request,

@@ -120,7 +120,7 @@ def _build_agent(agent_id_suffix, conv_id, task_id, project_path, llm):
     from lib.swarm.agent import SubAgent
     from lib.swarm.types import SubTaskSpec
     spec = SubTaskSpec(role='coder', objective='edit the shared file',
-                       id=agent_id_suffix, max_rounds=2)
+                       id=agent_id_suffix)
     return SubAgent(
         spec,
         parent_task={'id': task_id, 'convId': conv_id,

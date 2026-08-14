@@ -16,6 +16,10 @@ Two guarantees:
      proving the assertions have teeth.
 """
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {
+    'lib/.project_sessions/abc/modifications.json', 'lib/foo.py',
+}
+
 import os
 import sys
 
@@ -42,7 +46,6 @@ _GOLDEN_RUNTIME_STATE = (
     'outputs/',
     'overleaf_cache/',
     'lib/.project_sessions/',
-    'static/js/bundle-',
 )
 _GOLDEN_OVERLAY_SKIP = _GOLDEN_RUNTIME_STATE + (
     '.git/', '.venv/', 'venv/', 'node_modules/', '__pycache__/',
@@ -76,7 +79,7 @@ def test_classification():
     # Mutable runtime/user state — tolerated as dirty, preserved by overlay.
     state = ['data/tofu.db', 'data/config/server_config.json', 'logs/app.log',
              'uploads/images/x.png', 'outputs/run1/report.md',
-             'overleaf_cache/proj/main.tex', 'static/js/bundle-abc123.js',
+             'overleaf_cache/proj/main.tex',
              '.tofu/skills/mine.md', '.tofu/file-history/x',
              '.tofu_trash/y', './data/tofu.db',
              # nested undo store (multi-segment registry prefix)
@@ -87,8 +90,8 @@ def test_classification():
         assert is_overlay_skipped(p), f'{p} should be overlay-skipped'
     # Real shippable source — must be updated, never treated as user state.
     source = ['server.py', 'lib/foo.py', 'routes/chat.py', 'requirements.txt',
-              'static/js/update.js', 'static/styles.css', 'VERSION',
-              'static/js/main/main_init_tasks.js']
+              'frontend/src/main.ts', 'static/styles.css', 'VERSION',
+              'static/vite/manifest.json']
     for p in source:
         assert not is_runtime_state(p), f'{p} must NOT be runtime state'
         assert not is_overlay_skipped(p), f'{p} must NOT be overlay-skipped'
@@ -125,7 +128,7 @@ def test_gitignore_lines():
     joined = '\n'.join(lines)
     # Every INSTALL_STATE dir + the .tofu* glob must appear.
     for expect in ('data/', 'logs/', 'uploads/', 'outputs/',
-                   'overleaf_cache/', 'static/js/bundle-*', '.tofu*'):
+                   'overleaf_cache/', '.tofu*'):
         assert expect in joined, f'gitignore block missing {expect!r}'
     # Each ignore entry is preceded by a comment line.
     assert lines.count('data/') == 1
@@ -183,11 +186,7 @@ def test_export_covers_registry_internal_opensource():
         'registry dirs are not excluded by export:\n  ' +
         '\n  '.join(f'{mode}: {d!r}' for mode, d in missing) +
         '\n→ add each to export.ALWAYS_EXCLUDE_DIRS (see CLAUDE.md / runtime_layout).')
-    # The filename-prefix entry (bundle-) must be covered by an export glob.
-    assert any('bundle-' in g for g in export.ALWAYS_EXCLUDE_GLOBS), (
-        'export.ALWAYS_EXCLUDE_GLOBS lost the bundle-* glob (registry has '
-        'static/js/bundle-)')
-    _ok('export internal+opensource exclude every registry runtime-state dir (+bundle glob)')
+    _ok('export internal+opensource exclude every registry runtime-state dir')
 
 
 def test_neuter_export_guard_has_teeth():

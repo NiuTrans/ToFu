@@ -272,6 +272,32 @@ def test_snapshot_running_by_conv_excludes_aborted_and_non_running():
             _tasks_registry.pop('tid-done', None)
 
 
+def test_snapshot_running_by_conv_excludes_turn_v2_executor_tasks():
+    """V2 reconnects by durable attempt id, never by internal task id.
+
+    Surfacing the executor through the legacy busy projection makes an old
+    ``connectToTask`` path adopt the task and create a second DOM owner for the
+    same stable turn.
+    """
+    from lib.tasks_pkg.manager._registry import snapshot_running_by_conv
+    from lib.tasks_pkg.manager._state import tasks as _tasks_registry, tasks_lock as _tl
+    import time as _time
+
+    fake_v2 = {
+        'id': 'tid-v2', 'convId': 'conv-v2', 'status': 'running',
+        'aborted': False, '_turnProtocolV2': True,
+        'created_at': _time.time(), '_t_last_event': _time.time(),
+        '_dispatch_heartbeat': _time.time(),
+    }
+    with _tl:
+        _tasks_registry['tid-v2'] = fake_v2
+    try:
+        assert 'conv-v2' not in snapshot_running_by_conv()
+    finally:
+        with _tl:
+            _tasks_registry.pop('tid-v2', None)
+
+
 # ─────────────────────────────────────────────────────────────────────
 #  6. Fail-open — the extended payload must not break the mutation path
 # ─────────────────────────────────────────────────────────────────────

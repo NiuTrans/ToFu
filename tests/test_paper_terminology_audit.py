@@ -182,8 +182,18 @@ def _patch_dispatch(body):
 
 def _make_task(tid, lang='en'):
     from lib.paper import _new_report_task
-    return _new_report_task(tid, 'phashterm00000000000000000000000', lang, None,
-                            client_title='Efficient RLHF Training')
+    task = _new_report_task(
+        tid, 'phashterm00000000000000000000000', lang, None,
+        client_title='Efficient RLHF Training')
+    # This suite owns the primary report/audit boundary.  Keep independently
+    # tested post-report agents from making real dispatcher calls as their
+    # defaults evolve.
+    task['config'] = {
+        'paperInsightEnabled': False,
+        'paperTermfillEnabled': False,
+        'paperCheckpointsEnabled': False,
+    }
+    return task
 
 
 def _run(tid, body, lang='en'):

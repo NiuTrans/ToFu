@@ -17,8 +17,10 @@ specific live SSE event sequence:
 The engine (:class:`lib.orchestration_engine.FlowExecutor`) emits its OWN
 vocabulary (``step_start`` / ``step_delta`` / ``step_complete`` /
 ``loop_iteration`` / ``replan`` / ``zero_deliverable_guard`` …). This adapter
-is the stateful translator between the two, so endpoint / autopilot / custom
-flows drive the existing UI with ZERO frontend changes.
+is the stateful translator between the two. It retains the established endpoint
+wire envelope for compatibility, while explicit ``flowProjection`` /
+``turnRole`` / ``emits`` metadata lets the frontend render endpoint, Autopilot,
+and generic-flow semantics without inferring meaning from transport names.
 
 Two output channels, deliberately separated:
 
@@ -41,15 +43,19 @@ import time
 import uuid
 from collections.abc import Callable
 
-from lib.agent_core.events import Phase, build_phase
 from lib.log import get_logger
+from lib.orchestration._execution_projection import _PLANNER_ROLES
+from lib.orchestration_endpoint_projection import (
+    endpoint_emits_for_role,
+    project_endpoint_next_phase,
+    project_endpoint_phase_event,
+    project_endpoint_turn_metadata,
+)
 
 logger = get_logger(__name__)
 
 
 # Engine role → endpoint phase classification.
-_VERIFIER_ROLES = frozenset({'critic', 'reviewer', 'virtual_user'})
-_PLANNER_ROLES = frozenset({'planner'})
 
 
 class EndpointEventAdapter:
@@ -76,7 +82,8 @@ class EndpointEventAdapter:
 
     def __init__(self, emit: Callable | None = None,
                  on_stream: Callable | None = None,
-                 *, vu_run_id: str = '', vu_flow: bool = False):
+                 *, vu_run_id: str = '', vu_flow: bool = False,
+                 projection: str = 'endpoint'):
         self._emit = emit
         self._on_stream = on_stream
         # Autopilot (virtual_user) context: a run id to anchor VU turns to (so
@@ -85,6 +92,13 @@ class EndpointEventAdapter:
         # stamped as a VU turn, not a critic review).
         self._vu_run_id = vu_run_id or ''
         self._vu_flow = bool(vu_flow)
+        self._projection = (
+            projection if projection in ('endpoint', 'autopilot', 'flow')
+            else 'flow')
+        # Stable identity for the in-flight virtual-user turn. The frontend
+        # creates the live bubble at step_start and the DB message is emitted
+        # at step_complete; both sides must name the same turn.
+        self._vu_msg_id = ''
         self.messages: list[dict] = []
         self._iteration = 0           # worker iteration counter
         self._planner_iteration = 0   # planner (re)plan counter
@@ -132,21 +146,27 @@ class EndpointEventAdapter:
         role = ev.get('role') or ''
         emits = ev.get('emits') or self._derive_emits(role)
         self._cur_role = role
+        if role == 'virtual_user':
+            self._vu_msg_id = uuid.uuid4().hex
+
+        turn_meta = self._turn_meta(role, emits)
 
         if role in _PLANNER_ROLES:
             self._stream({'type': 'endpoint_iteration', 'iteration': 0,
-                          'phase': 'planning'})
+                          'phase': 'planning', **turn_meta})
         elif emits == 'user':
             # Verifier (critic / reviewer / virtual_user) — its turn lands on
             # the user side; the frontend's 'reviewing' branch finalizes the
             # worker bubble and creates the critic bubble.
             self._stream({'type': 'endpoint_iteration',
-                          'iteration': self._iteration, 'phase': 'reviewing'})
+                          'iteration': self._iteration, 'phase': 'reviewing',
+                          **turn_meta})
         else:
             # Assistant-side producer (worker / specialist) — count the turn.
             self._iteration += 1
             self._stream({'type': 'endpoint_iteration',
-                          'iteration': self._iteration, 'phase': 'working'})
+                          'iteration': self._iteration, 'phase': 'working',
+                          **turn_meta})
 
     def _on_step_delta(self, ev: dict):
         """Stream one content/thinking chunk into the current bubble."""
@@ -154,9 +174,15 @@ class EndpointEventAdapter:
         if not chunk:
             return
         if ev.get('kind') == 'thinking':
-            self._stream({'type': 'delta', 'thinking': chunk})
+            self._stream({'type': 'delta', 'thinking': chunk,
+                          **self._turn_meta(
+                              ev.get('role') or self._cur_role,
+                              ev.get('emits') or '')})
         else:
-            self._stream({'type': 'delta', 'content': chunk})
+            self._stream({'type': 'delta', 'content': chunk,
+                          **self._turn_meta(
+                              ev.get('role') or self._cur_role,
+                              ev.get('emits') or '')})
 
     def _on_step_phase(self, ev: dict):
         """Surface a transient producer status as a wire ``phase`` event.
@@ -174,22 +200,7 @@ class EndpointEventAdapter:
         emits = ev.get('emits') or self._derive_emits(ev.get('role') or '')
         if emits == 'user':
             return
-        out = build_phase(ev.get('phase') or Phase.WORKING,
-                          detail=ev.get('detail') or '')
-        if ev.get('attempt'):
-            out['attempt'] = ev.get('attempt')
-        if ev.get('status_code'):
-            out['statusCode'] = ev.get('status_code')
-        # i18n passthrough (pt_18ebee9c9ea64cf3): the swarm emitter ships
-        # structured detailKey/detailArgs (+ typed reasonKey) in the
-        # step_phase meta so the frontend HUD localizes the retry cause
-        # instead of rendering the raw dispatcher log token. Forward them
-        # verbatim; the legacy `detail` stays for headless clients.
-        if ev.get('detailKey'):
-            out['detailKey'] = ev.get('detailKey')
-        if ev.get('detailArgs'):
-            out['detailArgs'] = ev.get('detailArgs')
-        self._stream(out)
+        self._stream(project_endpoint_phase_event(ev))
 
     def _on_step_complete(self, ev: dict):
         role = ev.get('role') or ''
@@ -237,6 +248,39 @@ class EndpointEventAdapter:
             # checklist" instruction. Stamp them apart (_mark_user_side).
             next_phase = self._derive_next_phase(out)
             self._next_phase = next_phase
+            # Standalone Autopilot treats TASK_DONE as control, not as words
+            # the synthetic user said: no DB row is appended and the eager
+            # live placeholder is removed. Preserve that contract for a graph
+            # virtual_user instead of persisting a visible sentinel turn.
+            if role == 'virtual_user':
+                from lib.agent_verdict import classify_verdict, strip_machine_tokens
+                verdict = classify_verdict(
+                    out, verifier_role='virtual_user', loose_fallback=True)
+                if verdict.get('phase') == 'stop':
+                    self._stream({
+                        'type': 'endpoint_critic_msg',
+                        'iteration': self._iteration,
+                        'content': '',
+                        'thinking': '',
+                        'next_phase': 'stop',
+                        'discard': True,
+                        **self._turn_meta(role, emits),
+                    })
+                    self._vu_msg_id = ''
+                    return
+                out = strip_machine_tokens(out)
+                if not out.strip():
+                    self._stream({
+                        'type': 'endpoint_critic_msg',
+                        'iteration': self._iteration,
+                        'content': '',
+                        'thinking': '',
+                        'next_phase': 'worker',
+                        'discard': True,
+                        **self._turn_meta(role, emits),
+                    })
+                    self._vu_msg_id = ''
+                    return
             msg = {
                 'role': 'user',
                 'content': out,
@@ -248,7 +292,10 @@ class EndpointEventAdapter:
             # Finalize the critic/VU bubble live.
             self._stream({'type': 'endpoint_critic_msg',
                           'iteration': self._iteration, 'content': out,
-                          'thinking': thinking, 'next_phase': next_phase})
+                          'thinking': thinking, 'next_phase': next_phase,
+                          **self._turn_meta(role, emits)})
+            if role == 'virtual_user':
+                self._vu_msg_id = ''
         else:
             # An assistant-side producer turn (worker / specialist). The
             # iteration was already counted at step_start; the worker bubble
@@ -279,7 +326,7 @@ class EndpointEventAdapter:
         is_vu = role == 'virtual_user' or (synthetic and self._vu_flow)
         if is_vu:
             msg['_isVirtualUser'] = True
-            msg['_msgId'] = uuid.uuid4().hex
+            msg['_msgId'] = self._vu_msg_id or uuid.uuid4().hex
             if self._vu_run_id:
                 msg['_autopilotRunId'] = self._vu_run_id
         else:
@@ -288,16 +335,25 @@ class EndpointEventAdapter:
             msg['_epApproved'] = next_phase == 'stop'
             msg['_epNextPhase'] = next_phase
 
-    @staticmethod
-    def _derive_emits(role: str) -> str:
-        """Fallback message-axis derivation for events lacking ``emits``.
+    _derive_emits = staticmethod(endpoint_emits_for_role)
 
-        Mirrors lib.orchestration.resolve_emits' role rule so an older engine
-        (no ``emits`` in its events) classifies identically to the new one.
-        """
-        return 'user' if role in _VERIFIER_ROLES else 'assistant'
+    def _turn_meta(self, role: str, emits: str) -> dict:
+        """Wire metadata that keeps live and persisted turn identity equal."""
+        return project_endpoint_turn_metadata(
+            role,
+            emits,
+            projection=self._projection,
+            vu_msg_id=self._vu_msg_id,
+            vu_run_id=self._vu_run_id,
+        )
 
     def _on_zero_deliverable_guard(self, ev: dict):
+        if self._projection == 'autopilot':
+            # The real VU turn has already told the worker what remains. The
+            # engine directive is control-plane feedback for the next worker,
+            # not a second synthetic user message. Standalone Autopilot never
+            # persists such a duplicate row, so keep it off the transcript.
+            return
         # Mirror endpoint's synthetic critic row so the UI shows the guard.
         content = ('⚠️ Zero-deliverable guard: the worker produced no '
                    'state-changing actions; injecting an execute-now '
@@ -327,18 +383,10 @@ class EndpointEventAdapter:
         the next placeholder. Replan is signalled out-of-band via the
         ``replan`` event (``_pending_replan``).
         """
-        if self._pending_replan:
-            return 'planner'
-        low = (text or '').lower()
-        if '[vu: task_done]' in low:
-            return 'stop'
-        if '[verdict: stop]' in low or 'verdict: stop' in low:
-            # STOP with unresolved markers is overridden by the engine; if a
-            # replan/worker iteration follows we'll have seen those events.
-            return 'stop'
-        if 'continue_planner' in low:
-            return 'planner'
-        return 'worker'
+        return project_endpoint_next_phase(
+            text,
+            pending_replan=self._pending_replan,
+        )
 
     def _push(self, msg: dict):
         self.messages.append(msg)

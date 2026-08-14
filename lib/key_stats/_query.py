@@ -18,7 +18,7 @@ from lib.key_stats._state import (
     _list_siblings,
     _lock,
     _pair_key,
-    _save_unlocked,
+    _update_store_unlocked,
 )
 from lib.key_stats._enable import _is_last_resort_unlocked
 
@@ -186,29 +186,35 @@ def set_key_override(provider_id: str, key_name: str, enabled: bool) -> dict:
     instantly. Re-enabling means "I topped up", for every model on the key.
     """
     pk = _pair_key(provider_id, key_name)
-    with _lock:
-        _ensure_fresh_unlocked()
-        _cache['overrides'][pk] = bool(enabled)
+
+    def _mutate(stats, overrides):
+        overrides[pk] = bool(enabled)
         if enabled:
-            entry = _cache['stats'].get(pk)
-            if entry is not None:
+            entry = stats.get(pk)
+            if isinstance(entry, dict):
                 entry['exhausted'] = False
                 entry['exhausted_models'] = {}
                 entry['consecutive_429'] = 0
-        _save_unlocked()
+
+    with _lock:
+        _update_store_unlocked(_mutate)
+        day = _cache['day']
     logger.info('[KeyStats] User override %s=%s (day=%s)',
-                pk, bool(enabled), _cache['day'])
+                pk, bool(enabled), day)
     return get_today_stats(provider_id, key_name)
 
 
 def clear_key_override(provider_id: str, key_name: str) -> dict:
     """Remove explicit override (return to auto-disable logic)."""
     pk = _pair_key(provider_id, key_name)
+
+    def _mutate(_stats, overrides):
+        overrides.pop(pk, None)
+
     with _lock:
-        _ensure_fresh_unlocked()
-        if pk in _cache['overrides']:
-            _cache['overrides'].pop(pk, None)
-            _save_unlocked()
+        had_override = pk in _cache['overrides']
+        _update_store_unlocked(_mutate)
+        if had_override:
             logger.info('[KeyStats] Cleared override for %s (day=%s)',
                         pk, _cache['day'])
     return get_today_stats(provider_id, key_name)

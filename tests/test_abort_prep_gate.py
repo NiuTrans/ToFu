@@ -138,8 +138,14 @@ class TestStartTaskAbortRace:
         """Replace every side-effecting collaborator; return the spawn log."""
         import routes.chat_task_start as cts
         monkeypatch.setattr(cts, 'cleanup_old_tasks', lambda: None)
-        monkeypatch.setattr(cts, 'create_task',
-                            lambda conv_id, msgs, cfg: task_dict)
+        def _create_task(conv_id, msgs, cfg, *, supersede=True):
+            # This helper exercises the legacy send path, which must preserve
+            # conversation-wide supersede semantics after turn-protocol v2
+            # made the flag explicit at the call site.
+            assert supersede is True
+            return task_dict
+
+        monkeypatch.setattr(cts, 'create_task', _create_task)
         monkeypatch.setattr('lib.tasks_pkg.abort_running_tasks_for_conv',
                             lambda cid: 0)
         monkeypatch.setattr(
@@ -269,7 +275,7 @@ class TestRunTaskDiesInPrep:
         calls = []
 
         def _fake_llm(task, body, model, round_num, max_tokens,
-                      tool_call_happened, tool_list, max_tool_rounds,
+                      tool_call_happened, tool_list,
                       messages, preset, thinking_enabled,
                       accumulated_usage, api_rounds, **kw):
             calls.append(round_num)
@@ -339,6 +345,10 @@ class TestRunTaskDiesInPrep:
         """Harness proof: an UNABORTED task drives the loop and the spy sees
         exactly one LLM round that settles the turn."""
         task = self._make_task(aborted=False)
+        calls = self._run_with_llm_spy(monkeypatch, task)
+        assert calls == [0], f'healthy task should make one round-0 call: {calls}'
+        assert task.get('finishReason') == 'stop'
+        assert task.get('status') == 'done'
 
 
 

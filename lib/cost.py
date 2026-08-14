@@ -46,10 +46,7 @@ from __future__ import annotations
 from typing import Optional
 
 from lib.log import get_logger
-from lib.pricing import (
-    DEFAULT_USD_CNY_RATE, QWEN_PRICING_CNY,
-    get_pricing_data, lookup_pricing,
-)
+from lib.pricing import DEFAULT_USD_CNY_RATE, get_pricing_data, lookup_pricing
 
 logger = get_logger(__name__)
 
@@ -421,32 +418,6 @@ def _legacy_preset_to_model(model_id: str) -> str:
     return model_id or ''
 
 
-def _qwen_cny(tokens: int, side: str, model_id: str) -> float:
-    """Compute Qwen tiered cost in CNY for one direction.
-
-    ``side`` is ``'input'`` or ``'output'``. Returns CNY for
-    ``tokens`` charged at the tier whose threshold (max context window
-    size) is the smallest one >= ``tokens``. The cheapest tier is the
-    "low context" rate; fallback to the largest tier if everything is
-    over-threshold.
-    """
-    if tokens <= 0:
-        return 0.0
-    table = QWEN_PRICING_CNY.get(model_id) or QWEN_PRICING_CNY.get('_default')
-    if not table:
-        return 0.0
-    tiers = table.get(side) or []
-    if not tiers:
-        return 0.0
-    # Pick the first tier whose threshold >= tokens; otherwise last tier.
-    chosen_rate = tiers[-1][1]
-    for threshold, rate in tiers:
-        if tokens <= threshold:
-            chosen_rate = rate
-            break
-    return tokens * chosen_rate / 1_000_000
-
-
 def _round(value: float, places: int = 4) -> float:
     factor = 10 ** places
     return round(value * factor) / factor
@@ -485,38 +456,12 @@ def compute_cost(
 
     pricing_data = get_pricing_data()
     rate = pricing_data.get('usdToCny') or DEFAULT_USD_CNY_RATE
+    uncached, total_input = split_input_tokens(usage)
 
-    # ── Qwen tiered (CNY-native) — Qwen models bill in CNY, not USD ──
-    if 'qwen' in model_id.lower():
-        inp_cny = _qwen_cny(inp, 'input', model_id)
-        out_cny = _qwen_cny(out, 'output', model_id)
-        total_cny = inp_cny + out_cny
-        return {
-            'costUsd': _round(total_cny / rate),
-            'costCny': _round(total_cny),
-            'inputTokens': inp,
-            'outputTokens': out,
-            'cacheWriteTokens': cache_write,
-            'cacheReadTokens': cache_read,
-            'thinkingTokens': think_tok,
-            'inputCostCny': _round(inp_cny, 6),
-            'outputCostCny': _round(out_cny, 6),
-            'cacheWriteCostCny': 0.0,
-            'cacheReadCostCny': 0.0,
-            # USD per-component sub-costs — consumed by the billing adapter
-            # (lib/billing/cost.compute_request_cost) so the wallet debit and
-            # the displayed cost share ONE arithmetic core. Qwen bills in CNY,
-            # so the USD figures are the CNY costs divided by the live rate.
-            'inputCostUsd': _round(inp_cny / rate, 9),
-            'outputCostUsd': _round(out_cny / rate, 9),
-            'cacheWriteCostUsd': 0.0,
-            'cacheReadCostUsd': 0.0,
-            'cacheSavingsCny': 0.0,
-            'cacheSavingsUsd': 0.0,
-        }
-
-    # ── Generic USD pricing — provider override beats global ──
-    mp = lookup_pricing(model_id, provider_id) if model_id else None
+    # One resolver call selects ONE context tier from the COMPLETE prompt.
+    # Input/output/cache read/cache write all consume the resulting rates.
+    mp = lookup_pricing(model_id, provider_id,
+                        prompt_tokens=total_input) if model_id else None
     peak_mul = None
     if mp:
         base_in = float(mp.get('input') or 0)
@@ -524,13 +469,25 @@ def compute_cost(
         cw_mul = float(mp.get('cacheWriteMul', 1.25))
         cr_mul = float(mp.get('cacheReadMul', 0.10))
         peak_mul = mp.get('peakMul')  # stamped by lookup_pricing at peak hours
+        pricing_source = str(mp.get('_pricingSource') or 'resolved_price')
+        currency = str(mp.get('currency') or 'USD').upper()
+        selected_tier = mp.get('selectedTier')
     else:
         base_in = float(pricing_data.get('inputPrice') or 0)
         out_p = float(pricing_data.get('outputPrice') or 0)
         cw_mul = float(pricing_data.get('cacheWriteMul') or 1.25)
         cr_mul = float(pricing_data.get('cacheReadMul') or 0.10)
+        # Keep the legacy amount for UI/backward compatibility, but label it
+        # honestly: this global rate is not evidence that the requested model
+        # has a matching price row.
+        pricing_source = 'default_estimate'
+        currency = 'USD'
+        selected_tier = None
 
-    output_cost_usd = (out * out_p) / 1e6
+    unit_to_usd = (1.0 / rate) if currency == 'CNY' else 1.0
+    base_in_usd = base_in * unit_to_usd
+    out_p_usd = out_p * unit_to_usd
+    output_cost_usd = (out * out_p_usd) / 1e6
 
     # ── Cache convention detection ──
     # Delegated to split_input_tokens (the SINGLE source of this decision, also
@@ -541,24 +498,35 @@ def compute_cost(
     # when a round read its entire prompt back from cache.
     if cache_write > 0 or cache_read > 0:
         uncached, total_input = split_input_tokens(usage)
-        input_cost_usd = (uncached * base_in) / 1e6
-        cw_cost_usd = (cache_write * base_in * cw_mul) / 1e6
-        cr_cost_usd = (cache_read * base_in * cr_mul) / 1e6
+        input_cost_usd = (uncached * base_in_usd) / 1e6
+        cw_cost_usd = (cache_write * base_in_usd * cw_mul) / 1e6
+        cr_cost_usd = (cache_read * base_in_usd * cr_mul) / 1e6
     else:
         uncached = inp
         total_input = inp
-        input_cost_usd = (inp * base_in) / 1e6
+        input_cost_usd = (inp * base_in_usd) / 1e6
         cw_cost_usd = 0.0
         cr_cost_usd = 0.0
 
     cost_usd = input_cost_usd + cw_cost_usd + cr_cost_usd + output_cost_usd
-    no_cache_input_usd = (total_input * base_in) / 1e6
+    no_cache_input_usd = (total_input * base_in_usd) / 1e6
     cache_savings_usd = no_cache_input_usd - (
         input_cost_usd + cw_cost_usd + cr_cost_usd)
 
     return {
         'costUsd': _round(cost_usd),
         'costCny': _round(cost_usd * rate),
+        'pricingSource': pricing_source,
+        'pricingSnapshot': {
+            'model': model_id, 'provider': provider_id,
+            'source': pricing_source, 'currency': currency,
+            'selectedPromptTokens': total_input,
+            'tierId': selected_tier.get('id') if selected_tier else None,
+            'maxPromptTokens': (selected_tier.get('maxPromptTokens')
+                                if selected_tier else None),
+            'rates': {'input': base_in, 'output': out_p,
+                      'cacheWriteMul': cw_mul, 'cacheReadMul': cr_mul},
+        },
         'inputTokens': uncached,
         'outputTokens': out,
         'totalInputTokens': total_input,

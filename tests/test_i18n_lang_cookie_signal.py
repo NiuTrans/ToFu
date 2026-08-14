@@ -47,9 +47,12 @@ import types
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tests._runtime_sections import native_module_path
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 COMMON = os.path.join(REPO, 'routes', 'common.py')
-I18N = os.path.join(REPO, 'static', 'js', 'i18n.js')
+I18N = os.path.join(REPO, 'frontend', 'src', 'i18n', 'index.ts')
+I18N_BUNDLE = native_module_path('i18n-cookie-signal.js', I18N)
 
 try:
     import pytest
@@ -69,14 +72,12 @@ def _read(p):
 def _load_lang_resolver():
     """Exec just the ui-lang slice of routes/common.py.
 
-    Importing routes.common pulls routes/__init__ → routes/push.py, which
-    raises on `@push_bp.websocket` under plain Python (known Flask-shim
-    artifact, unrelated to this code). Slicing keeps the test honest — it
-    still executes the SHIPPED source text, not a copy.
+    Importing routes.common boots the wider route graph. Slicing keeps this
+    unit focused while still executing the shipped source text, not a copy.
     """
     src = _read(COMMON)
     start = src.index('_UI_LANG_COOKIE = ')
-    end = src.index('\n_APP_SCRIPT_SRC_SUBPATTERN')
+    end = src.index('\n_APP_ASSET_MARKER =')
     ns = {'logger': types.SimpleNamespace(debug=lambda *a, **k: None)}
     exec(compile(src[start:end], 'common_slice', 'exec'), ns)
     return ns
@@ -151,10 +152,7 @@ def test_index_html_cache_has_a_language_dimension():
         'would then be cross-served between languages')
 
     # And the cache-hit test must actually compare it.
-    hit = re.search(r"if \(_bundled_index_cache\['tag'\] == bundle_tag(.*?)\):",
-                    src, re.S)
-    assert hit, 'could not locate the cache-hit condition'
-    assert "_bundled_index_cache['lang'] == ui_lang" in hit.group(1), (
+    assert "_bundled_index_cache['lang'] == request_ui_lang()" in src, (
         'the cache-hit condition ignores language — a zh visitor could be '
         'served the en HTML from cache')
 
@@ -164,37 +162,37 @@ def test_index_html_cache_has_a_language_dimension():
 @_unit
 def test_client_mirrors_language_on_boot_and_on_change():
     src = _read(I18N)
-    assert 'function _syncLangCookie' in src, 'the cookie mirror is gone'
+    assert 'function syncLanguageCookie' in src, 'the cookie mirror is gone'
 
-    # Boot: called at top level right after the language is read.
-    assert re.search(r"var _i18nLang = localStorage\.getItem\('tofu_ui_lang'\)[^\n]*\n"
-                     r"(?:.*?\n)*?_syncLangCookie\(_i18nLang\);", src), (
+    # Boot: called by ready() after the selected locale has loaded.
+    ready = re.search(r'export async function ready\(\).*?\n\}', src, re.S)
+    assert ready and 'syncLanguageCookie(_i18nLang)' in ready.group(0), (
         'the mirror is not invoked at boot — users who set their language '
         'BEFORE this shipped would never get a cookie, and would be served '
         'the default bundle forever')
 
     # Change: called inside setLanguage.
-    m = re.search(r'function setLanguage\(lang\)\s*\{(.*?)\n\}', src, re.S)
+    m = re.search(r'export async function setLanguage\(.*?\n\}', src, re.S)
     assert m, 'setLanguage not found'
-    body = m.group(1)
-    assert '_syncLangCookie(lang)' in body, (
+    body = m.group(0)
+    assert 'syncLanguageCookie(language)' in body, (
         'setLanguage does not update the cookie — the switch would not '
         'survive a reload')
-    assert "localStorage.setItem('tofu_ui_lang', lang)" in body, (
+    assert "localStorage.setItem('tofu_ui_lang', language)" in body, (
         'localStorage must stay authoritative for the client')
 
 
 @_unit
 def test_cookie_attributes_are_sane_for_a_display_preference():
     src = _read(I18N)
-    m = re.search(r'function _syncLangCookie\(lang\)\s*\{(.*?)\n\}', src, re.S)
-    assert m, '_syncLangCookie body not found'
-    body = m.group(1)
+    m = re.search(r'function syncLanguageCookie\(.*?\n\}', src, re.S)
+    assert m, 'syncLanguageCookie body not found'
+    body = m.group(0)
     assert 'path=/' in body, 'must apply to the whole app'
     assert 'SameSite=Lax' in body, (
         'a display preference should not ride cross-site requests')
-    assert 'encodeURIComponent(lang)' in body, (
-        'the value must be encoded — it is written into a header')
+    assert 'language: UiLanguage' in m.group(0), (
+        'the cookie writer must only accept the whitelisted language union')
     assert 'try' in body, (
         'cookie writes throw when cookies are disabled; that must not break boot')
 
@@ -205,18 +203,23 @@ def test_cookie_write_survives_cookies_being_disabled():
     if not shutil.which('node'):
         print('SKIP (node unavailable)')
         return
-    src = _read(I18N)
+    src = _read(I18N_BUNDLE)
     harness = f"""
 globalThis.window = globalThis;
 globalThis.localStorage = {{ getItem: () => 'en', setItem: () => {{}} }};
 globalThis.document = {{
-  documentElement: {{}}, querySelectorAll: () => [],
+  documentElement: {{}}, querySelectorAll: () => [], getElementById: () => null,
   addEventListener: () => {{}}, readyState: 'complete',
   get cookie() {{ return ''; }},
   set cookie(v) {{ throw new Error('cookies disabled'); }},
 }};
+globalThis.CustomEvent = class CustomEvent {{ constructor(type, init) {{ this.type = type; this.detail = init?.detail; }} }};
+globalThis.dispatchEvent = () => true;
 {src}
-console.log('@@' + JSON.stringify({{ lang: _i18nLang, t: t('sidebar.settings') }}));
+(async () => {{
+  await ready();
+  console.log('@@' + JSON.stringify({{ lang: _i18nLang, t: t('sidebar.settings') }}));
+}})().catch((error) => {{ console.error(error); process.exitCode = 1; }});
 """
     with tempfile.NamedTemporaryFile('w', suffix='.js', delete=False,
                                      encoding='utf-8') as fh:

@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import re
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.api_response import api_not_found
 from lib.log import get_logger

@@ -14,6 +14,66 @@ from lib.log import get_logger
 logger = get_logger(__name__)
 
 
+_LOCKING_SELECT_RE = re.compile(
+    r'\bFOR\s+(?:UPDATE|NO\s+KEY\s+UPDATE|SHARE|KEY\s+SHARE)\b', re.I)
+_CTE_WRITE_RE = re.compile(r'\b(?:INSERT|UPDATE|DELETE|MERGE)\b', re.I)
+
+
+def _statement_effect(sql):
+    """Classify one translated statement for transaction hygiene.
+
+    psycopg2 starts a transaction for *every* statement when autocommit is
+    disabled, including a plain SELECT.  Most Tofu background readers keep a
+    thread-local connection, so a read that is not explicitly finished parks
+    the backend ``idle in transaction`` until PostgreSQL kills it.  We need a
+    conservative classifier to distinguish disposable reads from writes and
+    lock-bearing/explicit transactions.
+
+    Returns ``read``, ``write``, ``pin`` (transaction/lock must remain open),
+    or ``end`` (COMMIT/ROLLBACK transaction control).  Unknown statements are
+    treated as writes: retaining a transaction is cheaper than accidentally
+    committing or rolling back an operation with side effects.
+    """
+    text = (sql or '').lstrip()
+    # Strip leading comments so instrumentation comments do not defeat the
+    # classifier.  This is intentionally small; it is not a SQL parser.
+    while True:
+        if text.startswith('--'):
+            nl = text.find('\n')
+            text = '' if nl < 0 else text[nl + 1:].lstrip()
+            continue
+        if text.startswith('/*'):
+            end = text.find('*/', 2)
+            text = '' if end < 0 else text[end + 2:].lstrip()
+            continue
+        break
+    upper = text.upper()
+    keyword = upper.split(None, 1)[0] if upper else ''
+
+    if keyword in ('BEGIN', 'START', 'SAVEPOINT', 'LOCK'):
+        return 'pin'
+    if keyword in ('COMMIT', 'END'):
+        return 'end'
+    if keyword == 'ROLLBACK':
+        # ROLLBACK TO SAVEPOINT keeps the outer transaction alive.
+        return 'pin' if upper.startswith('ROLLBACK TO') else 'end'
+    if keyword == 'RELEASE':
+        return 'pin'
+
+    if keyword == 'SELECT':
+        return 'pin' if _LOCKING_SELECT_RE.search(upper) else 'read'
+    if keyword in ('SHOW', 'VALUES', 'TABLE'):
+        return 'read'
+    if keyword == 'EXPLAIN':
+        # EXPLAIN ANALYZE actually executes its DML target.
+        if 'ANALYZE' in upper and _CTE_WRITE_RE.search(upper):
+            return 'write'
+        return 'read'
+    if keyword == 'WITH':
+        return 'write' if _CTE_WRITE_RE.search(upper) else 'read'
+    return 'write'
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  DictRow — dict-like row wrapper for psycopg2 rows
 # ═══════════════════════════════════════════════════════════════════════
@@ -180,6 +240,8 @@ class PgCursor:
         self._skipped = False  # True if PRAGMA was skipped
 
     def execute(self, sql, params=None):
+        from lib.database._access_policy import enforce_sql_access
+        enforce_sql_access(sql)
         translated, is_pragma = translate_sql(sql)
         if is_pragma:
             self._skipped = True
@@ -195,9 +257,21 @@ class PgCursor:
             self.rowcount = self._cursor.rowcount
             self._conn._last_used = time.monotonic()
             self._conn._last_used_wall = time.time()
-            _sql_upper = translated[:30].lstrip().upper()
-            if _sql_upper.startswith(('INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP')):
+            effect = _statement_effect(translated)
+            if effect == 'write':
                 self._conn._dirty = True
+            elif effect == 'pin':
+                self._conn._transaction_pinned = True
+            elif effect == 'end':
+                self._conn._dirty = False
+                self._conn._transaction_pinned = False
+            elif effect == 'read':
+                # psycopg2's ordinary (unnamed) cursor has already buffered the
+                # result when execute() returns, so rollback does not invalidate
+                # fetchone/fetchall.  End a clean implicit read transaction
+                # immediately; explicit transactions and SELECT ... FOR UPDATE
+                # are pinned and therefore deliberately excluded.
+                self._conn._finish_clean_read()
         except Exception as e:
             # A SQL execution failure is a genuine, often data-affecting error.
             # Log at ERROR so it reaches error.log; the full SQL/params stay at
@@ -221,7 +295,7 @@ class PgCursor:
                 logger.debug('[DB] SQL error detail: %s\n  Original: %.200s\n  Translated: %.200s\n  Params: %.200s',
                              e, sql, translated, str(params)[:200] if params else 'None')
             try:
-                self._conn._conn.rollback()
+                self._conn.rollback()
             except Exception as _rb_err:
                 logger.debug('[DB] Rollback after SQL error also failed: %s', _rb_err)
             raise
@@ -234,6 +308,8 @@ class PgCursor:
         return self
 
     def executemany(self, sql, params_list):
+        from lib.database._access_policy import enforce_sql_access
+        enforce_sql_access(sql)
         translated, is_pragma = translate_sql(sql)
         if is_pragma:
             return self
@@ -246,14 +322,14 @@ class PgCursor:
             # Mark the connection dirty so teardown COMMITs instead of
             # rolling back — otherwise executemany-only writes are silently
             # discarded by close_db()'s clean-reads rollback branch.
-            _sql_upper = translated[:30].lstrip().upper()
-            if _sql_upper.startswith(('INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP')):
-                self._conn._dirty = True
+            # executemany is a mutation API in this codebase.  Classifying it
+            # conservatively also protects uncommon CTE/DDL batches.
+            self._conn._dirty = True
         except Exception as e:
             logger.error('[DB] SQL executemany failed (%s): %.120s', type(e).__name__, e)
             logger.debug('[DB] executemany error detail: %s\n  Translated: %.200s', e, translated)
             try:
-                self._conn._conn.rollback()
+                self._conn.rollback()
             except Exception as _rb_err:
                 logger.debug('[DB] Rollback after executemany error also failed: %s', _rb_err)
             raise
@@ -314,6 +390,7 @@ class PgConnection:
         self._conn = pg_conn
         self._closed = False
         self._dirty = False
+        self._transaction_pinned = False
         self._created_at = time.monotonic()
         self._last_used = time.monotonic()
         # Wall-clock twin of _last_used. time.monotonic() FREEZES across an OS
@@ -323,12 +400,44 @@ class PgConnection:
         self._last_used_wall = time.time()
         self.row_factory = None
 
+    def _finish_clean_read(self):
+        """End a disposable implicit read transaction.
+
+        A write, explicit transaction, or locking SELECT owns its transaction
+        boundary and must be ended by the caller.  A plain read owns no durable
+        state, so returning the backend to IDLE here prevents long-lived reader
+        threads from accumulating ``idle in transaction`` sessions.
+        """
+        if self._dirty or getattr(self, '_transaction_pinned', False):
+            return
+        self._conn.rollback()
+
+    def begin(self):
+        """Begin and pin an explicit transaction until commit/rollback."""
+        self._transaction_pinned = True
+        try:
+            return self.execute('BEGIN')
+        except Exception:
+            self._transaction_pinned = False
+            raise
+
     @property
     def raw(self):
         """Access the underlying psycopg2 connection for special operations."""
         return self._conn
 
+    @property
+    def dialect(self):
+        """Stable data-layer capability for backend-specific planner hints."""
+        return 'postgres'
+
     def execute(self, sql, params=None):
+        # PgCursor rolls the failed raw transaction back before re-raising,
+        # which intentionally clears wrapper state.  Capture the pre-statement
+        # ownership here so reconnect policy cannot mistake a formerly-dirty or
+        # explicit transaction for a clean first statement after that cleanup.
+        had_transaction_state = (
+            self._dirty or getattr(self, '_transaction_pinned', False))
         cur = self._conn.cursor()
         wrapper = PgCursor(cur, self)
         try:
@@ -347,7 +456,8 @@ class PgConnection:
             # that is NOT a dead-connection signature) is deliberately NOT
             # retried — only genuine connection death is.
             etype = type(e).__name__
-            if etype in ('OperationalError', 'InterfaceError') and not self._dirty:
+            if (etype in ('OperationalError', 'InterfaceError')
+                    and not had_transaction_state):
                 from lib.database._core import _pg_error_is_dead, _reconnect_pg_inplace
                 is_dead = (etype == 'InterfaceError') or _pg_error_is_dead(str(e))
                 if is_dead and _reconnect_pg_inplace(self):
@@ -365,6 +475,8 @@ class PgConnection:
 
     def executescript(self, sql):
         """Execute multiple SQL statements."""
+        from lib.database._access_policy import enforce_sql_access
+        enforce_sql_access(sql)
         cur = self._conn.cursor()
         statements = _split_sql_statements(sql)
         for stmt in statements:
@@ -380,17 +492,28 @@ class PgConnection:
                 logger.error('[DB] executescript statement failed (%s): %.120s', type(e).__name__, e)
                 logger.debug('[DB] executescript statement detail: %.300s', translated)
                 raise
-        self._conn.commit()
+        self.commit()
 
     def commit(self):
         self._conn.commit()
+        self._dirty = False
+        self._transaction_pinned = False
+        try:
+            from lib.database import _core as _core_mod
+            _core_mod._COMMIT_TOTAL += 1
+        except Exception as e:
+            logger.debug('[DB] commit counter increment failed: %s', e)
 
     def rollback(self):
         self._conn.rollback()
+        self._dirty = False
+        self._transaction_pinned = False
 
     def close(self):
         if not self._closed:
             self._closed = True
+            self._dirty = False
+            self._transaction_pinned = False
             try:
                 self._conn.close()
             except Exception as _close_err:

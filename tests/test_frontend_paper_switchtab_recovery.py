@@ -37,11 +37,15 @@ import subprocess
 
 import pytest
 
+from tests._paper_vite import compiled_typescript
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 PAPER_JS = os.path.join(ROOT, 'static', 'js', 'paper-reader.js')
+SESSION_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'session.ts')
 
 
 def _node_deps_available() -> bool:
@@ -77,15 +81,19 @@ win.t = global.t = (k) => (k === 'paper.reportNoText' ? 'No paper text available
 win.debugLog = global.debugLog = () => {};
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper-reader.js (real, shipped)
+eval(fs.readFileSync(process.argv[4], 'utf8'));
+Object.keys(win).forEach((name) => {
+  if (name.startsWith('_') && typeof win[name] === 'function') global[name] = win[name];
+});
 
 // Spy on the load path; stub subsystems the guard shouldn't need.
 let loadCalls = 0;
-_loadOrGenerateReport = () => { loadCalls++; };
-_renderPaperQA = () => {};
-_initBabelPdfTab = () => {};
-_teardownReadingTracker = () => {};
+win._loadOrGenerateReport = _loadOrGenerateReport = () => { loadCalls++; };
+win._renderPaperQA = _renderPaperQA = () => {};
+win._initBabelPdfTab = _initBabelPdfTab = () => {};
+win._teardownReadingTracker = _teardownReadingTracker = () => {};
 // Review path awaits venue resolution before loading — make it resolve fast.
-_populateReviewVenueDropdown = () => Promise.resolve();
+win._populateReviewVenueDropdown = _populateReviewVenueDropdown = () => Promise.resolve();
 if (typeof toggleSidebar === 'undefined') { global.toggleSidebar = win.toggleSidebar = () => {}; }
 // _reportView must exist (real one from the file); if the decomposition moved
 // it, fall back to a minimal shim keyed by tab.
@@ -93,6 +101,7 @@ if (typeof _reportView !== 'function') {
   _reportView = (tab) => ({ kind: tab,
     containerId: tab === 'review' ? 'paperReviewContent' : 'paperReportContent' });
 }
+win._reportView = _reportView;
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -107,6 +116,9 @@ function reportEmptyShown(id) {
   _paperHash = '';
   _paperPdfUrl = '/api/paper/pdf/restored-paper.pdf';
   _paperPdfFilename = 'restored-paper.pdf';
+  Object.assign(win, {
+    _paperParsedText, _paperHash, _paperPdfUrl, _paperPdfFilename,
+  });
   loadCalls = 0;
   document.getElementById('paperReportContent').innerHTML = '';
   _switchPaperTab('report');
@@ -127,6 +139,9 @@ function reportEmptyShown(id) {
   _paperHash = '';
   _paperPdfUrl = '';
   _paperPdfFilename = '';
+  Object.assign(win, {
+    _paperParsedText, _paperHash, _paperPdfUrl, _paperPdfFilename,
+  });
   loadCalls = 0;
   document.getElementById('paperReportContent').innerHTML = '';
   _switchPaperTab('report');
@@ -139,6 +154,9 @@ function reportEmptyShown(id) {
   _paperHash = '';
   _paperPdfUrl = '';
   _paperPdfFilename = '';
+  Object.assign(win, {
+    _paperParsedText, _paperHash, _paperPdfUrl, _paperPdfFilename,
+  });
   loadCalls = 0;
   _switchPaperTab('report');
   await new Promise(r => setTimeout(r, 0));
@@ -150,15 +168,20 @@ function reportEmptyShown(id) {
 """
 
 
-def _run_harness(paper_js: str) -> subprocess.CompletedProcess:
+def _run_harness(
+        paper_js: str, session_source: str | None = None,
+) -> subprocess.CompletedProcess:
     harness = os.path.join(HERE, '_paper_switchtab_recovery_harness.js')
     with open(harness, 'w', encoding='utf-8') as f:
         f.write(_HARNESS)
     try:
-        return subprocess.run(
-            ['node', harness, paper_js, ROOT],
-            capture_output=True, text=True, timeout=60,
-        )
+        with compiled_typescript(
+            SESSION_TS, contents=session_source,
+        ) as session_js:
+            return subprocess.run(
+                ['node', harness, paper_js, ROOT, session_js],
+                capture_output=True, text=True, timeout=60,
+            )
     finally:
         try:
             os.remove(harness)
@@ -182,34 +205,33 @@ def test_switchtab_enters_recovery_path_for_pdf_only_paper():
 def test_source_level_negative_control_narrow_guard_dead_ends():
     """Revert the guard to text||hash only and prove the PDF-only paper
     dead-ends on the message again. The shipped file is never modified."""
-    src = open(PAPER_JS, encoding='utf-8').read()
+    src = open(SESSION_TS, encoding='utf-8').read()
 
-    marker = 'if (_paperParsedText || _paperHash || _paperPdfUrl || _paperPdfFilename) {'
+    marker = (
+        "    const recoverable = Boolean(\n"
+        "      state._paperParsedText || state._paperHash\n"
+        "      || state._paperPdfUrl || state._paperPdfFilename,\n"
+        "    );"
+    )
     assert marker in src, 'fix marker not found — test is stale, update the marker'
-    broken = src.replace(marker, 'if (_paperParsedText || _paperHash) {', 1)
+    broken = src.replace(
+        marker,
+        "    const recoverable = Boolean(\n"
+        "      state._paperParsedText || state._paperHash,\n"
+        "    );",
+        1,
+    )
     assert broken != src, 'negative-control patch was a no-op'
+    proc = _run_harness(PAPER_JS, session_source=broken)
+    out = proc.stdout.strip()
+    assert proc.returncode == 0, f'node crashed: {proc.stderr}\n{out}'
+    # With the narrow guard, the PDF-only paper no longer enters the load
+    # path and paints the dead-end message → these checks flip to FAIL.
+    assert ('FAIL pdf_only_enters_load_path' in out
+            or 'FAIL pdf_only_no_dead_end_message' in out), \
+        'narrowing the guard did NOT reintroduce the dead-end — fix non-load-bearing:\n' + out
 
-    tmp = os.path.join(HERE, '_paper_reader_narrow_guard.js')
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(broken)
-    try:
-        chk = subprocess.run(['node', '--check', tmp], capture_output=True, text=True, timeout=30)
-        assert chk.returncode == 0, f'patched JS invalid: {chk.stderr}'
-        proc = _run_harness(tmp)
-        out = proc.stdout.strip()
-        assert proc.returncode == 0, f'node crashed: {proc.stderr}\n{out}'
-        # With the narrow guard, the PDF-only paper no longer enters the load
-        # path and paints the dead-end message → these checks flip to FAIL.
-        assert ('FAIL pdf_only_enters_load_path' in out
-                or 'FAIL pdf_only_no_dead_end_message' in out), \
-            'narrowing the guard did NOT reintroduce the dead-end — fix non-load-bearing:\n' + out
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-
-    assert open(PAPER_JS, encoding='utf-8').read() == src, 'shipped file was modified!'
+    assert open(SESSION_TS, encoding='utf-8').read() == src, 'shipped file was modified!'
 
 
 if __name__ == '__main__':

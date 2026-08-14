@@ -78,29 +78,55 @@ def fold_text_from_events(events):
     return ''.join(content_parts), ''.join(thinking_parts)
 
 
-def fold_cold_state_text(task_id, checkpoint_content='', checkpoint_thinking=''):
-    """Return the authoritative ``(content, thinking)`` for a COLD state
-    snapshot: the longer of the folded event log and the 5s checkpoint.
-
-    The event log is the primary source (lossless per-delta). The checkpoint is
-    the fallback for the ONE residual case the log cannot cover — a best-effort
-    per-delta persist that failed (a transient DB blip; logged at WARNING in
-    ``append_persistent_event``). Taking the longer of the two on the SERVER is
-    the root-side equivalent of the frontend keep-longer belt: it moves the
-    "never shrink an in-flight field" invariant to where the authoritative
-    record lives, so the client can project the state snapshot VERBATIM.
-
-    Best-effort: never raises — on any failure it returns the checkpoint pair
-    unchanged, so a fold problem can never blank a bubble worse than today.
-    """
+def fold_cold_state(task_id, checkpoint_content='', checkpoint_thinking='',
+                    checkpoint_epoch=0):
+    """Return authoritative cold text plus its effective generation."""
+    checkpoint_epoch = int(checkpoint_epoch or 0)
+    event_limit = 10000
     try:
         from lib.tasks_pkg.event_log import read_events
-        events = read_events(task_id, since_event_id=None)
+        events = read_events(
+            task_id, since_event_id=None, limit=event_limit)
         folded_c, folded_t = fold_text_from_events(events)
+        event_epoch = 0
+        event_ids = []
+        for ev in events or []:
+            payload = ev.get('payload', ev) if isinstance(ev, dict) else None
+            if isinstance(payload, dict):
+                event_epoch = max(
+                    event_epoch, int(payload.get('contentEpoch') or 0))
+            if isinstance(ev, dict) and ev.get('event_id') is not None:
+                event_ids.append(int(ev['event_id']))
     except Exception as e:
         logger.warning('[EventFold] fold failed for task=%s: %s — using checkpoint',
                        (task_id or '')[:8], e)
-        return checkpoint_content or '', checkpoint_thinking or ''
+        return (checkpoint_content or '', checkpoint_thinking or '',
+                checkpoint_epoch)
+    log_complete = (
+        len(events or []) < event_limit
+        and len(event_ids) == len(events or [])
+        and event_ids == list(range(len(event_ids)))
+    )
+    if event_epoch > checkpoint_epoch:
+        if log_complete:
+            return folded_c or '', folded_t or '', event_epoch
+        logger.warning(
+            '[EventFold] newer content epoch ignored for task=%s because the '
+            'event log is incomplete (checkpoint_epoch=%d event_epoch=%d '
+            'rows=%d first=%s last=%s)',
+            (task_id or '')[:8], checkpoint_epoch, event_epoch,
+            len(events or []), event_ids[0] if event_ids else None,
+            event_ids[-1] if event_ids else None)
+        return (checkpoint_content or '', checkpoint_thinking or '',
+                checkpoint_epoch)
     content = folded_c if len(folded_c) >= len(checkpoint_content or '') else checkpoint_content
     thinking = folded_t if len(folded_t) >= len(checkpoint_thinking or '') else checkpoint_thinking
-    return content or '', thinking or ''
+    return content or '', thinking or '', max(checkpoint_epoch, event_epoch)
+
+
+def fold_cold_state_text(task_id, checkpoint_content='', checkpoint_thinking='',
+                         checkpoint_epoch=0):
+    """Compatibility facade returning only ``(content, thinking)``."""
+    content, thinking, _epoch = fold_cold_state(
+        task_id, checkpoint_content, checkpoint_thinking, checkpoint_epoch)
+    return content, thinking

@@ -25,7 +25,7 @@ class TestRoundCheckpointWireParity:
         src = inspect.getsource(
             _round_checkpoint.run_round_checkpoint_and_close)
         assert "rs.last_checkpoint_ts >= 5" in src
-        assert "checkpoint_task_partial(task)" in src
+        assert "checkpoint_task_partial(task, force=True)" in src
 
     def test_checkpoint_failure_is_non_fatal(self):
         src = inspect.getsource(
@@ -59,5 +59,5 @@ class TestRunTaskDelegation:
     def test_run_task_no_longer_carries_block_inline(self):
         from lib.tasks_pkg.orchestrator import _run
         src = inspect.getsource(_run.run_task)
-        assert "checkpoint_task_partial(task)" not in src
+        assert "checkpoint_task_partial(task, force=True)" not in src
         assert "roundNum=round_num, reason='tools')" not in src

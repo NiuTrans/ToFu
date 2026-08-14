@@ -39,9 +39,8 @@ sys.modules.setdefault('flask', _quart)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _TARGET = os.path.join(_ROOT, 'routes', 'config.py')
-_API_JS = os.path.join(_ROOT, 'static', 'js', 'api.js')
-_CALLER_JS = os.path.join(_ROOT, 'static', 'js', 'settings',
-                          'provider_templates.js')
+_API_JS = os.path.join(_ROOT, 'frontend', 'src', 'runtime', 'app-runtime.js')
+_CALLER_JS = _API_JS
 
 pytestmark = pytest.mark.unit
 
@@ -91,7 +90,7 @@ def _sites():
 
 
 def test_envelope_parity():
-    from flask import jsonify
+    from quart import jsonify
     app = _make_app()
 
     async def _t():

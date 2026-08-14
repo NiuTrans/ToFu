@@ -1,20 +1,5 @@
-"""Critical-user-journey E2E — the browser 主干道巡检 (P0-3).
+"""Critical Vite/ESM user journeys driven through the real DOM."""
 
-设计稿 docs/TESTING_STRATEGY.md §4:业界惯例是 10–50 条关键旅程守 release 闸,
-不多养。本文件在 test_e2e_smoke.py 的 3 条(bundle 加载 / 发消息流式渲染 /
-工具卡渲染)之上补齐主干道:中止 / 会话恢复 / 侧栏 / 多轮 / 键盘发送 /
-新会话 / 主题持久化 / 设置弹窗 / 上传 chip。
-
-Same hermetic contract as the smoke file: real app + real browser + STUB LLM
-(the session fixture is imported — one install covers both files), and every
-LLM path asserts the stub sentinel ADVANCED so a patch-miss fails loudly
-instead of silently passing on real model output.
-
-Journey discipline: each test is ONE user journey against the live DOM — no
-re-implementation of render logic, no reaching into internals beyond the
-in-memory ``conversations`` model (the same source of truth the UI renders
-from). If a journey here breaks, a real user would have hit it.
-"""
 from __future__ import annotations
 
 import base64
@@ -23,218 +8,228 @@ import time
 
 import pytest
 
-# Reuse the smoke file's session stub fixture + helpers. The imported fixture
-# object keeps its @pytest.fixture registration, so this module gets the same
-# hermetic LLM/search stubs without duplication.
-from tests.test_e2e_smoke import (  # noqa: F401  (fixture import is load-bearing)
+from tests.test_e2e_smoke import (  # noqa: F401 -- imported fixtures are load-bearing
     _SENTINEL,
+    _disable_open_mode_rate_limit,
     _install_llm_stubs,
     _wait_app_ready,
 )
 
-# visual ONLY — see test_e2e_smoke.py for why 'slow' was removed (session
-# stub leak into the slow leg's endpoint suites).
-pytestmark = [pytest.mark.visual]
 
+pytestmark = [pytest.mark.visual]
 _TINY_PNG = base64.b64decode(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
 )
 
 
-def _send_and_wait_done(page, text, expect_assistant=1, timeout=30000):
-    """One full user turn: fill → click send → wait until the Nth stub reply
-    is in the conversations model — and PROVE the stub (not a real model)
-    answered. ``expect_assistant`` must track the turn number in multi-turn
-    journeys, else the wait is satisfied by the PREVIOUS turn's reply and the
-    hermetic guard fires before this turn's stream even starts."""
+def _fresh_chat(page):
+    _wait_app_ready(page)
+    page.locator('.new-chat-btn').click()
+    page.wait_for_function(
+        "!document.querySelector('#chatInner').innerText.includes('stubbed model')")
+
+
+def _send_and_wait_done(page, text, expected_replies=1, timeout=30000):
     calls_before = _SENTINEL['stream_calls']
     page.locator('#userInput').fill(text)
     page.locator('#sendBtn').click()
     page.wait_for_function(
-        """(n) => {
-            if (typeof conversations === 'undefined') return false;
-            const c = conversations.find(c => c.id === activeConvId);
-            if (!c) return false;
-            return c.messages.filter(m => m.role === 'assistant'
-                && (m.content || '').includes('stubbed model')).length >= n;
+        """(expected) => {
+          const body = document.querySelector('#chatInner')?.innerText || '';
+          const replies = body.split('stubbed model').length - 1;
+          const send = document.querySelector('#sendBtn');
+          return replies >= expected && send && !send.classList.contains('stop-btn');
         }""",
-        arg=expect_assistant,
-        timeout=timeout)
-    assert _SENTINEL['stream_calls'] > calls_before, (
-        'stream_llm_response stub never ran — a real model may have streamed; '
-        'the journey is no longer hermetic.'
+        arg=expected_replies,
+        timeout=timeout,
     )
+    assert _SENTINEL['stream_calls'] > calls_before
 
 
-def _fresh_chat(page):
-    _wait_app_ready(page)
-    page.evaluate("newChat()")
-    time.sleep(0.4)
+def _wait_conversation_persisted(page, conversation_id, text, timeout=10000):
+    """Wait for the authoritative V2 turn projection before a hard reload."""
+    endpoint = (
+        f"{page.url.rstrip('/')}/api/v2/conversations/"
+        f"{conversation_id}/turns"
+    )
+    deadline = time.monotonic() + timeout / 1000
+    while time.monotonic() < deadline:
+        response = page.request.get(endpoint)
+        if response.ok:
+            turns = response.json().get('turns', [])
+            if any(text in str((turn.get('projection') or {}).get('content', ''))
+                   for turn in turns):
+                return
+        page.wait_for_timeout(100)
+    pytest.fail(f'conversation {conversation_id} was not durable before reload')
 
 
-# ─── 主干道 1: 中止 ─────────────────────────────────────────────────────
-
-def test_abort_halts_stream_and_keeps_partial(page):
-    """Journey: 用户点了停止——流必须真的停、按钮弹回发送态、已流出的部分保留。
-
-    Uses the stub's __e2e_slow__ branch (60 words × 50ms) so the abort click
-    lands mid-stream deterministically."""
+def test_abort_halts_stream_and_keeps_partial(page, assert_no_js_errors):
     _fresh_chat(page)
     page.locator('#userInput').fill('__e2e_slow__ stream please')
     page.locator('#sendBtn').click()
-    # the send button must flip to its stop state while streaming
     page.wait_for_selector('#sendBtn.stop-btn', state='visible', timeout=10000)
-    # let a few words land, then abort via the SAME button
     page.wait_for_function(
         "document.querySelector('#chatInner').innerText.includes('slow03')",
-        timeout=10000)
+        timeout=10000,
+    )
     page.locator('#sendBtn').click()
-    # button must return to send state once the abort lands
     page.wait_for_function(
         "!document.querySelector('#sendBtn').classList.contains('stop-btn')",
-        timeout=10000)
-    text = page.inner_text('#chatInner')
-    idxs = [int(m.group(1)) for m in re.finditer(r'slow(\d\d)', text)]
-    assert idxs, f'no partial stream content kept after abort:\n{text[:300]}'
-    assert max(idxs) < 55, (
-        f'stream ran to (near) completion despite the abort — last word '
-        f'slow{max(idxs):02d} of slow59')
-    # and it must not resume growing after the abort settled
-    later = page.inner_text('#chatInner')
-    idxs_later = [int(m.group(1)) for m in re.finditer(r'slow(\d\d)', later)]
-    assert max(idxs_later or [0]) <= max(idxs) + 2, (
-        'the stream kept growing after the abort settled')
+        timeout=10000,
+    )
+    page.wait_for_function(
+        "/slow\\d\\d/.test(document.querySelector('#chatInner')?.innerText || '')",
+        timeout=10000,
+    )
+    first = [int(value) for value in re.findall(
+        r'slow(\d\d)', page.inner_text('#chatInner'))]
+    assert first and max(first) < 55
+    time.sleep(0.2)
+    later = [int(value) for value in re.findall(
+        r'slow(\d\d)', page.inner_text('#chatInner'))]
+    assert max(later or [0]) <= max(first) + 2
 
 
-# ─── 主干道 2: 会话恢复(刷新后历史还在) ──────────────────────────────
-
-def test_reload_restores_conversation(page):
-    """Journey: 用户刷新页面——会话仍在侧栏,点开后历史完整渲染。"""
+def test_reload_restores_active_conversation(page, assert_no_js_errors):
     _fresh_chat(page)
     _send_and_wait_done(page, 'Hello reload E2E')
-    conv_id = page.evaluate("activeConvId")
+    active = page.locator('.conv-item.active')
+    active.wait_for(state='attached', timeout=15000)
+    conversation_id = active.get_attribute('data-conv-id')
+    assert conversation_id
+    _wait_conversation_persisted(page, conversation_id, 'Hello reload E2E')
     page.reload()
     _wait_app_ready(page)
-    item = f'.conv-item[data-conv-id="{conv_id}"]'
-    page.wait_for_selector(item, state='attached', timeout=15000)
-    page.locator(item).click()
+    item = page.locator(f'.conv-item[data-conv-id="{conversation_id}"]')
+    item.wait_for(state='attached', timeout=15000)
+    item.click(position={'x': 12, 'y': 12})
     page.wait_for_function(
-        "document.querySelector('#chatInner').innerText.includes('stubbed model')",
-        timeout=15000)
-    assert 'Hello reload E2E' in page.inner_text('#chatInner'), (
-        'user message missing after reload-restore'
+        "document.querySelector('#chatInner').innerText.includes('Hello reload E2E')",
+        timeout=15000,
+    )
+    page.wait_for_function(
+        """() => (!window.BackendOfflineMonitor ||
+          window.BackendOfflineMonitor.phase === 'online') &&
+          !document.querySelector('#backend-offline-banner')""",
+        timeout=15000,
     )
 
 
-# ─── 主干道 3: 侧栏出现新会话 ──────────────────────────────────────────
-
-def test_sidebar_lists_new_conversation(page):
-    """Journey: 发完一条消息,新会话出现在侧栏列表且可点回。"""
+def test_multi_turn_and_enter_key_render(page, assert_no_js_errors):
     _fresh_chat(page)
-    _send_and_wait_done(page, 'Hello sidebar E2E')
-    conv_id = page.evaluate("activeConvId")
-    page.wait_for_selector(
-        f'.conv-item[data-conv-id="{conv_id}"]', state='attached', timeout=15000)
-
-
-# ─── 主干道 4: 多轮对话 ────────────────────────────────────────────────
-
-def test_multi_turn_both_turns_render(page):
-    """Journey: 同一会话连发两轮,两轮的用户/助手消息都在。"""
-    _fresh_chat(page)
-    _send_and_wait_done(page, 'turn one E2E', expect_assistant=1)
-    _send_and_wait_done(page, 'turn two E2E', expect_assistant=2)
-    page.wait_for_function(
-        """() => {
-            const c = conversations.find(c => c.id === activeConvId);
-            return c && c.messages.filter(m => m.role === 'assistant'
-                && (m.content || '').includes('stubbed model')).length >= 2;
-        }""",
-        timeout=15000)
-    body = page.inner_text('#chatInner')
-    assert 'turn one E2E' in body and 'turn two E2E' in body
-
-
-# ─── 主干道 5: 键盘 Enter 发送 ─────────────────────────────────────────
-
-def test_enter_key_sends_message(page):
-    """Journey: 用户按 Enter(默认发送模式)即发送,无需点按钮。"""
-    _fresh_chat(page)
+    _send_and_wait_done(page, 'turn one E2E', expected_replies=1)
     calls_before = _SENTINEL['stream_calls']
-    page.locator('#userInput').fill('Hello enter E2E')
+    page.locator('#userInput').fill('turn two E2E')
     page.keyboard.press('Enter')
     page.wait_for_function(
         """() => {
-            const c = conversations.find(c => c.id === activeConvId);
-            return c && c.messages.some(m => m.role === 'assistant'
-                && (m.content || '').includes('stubbed model'));
+          const body = document.querySelector('#chatInner')?.innerText || '';
+          return body.includes('turn one E2E') && body.includes('turn two E2E')
+            && body.split('stubbed model').length - 1 >= 2;
         }""",
-        timeout=30000)
-    assert _SENTINEL['stream_calls'] > calls_before, (
-        'Enter path never reached the stub — keyboard send is broken'
+        timeout=30000,
     )
+    assert _SENTINEL['stream_calls'] > calls_before
 
 
-# ─── 主干道 6: 新会话清空视图 ──────────────────────────────────────────
-
-def test_new_chat_clears_chat_view(page):
-    """Journey: 用户点新会话——上一轮内容从聊天视图消失。"""
+def test_new_chat_control_clears_chat_view(page, assert_no_js_errors):
     _fresh_chat(page)
     _send_and_wait_done(page, 'Hello clear E2E')
-    assert 'stubbed model' in page.inner_text('#chatInner')
-    page.evaluate("newChat()")
-    time.sleep(0.5)
-    assert 'stubbed model' not in page.inner_text('#chatInner'), (
-        'previous conversation still visible after newChat()'
+    page.locator('.new-chat-btn').click()
+    page.wait_for_function(
+        "!document.querySelector('#chatInner').innerText.includes('stubbed model')",
+        timeout=10000,
     )
 
 
-# ─── 主干道 7: 主题设置持久化 ──────────────────────────────────────────
-
-def test_theme_persists_across_reload(page):
-    """Journey: 用户换主题——data-theme 立即生效、写 localStorage、刷新后启动
-    路径(applyTheme(_getCurrentTheme()))还原同一主题。"""
+def test_settings_actions_and_theme_persist(page, assert_no_js_errors):
     _wait_app_ready(page)
-    before = page.evaluate("document.documentElement.getAttribute('data-theme')")
-    page.evaluate("cycleTheme()")
-    chosen = page.evaluate("document.documentElement.getAttribute('data-theme')")
-    assert chosen != before, 'cycleTheme() did not change data-theme'
-    assert page.evaluate("localStorage.getItem('claude_ui_theme')") == chosen, (
-        'theme not written to localStorage'
-    )
+    page.locator('[data-tofu-action="openSettings()"]').first.click()
+    page.wait_for_selector('#settingsModal.open', timeout=10000)
+    current = page.evaluate(
+        "document.documentElement.getAttribute('data-theme')")
+    target = 'light' if current != 'light' else 'dark'
+    page.locator(f'.theme-option[data-theme="{target}"]').click()
+    assert page.evaluate(
+        "document.documentElement.getAttribute('data-theme')") == target
+    page.locator('.settings-close-btn').first.click()
+    page.wait_for_selector('#settingsModal.open', state='detached', timeout=5000)
     page.reload()
     _wait_app_ready(page)
-    restored = page.evaluate("document.documentElement.getAttribute('data-theme')")
-    assert restored == chosen, (
-        f'theme not restored at boot: chose {chosen}, got {restored} after reload'
-    )
+    assert page.evaluate(
+        "document.documentElement.getAttribute('data-theme')") == target
 
 
-# ─── 主干道 8: 设置弹窗开合 ────────────────────────────────────────────
-
-def test_settings_modal_opens_and_closes(page):
-    """Journey: 用户打开设置——弹窗渲染;点关闭——弹窗收起。"""
+def test_paper_and_orchestration_domains_boot(page, assert_no_js_errors):
     _wait_app_ready(page)
-    page.locator('button[onclick="openSettings()"]').first.click()
-    page.wait_for_selector('#settingsModal.open', timeout=10000)
-    assert page.locator('#settingsModal.open').count() == 1, (
-        'settings modal did not render in open state')
-    page.locator('.settings-close-btn').first.click()
-    page.wait_for_function(
-        "!document.getElementById('settingsModal').classList.contains('open')",
-        timeout=5000)
-    assert page.locator('#settingsModal.open').count() == 0, (
-        'settings modal still open after the close button')
+    page.locator('#paperModeBtn').click()
+    page.wait_for_selector('#paperModeContainer', state='visible', timeout=15000)
+    page.locator('#paperModeBtn').click()
+    page.wait_for_selector('#paperModeContainer', state='hidden', timeout=10000)
+
+    opened = page.evaluate("""async () => {
+      await window.TofuModules.prepareFeature('openOrchestration');
+      const action = window.TofuModules.resolveAction('openOrchestration');
+      if (typeof action !== 'function') return false;
+      await action();
+      return true;
+    }""")
+    assert opened
+    page.wait_for_selector('#orchModal', state='visible', timeout=15000)
+    page.evaluate("""async () => {
+      const action = window.TofuModules.resolveAction('closeOrchestration');
+      if (typeof action === 'function') await action(null, true);
+    }""")
 
 
-# ─── 主干道 9: 上传附件 chip ───────────────────────────────────────────
+def test_paper_pdfjs_loads_and_renders_a_real_document(
+        page, tmp_path, assert_no_js_errors):
+    """The shipped PDF.js main chunk and worker must render an actual PDF.
 
-def test_upload_image_chip_renders(page, tmp_path):
-    """Journey: 用户选了一张图片——预览 chip 立即渲染(optimistic preview)。"""
+    Opening the empty Paper shell is insufficient: the classic-to-ESM split
+    previously left both ``_ensurePdfJs`` and ``pdfjsLib`` outside the private
+    feature service table, so every shell-only browser test stayed green while
+    selecting a document displayed "PDF.js failed to load".
+    """
+    pymupdf = pytest.importorskip('pymupdf')
+    document = pymupdf.open()
+    pdf_page = document.new_page(width=420, height=300)
+    pdf_page.insert_text((42, 72), 'Tofu Paper Reader PDF.js E2E')
+    pdf_bytes = document.tobytes()
+    document.close()
+    pdf_path = tmp_path / 'paper-pdfjs-e2e.pdf'
+    pdf_path.write_bytes(pdf_bytes)
+
+    requested_assets = []
+    page.on('request', lambda request: requested_assets.append(request.url))
+
+    _wait_app_ready(page)
+    page.locator('#paperModeBtn').click()
+    page.wait_for_selector('#paperModeContainer', state='visible', timeout=15000)
+    page.set_input_files('.paper-upload-btn input[type="file"]', str(pdf_path))
+    page.wait_for_selector(
+        '.paper-page-wrapper .paper-pdf-canvas', state='attached', timeout=30000)
+    result = page.evaluate("""() => ({
+      pages: document.querySelectorAll('.paper-page-wrapper').length,
+      canvases: document.querySelectorAll('.paper-pdf-canvas').length,
+      error: document.querySelector('.paper-error')?.textContent || '',
+    })""")
+
+    assert result == {'pages': 1, 'canvases': 1, 'error': ''}
+    assert any('pdf.worker.min' in url for url in requested_assets), (
+        'the real PDF.js worker asset was never requested')
+
+
+def test_upload_image_chip_renders(page, tmp_path, assert_no_js_errors):
     _fresh_chat(page)
     png = tmp_path / 'tiny.png'
     png.write_bytes(_TINY_PNG)
     page.set_input_files('#fileInput', str(png))
-    page.wait_for_selector('.img-preview', state='attached', timeout=10000)
-    assert page.locator('.img-preview').count() >= 1, (
-        'no attachment preview chip rendered after file selection')
+    preview = page.locator('.image-previews .img-preview[data-img-idx="0"]')
+    preview.wait_for(state='visible', timeout=10000)
+    image = preview.locator('img[alt="preview"]')
+    assert image.count() == 1
+    source = image.get_attribute('src') or ''
+    assert source.startswith(('blob:', 'data:image/png')), source
+    assert preview.locator('.remove-img').is_visible()

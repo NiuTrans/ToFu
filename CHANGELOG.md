@@ -44,7 +44,7 @@ All notable changes to tofu-open are documented in this file.
 - **Skills as a first-class noun (`lib/skills/`, `routes/api_v1/skills.py`).**
   User-installed skill packages are now decoupled from model-authored
   memories: an always-visible `<available_skills>` index plus an
-  `activate_skill` progressive-disclosure loader. The model channel is
+  `load_skill` progressive-disclosure loader. The model channel is
   read-only; install/uninstall/toggle are user-only.
 - **Project Brain — cross-conversation coordination (`lib/conversations/`).**
   Charter with human-reviewed decisions, an epic board with claims and leases,

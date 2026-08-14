@@ -12,11 +12,13 @@ LLM dispatcher; covered separately by smoke tests with mocked
 import asyncio
 import json
 import os
-import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import pytest
+
+pytest_plugins = ('tests._artifact_sidecar',)
 
 
 class _AppFixture:
@@ -29,47 +31,13 @@ class _AppFixture:
         self._tmp = tempfile.TemporaryDirectory()
         # Patch the API-key store path BEFORE the auth module loads.
         self._patch_api_keys_path()
-        # Install the flask→quart shim like server.py does.
-        import quart  # noqa
-        sys.modules['flask'] = quart
-        for attr in ('json', 'globals', 'helpers', 'wrappers', 'ctx'):
-            qs = f'quart.{attr}'
-            if qs in sys.modules:
-                sys.modules[f'flask.{attr}'] = sys.modules[qs]
-
-        # Patch Quart's Request.get_json to be sync-callable so
-        # request_parser.parse_body() works from sync route handlers.
-        # (Same logic as server.py:_install_flask_shim — but only when
-        # the original async coroutine function is still in place. If
-        # server.py was imported by an earlier test, the sync wrapper
-        # is already installed and we leave it alone.)
-        from quart.wrappers import Request as _QR
-        import inspect as _inspect
-        if _inspect.iscoroutinefunction(_QR.get_json):
-            _orig_get_json = _QR.get_json
-
-            def _sync_get_json(self, *a, **kw):
-                import asyncio as _a
-                coro = _orig_get_json(self, *a, **kw)
-                try:
-                    loop = _a.get_running_loop()
-                except RuntimeError:
-                    loop = None
-                if loop and loop.is_running():
-                    fut = _a.ensure_future(coro)
-                    while not fut.done():
-                        loop._run_once()
-                    return fut.result()
-                return _a.run(coro)
-
-            _QR.get_json = _sync_get_json
-
         # Force test mode: TUNNEL_TOKEN must be set so the auth
         # middleware actually rejects unauthenticated /api/v1/* calls.
         os.environ['TUNNEL_TOKEN'] = 'test-tunnel-token-not-real'
 
         from quart import Quart
-        self.app = Quart(__name__)
+        self.app = Quart(__name__, static_folder=None)
+        self.app.config.setdefault('PROVIDE_AUTOMATIC_OPTIONS', True)
         self.app.config['TESTING'] = True
 
         # Register the bearer auth hook + a couple of blueprints.
@@ -385,11 +353,14 @@ class IntegrationTest(unittest.TestCase):
 
     def test_optimizer_proposals_list_with_token(self):
         from lib.api_keys import create_key
+        from routes.api_v1 import optimizer as optimizer_routes
         _row, token = create_key(name='opt-reader', scopes=['chat'])
         async def go():
-            r = await self._client().get(
-                '/api/v1/optimizer/proposals',
-                headers={'Authorization': f'Bearer {token}'})
+            with mock.patch.object(
+                    optimizer_routes._storage, 'list_proposals', return_value=[]):
+                r = await self._client().get(
+                    '/api/v1/optimizer/proposals',
+                    headers={'Authorization': f'Bearer {token}'})
             self.assertEqual(r.status_code, 200)
             body = await r.get_json()
             self.assertTrue(body['ok'])
@@ -448,6 +419,21 @@ class IntegrationTest(unittest.TestCase):
             self.assertTrue(body['ok'])
             self.assertIn('timers', body)
             self.assertIn('active_count', body)
+        _run(go())
+
+    def test_timer_list_summary_avoids_full_rows(self):
+        from lib.api_keys import create_key
+        _row, token = create_key(name='timer-summary-reader', scopes=['chat'])
+        async def go():
+            r = await self._client().get(
+                '/api/v1/timer/list?summary=1',
+                headers={'Authorization': f'Bearer {token}'})
+            self.assertEqual(r.status_code, 200)
+            body = await r.get_json()
+            self.assertTrue(body['ok'])
+            self.assertIsInstance(body['has_timers'], bool)
+            self.assertIn('active_count', body)
+            self.assertNotIn('timers', body)
         _run(go())
 
     def test_endpoint_start_requires_auth(self):

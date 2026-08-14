@@ -37,7 +37,7 @@ from lib.database._pg_seed import (
 from lib.database._pg_backup import _try_self_heal_corrupt_pg
 
 from lib.database._bootstrap._config import (
-    _ensure_managed_pg_config, _restart_local_pg,
+    _ensure_managed_pg_config,
 )
 from lib.database._bootstrap._process import (
     _read_our_pg_port, _scan_for_our_pg, _stop_local_pg_quietly,
@@ -51,6 +51,27 @@ from lib.database._bootstrap._database import (
 )
 
 logger = get_logger(__name__)
+
+
+def _stage_managed_pg_config(pgdata):
+    """Write managed config without restarting an already-running server.
+
+    This function is reached from import-time backend discovery, including in
+    pytest, CLI helpers, and migration probes.  A textual config drift used to
+    call ``pg_ctl restart -m fast`` here, killing every connection owned by the
+    long-lived application.  Restart-only settings now become pending config
+    and take effect at the next deliberate PostgreSQL start/restart.
+
+    Fresh-cluster bootstrap is unaffected: it writes the same block before the
+    first postmaster start and therefore needs no restart.
+    """
+    changed = _ensure_managed_pg_config(pgdata)
+    if changed:
+        logger.warning(
+            '[DB] Managed PG config changed on disk; disruptive automatic '
+            'restart is disabled. Restart PostgreSQL during an explicit '
+            'maintenance window to apply restart-only settings.')
+    return changed
 
 
 def _bootstrap_pg(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password, pg_dbname):
@@ -285,8 +306,7 @@ def _try_explicit_pg_target(pgdata, base_dir, pg_host, pg_port, build_dsn):
         # ceiling, producing 'too many clients' FATALs).
         if target_is_local and _read_our_pg_port(pgdata) == target_port:
             _mark_pg_owned_locally(pgdata)
-            if _ensure_managed_pg_config(pgdata):
-                _restart_local_pg(pgdata, base_dir)
+            _stage_managed_pg_config(pgdata)
         return True, {'PG_HOST': target_host, 'PG_PORT': target_port,
                       'PG_DSN': test_dsn}
     except ImportError:
@@ -384,10 +404,9 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
                     # certainly started by a previous server.py on this
                     # host. Take ownership so shutdown_pool stops it.
                     _mark_pg_owned_locally(pgdata)
-                    # Re-apply managed tuning; restart only if it changed a
-                    # restart-only setting (max_connections / wal_level).
-                    if _ensure_managed_pg_config(pgdata):
-                        _restart_local_pg(pgdata, base_dir)
+                    # Stage managed tuning. Never bounce a shared running PG
+                    # from import-time discovery; restart is explicit.
+                    _stage_managed_pg_config(pgdata)
                     return {'PG_HOST': _local, 'PG_PORT': pg_port,
                             'PG_DSN': _build_dsn(_local, pg_port)}
                 else:
@@ -631,8 +650,7 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
                 _ensure_database_exists('127.0.0.1', conf_port, pg_dbname, pg_user, pgdata)
                 _write_owner_host(pgdata)
                 _mark_pg_owned_locally(pgdata)
-                if _ensure_managed_pg_config(pgdata):
-                    _restart_local_pg(pgdata, base_dir)
+                _stage_managed_pg_config(pgdata)
                 return {'PG_HOST': '127.0.0.1', 'PG_PORT': conf_port,
                         'PG_DSN': _build_dsn('127.0.0.1', conf_port)}
             # Not ours — reassign to a different port

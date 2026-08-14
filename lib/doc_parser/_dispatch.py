@@ -49,13 +49,19 @@ def is_supported_document(filename: str) -> bool:
     return ext in _ALL_SUPPORTED
 
 
-def extract_document_text(file_bytes: bytes, filename: str, max_chars: int = 0) -> dict:
+def extract_document_text(file_bytes: bytes, filename: str, max_chars: int = 0,
+                          *, robust: bool = False) -> dict:
     """Extract text from a document file.
 
     Args:
         file_bytes: Raw file bytes.
         filename: Original filename (used to determine format).
-        max_chars: Max chars to extract (0 = unlimited).
+        max_chars: Max chars to extract (0 = the package default).
+        robust: Use the slower sparse-spreadsheet path. This scans across
+            long blank gaps and keeps multiple table blocks instead of
+            assuming a sheet is one dense table. Intended for persistent
+            knowledge ingestion; interactive attachment parsing keeps the
+            lower-latency default.
 
     Returns:
         Dict with text, textLength, totalPages, isScanned, method, warnings.
@@ -72,7 +78,7 @@ def extract_document_text(file_bytes: bytes, filename: str, max_chars: int = 0) 
     elif ext == '.ppt':
         return _extract_ppt_legacy(file_bytes, limit)
     elif ext == '.xlsx':
-        return _extract_xlsx(file_bytes, limit)
+        return _extract_xlsx(file_bytes, limit, robust=robust)
     elif ext == '.xls':
         return _extract_xls_legacy(file_bytes, limit)
     elif ext in _PLAIN_TEXT_EXTS:

@@ -41,7 +41,7 @@ logger = get_logger(__name__)
 #  Shared singletons — ``tasks`` / ``tasks_lock`` alias _chat_runtime internals
 #  (MUST be re-exported so ``from lib.tasks_pkg.manager import tasks`` returns
 #  THE SAME object 47 call sites already hold). ``_chat_runtime`` +
-#  CHECKPOINT_MIN_DELTA_CHARS + the conv-latest-task index/accessors too.
+#  checkpoint sizing constants + the conv-latest-task index/accessors too.
 # ═══════════════════════════════════════════════════════════════════════════
 
 from lib.tasks_pkg.manager._state import (  # noqa: E402,F401
@@ -52,6 +52,7 @@ from lib.tasks_pkg.manager._state import (  # noqa: E402,F401
     _conv_latest_task_lock,
     _LATEST_KIND,
     _LATEST_TTL,
+    CHECKPOINT_CONV_BLOB_MAX_BYTES,
     CHECKPOINT_MIN_DELTA_CHARS,
     _record_latest_task,
     _clear_latest_task,
@@ -78,6 +79,8 @@ from lib.tasks_pkg.auto_translate import (  # noqa: E402,F401
 
 from lib.tasks_pkg.manager._events import (  # noqa: E402,F401
     append_event,
+    reset_task_text,
+    snapshot_task_text,
     find_message_by_id,
     _assign_message_ids,
     _new_assistant_slot,
@@ -115,6 +118,11 @@ from lib.tasks_pkg.manager._persist import (  # noqa: E402,F401
     _HEAVY_TERMINAL_FIELDS,
 )
 
+from lib.tasks_pkg.manager._terminal import (  # noqa: E402,F401
+    finalize_chat_task_error,
+    stamp_chat_task_terminal,
+)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  Conversation sync + settle reconcile + post-terminal fan-out
@@ -148,6 +156,7 @@ from lib.tasks_pkg.manager._registry import (  # noqa: E402,F401
     quiesce_running_tasks,
     _write_aborted_terminal_floor,
     write_carrier_terminal_row,
+    notify_terminal_busy_state,
 )
 
 
@@ -198,12 +207,14 @@ __all__ = [
     'abort_running_tasks_for_conv', 'quiesce_running_tasks',
     'make_task_abort_check', 'plant_abort_tombstone',
     'plant_abort_tombstones_for_conv', 'has_abort_tombstone',
-    'write_carrier_terminal_row',
+    'write_carrier_terminal_row', 'notify_terminal_busy_state',
     # events
-    'append_event', 'find_message_by_id',
+    'append_event', 'reset_task_text', 'snapshot_task_text', 'find_message_by_id',
     'build_event', 'EventType', 'emit',
     # persistence
     'build_result_meta', 'persist_task_result',
+    'finalize_chat_task_error',
+    'stamp_chat_task_terminal',
     'load_tool_rounds_from_conversation', 'load_endpoint_turns_from_conversation',
     # sync
     'checkpoint_task_partial',

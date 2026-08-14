@@ -13,6 +13,8 @@ test_conv_ref_scope.py) so it runs on whichever backend the test DB uses.
 """
 from __future__ import annotations
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {'lib/bar.py', 'lib/foo.py'}
+
 import json
 import os
 import sys

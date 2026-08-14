@@ -38,7 +38,6 @@ def test_now_ms_exported():
     'lib.artifacts.core',
     'lib.swarm.persistence',
     'lib.conversations.project_board',
-    'lib.orchestration_runs',
 ])
 def test_consumers_reuse_shared_now_ms(modname):
     """Every consolidated consumer must delegate to timeutil.now_ms, not define its own."""

@@ -36,6 +36,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 
 import pytest
 
@@ -43,25 +44,16 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
-def _reader_src() -> str:
-    """The shipped file defining the recommend-stream seam, resolved BY SYMBOL.
-
-    Same extraction (paper-reader.js → paper/arxiv.js, a DEFERRED-bundle file)
-    killed this harness and its sibling in test_frontend_recommend_stream_render.py.
-    Anchor on the symbol, never the path.
-    """
-    from tests._conv_bundle_sources import sources_defining
-    return sources_defining('_applyRecommendEvent')[-1]
-
-
-_READER_SRC = _reader_src()
+_READER_SRC = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'recommend.ts')
+ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
 
 
 def _node_deps_available():
     if not shutil.which('node'):
         return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
+    return (os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
+            and os.path.isfile(ESBUILD))
 
 
 _DOM = r'''<!DOCTYPE html><body>
@@ -126,9 +118,9 @@ win.renderToolRoundsHTML = global.renderToolRoundsHTML = (rounds, streaming) => 
 eval(fs.readFileSync(READER, 'utf8'));
 
 (function main() {
-const applyEv = (typeof _applyRecommendEvent === 'function') ? _applyRecommendEvent : undefined;
-const paint = (typeof _paintRecommendNow === 'function') ? _paintRecommendNow : undefined;
-const newStream = (typeof _newRecStream === 'function') ? _newRecStream : undefined;
+const applyEv = win._applyRecommendEvent;
+const paint = win._paintRecommendNow;
+const newStream = win._newRecStream;
 if (typeof applyEv !== 'function' || typeof paint !== 'function' || typeof newStream !== 'function') {
   console.log('__RESULT__' + JSON.stringify({ _missing: {
     applyEv: typeof applyEv, paint: typeof paint, newStream: typeof newStream } }));
@@ -139,7 +131,7 @@ const viewer = win.document.getElementById('paperPdfViewer');
 const out = {};
 
 const s = newStream('anthropic global workspace language models');
-_recStream = s;
+win._recStream = s;
 s.status = 'running';
 
 // ── Research round 1 STARTS: tool_start(web_search) ──
@@ -190,9 +182,24 @@ console.log('__RESULT__' + JSON.stringify(out));
 
 
 def _run(reader=_READER_SRC):
-    proc = subprocess.run(
-        ['node', '-e', _harness(), reader, ROOT],
-        capture_output=True, text=True, timeout=60)
+    with tempfile.TemporaryDirectory(prefix='tofu-recommend-timeline-') as temp_dir:
+        built = os.path.join(temp_dir, 'recommend.js')
+        with open(reader, encoding='utf-8') as source_file:
+            source = source_file.read()
+        dependency = os.path.join(
+            os.path.dirname(_READER_SRC), 'push-transport.ts').replace('\\', '/')
+        source = source.replace(
+            "from './push-transport';", f'from {json.dumps(dependency)};')
+        compiled = subprocess.run(
+            [ESBUILD, '--bundle', '--format=iife', '--platform=browser',
+             '--loader=ts', '--sourcefile=recommend.ts',
+             f'--outfile={built}'], input=source, capture_output=True,
+            text=True, timeout=60)
+        if compiled.returncode != 0:
+            raise AssertionError(f'esbuild failed: {compiled.stderr or compiled.stdout}')
+        proc = subprocess.run(
+            ['node', '-e', _harness(), built, ROOT],
+            capture_output=True, text=True, timeout=60)
     if proc.returncode != 0:
         raise AssertionError(f'harness failed: {proc.stderr or proc.stdout}')
     for line in proc.stdout.splitlines():
@@ -242,18 +249,20 @@ def test_NC_tool_round_accumulation_is_load_bearing(tmp_path):
     with open(_READER_SRC, encoding='utf-8') as f:
         original = f.read()
     anchor = (
-        "      s.researchCount = (s.researchCount || 0) + 1;\n"
-        "      s.researchLabel = (typeof ev.query === 'string' ? ev.query : '').slice(0, 80);\n"
-        "      s.toolRounds.push({")
+        "      stream.researchCount += 1;\n"
+        "      stream.researchLabel = typeof event.query === 'string'\n"
+        "        ? event.query.slice(0, 80) : '';\n"
+        "      stream.toolRounds.push({")
     assert anchor in original, 'tool_start accumulation anchor not found — update the neuter target'
     patched = original.replace(
         anchor,
-        ("      s.researchCount = (s.researchCount || 0) + 1;\n"
-         "      s.researchLabel = (typeof ev.query === 'string' ? ev.query : '').slice(0, 80);\n"
-         "      if (false) s.toolRounds.push({"),
+        ("      stream.researchCount += 1;\n"
+         "      stream.researchLabel = typeof event.query === 'string'\n"
+         "        ? event.query.slice(0, 80) : '';\n"
+         "      if (false) stream.toolRounds.push({"),
         1)
     assert patched != original, 'NC patch did not apply'
-    src = os.path.join(tmp_path, 'paper-reader-nc.js')
+    src = os.path.join(tmp_path, 'paper-recommend-nc.ts')
     with open(src, 'w', encoding='utf-8') as f:
         f.write(patched)
     out = _run(reader=src)

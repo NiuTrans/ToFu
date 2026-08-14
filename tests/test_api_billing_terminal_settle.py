@@ -31,34 +31,9 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sys
 import tempfile
 import time
 import unittest
-
-
-def _install_shim():
-    import quart
-    sys.modules['flask'] = quart
-    for attr in ('json', 'globals', 'helpers', 'wrappers', 'ctx'):
-        qs = f'quart.{attr}'
-        if qs in sys.modules:
-            sys.modules[f'flask.{attr}'] = sys.modules[qs]
-    from quart import Quart
-    if 'PROVIDE_AUTOMATIC_OPTIONS' not in Quart.default_config:
-        Quart.default_config = {**Quart.default_config,
-                                'PROVIDE_AUTOMATIC_OPTIONS': True}
-    from quart.wrappers import Request as _QR
-    import inspect
-    if inspect.iscoroutinefunction(_QR.get_json):
-        _orig = _QR.get_json
-
-        def _sync_get_json(self, *a, **kw):
-            import asyncio as _a
-            coro = _orig(self, *a, **kw)
-            return _a.run(coro)
-        _sync_get_json._genuine_async_get_json = _orig
-        _QR.get_json = _sync_get_json
 
 
 def _new_loop_run(coro):
@@ -75,7 +50,6 @@ class _TerminalSettleBase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        _install_shim()
         cls._tmp = tempfile.TemporaryDirectory()
 
         # Fresh SQLite DB with the full schema (incl. billing_ledger).
@@ -110,7 +84,8 @@ class _TerminalSettleBase(unittest.TestCase):
         os.environ['TOFU_EPHEMERAL_PREFLIGHT'] = '0'
 
         from quart import Quart
-        cls.app = Quart(__name__)
+        cls.app = Quart(__name__, static_folder=None)
+        cls.app.config.setdefault('PROVIDE_AUTOMATIC_OPTIONS', True)
         cls.app.config['TESTING'] = True
         from routes.api_v1.auth import (
             attach_rate_headers, bearer_auth_before_request,

@@ -30,10 +30,12 @@ from pathlib import Path
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 REPO = Path(__file__).resolve().parent.parent
-CONV_JS = REPO / "static" / "js" / "core" / "conversations.js"
+CONV_JS = Path(runtime_section_path('core/conversations.js'))
 
 # The four fire-and-forget re-hydration callbacks that run on every conv open.
 # Each is matched by the unique `.catch(...)` tail its wiring carries.

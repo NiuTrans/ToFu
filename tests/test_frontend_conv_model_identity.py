@@ -64,11 +64,16 @@ import sys
 
 import pytest
 
-from tests._jsdom import JS_DIR
+from tests._runtime_sections import runtime_section_path
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+CONVERSATIONS_JS = runtime_section_path('core/conversations.js')
+APPLY_SETTINGS_JS = runtime_section_path('core/conv_apply_settings.js')
+IDB_CACHE_JS = runtime_section_path('idb-cache.js')
+TOOLBAR_JS = runtime_section_path('main/main_toolbar_ui.js')
+MAIN_JS = runtime_section_path('main.js')
 
 
 def _node_available() -> bool:
@@ -337,8 +342,7 @@ def test_idb_settings_mirror_round_trips_model():
     """INVARIANT B — the cache writer must mirror the reader's resolution."""
     output = _run_harness(
         'b', _HARNESS_B,
-        os.path.join(JS_DIR, 'core', 'conv_apply_settings.js'),
-        os.path.join(JS_DIR, 'idb-cache.js'))
+        APPLY_SETTINGS_JS, IDB_CACHE_JS)
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'IDB settings mirror dropped the model:\n' + output
     assert output.count('PASS') >= 5, f'expected >=5 PASS, got:\n{output}'
@@ -417,7 +421,6 @@ global.autoTranslate = false;
 global._updateMemoryModalBtn = () => {};
 global._renderHintHtml = (s) => s;
 global._inputSendHintText = () => '';
-global.syncToolsetBanner = () => {};
 global._igModelsLoaded = true;
 global._loadIgModels = () => {};
 global._resetToolsToDefaultsExtra = () => {};
@@ -538,8 +541,7 @@ def test_paint_default_never_becomes_stored_model():
     laundered into the conversation's persisted identity."""
     output = _run_harness(
         'c', _HARNESS_C,
-        os.path.join(JS_DIR, 'main', 'main_toolbar_ui.js'),
-        os.path.join(JS_DIR, 'main.js'))
+        TOOLBAR_JS, MAIN_JS)
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, (
         'a paint-time default reached conv.model (write-back laundering):\n'
@@ -559,7 +561,7 @@ def test_NC_merge_active_task_settings_call_is_load_bearing(tmp_path):
     """NEUTER A: strip the ``_applySettingsToConv`` call from the
     MERGE_ACTIVE_TASK branch → a pinned conv again discards the server's
     model and the composer falls back to serverModel → red."""
-    conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
+    conv_js = CONVERSATIONS_JS
     with open(conv_js, encoding='utf-8') as f:
         src = f.read()
 
@@ -596,7 +598,7 @@ def test_NC_merge_active_task_settings_call_is_load_bearing(tmp_path):
 def test_NC_cache_mirror_resolution_is_load_bearing(tmp_path):
     """NEUTER B: revert the cache mirror to persisting only the flat
     ``conv.model`` → the preset/effort shapes cache as model-LESS → red."""
-    idb_js = os.path.join(JS_DIR, 'idb-cache.js')
+    idb_js = IDB_CACHE_JS
     with open(idb_js, encoding='utf-8') as f:
         src = f.read()
 
@@ -609,7 +611,7 @@ def test_NC_cache_mirror_resolution_is_load_bearing(tmp_path):
 
     output = _run_harness(
         'b_nc', _HARNESS_B,
-        os.path.join(JS_DIR, 'core', 'conv_apply_settings.js'), str(copy))
+        APPLY_SETTINGS_JS, str(copy))
     assert 'FAIL B2_preset_only_round_trips' in output, (
         'NEUTER did not bite: preset shape survived a model-only mirror.\n'
         + output)
@@ -626,7 +628,7 @@ def test_NC_provisional_guard_is_load_bearing(tmp_path):
     """NEUTER C: restore the old unconditional
     ``conv.model = config.model || serverModel`` write-back → the paint-time
     default is laundered into stored truth again → red."""
-    main_js = os.path.join(JS_DIR, 'main.js')
+    main_js = MAIN_JS
     with open(main_js, encoding='utf-8') as f:
         src = f.read()
 
@@ -642,7 +644,7 @@ def test_NC_provisional_guard_is_load_bearing(tmp_path):
 
     output = _run_harness(
         'c_nc', _HARNESS_C,
-        os.path.join(JS_DIR, 'main', 'main_toolbar_ui.js'), str(copy))
+        TOOLBAR_JS, str(copy))
     assert 'FAIL C1_default_paint_not_persisted' in output, (
         'NEUTER did not bite: the default paint was not persisted even '
         'without the guard.\n' + output)
@@ -674,7 +676,7 @@ def test_NC_single_resolver_is_load_bearing(tmp_path):
     third guard-failure mode ("a green guard testing code that never
     existed") is exactly what this prevents from recurring.
     """
-    main_js = os.path.join(JS_DIR, 'main.js')
+    main_js = MAIN_JS
     with open(main_js, encoding='utf-8') as f:
         src = f.read()
 
@@ -691,7 +693,7 @@ def test_NC_single_resolver_is_load_bearing(tmp_path):
 
     output = _run_harness(
         'd_nc', _HARNESS_C,
-        os.path.join(JS_DIR, 'main', 'main_toolbar_ui.js'), str(copy))
+        TOOLBAR_JS, str(copy))
     assert 'FAIL C1_default_paint_not_persisted' in output, (
         'NEUTER did not bite: pre-resolving the fallback at the call site no '
         'longer defeats the provisional guard — the mechanism may have '

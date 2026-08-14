@@ -7,8 +7,8 @@ exactly one copy of the state, so ``from lib.tasks_pkg.cache_tracking import
 _cache_states`` returns the SAME object the internal functions mutate.
 
 Also owns the state-eviction helpers (``cleanup_cache_state`` /
-``cleanup_stale_cache_states``) and the tools-registry latch release. The L2
-ROI flush on eviction is delegated to ``_roi._emit_l2_roi`` via a LAZY import
+``cleanup_stale_cache_states``). The L2 ROI flush on eviction is delegated to
+``_roi._emit_l2_roi`` via a LAZY import
 inside the functions to keep the dependency direction clean (``_roi`` imports
 this module for the state; this module only reaches into ``_roi`` at call
 time, never at import time).
@@ -203,6 +203,34 @@ def _state_key(conv_id: str) -> tuple:
     return (conv_id, threading.get_ident())
 
 
+def get_warm_cache_read(conv_id: str) -> int:
+    """Largest recent cache-read prefix observed for this conversation.
+
+    The proactive L2 gate runs before the next provider call and may execute on
+    a different worker thread from the turn that warmed the cache.  Inspect all
+    live per-thread states and the durable previous-turn baseline, then return
+    the larger value.  Zero means there is no evidence of a warm prefix, so an
+    automatic rewrite has no known cache entry to destroy.
+    """
+    if not conv_id:
+        return 0
+    with _cache_lock:
+        live = max(
+            (int(st.last_cache_read_tokens) for (cid, _tid), st
+             in _cache_states.items() if cid == conv_id and st.call_count > 0),
+            default=0,
+        )
+    try:
+        from lib.tasks_pkg.cache_tracking._persist import (
+            read_last_turn_cache_read)
+        durable = int(read_last_turn_cache_read(conv_id) or 0)
+    except Exception as e:
+        logger.debug('[CacheTrack] durable warm-cache read unavailable '
+                     'conv=%s: %s', conv_id[:8], e)
+        durable = 0
+    return max(live, durable)
+
+
 def get_prev_turn_cache_read(conv_id: str) -> int:
     """Best CROSS-THREAD ``cache_read`` baseline for a turn's round-1 (0 if none).
 
@@ -268,30 +296,6 @@ def get_prev_turn_cache_read(conv_id: str) -> int:
         return 0
 
 
-def _release_multiroot_sticky(conv_id: str) -> None:
-    """Release the tools-registry latches on evict.
-
-    Releases all three conv_id-keyed schema-stability latches together —
-    multi-root sticky, project-ready sticky, and the tool-schema latch —
-    because they share the cache-state lifecycle. Imported lazily so this
-    low-level module doesn't pull in the tools package at import time (and
-    tolerates the symbols being absent).
-    """
-    if not conv_id:
-        return
-    try:
-        from lib.tools import (
-            clear_multiroot_sticky,
-            clear_project_ready_sticky,
-            clear_tool_list_latch,
-        )
-        clear_multiroot_sticky(conv_id)
-        clear_project_ready_sticky(conv_id)
-        clear_tool_list_latch(conv_id)
-    except Exception as e:
-        logger.debug('[CacheTrack] tools-registry latch release unavailable: %s', e)
-
-
 def cleanup_cache_state(conv_id: str) -> None:
     """Remove cache state for a conversation that's no longer active.
 
@@ -321,7 +325,6 @@ def cleanup_cache_state(conv_id: str) -> None:
                          '(last calls=%d, total_breaks=%d)',
                          len(_keys), conv_id[:8], removed.call_count,
                          removed.total_breaks)
-    _release_multiroot_sticky(conv_id)
 
 
 def cleanup_stale_cache_states(max_age_s: float = 3600) -> int:
@@ -356,8 +359,6 @@ def cleanup_stale_cache_states(max_age_s: float = 3600) -> int:
                              cache_write_rebilled=None)
                 _stale.pending_l2_roi = None
             removed += 1
-    for key in stale_keys:
-        _release_multiroot_sticky(key[0])
     if removed:
         logger.info('[CacheTrack] Cleaned up %d stale cache states '
                     '(older than %ds, %d remaining)',

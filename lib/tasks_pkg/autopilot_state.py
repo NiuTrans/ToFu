@@ -403,26 +403,22 @@ def _resolve_recent_run_id(conv_id: str) -> str:
         return ''
     try:
         from lib.database import DOMAIN_CHAT, get_thread_db
+        from lib.database.conversation_repository import load_conversation
         db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT settings, messages FROM conversations WHERE id=? AND user_id=1',
-            (conv_id,)
-        ).fetchone()
-        if not row:
+        snapshot = load_conversation(
+            db, conv_id, metadata_columns=('settings',))
+        if snapshot is None:
             return ''
         try:
-            settings = json.loads(row[0] or '{}') if row[0] else {}
+            raw_settings = snapshot.get('settings')
+            settings = json.loads(raw_settings or '{}') if raw_settings else {}
         except (json.JSONDecodeError, TypeError) as e:
             logger.debug('[Autopilot] settings JSON parse failed, using fallback: %s', e)
             settings = {}
         pinned = (settings.get('autopilotRunId') or '').strip()
         if pinned:
             return pinned
-        try:
-            msgs = json.loads(row[1] or '[]') if row[1] else []
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.debug('[Autopilot] messages JSON parse failed, using fallback: %s', e)
-            msgs = []
+        msgs = snapshot.messages
         for m in reversed(msgs):
             if isinstance(m, dict) and (m.get('_autopilotRunId') or '').strip():
                 return m['_autopilotRunId'].strip()
@@ -452,18 +448,12 @@ def _resolve_run_anchor_msgid(conv_id: str, run_id: str) -> str:
         return ''
     try:
         from lib.database import DOMAIN_CHAT, get_thread_db
+        from lib.database.conversation_repository import load_conversation
         db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT messages FROM conversations WHERE id=? AND user_id=1',
-            (conv_id,)
-        ).fetchone()
-        if not row:
+        snapshot = load_conversation(db, conv_id)
+        if snapshot is None:
             return ''
-        try:
-            msgs = json.loads(row[0] or '[]') if row[0] else []
-        except (json.JSONDecodeError, TypeError) as _e:
-            logger.debug('resolve run anchor msgid: malformed JSON/unexpected type (%s)', _e)
-            msgs = []
+        msgs = snapshot.messages
         # Last turn STAMPED with this run id (only the VU turn carries it).
         stamped_idx = -1
         for i, m in enumerate(msgs):

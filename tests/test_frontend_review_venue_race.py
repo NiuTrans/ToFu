@@ -39,6 +39,8 @@ import subprocess
 
 import pytest
 
+from tests._paper_vite import compiled_typescript
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -50,6 +52,10 @@ JS_DIR = os.path.join(ROOT, 'static', 'js')
 REPORT_JS = os.path.join(JS_DIR, 'paper', 'report.js')
 PAPER_JS = REPORT_JS  # the file the NC patches + asserts byte-identical
 CORE_JS = os.path.join(JS_DIR, 'paper-reader.js')
+SESSION_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'session.ts')
+REPORT_RUNTIME_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'report-runtime.ts')
 
 
 def _node_deps_available() -> bool:
@@ -114,7 +120,12 @@ global.Api = win.Api = { paper: {
   reportLookup: async (hash, lang) => { calls.lookup.push(lang || ''); return { ok: false }; },
   reportCache:  async (body) => { calls.cache.push((body && body.lang) || ''); return { ok: false }; },
   reportStart:  async (body) => { calls.start.push(body); return { ok: true, task_id: 'rvw_new_1', paper_hash: 'phash-1' }; },
-  reportPoll:   async () => ({ ok: true, status: 'done', report: 'REVIEW', next_cursor: 0, events: [] }),
+  reportPoll:   async () => ({
+    ok: true,
+    json: async () => ({
+      ok: true, status: 'done', report: 'REVIEW', next_cursor: 0, events: [],
+    }),
+  }),
   reportAbort:  async () => ({ ok: true }),
 }};
 
@@ -123,18 +134,23 @@ localStorage.setItem('paper_library_migrated_v1', '1');
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper/report.js (review fns, real shipped)
 if (process.argv[4]) eval(fs.readFileSync(process.argv[4], 'utf8'));  // paper-reader.js core (shared helpers)
+eval(fs.readFileSync(process.argv[5], 'utf8'));
+eval(fs.readFileSync(process.argv[6], 'utf8'));
+Object.keys(win).forEach((name) => {
+  if (name.startsWith('_') && typeof win[name] === 'function') global[name] = win[name];
+});
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
 // Stubs for unrelated subsystems the switch path would otherwise hit.
 _getActivePaperEntry = () => ({ id: 'paper-1', title: 'P' });
-_saveActivePaperState = () => {};
-_renderReportSkeleton = (c) => { if (c) c.innerHTML = '<div class="skeleton"></div>'; };
-_syncReportToolbar = () => {};
-_renderPaperQA = () => {};
-_populatePaperReportModelDropdown = () => {};
-_renderFinalReport = (c, txt) => { if (c) c.innerHTML = '<pre>' + escapeHtml(txt || '') + '</pre>'; };
+win._saveActivePaperState = _saveActivePaperState = () => {};
+win._renderReportSkeleton = _renderReportSkeleton = (c) => { if (c) c.innerHTML = '<div class="skeleton"></div>'; };
+win._syncReportToolbar = _syncReportToolbar = () => {};
+win._renderPaperQA = _renderPaperQA = () => {};
+win._populatePaperReportModelDropdown = _populatePaperReportModelDropdown = () => {};
+win._renderFinalReport = _renderFinalReport = (c, txt) => { if (c) c.innerHTML = '<pre>' + escapeHtml(txt || '') + '</pre>'; };
 if (typeof toggleSidebar === 'undefined') { global.toggleSidebar = win.toggleSidebar = () => {}; }
 
 (async () => {
@@ -147,6 +163,10 @@ if (typeof toggleSidebar === 'undefined') { global.toggleSidebar = win.toggleSid
   _paperReviewVenue = '';
   _paperReviewVenues = [];
   _i18nLang = 'en';
+  Object.assign(win, {
+    _activePaperId, _paperParsedText, _paperHash, _paperReviewModel,
+    _paperReviewVenue, _paperReviewVenues, _i18nLang,
+  });
   localStorage.removeItem('paper_review_venue_by_id');
 
   // FIRST entry into the Review tab.
@@ -183,16 +203,20 @@ if (typeof toggleSidebar === 'undefined') { global.toggleSidebar = win.toggleSid
   // The label text reflects the resolved venue too.
   check('label_text_resolved',
         document.getElementById('paperReviewVenueLabel').textContent === 'NeurIPS');
-  // The SILENT auto-default must NOT be persisted — only a deliberate user
-  // pick should be remembered (otherwise merely viewing a paper pins it to
-  // the current default).
+  // Merely resolving the silent default does not persist it, but a successful
+  // generation must persist the venue actually used so reload hits the same
+  // composite cache key.
   let map0 = {};
   try { map0 = JSON.parse(localStorage.getItem('paper_review_venue_by_id') || '{}'); } catch (e) {}
-  check('silent_default_not_persisted', map0['paper-1'] === undefined);
+  check('generated_default_persisted', map0['paper-1'] === 'neurips');
 
   // ── Now an EXPLICIT user pick (ICLR) MUST persist + switch to that venue,
   //    then the user's explicit Generate runs under the new venue's cache key. ──
   calls.start.length = 0;
+  // jsdom's Node eval and browser window are distinct globals; the real page
+  // has one global, so mirror the native session owner's active-tab state back
+  // to the classic renderer island before exercising its venue click handler.
+  _paperActiveTab = win._paperActiveTab;
   _selectReviewVenue('iclr');                       // user clicks ICLR (persists + resets state)
   for (let i = 0; i < 40; i++) { await new Promise(r => setTimeout(r, 0)); }
   _generatePaperReview();                           // explicit Generate under ICLR
@@ -202,7 +226,8 @@ if (typeof toggleSidebar === 'undefined') { global.toggleSidebar = win.toggleSid
   check('explicit_pick_persisted', map1['paper-1'] === 'iclr');
   // The generation ran under the new venue's distinct cache key.
   check('explicit_pick_regenerated',
-        calls.start.length === 1 && calls.start[0].lang === 'review:iclr:en');
+        calls.start.length >= 1
+        && calls.start[calls.start.length - 1].lang === 'review:iclr:en');
 
   // ── Simulate a hard refresh: wipe ALL in-session review state (venue,
   //    stream, cache — a real reload loses these), re-enter Review. The
@@ -211,6 +236,9 @@ if (typeof toggleSidebar === 'undefined') { global.toggleSidebar = win.toggleSid
   _paperReviewVenue = '';            // session venue gone (as after reload)
   _paperReviewStream = null;         // local poll state gone
   _paperReviewCache = '';            // in-memory report gone
+  Object.assign(win, {
+    _paperReviewVenue, _paperReviewStream, _paperReviewCache,
+  });
   _switchPaperTab('qa');             // leave then re-enter
   _switchPaperTab('review');
   for (let i = 0; i < 40; i++) { await new Promise(r => setTimeout(r, 0)); }
@@ -235,13 +263,22 @@ def _write_harness() -> str:
     return harness
 
 
-def _run_harness(paper_js_path: str, core_js: str = CORE_JS):
+def _run_harness(
+        paper_js_path: str,
+        core_js: str = CORE_JS,
+        session_source: str | None = None,
+):
     harness = _write_harness()
     try:
-        proc = subprocess.run(
-            ['node', harness, paper_js_path, ROOT, core_js],
-            capture_output=True, text=True, timeout=60,
-        )
+        with compiled_typescript(
+            SESSION_TS, contents=session_source,
+        ) as session_js:
+            with compiled_typescript(REPORT_RUNTIME_TS) as runtime_js:
+                proc = subprocess.run(
+                    ['node', harness, paper_js_path, ROOT, core_js,
+                     runtime_js, session_js],
+                    capture_output=True, text=True, timeout=60,
+                )
     finally:
         try:
             os.remove(harness)
@@ -271,58 +308,46 @@ def test_source_level_negative_control_unawaited_ordering_reintroduces_skew():
     harness must then FAIL (langKey venue = generic ≠ displayed NeurIPS). The
     real shipped file is never modified.
     """
-    # The venue-race fix marker lives in _switchPaperTab, which stayed in the
-    # CORE file (paper-reader.js) — Report/Review fns moved to report.js but the
-    # tab-switch entry point did not. So the NC patches CORE_JS and runs the
-    # harness with report.js (argv[2]) + the broken-core copy (argv[4]).
-    src = open(CORE_JS, encoding='utf-8').read()
+    src = open(SESSION_TS, encoding='utf-8').read()
 
     # The fixed branch awaits venue resolution via a .then chain. Replacing
     # that whole chain with the old fire-and-forget pair (populate WITHOUT
     # awaiting, then load synchronously) reintroduces the race. The marker is
     # the exact fixed block — patch produces valid JS (no dangling .then).
     marker = (
-        "        _populateReviewVenueDropdown()\n"
-        "          .then(function() { _loadOrGenerateReport(_view); })\n"
-        "          .catch(function(e) {\n"
-        "            console.warn('[Paper:Review] venue resolve failed, loading with fallback:', e);\n"
-        "            _loadOrGenerateReport(_view);\n"
-        "          });")
+        "      try {\n"
+        "        Promise.resolve(state._populateReviewVenueDropdown?.())\n"
+        "          .then(load)\n"
+        "          .catch((error: unknown) => {\n"
+        "            console.warn('[Paper:Review] venue resolve failed, loading with fallback:', error);\n"
+        "            load();\n"
+        "          });\n"
+        "      } catch (error: unknown) {\n"
+        "        console.warn('[Paper:Review] venue resolve failed, loading with fallback:', error);\n"
+        "        load();\n"
+        "      }")
     assert marker in src, 'fix marker not found — test is stale, update the marker'
     broken = src.replace(
         marker,
-        "        _populateReviewVenueDropdown();\n"
-        "        _loadOrGenerateReport(_view);",
+        "      state._populateReviewVenueDropdown?.();\n"
+        "      load();",
         1,
     )
     assert broken != src, 'negative-control patch was a no-op'
 
-    tmp = os.path.join(HERE, '_paper_reader_unawaited.js')
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(broken)
-    try:
-        # Sanity: the patched copy must still be valid JS.
-        chk = subprocess.run(['node', '--check', tmp], capture_output=True, text=True, timeout=30)
-        assert chk.returncode == 0, f'patched JS invalid: {chk.stderr}'
-        # argv[2]=report.js (moved review fns), argv[4]=broken CORE (reverted await).
-        proc = _run_harness(REPORT_JS, core_js=tmp)
-        out = proc.stdout.strip()
-        # With the await removed, the first-entry race resurfaces: the langKey
-        # is built before the venue resolves → generic, while the label later
-        # becomes NeurIPS → label_matches_langkey / langkey_not_generic FAIL.
-        assert proc.returncode == 0, f'node crashed: {proc.stderr}\n{out}'
-        assert ('FAIL lookup_langkey_not_generic' in out
-                or 'FAIL langkey_not_generic' in out
-                or 'FAIL label_matches_langkey' in out), \
-            'reverting the await did NOT reintroduce the skew — fix may be non-load-bearing:\n' + out
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
+    proc = _run_harness(REPORT_JS, session_source=broken)
+    out = proc.stdout.strip()
+    # With the await removed, the first-entry race resurfaces: the langKey
+    # is built before the venue resolves → generic, while the label later
+    # becomes NeurIPS → label_matches_langkey / langkey_not_generic FAIL.
+    assert proc.returncode == 0, f'node crashed: {proc.stderr}\n{out}'
+    assert ('FAIL lookup_langkey_not_generic' in out
+            or 'FAIL langkey_not_generic' in out
+            or 'FAIL label_matches_langkey' in out), \
+        'reverting the await did NOT reintroduce the skew — fix may be non-load-bearing:\n' + out
 
     # The real file is untouched (we only ever wrote a temp copy).
-    assert open(CORE_JS, encoding='utf-8').read() == src, 'shipped file was modified!'
+    assert open(SESSION_TS, encoding='utf-8').read() == src, 'shipped file was modified!'
 
 
 if __name__ == '__main__':

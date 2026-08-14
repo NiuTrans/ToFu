@@ -185,6 +185,69 @@ def _transform_multiedit_to_apply_diffs(
     return out, True
 
 
+def _transform_legacy_edit_to_edit_file(
+    args: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    """Normalize native/legacy/foreign edit shapes into unified edits."""
+    source_edits = args.get('edits')
+    if isinstance(source_edits, list) and source_edits:
+        candidates = source_edits
+        shared_path = next((args.get(k) for k in (
+            'path', 'file_path', 'filepath', 'filename') if args.get(k)), '')
+    elif any(k in args for k in (
+            'anchor', 'search', 'old_string', 'old_str', 'oldText')):
+        candidates = [args]
+        shared_path = ''
+    else:
+        return args, False
+
+    normalized = []
+    changed = not (
+        isinstance(source_edits, list)
+        and all(isinstance(e, dict) and e.get('operation') for e in source_edits)
+    )
+    for edit in candidates:
+        if not isinstance(edit, dict):
+            normalized.append(edit)
+            continue
+        if edit.get('operation'):
+            normalized.append(dict(edit))
+            continue
+        path = next((edit.get(k) for k in (
+            'path', 'file_path', 'filepath', 'filename') if edit.get(k)),
+            shared_path)
+        search = next((edit.get(k) for k in (
+            'search', 'old_string', 'old_str', 'oldText') if k in edit), None)
+        replacement = next((edit.get(k) for k in (
+            'replace', 'new_string', 'new_str', 'newText') if k in edit), None)
+        if search is not None:
+            unified = {
+                'path': path, 'operation': 'replace',
+                'anchor': search, 'content': replacement if replacement is not None else '',
+            }
+        elif 'anchor' in edit:
+            position = edit.get('position', 'after')
+            unified = {
+                'path': path,
+                'operation': ('insert_before' if position == 'before'
+                              else 'insert_after'),
+                'anchor': edit.get('anchor'),
+                'content': edit.get('content', edit.get('text', '')),
+            }
+        else:
+            normalized.append(dict(edit))
+            continue
+        for optional in ('replace_all', 'description'):
+            if optional in edit:
+                unified[optional] = edit[optional]
+        normalized.append(unified)
+
+    out = {'edits': normalized}
+    if args.get('description'):
+        out['description'] = args['description']
+    return out, changed
+
+
 def _transform_askuserquestion_to_ask_human(
     args: dict[str, Any],
 ) -> tuple[dict[str, Any], bool]:
@@ -231,6 +294,7 @@ def _transform_askuserquestion_to_ask_human(
 
 # Registry keyed by the CANONICAL (already name-resolved) tool name.
 _STRUCTURAL_TRANSFORMS: dict[str, Any] = {
+    'edit_file': _transform_legacy_edit_to_edit_file,
     'apply_diffs': _transform_multiedit_to_apply_diffs,
     'ask_human': _transform_askuserquestion_to_ask_human,
 }

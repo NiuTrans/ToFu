@@ -301,6 +301,15 @@ class ConversationStore(Protocol):
         """
         ...
 
+    def next_task_event_id(self, task_id: str, *, floor: int = 0) -> int:
+        """Return an unused task-event id at or above ``floor``.
+
+        The host adapter must account for both durable rows and any local
+        write-behind shadow so a core caller cannot reuse an id while the
+        newest row is still awaiting its database commit.
+        """
+        ...
+
     def load_conversation_messages(self, conv_id: str) -> tuple[list, int] | None:
         """Return ``(messages, updated_at)`` for a conversation, or ``None``.
 

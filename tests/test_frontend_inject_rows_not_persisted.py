@@ -49,11 +49,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-CORE_DIR = os.path.join(ROOT, 'static', 'js', 'core')
+CORE_DIR = os.path.join(runtime_sections_dir(), 'core')
 
 
 def _locate(symbol: str) -> str:

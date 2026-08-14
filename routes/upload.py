@@ -2,13 +2,12 @@
 
 import base64
 import io
-import ipaddress
 import os
-import socket
 import time
-from urllib.parse import urlparse
 
-from flask import Blueprint, request, send_file
+from quart import Blueprint, request
+
+from lib.quart_sync import request_files, request_form, send_file
 
 # ── Magic-bytes image-type detector (imghdr replacement, Py 3.13+ safe) ──
 # Returns one of {'png','jpeg','gif','webp','bmp'} or None.
@@ -67,6 +66,8 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 # private endpoint.
 
 _DEFAULT_IMAGE_FETCH_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+_DEFAULT_IMAGE_UPLOAD_MAX_BYTES = 32 * 1024 * 1024  # compressed/on-wire image
+_DEFAULT_IMAGE_UPLOAD_MAX_PIXELS = 40_000_000       # ~160 MiB RGBA decode
 
 
 def _image_fetch_max_bytes() -> int:
@@ -82,28 +83,62 @@ def _image_fetch_max_bytes() -> int:
     return _DEFAULT_IMAGE_FETCH_MAX_BYTES
 
 
-def _image_fetch_allowed_hosts() -> set[str]:
-    raw = (getenv_compat('TOFU_IMAGE_FETCH_ALLOW_HOSTS') or '').strip()
-    if not raw:
-        return set()
-    return {h.strip().lower() for h in raw.split(',') if h.strip()}
-
-
 class _ImageFetchError(Exception):
     """Raised when a user-supplied image URL fails the SSRF / size guard."""
+
+
+def _image_upload_max_bytes() -> int:
+    raw = (getenv_compat('TOFU_IMAGE_UPLOAD_MAX_BYTES') or '').strip()
+    try:
+        value = int(raw) if raw else _DEFAULT_IMAGE_UPLOAD_MAX_BYTES
+    except ValueError as exc:
+        logger.debug('[ImageUpload] Invalid TOFU_IMAGE_UPLOAD_MAX_BYTES=%r: %s',
+                     raw, exc)
+        value = _DEFAULT_IMAGE_UPLOAD_MAX_BYTES
+    return max(1024, min(value, _DEFAULT_IMAGE_UPLOAD_MAX_BYTES))
+
+
+def _image_upload_max_pixels() -> int:
+    raw = (getenv_compat('TOFU_IMAGE_UPLOAD_MAX_PIXELS') or '').strip()
+    try:
+        value = int(raw) if raw else _DEFAULT_IMAGE_UPLOAD_MAX_PIXELS
+    except ValueError as exc:
+        logger.debug('[ImageUpload] Invalid TOFU_IMAGE_UPLOAD_MAX_PIXELS=%r: %s',
+                     raw, exc)
+        value = _DEFAULT_IMAGE_UPLOAD_MAX_PIXELS
+    return max(1_000_000, min(value, _DEFAULT_IMAGE_UPLOAD_MAX_PIXELS))
+
+
+def _upload_image_dimension_error(image_bytes: bytes) -> tuple[str, bool] | None:
+    """Return ``(message, oversized)`` before any full Pillow decode."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            width, height = image.size
+    except Exception as exc:
+        logger.debug('[ImageUpload] image header validation failed: %s', exc)
+        return (f'Invalid or corrupt image: {exc}', False)
+    pixels = int(width) * int(height)
+    limit = _image_upload_max_pixels()
+    if width <= 0 or height <= 0:
+        return ('Invalid image dimensions', False)
+    if pixels > limit:
+        return (
+            f'Image dimensions {width}x{height} exceed the {limit:,}-pixel limit',
+            True,
+        )
+    return None
 
 
 def _is_blocked_ip(ip_str: str) -> bool:
     """Return True if ``ip_str`` is loopback / RFC1918 / link-local / multicast /
     reserved / unspecified. These addresses must not be reachable through a
     user-supplied URL."""
-    try:
-        ip = ipaddress.ip_address(ip_str)
-    except ValueError as _e_audit:
-        logger.debug('[upload] _is_blocked_ip caught %s: %s', type(_e_audit).__name__, _e_audit)
-        return True  # unparseable → deny
-    return (ip.is_loopback or ip.is_private or ip.is_link_local
-            or ip.is_multicast or ip.is_reserved or ip.is_unspecified)
+    from lib.safe_fetch import ip_is_public
+    return not ip_is_public(ip_str)
 
 
 def _safe_image_fetch(url: str, *, timeout: int = 30) -> tuple[bytes, str]:
@@ -118,59 +153,18 @@ def _safe_image_fetch(url: str, *, timeout: int = 30) -> tuple[bytes, str]:
     The request streams (``stream=True``) and aborts as soon as the size cap
     is reached, so an attacker cannot OOM the server with a huge body.
     """
-    from lib.http_client import http_get
-
-    parsed = urlparse(url)
-    if parsed.scheme not in ('http', 'https'):
-        raise _ImageFetchError(f'unsupported scheme: {parsed.scheme!r}')
-    host = (parsed.hostname or '').lower()
-    if not host:
-        raise _ImageFetchError('missing hostname')
-
-    allowed = _image_fetch_allowed_hosts()
-    if host not in allowed:
-        # Resolve every IP the host could land on — checking a single record
-        # is not enough (DNS rebinding, multi-homed hosts).
-        try:
-            infos = socket.getaddrinfo(host, parsed.port,
-                                       proto=socket.IPPROTO_TCP)
-        except socket.gaierror as e:
-            raise _ImageFetchError(f'DNS resolution failed: {e}') from e
-        for info in infos:
-            ip_str = info[4][0]
-            if _is_blocked_ip(ip_str):
-                raise _ImageFetchError(
-                    f'host {host!r} resolves to blocked IP {ip_str} '
-                    f'(loopback/private/link-local/reserved)'
-                )
-
-    max_bytes = _image_fetch_max_bytes()
-    resp = http_get(url, timeout=timeout, stream=True)
+    from lib.safe_fetch import SafeFetchError, fetch_public_bytes
     try:
-        resp.raise_for_status()
-        # Honor Content-Length if the server is honest; still re-check while
-        # streaming since headers can lie.
-        cl = resp.headers.get('Content-Length')
-        if cl and cl.isdigit() and int(cl) > max_bytes:
-            raise _ImageFetchError(
-                f'response too large: Content-Length={cl} > max={max_bytes}'
-            )
-        chunks = []
-        total = 0
-        for chunk in resp.iter_content(chunk_size=64 * 1024):
-            if not chunk:
-                continue
-            total += len(chunk)
-            if total > max_bytes:
-                raise _ImageFetchError(
-                    f'response too large: streamed {total} > max={max_bytes}'
-                )
-            chunks.append(chunk)
-        body = b''.join(chunks)
-        ct = resp.headers.get('Content-Type', '') or ''
-        return body, ct.split(';')[0].strip()
-    finally:
-        resp.close()
+        body, content_type, _final_url = fetch_public_bytes(
+            url,
+            max_bytes=_image_fetch_max_bytes(),
+            timeout=timeout,
+            max_redirects=3,
+            allow_hosts_env='TOFU_IMAGE_FETCH_ALLOW_HOSTS',
+        )
+        return body, content_type
+    except SafeFetchError as exc:
+        raise _ImageFetchError(str(exc)) from exc
 
 
 # ══════════════════════════════════════════════════════
@@ -362,6 +356,12 @@ def upload_image():
         media_type = data.get('mediaType', 'image/png')
         if not b64_data:
             return api_bad_request('No base64 data')
+        max_upload_bytes = _image_upload_max_bytes()
+        max_encoded = ((max_upload_bytes + 2) // 3) * 4 + 8
+        if not isinstance(b64_data, str) or len(b64_data) > max_encoded:
+            return api_error(
+                f'Image exceeds the {max_upload_bytes // (1024 * 1024)} MiB upload limit',
+                status=413)
         # ★ SVG is intentionally excluded — user-supplied SVGs can embed
         # <script> and enable stored XSS when served inline. See §10.4.
         ext_map = {
@@ -379,12 +379,20 @@ def upload_image():
         except Exception as e:
             logger.warning('[upload_image] base64 decode failed: %s', e)
             return api_bad_request('Invalid base64 payload')
+        if len(img_bytes) > max_upload_bytes:
+            return api_error(
+                f'Image exceeds the {max_upload_bytes // (1024 * 1024)} MiB upload limit',
+                status=413)
         # ── Magic-bytes sanity check (defence in depth against content-type spoofing) ──
         detected = _detect_image_format(img_bytes[:32])
         if detected not in ('png', 'jpeg', 'gif', 'webp', 'bmp'):
             logger.warning('[upload_image] Magic-bytes check failed: media_type=%s detected=%s len=%d',
                            media_type, detected, len(img_bytes))
             return api_bad_request('Payload does not match any supported image format')
+        dimension_error = _upload_image_dimension_error(img_bytes)
+        if dimension_error:
+            message, oversized = dimension_error
+            return api_error(message, status=413 if oversized else 400)
 
         # Wire-size shrink (see module-level _shrink_upload_image docstring)
         try:
@@ -401,6 +409,12 @@ def upload_image():
         filename = f"{int(time.time()*1000)}_{os.urandom(4).hex()}{ext}"
         filepath = os.path.join(UPLOAD_DIR, filename)
         try:
+            # UPLOAD_DIR is normally created at module import, but the
+            # writable data mount can be replaced or cleaned while this
+            # long-lived process remains alive.  Re-establish the directory
+            # at the write boundary so one external cleanup does not make all
+            # later uploads fail until the server is restarted.
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
             with open(filepath, 'wb') as f:
                 f.write(img_bytes)
         except Exception as e:
@@ -418,9 +432,10 @@ def upload_image():
         return api_ok({'url': f'/api/images/{filename}', 'filename': filename})
 
     # ── Multipart form upload (traditional file upload) ──
-    if 'file' not in request.files:
+    files = request_files()
+    if 'file' not in files:
         return api_bad_request('No file')
-    file = request.files['file']
+    file = files['file']
     if not file.filename:
         return api_bad_request('No filename')
     ext = os.path.splitext(file.filename)[1].lower()
@@ -441,10 +456,18 @@ def upload_image():
     # Read full bytes so we can run the wire-size shrink before writing to disk
     try:
         file.stream.seek(0)
-        raw_bytes = file.stream.read()
+        raw_bytes = file.stream.read(_image_upload_max_bytes() + 1)
     except Exception as e:
         logger.error('[upload_image] failed to read uploaded stream: %s', e, exc_info=True)
         return api_internal_error('internal_error')
+    if len(raw_bytes) > _image_upload_max_bytes():
+        return api_error(
+            f'Image exceeds the {_image_upload_max_bytes() // (1024 * 1024)} MiB upload limit',
+            status=413)
+    dimension_error = _upload_image_dimension_error(raw_bytes)
+    if dimension_error:
+        message, oversized = dimension_error
+        return api_error(message, status=413 if oversized else 400)
 
     try:
         new_bytes, new_ext, shrink_info = _shrink_upload_image(raw_bytes, detected)
@@ -454,10 +477,13 @@ def upload_image():
         new_bytes, new_ext, shrink_info = raw_bytes, ext, {'shrunk': False, 'reason': f'exc:{e}'}
 
     # Preserve user-supplied filename stem but use the (possibly new) extension
-    stem = os.path.splitext(file.filename)[0]
+    from werkzeug.utils import secure_filename
+    stem = os.path.splitext(secure_filename(os.path.basename(file.filename)))[0]
+    stem = (stem or 'image')[:80]
     filename = f"{int(time.time()*1000)}_{os.urandom(4).hex()}_{stem}{new_ext}"
     filepath = os.path.join(UPLOAD_DIR, filename)
     try:
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
         with open(filepath, 'wb') as f:
             f.write(new_bytes)
     except Exception as e:
@@ -612,6 +638,7 @@ def generate_image_route():
         filename = f"gen_{int(time.time()*1000)}{ext}"
         filepath = os.path.join(UPLOAD_DIR, filename)
         try:
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
             with open(filepath, 'wb') as f:
                 f.write(raw_bytes)
             file_size = len(raw_bytes)
@@ -762,7 +789,8 @@ def list_image_models():
 @upload_bp.route('/api/pdf/parse', methods=['POST'])
 def parse_pdf():
     from lib.pdf_parser._common import MAX_PDF_BYTES
-    if 'file' not in request.files:
+    files = request_files()
+    if 'file' not in files:
         logger.warning('[parse_pdf] No file in request (content_length=%s)',
                        request.content_length)
         return api_bad_request('No file provided')
@@ -771,7 +799,7 @@ def parse_pdf():
                        request.content_length, request.content_length / 1048576,
                        MAX_PDF_BYTES // 1048576)
         return api_bad_request(f'File too large (max {MAX_PDF_BYTES // 1048576}MB)')
-    file = request.files['file']
+    file = files['file']
     if not file.filename:
         logger.warning('[parse_pdf] No filename in uploaded file')
         return api_bad_request('No filename')
@@ -786,10 +814,11 @@ def parse_pdf():
     from lib.pdf_parser.pool import parse_pdf_pooled as _parse_pdf
     logger.info('[parse_pdf] Starting parse: %s (%d bytes, %.1f MB)',
                 file.filename, len(pdf_bytes), len(pdf_bytes) / 1048576)
+    form = request_form()
     try:
-        max_text_chars = int(request.form.get('maxTextChars', 0))
-        max_image_width = int(request.form.get('maxImageWidth', 1024))
-        max_images = int(request.form.get('maxImages', 20))
+        max_text_chars = int(form.get('maxTextChars', 0))
+        max_image_width = int(form.get('maxImageWidth', 1024))
+        max_images = int(form.get('maxImages', 20))
 
     except (ValueError, TypeError) as e:
         logger.warning('[parse_pdf] Invalid numeric parameter: %s', e, exc_info=True)
@@ -801,7 +830,7 @@ def parse_pdf():
     #                 docling is not installed or fails).
     # `rich` (default) → pymupdf4llm.
     # `fast` → raw get_text (not used by upload, kept for completeness).
-    _requested_mode = (request.form.get('textMode') or
+    _requested_mode = (form.get('textMode') or
                        os.environ.get('PDF_TEXT_MODE') or
                        'rich').strip().lower()
     if _requested_mode not in ('rich', 'structured', 'fast'):
@@ -836,7 +865,8 @@ def pdf_vlm_parse():
     from lib.pdf_parser import start_vlm_task
     from lib.pdf_parser._common import MAX_PDF_BYTES
 
-    if 'file' not in request.files:
+    files = request_files()
+    if 'file' not in files:
         logger.warning('[VLM-Parse] No file in request (content_length=%s)',
                        request.content_length)
         return api_bad_request('No file provided')
@@ -845,7 +875,7 @@ def pdf_vlm_parse():
                        request.content_length, request.content_length / 1048576,
                        MAX_PDF_BYTES // 1048576)
         return api_bad_request(f'File too large (max {MAX_PDF_BYTES // 1048576}MB)')
-    file = request.files['file']
+    file = files['file']
     pdf_bytes = file.read()
     if not pdf_bytes:
         logger.warning('[VLM-Parse] Empty file: %s', file.filename)
@@ -913,11 +943,12 @@ def parse_document():
     from lib import FETCH_MAX_BYTES
     from lib.doc_parser import extract_document_text, is_supported_document
 
-    if 'file' not in request.files:
+    files = request_files()
+    if 'file' not in files:
         return api_bad_request('No file provided')
     if request.content_length and request.content_length > FETCH_MAX_BYTES:
         return api_bad_request(f'File too large (max {FETCH_MAX_BYTES // 1048576}MB)')
-    file = request.files['file']
+    file = files['file']
     if not file.filename:
         return api_bad_request('No filename')
 
@@ -932,7 +963,7 @@ def parse_document():
         return api_bad_request('File too large')
 
     try:
-        max_text_chars = int(request.form.get('maxTextChars', 0))
+        max_text_chars = int(request_form().get('maxTextChars', 0))
     except (ValueError, TypeError) as e:
         logger.warning('[parse_doc] Invalid maxTextChars: %s', e)
         max_text_chars = 0

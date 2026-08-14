@@ -9,9 +9,18 @@ Run:  pytest tests/test_api_integration.py -m api
 """
 from __future__ import annotations
 
+import re
 import time
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_background_llm(monkeypatch):
+    """These route-shape checks never need a model call."""
+    import lib.tasks_pkg as tasks_pkg
+
+    monkeypatch.setattr(tasks_pkg, 'spawn_task', lambda _task: None)
 
 # ═══════════════════════════════════════════════════════════
 #  Auth & Meta (post /api/v1 migration)
@@ -632,15 +641,13 @@ class TestStaticPages:
 
     def test_index_page(self, flask_client):
         resp = flask_client.get("/")
-        # The bundled-HTML path returns 200 with the page. The bundle-failure
-        # fallback uses send_from_directory, which under the sync test adapter
-        # can surface as a 500 (sync route returning an un-awaited coroutine);
-        # this is a harness artifact, not a production issue (Quart awaits it
-        # in the real async dispatch). Accept either, but when 200 assert the
-        # page content is right.
-        assert resp.status_code in (200, 500)
-        if resp.status_code == 200:
-            assert "Tofu" in resp.data.decode("utf-8")
+        assert resp.status_code == 200
+        html = resp.data.decode("utf-8")
+        assert "Tofu" in html
+        assert '<!-- TOFU_APP_ASSETS -->' not in html
+        assert 'id="tofu-boot-config"' in html
+        assert 'src="static/vite/assets/' in html
+        assert 'src="static/js/core.js' not in html
 
     def test_css_loads(self, flask_client):
         resp = flask_client.get("/static/styles.css")
@@ -648,7 +655,12 @@ class TestStaticPages:
         assert len(resp.data) > 1000
 
     def test_main_js_loads(self, flask_client):
-        resp = flask_client.get("/static/js/main.js")
+        index = flask_client.get('/')
+        match = re.search(
+            r'src="(static/vite/assets/[^"?]+\.js)(?:\?[^" ]*)?"',
+            index.data.decode('utf-8'))
+        assert match, 'rendered shell has no Vite JavaScript entry asset'
+        resp = flask_client.get('/' + match.group(1))
         assert resp.status_code == 200
         assert len(resp.data) > 10000
 

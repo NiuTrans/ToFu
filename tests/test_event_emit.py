@@ -121,7 +121,7 @@ class TestConvertedOrchestratorSites(unittest.TestCase):
         expected = {'type': 'phase', 'phase': 'llm_thinking',
                     'detail': 'Generating response…',
                     'detailKey': 'stream.phase.generatingResponse',
-                    'roundNum': 1}
+                    'roundNum': 1, 'taskId': task['id']}
         self.assertEqual(json.dumps(got, ensure_ascii=False),
                          json.dumps(expected, ensure_ascii=False))
 
@@ -137,7 +137,8 @@ class TestConvertedOrchestratorSites(unittest.TestCase):
         # (see _emit_tool_round_phase in lib/tasks_pkg/orchestrator/_finalize.py).
         self.assertEqual(list(got.keys()),
                          ['type', 'phase', 'detail', 'detailKey', 'detailArgs',
-                          'toolContext', 'toolContextTools', 'roundNum'])
+                          'toolContext', 'toolContextTools', 'roundNum',
+                          'taskId'])
         self.assertEqual(got['type'], 'phase')
         self.assertEqual(got['roundNum'], 3)
         self.assertEqual(got['detailKey'], 'stream.phase.analyzingRound')

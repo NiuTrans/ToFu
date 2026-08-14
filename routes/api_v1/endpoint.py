@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import threading
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.api_response import api_bad_request, api_not_found, api_ok
 from lib.log import get_logger

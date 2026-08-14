@@ -79,12 +79,6 @@ def restore_tool_history(
     if not (_keep_tool_history and _conv_id):
         return messages, list(messages), False
 
-    if callable(vu_phase):
-        try:
-            vu_phase('Autopilot：重建工具调用历史…')
-        except Exception as e:
-            logger.debug('[orchestrator] tool_history vu_phase failed: %s', e)
-
     rebuilt, _rebuild_stats = rebuild_messages_with_history(_conv_id, messages)
     if _rebuild_stats['used_store']:
         # Log the overhead for monitoring

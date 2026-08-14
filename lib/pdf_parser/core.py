@@ -49,9 +49,10 @@ def parse_pdf(pdf_bytes: bytes, *,
         warnings
 
         ``extractor`` is the per-document winner reported by
-        ``extract_pdf_text_with_meta`` (``'pymupdf4llm'`` / ``'pymupdf-raw'`` /
-        ``'docling'`` / ``'error'``) — the value ``parser_version`` stamping is
-        keyed on. ``method`` is the legacy label derived from it.
+        ``extract_pdf_text_with_meta`` (``'pymupdf4llm'`` /
+        ``'pymupdf4llm-partial'`` / ``'pymupdf-raw'`` / ``'docling'`` /
+        ``'error'``) — the value ``parser_version`` stamping is keyed on.
+        ``method`` is the legacy label derived from it.
     """
     # Defensive normalize — accept None / unknown modes gracefully.
     if text_mode not in ('rich', 'structured', 'fast'):
@@ -83,7 +84,9 @@ def parse_pdf(pdf_bytes: bytes, *,
             # Method label = the strategy that ACTUALLY produced the text
             # (per-document truth from extract_pdf_text_with_meta — a
             # pymupdf4llm attempt that fell back to raw is tagged raw).
-            method = {'pymupdf4llm': 'pymupdf4llm', 'docling': 'docling',
+            method = {'pymupdf4llm': 'pymupdf4llm',
+                      'pymupdf4llm-partial': 'pymupdf4llm',
+                      'docling': 'docling',
                       'pymupdf-raw': 'pymupdf_raw'}.get(
                           extractor,
                           'pymupdf4llm' if HAS_PYMUPDF4LLM else 'pymupdf_raw')
@@ -98,6 +101,9 @@ def parse_pdf(pdf_bytes: bytes, *,
                 else:
                     warnings.append('pymupdf4llm not installed; '
                                     'tables/headers not preserved.')
+            elif extractor == 'pymupdf4llm-partial':
+                warnings.append('Some PDF pages required raw-text fallback; '
+                                'most Markdown structure was preserved.')
 
             # ── Images (figures & tables) ──
             images = []

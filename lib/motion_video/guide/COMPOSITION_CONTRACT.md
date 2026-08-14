@@ -23,7 +23,7 @@ reproducible from its time alone. Three contracts enforce that.
 
 ## 2. Animation runtime contract
 
-- GSAP via CDN: `<script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>`
+- Pinned scene-local GSAP runtime (already staged by the engine): `<script src="assets/gsap-3.14.2.min.js"></script>`. Do not use a CDN or any other network runtime.
 - EXACTLY ONE timeline, built SYNCHRONOUSLY at page load:
   ```js
   window.__timelines = window.__timelines || {};
@@ -35,6 +35,11 @@ reproducible from its time alone. Three contracts enforce that.
   event handlers; never `gsap.set()` clips that start later (use `tl.set(...)`
   at a time ≥ the clip's `data-start`).
 - Render duration comes from the root `data-duration`, not the timeline length.
+- When the mandatory frame packet lists an `outgoing visual handle`, all
+  narrative/action animation must finish by `content_duration_s`. Keep the
+  exact resolved state unchanged from that program end through root
+  `data-duration`; the assembler consumes this tail in the overlap transition.
+  It is not extra time for another reveal, exit, or caption.
 
 ## 3. Determinism bans (hard errors at the static gate)
 

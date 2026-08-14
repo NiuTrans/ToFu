@@ -64,6 +64,9 @@ JS_DIR = os.path.join(ROOT, 'static', 'js')
 sys.path.insert(0, HERE)
 from _jsdom import run_harness, frontend_module_guard  # noqa: E402
 from _conv_bundle_sources import conv_family_sources  # noqa: E402
+from tests._runtime_sections import runtime_sections_dir
+
+JS_DIR = runtime_sections_dir()
 
 frontend_module_guard(need_jsdom=False)
 

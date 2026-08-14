@@ -48,25 +48,24 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-# Logging: prefer the app's centralized logger when importable (running from a
-# Tofu checkout), but stay usable as a truly standalone daemon if lib/ is
-# unavailable — the supervisor must survive an otherwise-broken app tree.
-try:
-    from lib.log import get_logger, audit_log
-    logger = get_logger(__name__)
-except Exception:  # pragma: no cover - fallback only when lib is absent
-    import logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s %(levelname)s [%(name)s] %(message)s',
-    )
-    logger = logging.getLogger('supervisor')
+from server_manager import LifecycleManager
 
-    def audit_log(event, **details):
-        logger.info('[audit] %s %s', event, details)
+# The lifecycle manager must stay available when application imports or the DB
+# are broken. Keep its dependency closure strictly standard-library; the shell
+# redirects this stream to logs/server-manager.log.
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s [%(name)s] %(message)s',
+)
+logger = logging.getLogger('supervisor')
 
 
-SUPERVISOR_VERSION = '0.1.0'
+def audit_log(event, **details):
+    logger.info('[audit] %s %s', event, details)
+
+
+SUPERVISOR_VERSION = '0.2.0'
 DEFAULT_PORT = 15001
 
 # ── Environment knobs ─────────────────────────────────────────────────
@@ -351,35 +350,76 @@ class SupervisorHandler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _manager(self, project_path):
+        return self.server.managers[os.path.realpath(project_path)]
+
     # ── routes ──
     def do_GET(self):
         route = urlparse(self.path)
         path = route.path.rstrip('/') or '/'
         if path == '/health':
-            self._send_json(200, {'ok': True, 'version': SUPERVISOR_VERSION})
+            self._send_json(200, {
+                'ok': True,
+                'version': SUPERVISOR_VERSION,
+                'managerPid': os.getpid(),
+                'projects': sorted(getattr(self.server, 'allowlist', set())),
+            })
             return
         if path == '/status':
             qs = parse_qs(route.query)
             project_path = (qs.get('projectPath', [''])[0] or '').strip()
             if not self._check_allowed(project_path):
                 return
-            self._send_json(200, {'ok': True, **read_status(project_path)})
+            probe = (qs.get('probe', ['0'])[0] == '1')
+            self._send_json(200, {
+                'ok': True,
+                **self._manager(project_path).status(probe_health=probe),
+            })
             return
         self._send_json(404, {'ok': False, 'error': 'not found'})
 
     def do_POST(self):
         path = urlparse(self.path).path.rstrip('/') or '/'
-        if path not in ('/start', '/stop'):
+        if path not in ('/start', '/stop', '/restart'):
             self._send_json(404, {'ok': False, 'error': 'not found'})
             return
         body = self._read_json_body()
+        if not isinstance(body, dict):
+            self._send_json(400, {'ok': False, 'error': 'JSON body must be an object'})
+            return
         project_path = (body.get('projectPath') or '').strip()
         if not self._check_allowed(project_path):
             return
         if path == '/start':
-            self._send_json(200, do_start(project_path))
+            result = self._manager(project_path).start(
+                server_args=body.get('serverArgs'),
+                server_env=body.get('serverEnv'),
+                source=body.get('source') or 'http',
+                explicit=True,
+            )
+            self._send_json(200 if result.get('ok') else 409, result)
+        elif path == '/restart':
+            result = self._manager(project_path).restart(
+                server_args=body.get('serverArgs'),
+                server_env=body.get('serverEnv'),
+                source=body.get('source') or 'http',
+            )
+            self._send_json(200 if result.get('ok') else 409, result)
         else:
-            self._send_json(200, do_stop(project_path))
+            result = self._manager(project_path).stop(
+                source=body.get('source') or 'http')
+            self._send_json(200 if result.get('ok') else 409, result)
+
+
+class ManagerHTTPServer(ThreadingHTTPServer):
+    """HTTP adapter that also owns the project monitor threads."""
+
+    daemon_threads = True
+
+    def server_close(self):
+        for manager in getattr(self, 'managers', {}).values():
+            manager.close()
+        super().server_close()
 
 
 def build_server():
@@ -389,10 +429,23 @@ def build_server():
         port = int(os.environ.get(ENV_PORT, DEFAULT_PORT))
     except (ValueError, TypeError):
         port = DEFAULT_PORT
-    allowlist = parse_allowlist(os.environ.get(ENV_PROJECTS, ''))
+    configured = os.environ.get(ENV_PROJECTS, '')
+    # Project-local zero-config default. An explicit value still keeps the
+    # strict exact-realpath allow-list used by remote Android control.
+    allowlist = parse_allowlist(configured)
+    if not configured:
+        allowlist = {os.path.realpath(os.path.dirname(__file__))}
 
-    httpd = ThreadingHTTPServer((host, port), SupervisorHandler)
+    # Bind before constructing managers. A second supervisor therefore fails
+    # without touching desired state or racing the active owner.
+    httpd = ManagerHTTPServer((host, port), SupervisorHandler)
     httpd.allowlist = allowlist
+    httpd.managers = {
+        project: LifecycleManager(project, os.environ.get(ENV_PYTHON) or sys.executable)
+        for project in allowlist if is_allowed(project, allowlist)
+    }
+    for manager in httpd.managers.values():
+        manager.start_monitor()
 
     if not allowlist:
         logger.warning('%s is empty — no project is startable/stoppable until '

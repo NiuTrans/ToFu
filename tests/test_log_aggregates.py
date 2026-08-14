@@ -212,22 +212,27 @@ class TestContinuationAttribution:
 
 class _DbBase:
     @pytest.fixture()
-    def fresh_db(self, tmp_path):
+    def fresh_db(self, tmp_path, monkeypatch):
         from lib.database import init_db, reset_sqlite_for_tests, restore_db_state
+        from lib.storage import StorageSupervisor
+
         snapshot = reset_sqlite_for_tests(str(tmp_path / 'agg.db'))
         init_db()
+        supervisor = StorageSupervisor(
+            project_root=tmp_path / 'sidecar', backend='sqlite',
+            startup_timeout=20)
+        supervisor.start()
+        monkeypatch.setattr(
+            la, '_storage', lambda **_kwargs: supervisor.client)
         try:
-            yield
+            yield supervisor
         finally:
+            supervisor.stop()
             restore_db_state(snapshot)
 
     @staticmethod
     def _rows():
-        from lib.database import DOMAIN_SYSTEM, get_thread_db
-        db = get_thread_db(DOMAIN_SYSTEM)
-        return db.execute(
-            'SELECT fingerprint, level, logger, template, sample, count,'
-            ' first_seen, last_seen FROM log_aggregates').fetchall()
+        return la.query_aggregates(limit=500)['items']
 
 
 class TestFlush(_DbBase):
@@ -247,12 +252,7 @@ class TestFlush(_DbBase):
 
     def test_table_created_by_bootstrap(self, fresh_db):
         """新表必须由 always-on bootstrap 创建(selfheal 探针的覆盖对象)。"""
-        from lib.database import DOMAIN_SYSTEM, get_thread_db
-        db = get_thread_db(DOMAIN_SYSTEM)
-        row = db.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table'"
-            " AND name='log_aggregates'").fetchone()
-        assert row is not None
+        assert la.query_aggregates()['items'] == []
 
     def test_upsert_accumulates_across_flushes(self, fresh_db):
         base = time.time() - 10
@@ -266,11 +266,13 @@ class TestFlush(_DbBase):
 
     def test_flush_fail_open_requeues(self, fresh_db, monkeypatch):
         store = self._store_with(n=5)
-        monkeypatch.setattr(la, '_get_db',
-                            lambda: (_ for _ in ()).throw(RuntimeError('db down')))
+        monkeypatch.setattr(
+            la, '_storage',
+            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError('db down')))
         result = la.flush_once(store=store)
         assert result['ok'] is False
-        monkeypatch.undo()
+        monkeypatch.setattr(
+            la, '_storage', lambda **_kwargs: fresh_db.client)
         # 计数被并回,下个窗口(换了好的 DB)一次补齐,不丢。
         result = la.flush_once(store=store)
         assert result['ok'] is True
@@ -278,8 +280,6 @@ class TestFlush(_DbBase):
         assert len(rows) == 1 and rows[0]['count'] == 5
 
     def test_ttl_sweep_deletes_only_stale(self, fresh_db, monkeypatch):
-        from lib.database import DOMAIN_SYSTEM, get_thread_db
-        db = get_thread_db(DOMAIN_SYSTEM)
         new_ms = 9_000_000_000_000
         # 结构性解耦模块态:setup 两次 flush 若撞上 _last_sweep_at=0
         # (隔离运行/新 worker)会当场把 stale 行扫掉,assert 2 变 1——
@@ -317,13 +317,13 @@ class TestFlush(_DbBase):
 
 class TestAggregatesEndpoint(_DbBase):
     def _app(self):
-        from quart import Quart, g
+        from quart import g
 
+        from lib.app_factory import create_base_app
         from lib.api_keys import local_admin_context
         from routes.api_v1.logs import api_v1_logs_bp
 
-        app = Quart(__name__)
-        app.config['TESTING'] = True
+        app = create_base_app(__name__, {'TESTING': True})
 
         @app.before_request
         async def _grant():
@@ -391,6 +391,28 @@ class TestFlusherLifecycle:
         finally:
             la.stop_flusher(final_flush=False)
         assert la._flusher_thread is None
+
+    def test_stop_timeout_retains_live_thread_and_skips_final_flush(
+            self, monkeypatch):
+        calls = []
+
+        class StuckThread:
+            def is_alive(self):
+                return True
+
+            def join(self, timeout):
+                calls.append(('join', timeout))
+
+        thread = StuckThread()
+        monkeypatch.setattr(la, '_flusher_thread', thread)
+        monkeypatch.setattr(
+            la, 'flush_once', lambda: calls.append(('flush', None)))
+        la._flusher_stop.clear()
+
+        assert la.stop_flusher(timeout=0.125) is False
+        assert la._flusher_stop.is_set()
+        assert la._flusher_thread is thread
+        assert calls == [('join', 0.125)]
 
     def test_kill_switch_disables(self, monkeypatch):
         monkeypatch.setenv('TOFU_LOG_AGGREGATES', '0')

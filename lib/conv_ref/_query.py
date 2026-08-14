@@ -15,7 +15,7 @@ DEFAULT_USER_ID = 1  # mirrors routes/common.py
 def _get_db():
     """Get a DB connection — works both inside Flask request context and background threads."""
     try:
-        from flask import has_app_context
+        from quart import has_app_context
         if has_app_context():
             from lib.database import get_db
             return get_db(DOMAIN_CHAT)
@@ -112,8 +112,7 @@ def list_conversations(keyword=None, limit=20, scope='auto',
 
     params.append(limit)
     sql = (
-        'SELECT id, title, created_at, updated_at, '
-        'json_array_length(messages) as msg_count '
+        'SELECT id, title, created_at, updated_at, msg_count '
         'FROM conversations WHERE ' + ' AND '.join(where) +
         ' ORDER BY updated_at DESC LIMIT ?'
     )

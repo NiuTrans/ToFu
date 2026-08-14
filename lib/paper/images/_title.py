@@ -7,9 +7,8 @@ report's ``# Title`` heading on every cache / re-render path.
 """
 
 import re
-import time
+import uuid
 
-from lib.database import get_db, get_thread_db
 from lib.log import get_logger
 
 from ..hashing import _safe_hash_dir
@@ -24,35 +23,25 @@ def _lookup_paper_title(phash: str) -> str:
     (across all users — paper_hash is content-addressable, not user-scoped).
     Returns '' if no row exists or the lookup fails.
 
-    Uses ``get_thread_db()`` so it's safe to call from background worker
-    threads (where Flask's request-scoped ``g`` is not available).
+    The lookup is safe from request and background threads because the caller
+    only holds an RPC client; database connections remain in the Sidecar.
     """
     if not _safe_hash_dir(phash):
         return ''
     try:
-        # Background task path: no Flask request context → can't use get_db()
-        # which relies on flask.g. Fall back to a thread-local connection.
-        try:
-            db = get_db()
-        except RuntimeError as e:
-            # Working outside of application context — expected from worker threads.
-            logger.debug('[Paper:Report] No Flask context, using thread-local DB: %s', e)
-            db = get_thread_db()
-        row = db.execute(
-            'SELECT title, arxiv_id FROM paper_library '
-            'WHERE paper_hash=? ORDER BY updated_at DESC LIMIT 1',
-            (phash,),
-        ).fetchone()
+        from lib.storage import get_storage_client
+        row = get_storage_client().query(
+            'paper.library.identity', {'paper_hash': phash})
     except Exception as e:
         logger.warning('[Paper:Report] Title lookup failed for hash=%s: %s', phash, e)
         return ''
     if not row:
         logger.info('[Paper:Report] No paper_library row for hash=%s — title prepend skipped', phash)
         return ''
-    title = (row['title'] or '').strip()
+    title = (row.get('title') or '').strip()
     if title:
         return title
-    arxiv = (row['arxiv_id'] or '').strip()
+    arxiv = (row.get('arxiv_id') or '').strip()
     return f'arXiv:{arxiv}' if arxiv else ''
 
 
@@ -99,61 +88,30 @@ def _backfill_library_title(phash: str, new_title: str) -> str:
     the hash (the new one if any row was updated, else the existing stored
     title, else '').
 
-    Safe to call from a background worker thread (uses get_thread_db when no
-    Flask request context is available).
+    Safe to call from a background worker thread: the complete conditional
+    update is one Sidecar transaction.
     """
     new_title = (new_title or '').strip()
     if not _safe_hash_dir(phash) or not new_title:
         return ''
     try:
-        try:
-            db = get_db()
-        except RuntimeError as e:
-            logger.debug('[Paper:Report] No Flask context for backfill, thread-local DB: %s', e)
-            db = get_thread_db()
-        rows = db.execute(
-            'SELECT id, user_id, title FROM paper_library WHERE paper_hash=?',
-            (phash,),
-        ).fetchall()
+        from lib.storage import get_storage_client
+        result = get_storage_client(write=True).command(
+            'paper.library.title.backfill', {
+                'paper_hash': phash,
+                'title': new_title,
+            }, f'paper.library.title.backfill:{uuid.uuid4().hex}')
     except Exception as e:
-        logger.warning('[Paper:Report] Title backfill query failed for hash=%s: %s', phash, e)
+        logger.warning('[Paper:Report] Title backfill failed for hash=%s: %s', phash, e)
         return ''
-
-    if not rows:
-        logger.info('[Paper:Report] No paper_library row to backfill for hash=%s', phash)
-        return new_title
-
-    def _is_placeholder(t: str) -> bool:
-        t = (t or '').strip()
-        # Empty, or a bare arXiv:<id> the failed up-front lookup left behind.
-        return (not t) or bool(re.match(r'^arxiv[:\s]', t, re.IGNORECASE))
-
-    updated = 0
-    authoritative = ''
-    for row in rows:
-        stored = (row['title'] or '').strip()
-        if _is_placeholder(stored):
-            try:
-                db.execute(
-                    'UPDATE paper_library SET title=?, updated_at=? '
-                    'WHERE id=? AND user_id=?',
-                    (new_title, int(time.time()), row['id'], row['user_id']),
-                )
-                db.commit()
-                updated += 1
-                authoritative = new_title
-                logger.info('[Paper:Report] Backfilled title for hash=%s id=%s: %.120s',
-                            phash, row['id'], new_title)
-            except Exception as e:
-                logger.warning('[Paper:Report] Title backfill UPDATE failed hash=%s id=%s: %s',
-                               phash, row['id'], e)
-        elif not authoritative:
-            # Row already has a good (user-set / resolved) title — respect it.
-            authoritative = stored
-    if not updated:
+    updated = int(result.get('updated') or 0)
+    if updated:
+        logger.info('[Paper:Report] Backfilled %d title row(s) for hash=%s: %.120s',
+                    updated, phash, new_title)
+    else:
         logger.info('[Paper:Report] Title backfill skipped for hash=%s — '
-                    'existing title not a placeholder', phash)
-    return authoritative or new_title
+                    'no placeholder row', phash)
+    return str(result.get('title') or new_title)
 
 
 def _is_placeholder_title(t: str) -> bool:

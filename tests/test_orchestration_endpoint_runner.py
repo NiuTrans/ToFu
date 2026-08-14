@@ -93,8 +93,14 @@ class EndToEndTest(unittest.TestCase):
 
         captured_events = []
         import lib.tasks_pkg.manager as mgr
+        # Import leaves before replacing the manager facade. Otherwise a leaf
+        # first imported during this test can permanently bind the temporary
+        # lambda even after the facade is restored, making later files fail by
+        # collection order.
+        import lib.tasks_pkg.orchestrator._finalize as finalize_mod
         orig_append = mgr.append_event
         orig_persist = mgr.persist_task_result
+        orig_finalize_persist = finalize_mod.persist_task_result
         mgr.append_event = lambda task, event: captured_events.append(event)
         mgr.persist_task_result = lambda task: None
 
@@ -126,6 +132,7 @@ class EndToEndTest(unittest.TestCase):
             runner_mod._build_tools_for_task = orig_tools
             mgr.append_event = orig_append
             mgr.persist_task_result = orig_persist
+            finalize_mod.persist_task_result = orig_finalize_persist
             ep_mod._store_endpoint_turns_on_task = orig_store
             ep_mod._sync_endpoint_turns_to_conversation = orig_sync
             ep_mod._trigger_per_turn_auto_translate = orig_perturn

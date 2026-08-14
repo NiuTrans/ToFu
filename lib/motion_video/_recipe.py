@@ -34,9 +34,22 @@ from __future__ import annotations
 import json
 import os
 import re
+from urllib.parse import urlparse
 
 from lib.log import get_logger
-
+from lib.production.contracts import (
+    normalise_asset_briefs,
+    normalise_source_ids,
+)
+from lib.production.research import (
+    RESEARCH_RESUME_TTL_S,
+    current_fact_errors,
+    evidence_checkpoint_version,
+    format_research_cards,
+    gate_research_bundle,
+    research_topic,
+    summarise_current_signals,
+)
 from lib.production.stages import Stage, run_stages
 
 logger = get_logger(__name__)
@@ -51,17 +64,18 @@ _MIN_SCENE_S = 2.5
 _MAX_SCENE_S = 15.0
 #: Conservative narration pace used ONLY when TTS is unavailable (degraded).
 _FALLBACK_CHARS_PER_SECOND = 4.2
-#: How many web results to mine per research query.
-_RESEARCH_MAX_RESULTS = 6
+_RESEARCH_CHECKPOINT_VERSION = evidence_checkpoint_version(freshness='week')
 
 
 # ── Seams (monkeypatchable) ───────────────────────────────
 
-def _web_search(query: str, *, user_question: str = '', freshness: str = ''):
+def _web_search(query: str, *, user_question: str = '', freshness: str = '',
+                max_results: int = 12, deepen: bool = False):
     """Run one web search through the tofu-search facade. Returns results."""
     from lib.tasks_pkg.handlers import search as _facade
     return _facade.perform_web_search(query, user_question=user_question,
-                                      freshness=freshness)
+                                      freshness=freshness,
+                                      max_results=max_results, deepen=deepen)
 
 
 def _llm_chat(messages, **kwargs):
@@ -110,8 +124,12 @@ def _cards_from_results(results) -> list[dict]:
         point = re.sub(r'\s+', ' ', point)[:400]
         if not point:
             continue
-        cards.append({'point': point, 'url': url,
-                      'title': (r.get('title') or '').strip()[:200]})
+        cards.append({'id': f'S{len(cards) + 1}', 'point': point, 'url': url,
+                      'host': urlparse(url).netloc.lower().removeprefix('www.'),
+                      'title': (r.get('title') or '').strip()[:200],
+                      'published_at': '', 'query_lane': 'background',
+                      'query_lanes': ['background'], 'freshness': 'none',
+                      'source_hints': []})
     return cards
 
 
@@ -119,89 +137,123 @@ def _cards_from_results(results) -> list[dict]:
 
 def _run_research(ctx: dict) -> dict:
     topic = ctx['topic']
-    lang = ctx.get('lang', 'zh')
 
-    def _search(q: str, freshness: str) -> list[dict]:
-        try:
-            return _cards_from_results(
-                _web_search(q, user_question=topic, freshness=freshness))
-        except Exception as e:
-            logger.warning('[Recipe:research] query %r (freshness=%r) failed: %s',
-                           q, freshness, e)
-            return []
+    def _search(query: str, **kwargs):
+        # Keep the historical monkeypatch seam usable: older callers replace
+        # _web_search with a three-argument function. The live function owns
+        # the richer max-results/deepen knobs.
+        import inspect
+        params = inspect.signature(_web_search).parameters.values()
+        supports_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD
+                              for p in params)
+        names = {p.name for p in params}
+        common = {
+            'user_question': kwargs.get('user_question', topic),
+            'freshness': kwargs.get('freshness', ''),
+        }
+        if supports_kwargs or {'max_results', 'deepen'} <= names:
+            common.update({
+                'max_results': kwargs.get('max_results', 12),
+                'deepen': kwargs.get('deepen', False),
+            })
+        return _web_search(query, **common)
 
-    # The PRIMARY angle is freshness-gated to the last week — the recipe is
-    # built for NEWS topics. But produce_video also serves EVERGREEN science
-    # topics (owner 2026-07-26): if the week gate starves the run (<3 cards),
-    # retry the SAME query unfiltered instead of failing the fact gate. The
-    # background angle stays ungated in all cases.
-    cards = _search(topic, 'week')
-    freshness_used = 'week'
-    if len(cards) < 3:
-        logger.info('[Recipe:research] week-fresh primary gave %d card(s) — '
-                    'retrying without freshness (evergreen topic?)',
-                    len(cards))
-        cards = _search(topic, '')
-        freshness_used = 'none'
-    seen = {c['url'] for c in cards}
-    bg_query = (f'{topic} 原理 背景' if lang == 'zh'
-                else f'{topic} explained background')
-    for card in _search(bg_query, ''):
-        if card['url'] not in seen:
-            seen.add(card['url'])
-            cards.append(card)
-    logger.info('[Recipe:research] topic=%r → %d fact card(s) '
-                '(freshness_used=%s)', topic[:60], len(cards), freshness_used)
-    return {'topic': topic, 'cards': cards[:24],
-            'freshness_used': freshness_used}
+    return research_topic(
+        topic, max_cards=18, current_freshness='week',
+        fallback_unfiltered_current=True, search_fn=_search)
 
 
 def _gate_research(ctx: dict, artifact: dict) -> list:
-    cards = artifact.get('cards') or []
-    if not cards:
-        return ['research produced zero fact cards with a real source URL '
-                '(fact-discipline gate: every point must be grounded)']
-    if not any(c.get('url', '').lower().startswith(('http://', 'https://'))
-               for c in cards):
-        return ['no fact card carries a real http(s) URL']
-    return []
+    return gate_research_bundle(artifact)
 
 
-RESEARCH = Stage('research', _run_research, gate=_gate_research, retry=1)
+RESEARCH = Stage(
+    'research', _run_research, gate=_gate_research, retry=1,
+    resume_ttl_s=RESEARCH_RESUME_TTL_S,
+    checkpoint_version=_RESEARCH_CHECKPOINT_VERSION)
 
 
 # ── Stage: script ─────────────────────────────────────────
 
 def _build_script_prompt(topic: str, cards: list[dict], *, lang: str,
-                         max_scenes: int) -> str:
-    numbered = '\n'.join(
-        f'[{i}] {c["point"]}  (来源: {c["url"]})'
-        for i, c in enumerate(cards, 1))
+                         max_scenes: int, research: dict | None = None,
+                         gate_feedback: list | None = None) -> str:
     import datetime
-    today = datetime.date.today().isoformat()
+    research = dict(research or {})
+    research.setdefault('cards', cards)
+    today = (str(research.get('as_of') or '')[:10]
+             or datetime.date.today().isoformat())
+    numbered = format_research_cards(research)
+    signals = (research.get('current_signals')
+               or summarise_current_signals(cards))
+    signal_doc = (
+        'Automated temporal scan (not an authority verdict): '
+        f'current_status_sources={",".join(signals.get("status_source_ids") or []) or "none"}; '
+        f'prices corroborated by 2+ independent hosts='
+        f'{",".join(signals.get("corroborated_price_values") or []) or "none"}; '
+        f'single-host price candidates='
+        f'{",".join(signals.get("single_source_price_values") or []) or "none"}.\n')
+    feedback_doc = ''
+    if gate_feedback:
+        feedback_doc = (
+            'Previous script attempt was rejected. Correct every item below:\n- '
+            + '\n- '.join(str(item) for item in gate_feedback[:6]) + '\n')
     if lang == 'zh':
         return (
-            f'今天是 {today}。你是一名科普短视频编导。请把下面这些带来源的事实卡片,改写成一段'
-            f'口语化、准确、适合配音的科普短视频口播稿,主题是《{topic}》。\n\n'
+            f'今天是 {today}。你是一名品牌短片与科普短视频编导。请把下面这些带来源的事实卡片,'
+            f'改写成一段口语化、准确、适合配音的短视频脚本,主题是《{topic}》。\n\n'
             '严格要求:\n'
-            f'1. 输出 JSON:{{"title": "...", "segments": ["第1段口播", "第2段", ...]}}。\n'
-            f'2. segments 数量在 3 到 {max_scenes - 1} 之间(不含片尾来源卡,系统会自动追加)。\n'
-            '3. 每段 1~3 句,口语、连贯、可直接配音;不得出现"如图""见下"等书面语。\n'
-            '4. 只依据事实卡片,不得编造;不确定就不说。\n'
-            '5. 只输出 JSON 本身,不要解释、不要代码围栏。\n\n'
-            f'事实卡片:\n{numbered}')
+            '1. 输出 JSON:{"title":"...","beats":[{"text":"口播",'
+            '"on_screen":"画面短文案","visual":"构图与动效方向",'
+            '"source_ids":["S1"],'
+            '"assets":[{"role":"subject|diagram|background",'
+            '"semantic_target":"该素材必须在画面中支撑的具体对象/部位/判断",'
+            '"prompt":"English text-free image prompt"}]}]}。\n'
+            f'2. beats 数量在 3 到 {max_scenes - 1} 之间(不含片尾来源卡,系统会自动追加)。\n'
+            '3. text 每段 1~3 句,口语、连贯、可直接配音;on_screen 是不超过18字的标题式短句。\n'
+            '4. visual 明确主体、景别、空间层次和一个可执行动效,相邻镜头不能同构。\n'
+            '5. 每个内容镜头给 1~2 个 assets。具体汽车/人物/场景用 subject;解释结构用 diagram;'
+            '纯转场才可为空。prompt 必须英文、无文字、无 Logo、无水印,不得要求生成图表文字。\n'
+            '   semantic_target 必须明确写出素材要证明的可见对象、部位或关系;例如要讲'
+            '“纯平地板”就必须要求看见地板/中央通道,不能用窗户或泛化座舱图代替。\n'
+            '6. 每个包含事实陈述的 beat 必须在 source_ids 列出支持它的 [S#];'
+            '不得用“片尾有来源”代替逐镜证据关联。\n'
+            '7. 先处理当前状态:只要 current/official 车道出现发布、预售、价格'
+            '更新,脚本必须引用对应 [S#],严格区分预售价、最终售价、传闻和估算;'
+            '较新证据已公布预售价时不得说“价格尚未公布”。\n'
+            '8. 精确价格/日期/参数优先第一方页面;若只有二手来源,必须两家独立'
+            '来源一致才写成确定数字。只依据事实卡片,不得编造。\n'
+            '9. 只输出 JSON 本身,不要解释、不要代码围栏。\n\n'
+            f'{signal_doc}{feedback_doc}事实卡片:\n{numbered}')
     return (
-        f'Today is {today}. You are a science-explainer video writer. Rewrite the sourced fact '
+        f'Today is {today}. You are a brand-film and explainer writer. Rewrite the sourced fact '
         f'cards below into a spoken, accurate, voice-over-ready short-video '
         f'script about "{topic}".\n\n'
         'Strict requirements:\n'
-        '1. Output JSON: {"title": "...", "segments": ["line 1", "line 2", ...]}.\n'
-        f'2. Between 3 and {max_scenes - 1} segments (the sources card is '
+        '1. Output JSON: {"title":"...","beats":[{"text":"...",'
+        '"on_screen":"...","visual":"...","source_ids":["S1"],'
+        '"assets":[{"role":'
+        '"subject|diagram|background","semantic_target":"visible object/detail '
+        'that supports the claim","prompt":"English text-free image '
+        'prompt"}]}]}.\n'
+        f'2. Between 3 and {max_scenes - 1} beats (the sources card is '
         'appended automatically).\n'
-        '3. Each segment 1-3 spoken sentences; no "as shown"/"see figure".\n'
-        '4. Ground every claim in the cards; invent nothing.\n'
-        '5. Output ONLY the JSON — no commentary, no fences.\n\n'
-        f'Fact cards:\n{numbered}')
+        '3. text is 1-3 spoken sentences; on_screen is a short headline; '
+        'visual names composition, depth and one executable motion idea.\n'
+        '4. Give each content beat 1-2 real asset briefs; prompts are English, '
+        'text-free, logo-free and watermark-free. Never ask image generation '
+        'to draw charts or labels. semantic_target names the visible object, '
+        'part or relationship the asset must actually prove; never substitute '
+        'a generic cabin/window image for a floor or rail claim.\n'
+        '5. Every factual beat lists its supporting [S#] values in source_ids; '
+        'end credits do not replace beat-level grounding.\n'
+        '6. Address current-state evidence first. Distinguish presale price, '
+        'final price, rumor and estimate; never say price is unannounced when '
+        'newer evidence announces a presale price. Exact prices/dates/specs '
+        'need a first-party card or agreement across two independent hosts.\n'
+        '7. Ground every claim in the cards; invent no specs, prices, dates or promises.\n'
+        '8. Output ONLY the JSON — no commentary, no fences.\n\n'
+        f'{signal_doc}{feedback_doc}Fact cards:\n{numbered}')
 
 
 _JSON_BLOCK_RE = re.compile(r'\{.*\}', re.DOTALL)
@@ -216,8 +268,9 @@ def _parse_script(content: str) -> dict:
     if not isinstance(raw, dict):
         raise ValueError('script JSON is not an object')
     segs = raw.get('segments')
-    if not isinstance(segs, list):
-        raise ValueError('script JSON has no segments array')
+    beats = raw.get('beats')
+    if not isinstance(segs, list) and not isinstance(beats, list):
+        raise ValueError('script JSON has neither segments nor beats array')
     return raw
 
 
@@ -246,15 +299,45 @@ def _run_script(ctx: dict) -> dict:
     topic = ctx['topic']
     lang = ctx.get('lang', 'zh')
     max_scenes = ctx.get('max_scenes', _DEFAULT_MAX_SCENES)
-    cards = ctx['artifacts']['research']['cards']
-    prompt = _build_script_prompt(topic, cards, lang=lang, max_scenes=max_scenes)
+    research = ctx['artifacts']['research']
+    cards = research['cards']
+    gate_feedback = list(ctx.pop('_script_gate_feedback', []) or [])
+    prompt = _build_script_prompt(
+        topic, cards, lang=lang, max_scenes=max_scenes, research=research,
+        gate_feedback=gate_feedback)
     content, usage = _llm_chat(
         [{'role': 'user', 'content': prompt}],
         max_tokens=4096, temperature=0.4,
+        prefer_model=ctx.get('model') or None,
+        strict_model=bool(ctx.get('model')),
         log_prefix='[Recipe:script]')
     raw = _parse_script(content)
-    segments = [re.sub(r'\s+', ' ', str(s)).strip()
-                for s in raw.get('segments') or [] if str(s).strip()]
+    raw_beats = raw.get('beats') if isinstance(raw.get('beats'), list) else []
+    beats = []
+    valid_source_ids = [str(card.get('id') or '') for card in cards]
+    for item in raw_beats:
+        if not isinstance(item, dict):
+            continue
+        spoken = re.sub(r'\s+', ' ', str(item.get('text') or '')).strip()
+        if not spoken:
+            continue
+        beats.append({
+            'text': spoken,
+            'on_screen': re.sub(r'\s+', ' ',
+                                str(item.get('on_screen') or '')).strip()[:88],
+            'visual': re.sub(r'\s+', ' ',
+                             str(item.get('visual') or '')).strip()[:800],
+            'source_ids': normalise_source_ids(
+                item.get('source_ids'), valid_ids=valid_source_ids),
+            'assets': normalise_assets(item.get('assets')),
+        })
+    if beats:
+        beats = beats[:max_scenes - 1]
+        segments = [b['text'] for b in beats]
+    else:
+        # Backward-compatible with checkpoints and older/custom models.
+        segments = [re.sub(r'\s+', ' ', str(s)).strip()
+                    for s in raw.get('segments') or [] if str(s).strip()]
     segments = segments[:max_scenes - 1]  # leave room for the sources card
     title = (raw.get('title') or topic).strip()
     # 拍板 #4: credit the sources at the end — but as a SILENT VISUAL end
@@ -262,21 +345,40 @@ def _run_script(ctx: dict) -> dict:
     # turns this line into the final spoken=False scene; if it stayed here,
     # the TTS pass would read domain names aloud.
     sources_line = _sources_line(cards, lang)
+    source_ids = normalise_source_ids(
+        [sid for beat in beats for sid in beat.get('source_ids') or []]
+        + list(raw.get('source_ids') or []),
+        valid_ids=valid_source_ids, limit=12)
     logger.info('[Recipe:script] topic=%r → %d segment(s), sources card %r, '
                 'title=%r', topic[:60], len(segments), sources_line[:40],
                 title[:60])
     return {'title': title, 'segments': segments,
+            'beats': beats,
+            'source_ids': source_ids,
             'sources_line': sources_line,
+            'research_as_of': str(research.get('as_of') or ''),
             'usage': usage if isinstance(usage, dict) else {}}
 
 
 def _gate_script(ctx: dict, artifact: dict) -> list:
     segs = artifact.get('segments') or []
+    errors = []
     if len(segs) < 2:
         return [f'script has too few segments ({len(segs)}; need ≥2)']
     if any(not s.strip() for s in segs):
         return ['script has an empty segment']
-    return []
+    research = ctx.get('artifacts', {}).get('research') or {}
+    script_text = '\n'.join(
+        list(segs)
+        + [str(beat.get('on_screen') or '')
+           for beat in artifact.get('beats') or []])
+    errors.extend(current_fact_errors(
+        research, script_text, cited_ids=artifact.get('source_ids') or []))
+    if errors:
+        ctx['_script_gate_feedback'] = list(errors)
+    else:
+        ctx.pop('_script_gate_feedback', None)
+    return errors
 
 
 SCRIPT = Stage('script', _run_script, gate=_gate_script, retry=1)
@@ -369,22 +471,10 @@ def normalise_assets(raw) -> list[dict]:
     A prompt-less entry is dropped: an asset request with no prompt cannot be
     generated, and keeping it would create an obligation nothing can satisfy.
     """
-    out: list[dict] = []
-    if not isinstance(raw, list):
-        return out
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        prompt = re.sub(r'\s+', ' ', str(item.get('prompt') or '')).strip()
-        if not prompt:
-            continue
-        role = str(item.get('role') or '').strip().lower()
-        if role not in ASSET_ROLES:
-            logger.info('[Recipe] asset role %r is not one of %s — treating it '
-                        'as background (never required)', role, ASSET_ROLES)
-            role = 'background'
-        out.append({'role': role, 'prompt': prompt[:_MAX_ASSET_PROMPT]})
-    return out[:3]
+    return normalise_asset_briefs(
+        raw, allowed_roles=ASSET_ROLES, fallback_role='background',
+        max_items=3, prompt_limit=_MAX_ASSET_PROMPT,
+        log_prefix='[Recipe]')
 
 
 def script_stage_for_source(source_text: str, *, lang: str = 'zh',
@@ -449,8 +539,8 @@ def script_stage_for_source(source_text: str, *, lang: str = 'zh',
 _SOURCES_CARD_S = 3.5
 
 
-def _provisional_scenes(segments: list[str],
-                        sources_line: str = '') -> list[dict]:
+def _provisional_scenes(segments: list[str], sources_line: str = '',
+                        beats: list[dict] | None = None) -> list[dict]:
     """A first-cut storyboard (contiguous from 0) used only to drive TTS.
 
     Durations here are placeholders; the real durations come from the TTS
@@ -461,12 +551,19 @@ def _provisional_scenes(segments: list[str],
     scenes: list[dict] = []
     cursor = 0.0
     for i, seg in enumerate(segments, 1):
+        beat = beats[i - 1] if beats and i <= len(beats) else {}
         est = max(_MIN_SCENE_S, min(len(seg) / _FALLBACK_CHARS_PER_SECOND,
                                     _MAX_SCENE_S))
-        scenes.append({'id': f'scene-{i:03d}',
-                       'start': round(cursor, 3),
-                       'end': round(cursor + est, 3),
-                       'text': seg, 'visual': ''})
+        scenes.append({
+            'id': f'scene-{i:03d}',
+            'start': round(cursor, 3),
+            'end': round(cursor + est, 3),
+            'text': seg,
+            'on_screen': str(beat.get('on_screen') or ''),
+            'visual': str(beat.get('visual') or ''),
+            'source_ids': list(beat.get('source_ids') or []),
+            'assets': list(beat.get('assets') or []),
+        })
         cursor += est
     if sources_line:
         scenes.append({'id': f'scene-{len(scenes) + 1:03d}',
@@ -495,7 +592,8 @@ def _rescore_from_manifest(scenes: list[dict], manifest: dict) -> list[dict]:
 def _run_timeline(ctx: dict) -> dict:
     script = ctx['artifacts']['script']
     scenes = _provisional_scenes(script['segments'],
-                                 script.get('sources_line') or '')
+                                 script.get('sources_line') or '',
+                                 script.get('beats') or [])
     audio_dir = os.path.join(ctx['workdir'], 'audio')
     manifest = {'ok': False, 'degraded': True}
     if ctx.get('narration', True):
@@ -523,6 +621,13 @@ def _run_timeline(ctx: dict) -> dict:
         logger.info('[Recipe:timeline] %d scene(s), char-estimated durations '
                     '(TTS %s)', len(scenes),
                     'degraded' if manifest.get('degraded') else 'off')
+    # Remotion's composition schema and video-shotcraft's recipe cards point
+    # at the same missing layer in our former design: a scene needs a typed
+    # shot contract before it reaches a renderer.  Normalize it here so the
+    # checkpointed scenes.json itself is complete; the engine repeats this
+    # idempotently for uploaded/legacy storyboards.
+    from lib.motion_video._creative_plan import normalise_film_plan
+    normalise_film_plan(scenes)
     scenes_path = os.path.join(ctx['workdir'], 'scenes.json')
     from lib.json_store import write_json_atomic
     write_json_atomic(scenes_path, scenes)
@@ -546,7 +651,9 @@ def _gate_timeline(ctx: dict, artifact: dict) -> list:
         return ['scenes.json is empty']
     from lib import motion_video as mv
     span = (float(scenes[0]['start']), float(scenes[-1]['end']))
-    return mv.check_storyboard(scenes, span)
+    errors = mv.check_storyboard(scenes, span)
+    from lib.motion_video._shot_recipes import shot_contract_errors
+    return errors + shot_contract_errors(scenes)
 
 
 TIMELINE = Stage('timeline', _run_timeline, gate=_gate_timeline, retry=0)
@@ -563,6 +670,7 @@ def build_scenes_from_topic(topic: str, workdir: str, *, lang: str = 'zh',
                             max_scenes: int = _DEFAULT_MAX_SCENES,
                             narration: bool = True, voice: str = '',
                             speed=None, alignment: str = 'loose',
+                            model: str | None = None,
                             abort_event=None,
                             emit=None) -> dict:
     """Run research → script → timeline; return the timeline artifact.
@@ -579,6 +687,7 @@ def build_scenes_from_topic(topic: str, workdir: str, *, lang: str = 'zh',
         'topic': topic, 'workdir': workdir, 'lang': lang,
         'max_scenes': max_scenes, 'narration': narration, 'voice': voice,
         'speed': speed, 'alignment': alignment, 'abort_event': abort_event,
+        'model': model,
     }
     state_path = os.path.join(workdir, 'pipeline_state.json')
     artifacts = run_stages(

@@ -53,7 +53,9 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _ORCH_PKG = os.path.join(_ROOT, 'lib/tasks_pkg/orchestrator')
 _BREAKER_PY = os.path.join(_ORCH_PKG, '_tool_timeout_breaker.py')
 _EVENTS_PY = os.path.join(_ROOT, 'lib/agent_core/events.py')
-_REDUCER_JS = os.path.join(_ROOT, 'static/js/ui/stream_reducer.js')
+from tests._runtime_sections import runtime_section_path
+
+_REDUCER_JS = runtime_section_path('ui/stream_reducer.js')
 
 # Closed enumeration of sanctioned ROUND_END reasons (registry-synced).
 _SANCTIONED_REASONS = {'tools', 'final', 'aborted', 'budget', 'error',

@@ -86,7 +86,7 @@ class TestForwardedHeaderNeverTrusted:
             session-scoped and a duplicate name raises
             "View function mapping is overwriting an existing endpoint".
         """
-        from flask import request
+        from quart import request
         from routes.api_v1 import auth as auth_mod
 
         app = flask_client._c.app

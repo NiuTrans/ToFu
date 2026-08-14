@@ -5,9 +5,9 @@ single home in :mod:`._spec`) and produces a human-consumable inventory of
 every tool family registered in this process — grouped by category, with
 each family's gate evaluated against a **reference context** (the server's
 current defaults: search on, no project attached, compositional features
-matching what a plain chat turn would see) so the answer to *"would this
-family be offered to the model right now?"* is computed by the spec's own
-``build()`` — never by a hand-mirrored guess.
+matching what a plain chat turn would see). That request-context evaluation is
+retained as diagnostic metadata for headless clients; the Settings page uses
+the response as a **global catalogue** and intentionally ignores gate state.
 
 Born 2026-08-06 (owner directive: a Settings → 工具 panel must show every
 tool registered in real time — "I don't even know what tools the project
@@ -20,16 +20,15 @@ What it deliberately is NOT
 * **Not an execution surface.** Building schemas for introspection runs the
   same lazy imports the request path runs; handlers are never invoked.
 * **Not per-request truth.** Gates like conv-ref (needs an @-mention) or
-  plugin allow-lists are per-request; the inventory answers for the
-  reference context and says so per family via ``gate`` / ``gate_state``.
+  plugin allow-lists are per-request. They remain annotated for diagnostics,
+  but never determine whether a registered family is present in the payload.
 * **Not cached.** The payload is small and the panel is opened by a human;
   computing fresh on every GET keeps the panel REAL (an MCP reconnect or a
   plugin install shows up on the next open).
 
 MCP tools are attached from the live bridge (when started): ``_tool_index``
-is enumerated so a user-disabled tool shows as ``off`` instead of
-vanishing — the panel must show everything *registered*, with state, not
-only what the model currently sees.
+is enumerated so a user-disabled tool does not vanish from the global
+catalogue. The UI lists it uniformly with every other registered tool.
 """
 
 from __future__ import annotations
@@ -257,45 +256,58 @@ def build_tool_inventory() -> dict:
             'declared': sorted(spec.provides),
         }
         tools: list[dict] = []
+        schemas = contributions.get(spec.key, [])
         gate_state = 'on'
         gate_reason = ''
         if spec.source == 'plugin' and not ctx.plugin_allowed(spec.plugin_name):
             gate_state = 'off'
             gate_reason = 'plugin_not_allowlisted'
+            # Visibility allow-lists are request isolation, not catalogue
+            # membership. Build the schema metadata for display even though
+            # this reference request would not expose the plugin to a model.
+            # A ToolSpec build is schema assembly only; handlers never run.
+            try:
+                schemas = spec.build(ctx) or []
+            except Exception as e:
+                logger.warning('[ToolInventory] plugin spec %s catalogue '
+                               'build failed: %s', spec.key, e)
+                schemas = []
+                gate_reason = f'catalog_build_error: {e}'
         else:
             if spec.key in build_errors:
                 gate_state = 'error'
                 gate_reason = f'build_error: {build_errors[spec.key]}'
-            for schema in contributions.get(spec.key, []):
-                if not isinstance(schema, dict):
-                    continue
-                name = _schema_name(schema)
-                if not name:
-                    continue
-                tools.append({
-                    'name': name,
-                    'description': _schema_description(schema)[:300],
-                    'required': _required_params(schema),
-                    'write': name in writes or name in spec.write_tools,
-                    'handler': name in bound or spec.handler is not None,
-                    'enabled': True,
-                })
-            if gate_state == 'on' and not tools:
-                gate_state = 'off'
-                gate_reason = 'gate_closed'
+        for schema in schemas:
+            if not isinstance(schema, dict):
+                continue
+            name = _schema_name(schema)
+            if not name:
+                continue
+            tools.append({
+                'name': name,
+                'description': _schema_description(schema)[:300],
+                'required': _required_params(schema),
+                'write': name in writes or name in spec.write_tools,
+                'handler': name in bound or spec.handler is not None,
+                'enabled': gate_state == 'on',
+            })
+        if gate_state == 'on' and not tools:
+            gate_state = 'off'
+            gate_reason = 'gate_closed'
         # Declared-but-currently-not-contributed names (provides minus built)
         # are listed as disabled rows so the family still shows its full
         # surface (e.g. browser family with the extension disconnected).
         built_names = {t['name'] for t in tools}
-        for name in sorted(spec.provides - built_names):
-            tools.append({
-                'name': name,
-                'description': '',
-                'required': [],
-                'write': name in writes or name in spec.write_tools,
-                'handler': name in bound,
-                'enabled': False,
-            })
+        if not spec.catalog_active_only:
+            for name in sorted(spec.provides - built_names):
+                tools.append({
+                    'name': name,
+                    'description': '',
+                    'required': [],
+                    'write': name in writes or name in spec.write_tools,
+                    'handler': name in bound,
+                    'enabled': False,
+                })
         family['gate_state'] = gate_state
         family['gate_reason'] = gate_reason
         family['tools'] = tools
@@ -303,6 +315,14 @@ def build_tool_inventory() -> dict:
         if spec.key == 'mcp':
             family['mcp_tools'] = _mcp_rows()
             family['mcp_servers'] = _mcp_servers()
+            # When MCP exposure is inline, spec.build() returns the same live
+            # server tools that _mcp_rows() enumerates. Keep one catalogue row
+            # per tool (the MCP row wins because it carries the server badge),
+            # while retaining the three progressive meta tools in `tools`.
+            mcp_names = {t['name'] for t in family['mcp_tools']}
+            if mcp_names:
+                tools = [t for t in tools if t['name'] not in mcp_names]
+                family['tools'] = tools
             if family['mcp_tools'] and gate_state == 'off':
                 # cfg default mcpEnabled=True but bridge disconnected —
                 # distinguish "off by config" from "on but no server".
@@ -313,6 +333,8 @@ def build_tool_inventory() -> dict:
         n_active = sum(1 for t in tools if t['enabled']) + \
             sum(1 for t in family['mcp_tools'] if t['enabled'])
         n_total = len(tools) + len(family['mcp_tools'])
+        if spec.catalog_active_only and n_total == 0:
+            continue
         family['counts'] = {'active': n_active, 'total': n_total}
         total_tools += n_total
         active_tools += n_active
@@ -321,6 +343,7 @@ def build_tool_inventory() -> dict:
     # Plugin specs carry source='plugin'; surface which entry points are
     # installed at all so a registered-but-absent plugin is explainable.
     inventory = {
+        'scope': 'global_registry',
         'generated_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
         'reference': {
             'search_mode': ctx.search_mode,

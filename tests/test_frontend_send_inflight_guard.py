@@ -41,6 +41,8 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 PIPELINE = os.path.normpath(
     os.path.join(HERE, '..', 'static', 'js', 'main', 'main_send_pipeline.js'))
+LIFECYCLE = os.path.normpath(
+    os.path.join(HERE, '..', 'static', 'js', 'main', 'main_conv_lifecycle.js'))
 
 
 def _gap_region(src: str) -> str:
@@ -83,6 +85,21 @@ def test_no_unguarded_return_in_sendinflight_gap():
         '_sendInFlight leak path(s) in main_send_pipeline.js — every pre-POST '
         'exit must clear the flag or the conversation stops syncing forever '
         '(pt_c03fae11):\n  ' + '\n  '.join(v))
+
+
+def test_same_conversation_open_is_idempotent_during_send_window():
+    """A programmatic same-conv open must not start a competing reconnect or
+    invalidate the send generation while the POST owns stream attachment."""
+    with open(LIFECYCLE, encoding='utf-8') as f:
+        src = f.read()
+    fn = src[src.index('function loadConversation(id) {'):]
+    guard = fn.index('_sameInFlightConv._sendInFlight')
+    early_return = fn.index('return;', guard)
+    invalidate = fn.index('_sendGeneration++')
+    assert guard < early_return < invalidate, (
+        'same-conv _sendInFlight guard must return before _sendGeneration++')
+    assert 'id === activeConvId' in fn[:guard], (
+        'guard must be same-conversation-only so real conversation switches work')
 
 
 def test_NEUTER_return_without_clear_is_flagged():

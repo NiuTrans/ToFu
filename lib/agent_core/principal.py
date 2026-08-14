@@ -34,7 +34,7 @@ def _client_ip() -> str:
     rather than crashing.
     """
     try:
-        from flask import request
+        from quart import request
         addr = (request.remote_addr or '').strip()
     except Exception as e:  # no request context / import edge
         logger.debug('[principal] client_ip unavailable: %s', e)

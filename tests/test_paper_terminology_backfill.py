@@ -176,6 +176,32 @@ def test_flag_and_key_helpers():
     _ok('env is a kill switch (default not-disabled); termfill:<ui> key helper')
 
 
+def test_termfill_persistence_uses_semantic_sidecar(monkeypatch):
+    import lib.paper.terminology_backfill as tb
+
+    calls = []
+
+    class Client:
+        def command(self, operation, payload, command_id):
+            calls.append((operation, payload, command_id))
+            return {'saved': True}
+
+    monkeypatch.setattr(tb, '_storage', lambda **_kwargs: Client())
+    monkeypatch.setattr(
+        tb, 'build_backfill_addendum',
+        lambda *_args, **_kwargs: '## Added definitions')
+
+    result = tb.run_report_termfill(
+        'body', 'en', phash='paper-hash', model='model-x',
+        audit={'missing': [{'term': 'SFT'}]})
+
+    assert result['closed'] is True
+    assert calls[0][0] == 'paper.report.upsert'
+    assert calls[0][1]['lang'] == 'termfill:en'
+    assert calls[0][1]['meta'] == {'kind': 'termfill'}
+    assert calls[0][2].startswith('paper-termfill:')
+
+
 def test_negctl_reaudit_gate_load_bearing():
     """SOURCE-LEVEL: neuter the re-audit filter so EVERY offered row is accepted
     blindly → the junk addendum would no longer be empty. Proves the gate (not
@@ -216,7 +242,11 @@ def _run_engine(tid, body, lang='en'):
     _patch_dispatch_stream(body)
     task = _new_report_task(tid, 'phashbackfill000000000000000000', lang, None,
                             client_title='Efficient RLHF Training',
-                            ui_lang='en' if lang == 'en' else 'en')
+                            ui_lang='en' if lang == 'en' else 'en',
+                            config={
+                                'paperInsightEnabled': False,
+                                'paperCheckpointsEnabled': False,
+                            })
     re_mod._run_report_task(task, [
         {'role': 'system', 'content': 'sys'},
         {'role': 'user', 'content': 'paper'},

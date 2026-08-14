@@ -137,6 +137,19 @@ available via `config`.
     "endpointMode": false,
     "swarmEnabled": false,
     "mcpEnabled": true,
+    "tools": {
+      "toolSearch": "auto",
+      "programmaticCalling": "off",
+      "nativeExposure": "full"
+    },
+    "responses": {
+      "transport": "sse",
+      "reasoningMode": "standard",
+      "verbosity": "medium",
+      "imageDetail": "auto",
+      "multiAgent": "off",
+      "maxConcurrentSubagents": 3
+    },
     "disableModelFallback": false
   },
   "conversation_id": "my-headless-job-001",             // optional
@@ -144,6 +157,14 @@ available via `config`.
   "timeout_s": 600
 }
 ```
+
+`tools.toolSearch` applies to every provider: `auto` uses a verified native
+implementation where available and otherwise the local `search_tools` +
+direct native tool calls; `native` still falls back locally when capability is
+unverified. The `responses.*` controls remain limited to `protocol: responses`
+with an effective `responses_profile` of `openai`. See
+[Tool Search and direct execution](TOOL_SEARCH_EXECUTION_GATEWAY.md) and the
+[OpenAI Responses feature policy](OPENAI_RESPONSES_FEATURES.md).
 
 > **⚠️ Automatic model fallback (important for pinned-model callers).**
 > The server admin can configure a global *fallback model* (Settings →
@@ -654,7 +675,7 @@ values:
 | `prompt_too_long` | no | Context overflow after auto-compaction |
 | `stream_only` | no | Model rejects non-streaming calls |
 | `model_limit` | no | `max_tokens` exceeded the model's learned cap |
-| `tool_rounds_exhausted` | no | Hit the per-task tool-round budget |
+| `tool_rounds_exhausted` | no | Legacy persisted value only; current runs do not emit it |
 | `tool_timeout` | yes | Repeated tool-execution timeouts |
 | `premature_close` | yes | SSE stream cut off (retries exhausted) |
 | `abnormal_stop` | yes | Missing finish marker / partial reply |
@@ -681,6 +702,35 @@ test keeps it honest.
 > primary-model error — branch on `kind` / `retryable` as usual and
 > retry on the SAME model rather than expecting a fallback to have
 > masked it.
+
+### 3.9 Motion-video production — `/api/v1/motion/*`
+
+Start a topic, SRT, or pre-authored storyboard with
+`POST /api/v1/motion/videos`. The task lifecycle uses the motion-specific
+poll/abort routes and also appears in the generic task registry. Important
+discovery and delivery endpoints:
+
+```text
+GET  /api/v1/motion/status
+GET  /api/v1/motion/shot-recipes
+GET  /api/v1/motion/audio-contract
+POST /api/v1/motion/videos
+GET  /api/v1/motion/videos/{id}/scenes
+POST /api/v1/motion/videos/{id}/scenes/{scene_id}/regen
+GET  /api/v1/motion/videos/{id}/file
+GET  /api/v1/motion/videos/{id}/file?part=srt
+GET  /api/v1/motion/videos/{id}/file?part=audio-plan
+GET  /api/v1/motion/videos/{id}/file?part=audio-attribution
+```
+
+`audio_plan` can be supplied inline or by `audio_plan_path` (not both), up to
+256 KB. Relative asset paths resolve from `audio_base_dir` for inline plans or
+beside the plan file for path input. Audio assets must already be local and
+carry license/source metadata; the job content-addresses them before render.
+The resulting scene list exposes the `motion-timeline-v1` content/render
+durations and real overlap transition fields. The final file clock always
+remains the spoken/SRT program duration even when visual handles are rendered
+for `xfade`.
 
 ---
 
@@ -928,7 +978,9 @@ graph short- and long-term trends from the same scraper.
 ## 9. Operational notes
 
 * **CORS**: enable on the front-proxy. Tofu does not set CORS headers.
-* **TLS**: HTTPS + HTTP/2 by default (`--no-tls` to disable). For SSE
+* **TLS**: proxy-safe HTTP/1.1 by default. Set `TOFU_TLS=1` (or configure a
+  certificate pair) for direct HTTPS + HTTP/2; `--no-tls` explicitly keeps
+  HTTP. For SSE
   consumers, ensure intermediate proxies support streaming
   (`X-Accel-Buffering: no` is set on every SSE response).
 * **Logs**: every authenticated request is audit-logged

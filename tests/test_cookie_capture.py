@@ -1,28 +1,27 @@
 """Behaviour tests for lib/browser/cookie_capture.py + the fetch.py wall hook.
 
-Contract (epic pt_c009ff1c36ba4527):
+Contract (epic pt_c009ff1c36ba4527; auto-capture per owner decision 2026-08-13 —
+the consent banner / grant store / resolve endpoints were removed):
   * wall detection is netloc-based (the SSO login URL carries the original
     page as redirect_uri — whole-URL substring matching misclassifies);
-  * NO capture without a recorded per-domain grant (one-time consent);
-  * a denial suppresses re-asking for a cooldown (no nag-every-fetch);
-  * cookies are stored ONLY after a probe proves the page no longer walls —
-    anonymous tracking cookies must never be mistaken for a session;
+  * capture engages AUTOMATICALLY on a wall — but cookies are stored ONLY
+    after a probe proves the page no longer walls, so anonymous tracking
+    cookies are never mistaken for a session;
   * every capture is audit-logged with cookie COUNT, never values;
   * a fresh stored session suppresses re-capture (no capture loop);
+  * a per-domain cooldown suppresses a second login tab right after one was
+    opened (no tab-spam when the user ignores the login tab);
   * the fetch hook returns None on a wall (wall text is not content) and
     retries inline only when capture completed synchronously.
 
 NEUTER anchors:
-  * test_no_capture_without_consent            — removing the consent gate
-    must turn this red (capture would fire unconsented);
   * test_anonymous_cookies_not_stored_without_probe_pass — removing the
     probe-verify must turn this red (anonymous cookies would be stored);
-  * test_capture_is_audited                    — removing audit_log red.
+  * test_capture_is_audited                        — removing audit_log red.
 
 All offline: extension commands, probes, and push are faked.
 """
 
-import threading
 import time
 
 import pytest
@@ -33,17 +32,14 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.fixture(autouse=True)
-def _isolated_store(tmp_path, monkeypatch):
-    monkeypatch.setattr(cc, '_CONSENT_PATH', str(tmp_path / 'consent.json'))
-    monkeypatch.setattr(cc, '_CONSENT_TIMEOUT_S', 5)
-    monkeypatch.setattr(cc, '_IMMEDIATE_WAIT_S', 1)
-    with cc._pending_lock:
-        cc._pending.clear()
+def _isolated_state():
+    with cc._capture_lock:
         cc._capture_threads.clear()
+        cc._last_attempt.clear()
     yield
-    with cc._pending_lock:
-        cc._pending.clear()
+    with cc._capture_lock:
         cc._capture_threads.clear()
+        cc._last_attempt.clear()
 
 
 @pytest.fixture
@@ -96,68 +92,12 @@ class TestWallDetection:
 
 
 # ══════════════════════════════════════════════════════════
-#  2. Consent gate
-# ══════════════════════════════════════════════════════════
-
-class TestConsentGate:
-    def test_grant_persisted_and_not_reasked(self, monkeypatch):
-        pushes = []
-        monkeypatch.setattr('lib.push.push_event',
-                            lambda ch, tid, payload: pushes.append(payload))
-        monkeypatch.setattr(cc, 'audit_log', lambda *a, **k: None)
-
-        def approver():
-            time.sleep(0.05)
-            pend = cc.pending_consents()
-            assert len(pend) == 1
-            cc.resolve_consent(pend[0]['id'], True)
-
-        threading.Thread(target=approver, daemon=True).start()
-        assert cc.request_consent('example.com', 'https://example.com/x') is True
-        assert cc._grant_for('example.com')
-        assert pushes and pushes[0]['type'] == 'request'
-
-        # One-time: a second request never pushes nor blocks.
-        pushes.clear()
-        t0 = time.time()
-        assert cc._grant_for('example.com') is True
-        assert time.time() - t0 < 1
-        assert pushes == []
-
-    def test_denial_suppresses_reask_within_cooldown(self, monkeypatch):
-        pushes = []
-        monkeypatch.setattr('lib.push.push_event',
-                            lambda ch, tid, payload: pushes.append(payload))
-        monkeypatch.setattr(cc, 'audit_log', lambda *a, **k: None)
-
-        def denier():
-            time.sleep(0.05)
-            cc.resolve_consent(cc.pending_consents()[0]['id'], False)
-
-        threading.Thread(target=denier, daemon=True).start()
-        assert cc.request_consent('example.com', 'https://example.com/x') is False
-        assert cc._denial_fresh('example.com')
-
-    def test_revoke_forces_reask(self, monkeypatch):
-        monkeypatch.setattr(cc, 'audit_log', lambda *a, **k: None)
-        cc._record_grant('example.com')
-        assert cc._grant_for('example.com')
-        assert cc.revoke_consent('example.com') is True
-        assert not cc._grant_for('example.com')
-        assert cc.revoke_consent('example.com') is False
-
-
-# ══════════════════════════════════════════════════════════
-#  3. Capture orchestration
+#  2. Capture orchestration (auto-approved — no consent gate)
 # ══════════════════════════════════════════════════════════
 
 class TestCapture:
-    def _grant(self):
-        cc._record_grant('walled.example.com')
-
     def test_capture_stores_only_after_probe_clears_wall(
             self, monkeypatch, ext_online, no_existing_source):
-        self._grant()
         stored = {}
         monkeypatch.setattr('lib.auth_sources.upsert_source',
                             lambda dom, **kw: stored.update(domain=dom, **kw) or {})
@@ -177,7 +117,6 @@ class TestCapture:
         """NEUTER anchor for the probe-verify: get_cookies returns anonymous
         cookies but the page STILL walls → nothing may be stored, and the
         async login-tab path engages instead."""
-        self._grant()
         upsert_calls = []
         monkeypatch.setattr('lib.auth_sources.upsert_source',
                             lambda dom, **kw: upsert_calls.append(dom) or {})
@@ -196,7 +135,6 @@ class TestCapture:
         assert started, 'async capture should engage for a still-walled page'
 
     def test_capture_is_audited(self, monkeypatch, ext_online, no_existing_source):
-        self._grant()
         audits = []
         monkeypatch.setattr(cc, 'audit_log',
                             lambda event, **kw: audits.append((event, kw)))
@@ -214,27 +152,29 @@ class TestCapture:
         assert capture_events[0]['domain'] == 'walled.example.com'
         assert 'value' not in str(capture_events[0]), 'cookie values must not be audited'
 
-    def test_no_capture_without_consent(
+    def test_login_tab_cooldown_suppresses_second_attempt(
             self, monkeypatch, ext_online, no_existing_source):
-        """NEUTER anchor for the consent gate: no grant + instant denial →
-        the store/probe/upsert path must never run."""
-        monkeypatch.setattr('lib.push.push_event', lambda *a, **k: None)
+        """A login tab that the user ignores must NOT re-open on every fetch
+        round: within _ATTEMPT_COOLDOWN_S a second wall only logs a skip."""
         monkeypatch.setattr(cc, 'audit_log', lambda *a, **k: None)
-        monkeypatch.setattr(cc, 'request_consent', lambda dom, url: False)
-        probe_calls = []
-        monkeypatch.setattr(cc, '_probe_no_longer_walled',
-                            lambda url: probe_calls.append(url) or True)
-        upsert_calls = []
-        monkeypatch.setattr('lib.auth_sources.upsert_source',
-                            lambda dom, **kw: upsert_calls.append(dom) or {})
+        monkeypatch.setattr(cc, '_probe_no_longer_walled', lambda url: False)
+        monkeypatch.setattr('lib.push.push_event', lambda *a, **k: None)
+        started = []
+        monkeypatch.setattr(cc.threading, 'Thread',
+                            lambda **kw: started.append(kw) or
+                            type('T', (), {'start': lambda self: None})())
 
-        assert cc.handle_login_wall('https://walled.example.com/') is False
-        assert probe_calls == [], 'probe must not run without consent'
-        assert upsert_calls == [], 'nothing may be stored without consent'
+        assert cc.handle_login_wall('https://walled.example.com/app') is False
+        assert len(started) == 1
+
+        # Simulate the capture thread having exited; the cooldown remains.
+        with cc._capture_lock:
+            cc._capture_threads.pop('walled.example.com', None)
+        assert cc.handle_login_wall('https://walled.example.com/app') is False
+        assert len(started) == 1, 'a second login tab must not open inside the cooldown'
 
     def test_fresh_auth_source_suppresses_recapture(
             self, monkeypatch, ext_online):
-        self._grant()
         monkeypatch.setattr('lib.auth_sources.match_source',
                             lambda url: {'domain': 'walled.example.com',
                                          'updated_at': time.time()})
@@ -247,15 +187,15 @@ class TestCapture:
     def test_offline_extension_noop(self, monkeypatch):
         monkeypatch.setattr('lib.browser.queue.is_extension_connected',
                             lambda *a, **k: False)
-        consent_calls = []
-        monkeypatch.setattr(cc, 'request_consent',
-                            lambda dom, url: consent_calls.append(dom) or True)
+        probe_calls = []
+        monkeypatch.setattr(cc, '_probe_no_longer_walled',
+                            lambda url: probe_calls.append(url) or True)
         assert cc.handle_login_wall('https://walled.example.com/') is False
-        assert consent_calls == []
+        assert probe_calls == []
 
 
 # ══════════════════════════════════════════════════════════
-#  4. fetch.py hook
+#  3. fetch.py hook
 # ══════════════════════════════════════════════════════════
 
 class TestFetchHook:

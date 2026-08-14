@@ -208,6 +208,33 @@ class ResponseTranslationTest(unittest.TestCase):
             {'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': 'x'}]})
         self.assertEqual(o['choices'][0]['finish_reason'], 'stop')
 
+    def test_hosted_tool_blocks_are_kept_for_protocol_replay(self):
+        blocks = [
+            {'type': 'server_tool_use', 'id': 'srv_1',
+             'name': 'tool_search_tool_bm25',
+             'input': {'query': 'document editor'}},
+            {'type': 'tool_search_tool_result', 'tool_use_id': 'srv_1',
+             'content': [{'type': 'tool_reference',
+                          'tool_name': 'update_doc'}]},
+            {'type': 'tool_use', 'id': 'tu_1', 'name': 'update_doc',
+             'input': {'id': '42'}},
+        ]
+        o = anthropic_response_to_openai({
+            'stop_reason': 'tool_use', 'content': blocks})
+        msg = o['choices'][0]['message']
+        self.assertEqual(msg['_anthropic_content_blocks'], blocks)
+        self.assertEqual(msg['tool_calls'][0]['function']['name'], 'update_doc')
+
+        wire = openai_body_to_anthropic({
+            'model': 'claude-sonnet-4-5', 'max_tokens': 64,
+            'messages': [
+                {'role': 'user', 'content': 'edit it'},
+                msg,
+                {'role': 'tool', 'tool_call_id': 'tu_1', 'content': 'ok'},
+            ],
+        })
+        self.assertEqual(wire['messages'][1]['content'], blocks)
+
 
 class SSETranslationTest(unittest.TestCase):
     def _run(self, events):
@@ -256,6 +283,50 @@ class SSETranslationTest(unittest.TestCase):
         out = t.translate(json.dumps({'type': 'error',
                                       'error': {'message': 'boom'}}))
         self.assertEqual(out[0]['error']['message'], 'boom')
+
+    def test_server_tool_use_is_not_dispatched_and_full_blocks_are_replayable(self):
+        t = AnthropicSSETranslator(model='claude-sonnet-4-5')
+        events = [
+            {'type': 'content_block_start', 'index': 0,
+             'content_block': {'type': 'server_tool_use', 'id': 'srv_1',
+                               'name': 'tool_search_tool_bm25', 'input': {}}},
+            {'type': 'content_block_delta', 'index': 0,
+             'delta': {'type': 'input_json_delta',
+                       'partial_json': '{"query":"xuecheng"}'}},
+            {'type': 'content_block_start', 'index': 1,
+             'content_block': {
+                 'type': 'tool_search_tool_result', 'tool_use_id': 'srv_1',
+                 'content': [{'type': 'tool_reference',
+                              'tool_name': 'mcp__xuecheng__update_doc'}]}},
+            {'type': 'content_block_start', 'index': 2,
+             'content_block': {'type': 'tool_use', 'id': 'tu_1',
+                               'name': 'mcp__xuecheng__update_doc', 'input': {}}},
+            {'type': 'content_block_delta', 'index': 2,
+             'delta': {'type': 'input_json_delta',
+                       'partial_json': '{"doc_id":"42"}'}},
+        ]
+        projected = []
+        for event in events:
+            projected.extend(t.translate(json.dumps(event)))
+
+        # Only the actual client tool_use is projected into the application
+        # executor; the hosted BM25 server_tool_use stays protocol-private.
+        projected_calls = [tc for chunk in projected
+                           for choice in chunk.get('choices', [])
+                           for tc in choice.get('delta', {}).get('tool_calls', [])]
+        self.assertEqual(len(projected_calls), 2)  # start + args of index 2
+        self.assertTrue(all(tc.get('index') == 2 for tc in projected_calls))
+        self.assertEqual(t.anthropic_content_blocks, [
+            {'type': 'server_tool_use', 'id': 'srv_1',
+             'name': 'tool_search_tool_bm25',
+             'input': {'query': 'xuecheng'}},
+            {'type': 'tool_search_tool_result', 'tool_use_id': 'srv_1',
+             'content': [{'type': 'tool_reference',
+                          'tool_name': 'mcp__xuecheng__update_doc'}]},
+            {'type': 'tool_use', 'id': 'tu_1',
+             'name': 'mcp__xuecheng__update_doc',
+             'input': {'doc_id': '42'}},
+        ])
 
     def _last_usage(self, events):
         """Return the final usage dict an accumulator would settle on

@@ -172,11 +172,9 @@ just writes what the tray dialog would have.
   and re-provisioned, never repaired.
 - `proot -0` is FAKE root confined to the guest; no setuid, no namespaces,
   no host privilege. The host never executes guest binaries.
-- The preseeded URL is not a secret. (Phase 2's baked token is the user's
-  OWN `agents:bridge` token, scoped + revocable, travelling over
-  authenticated HTTPS to that user's own machine — same exposure class as
-  the minted connect line shown in cleartext today, and the artifact is
-  served only to its owner per §5.)
+- The preseeded URL is not a secret. A personalized controlled-end installer's
+  token is the caller's own scoped, revocable `agents:bridge` credential,
+  delivered over the authenticated download and never displayed to the user.
 - The built installer is unsigned (same as CI's today — SmartScreen note
   unchanged; signing stays a separate, human-credentialed question).
 

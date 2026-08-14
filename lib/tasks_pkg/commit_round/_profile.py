@@ -88,6 +88,9 @@ def _run_profile_consolidation_async(task: dict, messages: list) -> None:
                 summary=pref.get('summary', ''),
                 pending=bool(pref.get('pending')),
                 id=pref.get('id', ''),
+                change_id=pref.get('change_id', pref.get('id', '')),
+                item_id=pref.get('item_id', ''),
+                context_type=pref.get('type', ''),
             ))
         except Exception as e:
             logger.debug('[Task:%s] preference_learned emit failed: %s', tid, e)

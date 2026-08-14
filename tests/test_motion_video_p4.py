@@ -195,6 +195,78 @@ def test_script_respects_max_scenes_cap(monkeypatch):
     assert len(art['segments']) == 4  # cost cap, 拍板 #3
 
 
+def test_topic_script_is_locked_to_requested_model(monkeypatch):
+    seen = {}
+
+    def fake_chat(messages, **kwargs):
+        seen.update(kwargs)
+        return ('{"title":"澎程","segments":["第一幕。","第二幕。",'
+                '"第三幕。"]}', {})
+
+    monkeypatch.setattr(rec, '_llm_chat', fake_chat)
+    ctx = {'topic': '小米澎程', 'lang': 'zh', 'max_scenes': 8,
+           'model': 'kimi-k3',
+           'artifacts': {'research': {
+               'cards': rec._cards_from_results(_FAKE_RESULTS)}}}
+    rec._run_script(ctx)
+    assert seen['prefer_model'] == 'kimi-k3'
+
+
+def test_topic_script_carries_art_direction_into_scenes(monkeypatch):
+    reply = {
+        'title': '澎程',
+        'beats': [
+            {'text': '远方，从容展开。', 'on_screen': '空间，自由生长',
+             'visual': 'Wide road reveal with layered parallax',
+             'source_ids': ['S1'],
+             'assets': [{'role': 'subject',
+                         'semantic_target': 'the vehicle on the open road',
+                         'prompt': 'premium SUV at sunrise, no text'}]},
+            {'text': '智能，让旅途彼此连接。', 'on_screen': '人车家全生态',
+             'visual': 'Connected nodes orbit the cabin',
+             'source_ids': ['S2'],
+             'assets': [{'role': 'diagram',
+                         'prompt': 'abstract connected ecosystem, no labels'}]},
+            {'text': '每一次出发，都通向更大的世界。', 'on_screen': '向远方',
+             'visual': 'Horizon resolve', 'source_ids': ['S1'], 'assets': []},
+        ],
+    }
+    monkeypatch.setattr(
+        rec, '_llm_chat',
+        lambda *a, **k: (json.dumps(reply, ensure_ascii=False), {}))
+    ctx = {'topic': '小米澎程', 'lang': 'zh', 'max_scenes': 8,
+           'model': 'kimi-k3',
+           'artifacts': {'research': {
+               'cards': rec._cards_from_results(_FAKE_RESULTS)}}}
+    script = rec._run_script(ctx)
+    scenes = rec._provisional_scenes(script['segments'], '', script['beats'])
+    assert scenes[0]['on_screen'] == '空间，自由生长'
+    assert scenes[0]['source_ids'] == ['S1']
+    assert scenes[0]['assets'][0]['role'] == 'subject'
+    assert scenes[0]['assets'][0]['semantic_target'] == (
+        'the vehicle on the open road')
+    assert scenes[1]['visual'] == 'Connected nodes orbit the cabin'
+
+
+def test_topic_script_gate_rejects_stale_current_facts_and_feeds_retry():
+    card = {
+        'id': 'S1', 'title': '官方预售',
+        'point': 'N70 Max 预售价 25.99 万元，现已开启预售。',
+        'url': 'https://example.com/latest', 'host': 'example.com',
+        'query_lane': 'current', 'query_lanes': ['current'],
+    }
+    artifact = {
+        'segments': ['新车即将到来。', '价格尚未公布。'],
+        'beats': [], 'source_ids': [],
+    }
+    ctx = {'artifacts': {'research': {'cards': [card]}}}
+    errors = rec._gate_script(ctx, artifact)
+    assert any('ignores every current-state source' in error
+               for error in errors)
+    assert any('announced presale price' in error for error in errors)
+    assert ctx['_script_gate_feedback'] == errors
+
+
 def test_timeline_uses_real_tts_durations(monkeypatch, tmp_path):
     """The timeline must be measured from real TTS audio, not char-estimated
     (owner requirement: delete the 4.2 chars/s hard estimate)."""
@@ -219,6 +291,10 @@ def test_timeline_uses_real_tts_durations(monkeypatch, tmp_path):
     # Durations came straight from the manifest (4/6/3 = 13s span).
     assert scenes[0]['end'] - scenes[0]['start'] == pytest.approx(4.0)
     assert scenes[-1]['end'] == pytest.approx(13.0)
+    assert scenes[0]['shot_recipe']
+    assert scenes[0]['shot_contract_version'] == 'motion-shot-v1'
+    assert len(scenes[0]['qa_progresses']) == 4
+    assert scenes[-1]['narrative_role'] == 'cta'
     assert rec._gate_timeline({}, art) == []
 
 
@@ -264,8 +340,9 @@ def _ctx(*, project, search):
 def test_produce_video_not_project_gated():
     """拍板 #2: produce_video is available WITHOUT an attached project."""
     from lib.tools.registry import assemble_tool_list
-    tools, _ = assemble_tool_list(_ctx(project=False, search=True))
-    names = {t['function']['name'] for t in tools}
+    ctx = _ctx(project=False, search=True)
+    assemble_tool_list(ctx)
+    names = {t['function']['name'] for t in ctx.enabled_tool_catalog}
     assert 'produce_video' in names
     # ...while the low-level motion_video_* family stays project-gated.
     assert not any(n.startswith('motion_video') for n in names)
@@ -293,15 +370,20 @@ def test_produce_research_reachable_and_search_gated():
     (same posture as produce_video/report) but search-gated — the ideation
     screen is only meaningful against a real harvested corpus."""
     from lib.tools.registry import assemble_tool_list
-    tools, _ = assemble_tool_list(_ctx(project=False, search=True))
-    names = [t['function']['name'] for t in tools]
+    ctx = _ctx(project=False, search=True)
+    assemble_tool_list(ctx)
+    names = [t['function']['name'] for t in ctx.enabled_tool_catalog]
     assert 'produce_research' in names
     # Appended AFTER the existing pair so the cache-stable prefix is untouched.
     assert ([n for n in names if n.startswith('produce_')]
             == ['produce_video', 'produce_report', 'produce_research',
                 'produce_slides'])
-    off, _ = assemble_tool_list(_ctx(project=False, search=False))
+    off_ctx = _ctx(project=False, search=False)
+    off, _ = assemble_tool_list(off_ctx)
     assert 'produce_research' not in {t['function']['name'] for t in off}
+    assert 'produce_research' in {
+        t['function']['name'] for t in off_ctx.enabled_tool_catalog
+    }
 
 
 def test_produce_research_handler_registered():
@@ -333,8 +415,8 @@ def test_produce_research_crash_resume_wired():
     """SEAM 5: the resume sweep must be CALLED at startup, not merely defined
     — otherwise a crashed job's harvested corpus is stranded on disk."""
     import inspect
-    import server
-    src = inspect.getsource(server._start_background_workers)
+    from lib.server_background_services import start_background_services
+    src = inspect.getsource(start_background_services)
     assert 'resume_interrupted_research' in src
 
 

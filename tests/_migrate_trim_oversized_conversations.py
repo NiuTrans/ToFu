@@ -53,17 +53,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ctypes
+import gc
 import json
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.database import async_execute, async_fetchall, async_fetchone  # noqa: E402
+from lib.database import _BACKEND, async_fetchall, run_pooled  # noqa: E402
 from lib.database._wrappers import json_dumps_pg  # noqa: E402
+from lib.database.messages_rows import backfill_conv  # noqa: E402
 from lib.log import audit_log, get_logger  # noqa: E402
 # Reuse the EXACT write-path sanitizers — single source of truth.
-from lib.tasks_pkg.manager import (  # noqa: E402
+from lib.storage_projection import (  # noqa: E402
     _sanitize_api_rounds_for_persist,
     _sanitize_usage_for_persist,
     _trim_round_for_persist,
@@ -92,8 +95,9 @@ def trim_messages(messages):
         m2 = dict(m)
         if isinstance(m2.get('usage'), dict):
             m2['usage'] = _sanitize_usage_for_persist(m2['usage'])
-        if isinstance(m2.get('apiRounds'), list):
-            m2['apiRounds'] = _sanitize_api_rounds_for_persist(m2['apiRounds'])
+        for field in ('apiRounds', '_continueApiRounds'):
+            if isinstance(m2.get(field), list):
+                m2[field] = _sanitize_api_rounds_for_persist(m2[field])
         live = m2.get('_liveLastRoundUsage')
         if isinstance(live, dict) and isinstance(live.get('usage'), dict):
             m2['_liveLastRoundUsage'] = {**live, 'usage': _sanitize_usage_for_persist(live['usage'])}
@@ -118,30 +122,81 @@ def _as_list(raw):
     return None
 
 
-async def _candidate_ids(min_bytes, only_id):
+async def _candidate_ids(min_bytes, only_id, limit):
     """Return (id, byte_len) for rows to consider, largest first.
 
-    ``length(messages::text)`` casts the JSONB column to text (the same probe
-    used to find the fat convs). SQLite stores messages as TEXT so ``::text``
-    is a harmless no-op there via the dialect bridge.
+    PostgreSQL uses ``pg_column_size`` so candidate discovery reads TOAST
+    metadata instead of detoasting and rendering every JSONB value just to
+    compute its text length.  The old query took 87 seconds on 4.6 GB of
+    conversations before it could process its first row.  The exact logical
+    before/after sizes are still computed for each selected row.
     """
-    if only_id:
-        row = await async_fetchone(
-            'SELECT id, length(messages::text) AS n FROM conversations WHERE id=?',
-            (only_id,))
-        return [(row['id'], row['n']) for row in ([row] if row else [])]
-    rows = await async_fetchall(
-        'SELECT id, length(messages::text) AS n FROM conversations '
-        'WHERE length(messages::text) >= ? ORDER BY n DESC',
-        (min_bytes,))
+    size_expr = ('pg_column_size(messages)' if _BACKEND == 'pg'
+                 else 'length(CAST(messages AS TEXT))')
+    where = 'id=?' if only_id else f'{size_expr} >= ?'
+    params = [only_id if only_id else min_bytes]
+    sql = f'SELECT id, {size_expr} AS n FROM conversations WHERE {where} ORDER BY n DESC'
+    if limit:
+        sql += ' LIMIT ?'
+        params.append(int(limit))
+    rows = await async_fetchall(sql, tuple(params))
     return [(r['id'], r['n']) for r in rows]
 
 
-async def run(apply, min_mb, only_id, limit):
+def _trim_heap():
+    """Return giant per-row JSON scratch buffers to the OS when possible."""
+    gc.collect()
+    try:
+        ctypes.CDLL(None).malloc_trim(0)
+    except (AttributeError, OSError):
+        pass
+
+
+def _process_one(db, cid, apply):
+    """Trim one row; on apply, update blob + row mirror in one transaction."""
+    row = db.execute(
+        'SELECT messages, msg_count, rev FROM conversations WHERE id=?',
+        (cid,)).fetchone()
+    if not row:
+        db.rollback()
+        return {'status': 'missing'}
+    messages = _as_list(row['messages'])
+    if messages is None:
+        db.rollback()
+        return {'status': 'unparseable'}
+    before = len(json_dumps_pg(messages))
+    trimmed = trim_messages(messages)
+    after_text = json_dumps_pg(trimmed)
+    after = len(after_text)
+    result = {
+        'status': 'noop' if after >= before else 'shrunk',
+        'before': before, 'after': min(before, after),
+        'new_count': len(trimmed), 'old_count': row['msg_count'],
+    }
+    if after >= before or not apply:
+        db.rollback()
+        return result
+
+    # Optimistic CAS prevents an online task/client write between SELECT and
+    # UPDATE from being overwritten.  PostgreSQL's messages trigger bumps rev.
+    cur = db.execute(
+        'UPDATE conversations SET messages=?, msg_count=? WHERE id=? AND rev=?',
+        (after_text, len(trimmed), cid, int(row['rev'] or 0)))
+    if (getattr(cur, 'rowcount', 0) or 0) != 1:
+        db.rollback()
+        result['status'] = 'cas_lost'
+        return result
+    # The normalized store is a mirror.  Rebuild it in the SAME transaction so
+    # a successful maintenance row can never create a blob/rows parity window.
+    backfill_conv(db, cid, trimmed, commit=False)
+    db.commit()
+    result['status'] = 'applied'
+    return result
+
+
+async def run(apply, min_mb, only_id, limit, sleep_ms):
     min_bytes = int(min_mb * 1024 * 1024)
-    candidates = await _candidate_ids(min_bytes, only_id)
-    if limit:
-        candidates = candidates[:limit]
+    candidates = await _candidate_ids(min_bytes, only_id, limit)
 
     mode = 'APPLY' if apply else 'DRY-RUN'
     print(f'\n  ═══ trim-oversized-conversations [{mode}] — '
@@ -154,46 +209,37 @@ async def run(apply, min_mb, only_id, limit):
     total_after = 0
     shrunk = 0
     skipped_noop = 0
-    errored = 0
+    errored = cas_lost = 0
 
-    for cid, raw_len in candidates:
+    for idx, (cid, raw_len) in enumerate(candidates, 1):
         try:
-            row = await async_fetchone(
-                'SELECT messages, msg_count FROM conversations WHERE id=?', (cid,))
-            if not row:
-                continue
-            messages = _as_list(row['messages'])
-            if messages is None:
+            result = await run_pooled(lambda db, _cid=cid: _process_one(db, _cid, apply))
+            if result['status'] in ('missing', 'unparseable'):
                 print(f'  {cid:18s}  SKIP (unparseable messages)')
                 errored += 1
                 continue
-
-            before = len(json_dumps_pg(messages))
-            trimmed = trim_messages(messages)
-            after_text = json_dumps_pg(trimmed)
-            after = len(after_text)
-
+            before, after = result['before'], result['after']
             total_before += before
-            if after >= before:
+            if result['status'] == 'noop':
                 # Idempotent: nothing shrank → already trimmed (or nothing to
                 # trim). Do NOT write.
                 total_after += before
                 skipped_noop += 1
                 continue
-
             total_after += after
             shrunk += 1
             reclaimed = before - after
-            new_count = len(trimmed)
-            old_count = row['msg_count']
+            new_count = result['new_count']
+            old_count = result['old_count']
             count_note = '' if old_count in (None, new_count) else f'  msg_count {old_count}→{new_count}'
             print(f'  {cid:18s}  {before/1048576:8.2f} MB → {after/1048576:7.2f} MB  '
-                  f'(reclaim {reclaimed/1048576:7.2f} MB, {100*reclaimed//before:3d}%){count_note}')
+                  f'(reclaim {reclaimed/1048576:7.2f} MB, {100*reclaimed//before:3d}%){count_note}',
+                  flush=True)
 
-            if apply:
-                await async_execute(
-                    'UPDATE conversations SET messages=?, msg_count=? WHERE id=?',
-                    (after_text, new_count, cid))
+            if result['status'] == 'cas_lost':
+                cas_lost += 1
+                print('    CAS lost — concurrent writer won; row left untouched', flush=True)
+            elif result['status'] == 'applied':
                 logger.info('[trim-migration] conv=%s trimmed %d→%d bytes (reclaimed %d)',
                             cid, before, after, reclaimed)
                 try:
@@ -206,11 +252,18 @@ async def run(apply, min_mb, only_id, limit):
             logger.error('[trim-migration] row %s failed (%s): %s — skipped',
                          cid, type(e).__name__, e, exc_info=True)
             print(f'  {cid:18s}  ERROR ({type(e).__name__}: {e}) — skipped')
+        finally:
+            _trim_heap()
+            if sleep_ms:
+                await asyncio.sleep(sleep_ms / 1000.0)
+        if idx % 25 == 0:
+            print(f'  … {idx}/{len(candidates)} processed', flush=True)
 
     print(f'\n  ─── {mode} summary ───')
     print(f'    rows that shrink : {shrunk}')
     print(f'    rows no-op (idempotent skip) : {skipped_noop}')
     print(f'    rows errored (skipped) : {errored}')
+    print(f'    CAS conflicts (safe skip) : {cas_lost}')
     print(f'    total before : {total_before/1048576:.2f} MB')
     print(f'    total after  : {total_after/1048576:.2f} MB')
     print(f'    reclaimed    : {(total_before-total_after)/1048576:.2f} MB')
@@ -227,8 +280,11 @@ def main():
                    help='only consider rows whose messages JSON >= this many MB (default 1)')
     p.add_argument('--id', default='', help='restrict to a single conversation id')
     p.add_argument('--limit', type=int, default=0, help='cap number of rows processed (0 = all)')
+    p.add_argument('--sleep-ms', type=int, default=20,
+                   help='throttle between rows in ms (default 20)')
     args = p.parse_args()
-    asyncio.run(run(args.apply, args.min_mb, args.id or '', args.limit))
+    asyncio.run(run(args.apply, args.min_mb, args.id or '', args.limit,
+                    max(0, args.sleep_ms)))
 
 
 if __name__ == '__main__':

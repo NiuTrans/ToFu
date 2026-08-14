@@ -90,6 +90,72 @@ def test_active_keeps_autopilot_kick_carrier(flask_client, put_task):
     assert 'kick-carrier-1' in ids, 'autopilot-kick carrier must stay reconnectable'
 
 
+@pytest.mark.api
+def test_sharded_active_merges_only_durable_reconnectable_tasks(
+        flask_client, monkeypatch):
+    """Any replica can discover a direct browser task and its ingress key.
+
+    Hidden/background carriers do not carry ``reconnectable`` and therefore
+    must not leak into the plain connectToTask recovery view.
+    """
+    import json
+    import routes.chat as chat_mod
+
+    class _DB:
+        def execute(self, _sql):
+            return self
+
+        def fetchall(self):
+            return [
+                {'task_id': 'remote-ui-1', 'conv_id': 'remote-conv',
+                 'status': 'running', 'metadata': json.dumps({
+                     'reconnectable': True, 'affinityKey': 'aff-remote'})},
+                {'task_id': 'remote-carrier-1', 'conv_id': 'remote-conv',
+                 'status': 'running', 'metadata': json.dumps({
+                     'affinityKey': 'aff-remote'})},
+            ]
+
+    def _db_for_test(_domain):
+        return _DB()
+
+    def _no_auth():
+        return None
+
+    monkeypatch.setenv('TOFU_RUNTIME_STATE_BACKEND', 'redis')
+    monkeypatch.setattr(chat_mod, 'get_thread_db', _db_for_test)
+    monkeypatch.setattr(chat_mod, 'current_auth', _no_auth)
+
+    resp = flask_client.get('/api/v1/chat/active')
+    items = (resp.get_json() or {}).get('items') or []
+    remote = {item['id']: item for item in items if item['id'].startswith('remote-')}
+    assert remote['remote-ui-1']['affinityKey'] == 'aff-remote'
+    assert 'remote-carrier-1' not in remote
+
+
+
+@pytest.mark.api
+def test_active_excludes_terminal_and_aborted_tasks(flask_client, put_task):
+    """The reconnect view contains live work only.
+
+    Terminal task dicts intentionally remain in the in-memory registry for a
+    short poll/replay grace period.  Surfacing them through ``/chat/active``
+    makes the frontend reconnect to an already-completed SSE and can turn the
+    Send button back into Stop immediately after a successful turn.
+    """
+    put_task({'id': 'live-1', 'convId': 'conv-live', 'status': 'running'})
+    put_task({'id': 'pending-1', 'convId': 'conv-pending', 'status': 'pending'})
+    put_task({'id': 'done-1', 'convId': 'conv-done', 'status': 'done'})
+    put_task({'id': 'error-1', 'convId': 'conv-error', 'status': 'error'})
+    put_task({'id': 'aborted-1', 'convId': 'conv-aborted',
+              'status': 'running', 'aborted': True})
+
+    resp = flask_client.get('/api/v1/chat/active')
+    assert resp.status_code == 200
+    ids = {t['id'] for t in (resp.get_json() or {}).get('items') or []}
+    assert {'live-1', 'pending-1'} <= ids
+    assert {'done-1', 'error-1', 'aborted-1'}.isdisjoint(ids)
+
+
 # ── discard_task: carrier removed from registry + conv-latest index ────
 
 def test_discard_task_pops_registry_and_latest_index():

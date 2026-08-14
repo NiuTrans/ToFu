@@ -42,17 +42,15 @@ import subprocess
 
 import pytest
 
+from tests._paper_vite import compiled_typescript
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
-# The divider + responsive-crossing IIFE was extracted to this self-contained
-# sibling (Epic E cut #4, 2026-07-11). The harness evals only this file (the
-# IIFE self-inits on DOMContentLoaded and its runtime deps — paperFitWidth /
-# _setPaperMobileView — are stubbed/overridden post-eval), and the triple-neuter
-# NC markers + the byte-identity assertion now target it.
-PAPER_JS = os.path.join(JS_DIR, 'paper', 'pdf_responsive.js')
+PAPER_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'pdf-responsive.ts')
+ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
 
 
 def _node_deps_available() -> bool:
@@ -92,6 +90,10 @@ global.window = win;
 global.document = win.document;
 global.localStorage = win.localStorage;
 global.console = console;
+global.HTMLElement = win.HTMLElement;
+global.MouseEvent = win.MouseEvent;
+global.TouchEvent = win.TouchEvent;
+global.AbortController = win.AbortController;
 
 // Synchronous rAF/setTimeout so the coalescing frame AND the deferred fit both
 // run inline. (The crossing handler nests a second rAF for the fit.)
@@ -115,13 +117,18 @@ win.__mql = mql;
 // Spy fit-to-width. The REAL paperFitWidth needs a live pdf.js doc; we only
 // care THAT it's called on a crossing, so replace it after eval.
 let fitCalls = 0;
+const setMobileView = (view) => {
+  const selected = view === 'reader' ? 'reader' : 'pdf';
+  document.querySelector('.paper-body').setAttribute('data-paper-view', selected);
+  document.querySelectorAll('.paper-mobile-switch-btn').forEach((button) => {
+    button.classList.toggle('active', button.dataset.view === selected);
+  });
+};
+global._setPaperMobileView = win._setPaperMobileView = setMobileView;
 
-// argv[4] = core paper-reader.js (defines the REAL _setPaperMobileView the
-// crossing handler calls); argv[2] = pdf_responsive.js (the extracted IIFE
-// under test / neuter). Eval core FIRST so _setPaperMobileView exists when the
-// sibling's crossing handler runs, then the sibling in the SAME scope.
-if (process.argv[4] && fs.existsSync(process.argv[4])) eval(fs.readFileSync(process.argv[4], 'utf8'));
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // pdf_responsive.js (real, shipped)
+const responsiveSource = fs.readFileSync(process.argv[2], 'utf8');
+(0, eval)(responsiveSource);  // compiled TypeScript owner
+eval(responsiveSource);  // mixed Vite/classic retry must remain single-owner
 
 // Post-eval overrides. _setPaperMobileView stays REAL (it's under test).
 paperFitWidth = win.paperFitWidth = () => { fitCalls++; };
@@ -142,6 +149,7 @@ function body() { return document.querySelector('.paper-body'); }
   check('predicate_is_coarse_1024',
         String(mql.media) === '(max-width:1024px) and (pointer:coarse)');
   check('crossing_fn_exposed', typeof win._paperResponsiveOnCrossing === 'function');
+  check('responsive_single_owner', mql._listeners.length === 1);
 
   // ── Baseline: desktop split, body has NO view attribute. ──
   check('baseline_no_view', body().getAttribute('data-paper-view') === null);
@@ -184,8 +192,7 @@ def _run_harness(paper_js: str) -> subprocess.CompletedProcess:
         f.write(_HARNESS)
     try:
         return subprocess.run(
-            ['node', harness, paper_js, ROOT,
-             os.path.join(JS_DIR, 'paper-reader.js')],
+            ['node', harness, paper_js, ROOT],
             capture_output=True, text=True, timeout=60,
         )
     finally:
@@ -197,8 +204,9 @@ def _run_harness(paper_js: str) -> subprocess.CompletedProcess:
 
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
-def test_paper_responsive_crossing_reasserts_view_and_refits():
-    proc = _run_harness(PAPER_JS)
+def test_paper_responsive_crossing_reasserts_view_and_refits(
+        paper_responsive_js):
+    proc = _run_harness(paper_responsive_js)
     out = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{out}'
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
@@ -206,29 +214,34 @@ def test_paper_responsive_crossing_reasserts_view_and_refits():
     assert out.count('PASS') >= 9, f'expected >=9 PASS lines, got:\n{out}'
 
 
-def _run_neuter(patched_src: str, tag: str) -> str:
-    """Write a patched COPY, node --check it, run the harness, return stdout."""
-    tmp = os.path.join(HERE, f'_paper_reader_neuter_{tag}.js')
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(patched_src)
-    try:
-        chk = subprocess.run(['node', '--check', tmp], capture_output=True, text=True, timeout=30)
-        assert chk.returncode == 0, f'patched JS invalid ({tag}): {chk.stderr}'
-        proc = _run_harness(tmp)
-        assert proc.returncode == 0, f'node crashed ({tag}): {proc.stderr}\n{proc.stdout}'
-        return proc.stdout.strip()
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
+@pytest.fixture(scope='module')
+def paper_responsive_js(tmp_path_factory):
+    if not os.path.isfile(ESBUILD):
+        pytest.skip('esbuild dev dependency not installed')
+    built = tmp_path_factory.mktemp('paper-responsive') / 'owner.js'
+    compiled = subprocess.run(
+        [ESBUILD, PAPER_TS, '--bundle', '--format=iife',
+         '--platform=browser', f'--outfile={built}'],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+    return str(built)
+
+
+def _run_neuter(patched_src: str, tag: str, tmp_path) -> str:
+    """Compile a patched TypeScript COPY and run the real-owner harness."""
+    del tmp_path
+    with compiled_typescript(PAPER_TS, contents=patched_src) as built:
+        proc = _run_harness(built)
+    assert proc.returncode == 0, f'node crashed ({tag}): {proc.stderr}\n{proc.stdout}'
+    return proc.stdout.strip()
 
 
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
-def test_triple_neuter_crossing_is_load_bearing():
+def test_triple_neuter_crossing_is_load_bearing(tmp_path):
     """Three independent neuters, each on a COPY; shipped file untouched."""
-    src = open(PAPER_JS, encoding='utf-8').read()
+    src = open(PAPER_TS, encoding='utf-8').read()
 
     # ── NC-1: neuter the whole single-pane view-assert branch → a no-view body
     #    entering single-pane is NEVER given a pane → foldin_view_defaults_pdf
@@ -236,17 +249,24 @@ def test_triple_neuter_crossing_is_load_bearing():
     #    _setPaperMobileView's own invalid→pdf coercion — a belt for the
     #    _setPaperMobileView-absent fallback path — so the load-bearing unit is
     #    the branch RUNNING on a crossing, which is what this neuters.) ──
-    m1 = "    var singlePane = !!(_singlePaneMq && _singlePaneMq.matches);\n    if (singlePane) {"
+    m1 = "    if (singlePaneQuery?.matches) {"
     assert m1 in src, 'NC-1 marker not found — test is stale'
-    out1 = _run_neuter(src.replace(m1, "    var singlePane = !!(_singlePaneMq && _singlePaneMq.matches);\n    if (false) {", 1), 'nc1')
+    out1 = _run_neuter(
+        src.replace(m1, "    if (false && singlePaneQuery?.matches) {", 1),
+        'nc1', tmp_path)
     assert 'FAIL foldin_view_defaults_pdf' in out1, \
         'NC-1: skipping the single-pane view-assert did NOT break it — non-load-bearing:\n' + out1
 
     # ── NC-2: remove the refit call from the crossing handler → a fold leaves
     #    the PDF mis-sized → the refit checks FAIL. ──
-    m2 = "    if (typeof paperFitWidth === 'function') {\n      requestAnimationFrame(function() {\n        try { paperFitWidth(); } catch (err) { console.warn('[Paper] responsive fit failed:', err); }\n      });\n    }\n"
+    m2 = "    if (typeof legacyWindow().paperFitWidth === 'function') {"
     assert m2 in src, 'NC-2 marker not found — test is stale'
-    out2 = _run_neuter(src.replace(m2, "    if (false && typeof paperFitWidth === 'function') {\n      requestAnimationFrame(function() {\n        try { paperFitWidth(); } catch (err) { console.warn('[Paper] responsive fit failed:', err); }\n      });\n    }\n", 1), 'nc2')
+    out2 = _run_neuter(
+        src.replace(
+            m2,
+            "    if (false && typeof legacyWindow().paperFitWidth === 'function') {",
+            1),
+        'nc2', tmp_path)
     # The fold-OUT and orientationchange paths do NOT run the single-pane
     # view-assert (which itself refits via _setPaperMobileView('pdf')), so the
     # handler's OWN refit is the only thing that fits there — neutering it must
@@ -256,21 +276,15 @@ def test_triple_neuter_crossing_is_load_bearing():
 
     # ── NC-3: break the matchMedia predicate to min-width (never matches the
     #    tablet case) → a fold-in never enters single-pane → view-assert FAILS. ──
-    m3 = "window.matchMedia('(max-width:1024px) and (pointer:coarse)')"
+    m3 = "'(max-width:1024px) and (pointer:coarse)'"
     assert m3 in src, 'NC-3 marker not found — test is stale'
-    out3 = _run_neuter(src.replace(m3, "window.matchMedia('(min-width:99999px) and (pointer:coarse)')", 1), 'nc3')
+    out3 = _run_neuter(
+        src.replace(m3, "'(min-width:99999px) and (pointer:coarse)'", 1),
+        'nc3', tmp_path)
     # The predicate string check pins the mirror; and with our controllable mql
     # the handler still keys off mql.matches, so the discriminating signal is
     # the predicate assertion flipping to FAIL.
     assert 'FAIL predicate_is_coarse_1024' in out3, \
         'NC-3: changing the predicate did NOT flip the predicate mirror check — non-load-bearing:\n' + out3
 
-    assert open(PAPER_JS, encoding='utf-8').read() == src, 'shipped file was modified!'
-
-
-if __name__ == '__main__':
-    test_paper_responsive_crossing_reasserts_view_and_refits()
-    print('positive: PASS')
-    test_triple_neuter_crossing_is_load_bearing()
-    print('triple-neuter: PASS')
-    print('ALL PASSED')
+    assert open(PAPER_TS, encoding='utf-8').read() == src, 'shipped file was modified!'

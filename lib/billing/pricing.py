@@ -62,11 +62,16 @@ from __future__ import annotations
 
 import os
 import threading
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Dict, Optional
 
 from lib.config_dir import config_path
-from lib.json_store import read_json, write_json_atomic
+from lib.json_store import (
+    JsonStoreReadError,
+    read_json,
+    update_json_atomic,
+)
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -143,14 +148,23 @@ def _ensure_loaded() -> Dict:
         if mtime == 0.0:
             # First read — seed the file.
             try:
-                write_json_atomic(_PRICING_PATH, _DEFAULT_PRICING)
+                def _seed(current):
+                    if current is None:
+                        return deepcopy(_DEFAULT_PRICING)
+                    if not isinstance(current, dict):
+                        raise JsonStoreReadError(
+                            'pricing store is not a JSON object')
+                    return current
+
+                update_json_atomic(
+                    _PRICING_PATH, _seed, default=None, strict=True)
                 logger.info('[Pricing] Seeded %s with defaults',
                             _PRICING_PATH)
-            except OSError as e:
+            except (OSError, JsonStoreReadError) as e:
                 logger.warning('[Pricing] Could not seed %s: %s — '
                                'using in-memory defaults',
                                _PRICING_PATH, e)
-                _cache = dict(_DEFAULT_PRICING)
+                _cache = deepcopy(_DEFAULT_PRICING)
                 _cache_mtime = 0.0
                 return _cache
             mtime = _file_mtime()
@@ -210,7 +224,9 @@ def get_price(model: str) -> ModelPrice:
 
 def list_prices() -> Dict:
     """Return the full pricing payload (for the admin UI)."""
-    return dict(_ensure_loaded())
+    # This is a cache boundary, not an invitation to mutate the live nested
+    # ``models``/``default_model`` dicts behind get_price().
+    return deepcopy(_ensure_loaded())
 
 
 def get_default_margin() -> float:
@@ -252,17 +268,32 @@ def save_margin(margin: float) -> Dict:
     if not (0.0 <= margin <= 100.0):
         raise PricingError('default_margin: must be between 0 and 100')
 
-    # Preserve every other field of the on-disk doc; only the margin changes.
-    cfg = dict(_ensure_loaded())
-    cfg['default_margin'] = margin
-    cfg.setdefault('version', _PRICING_VERSION)
-    cfg.setdefault('currency', 'USD')
-    write_json_atomic(_PRICING_PATH, cfg)
-    reload_pricing()
+    # Merge against the latest on-disk document while holding both the module
+    # cache lock and json_store's cross-process RMW lock.  The former
+    # load-cache-edit-write path could erase an operator's concurrent rate-card
+    # or metadata edit with a stale snapshot even though this API promises to
+    # touch only default_margin.
+    global _cache, _cache_mtime
+    with _lock:
+        def _mutate(current):
+            if current is None:
+                current = deepcopy(_DEFAULT_PRICING)
+            if not isinstance(current, dict):
+                raise JsonStoreReadError(
+                    'pricing store is not a JSON object')
+            current['default_margin'] = margin
+            current.setdefault('version', _PRICING_VERSION)
+            current.setdefault('currency', 'USD')
+            return current
+
+        cfg = update_json_atomic(
+            _PRICING_PATH, _mutate, default=None, strict=True)
+        _cache = deepcopy(cfg)
+        _cache_mtime = _file_mtime()
     logger.info('[Pricing] Saved relay margin=%.3f to %s (rate rows untouched '
                 '— authoritative rates live in lib/pricing.py)',
                 margin, _PRICING_PATH)
-    return cfg
+    return deepcopy(cfg)
 
 
 __all__ = [

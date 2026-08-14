@@ -23,11 +23,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+TOOL_ROUNDS = runtime_section_path('ui/tool_rounds.js')
 
 
 def _node_deps_available() -> bool:
@@ -101,7 +103,7 @@ def test_run_command_approval_card_renders():
     try:
         proc = subprocess.run(
             ['node', harness,
-             os.path.join(JS_DIR, 'ui', 'tool_rounds.js'),  # argv[2]
+             TOOL_ROUNDS,                                   # argv[2]
              ROOT],                                          # argv[3]
             capture_output=True, text=True, timeout=60,
         )

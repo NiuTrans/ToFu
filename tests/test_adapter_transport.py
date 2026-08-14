@@ -258,8 +258,11 @@ def test_chat_adapter_relay_failure_is_unreachable():
 
 def test_probe_one_cell_adapter_uses_relay_and_classifies():
     import lib.provider_probe as pp
+    payload = {'choices': [{'message': {'content': 'OK'}}]}
     with mock.patch('lib.desktop.adapter.relay_http',
-                    return_value=_FakeHTTPResponse(200, {}, 'ok')) as relay:
+                    return_value=_FakeHTTPResponse(
+                        200, payload,
+                        '{"choices":[{"message":{"content":"OK"}}]}')) as relay:
         status, detail = pp.probe_one_cell(
             BASE_URL, 'ta_deadbeef', 'claude-sub', {}, 5,
             adapter=dict(MARKER))

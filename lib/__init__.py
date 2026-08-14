@@ -235,7 +235,14 @@ _load_plugin_flags()
 
 # ── Fetch / search settings ──
 # Priority: ENV VAR > server_config.json search section > hardcoded default
-_search_cfg = _SAVED_CONFIG.get('search', {})
+from lib.search_profiles import resolve_search_profile as _resolve_search_profile
+
+_search_cfg_raw = _SAVED_CONFIG.get('search', {})
+_search_cfg = _resolve_search_profile(
+    _search_cfg_raw if isinstance(_search_cfg_raw, dict) else {})
+SEARCH_PROFILE = _search_cfg['profile']
+SEARCH_OVERRIDES = dict(_search_cfg.get('overrides') or {})
+SEARCH_DEEPEN_ENABLED = bool(_search_cfg.get('deepen_enabled', False))
 
 def _fetch_cfg(env_key, saved_key, default):
     """Resolve a fetch/search integer setting.  0 is a valid value (e.g. PDF no-limit)."""
@@ -336,7 +343,12 @@ def reload_config():
     ]
 
     # Fetch settings — same priority chain as module init: ENV > saved > default
-    _search = _SAVED_CONFIG.get('search', {})
+    _search_raw = _SAVED_CONFIG.get('search', {})
+    _search = _resolve_search_profile(
+        _search_raw if isinstance(_search_raw, dict) else {})
+    _mod.SEARCH_PROFILE = _search['profile']
+    _mod.SEARCH_OVERRIDES = dict(_search.get('overrides') or {})
+    _mod.SEARCH_DEEPEN_ENABLED = bool(_search.get('deepen_enabled', False))
     def _rcfg(env_key, saved_key, default):
         env = os.environ.get(env_key)
         if env is not None and env != '':

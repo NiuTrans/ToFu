@@ -243,7 +243,7 @@ class TestFallbackSwallowsSaturation:
                 'events': [], 'events_lock': threading.Lock()}
         res = _llm_call_with_fallback(
             task, {'model': 'claude-opus-5'}, 'claude-opus-5', 0, 512,
-            False, None, 1, [{'role': 'user', 'content': 'hi'}],
+            False, None, [{'role': 'user', 'content': 'hi'}],
             'low', False, {}, [])
         assert res['model'] == 'kimi-k3'
         assert task['_fallback_model'] == 'kimi-k3'

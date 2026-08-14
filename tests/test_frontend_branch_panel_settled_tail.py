@@ -37,8 +37,10 @@ JS_DIR = os.path.join(ROOT, 'static', 'js')
 
 sys.path.insert(0, HERE)
 from _jsdom import frontend_module_guard  # noqa: E402
+from _runtime_sections import runtime_section_path  # noqa: E402
 
 frontend_module_guard(need_jsdom=True)
+BRANCH_JS = runtime_section_path('branch.js')
 
 _HARNESS = r"""
 const fs = require('fs');
@@ -80,7 +82,7 @@ const CONV = {
 global.conversations = [CONV];
 global.getActiveConv = () => CONV;
 
-let src = fs.readFileSync(path.join(ROOT, 'static', 'js', 'branch.js'), 'utf8');
+let src = fs.readFileSync(process.argv[4], 'utf8');
 if (NEUTER === 'pin_only') {
   const needle = 'const _tailIsLive = isStreaming || (hasPersistentTask && _tailUnfinished);';
   if (src.indexOf(needle) < 0) { console.log('FAIL neuter_target_drifted'); process.exit(0); }
@@ -136,7 +138,7 @@ def _run(neuter='none'):
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     try:
-        proc = subprocess.run(['node', harness, ROOT, neuter],
+        proc = subprocess.run(['node', harness, ROOT, neuter, BRANCH_JS],
                               capture_output=True, text=True, timeout=60)
     finally:
         try:

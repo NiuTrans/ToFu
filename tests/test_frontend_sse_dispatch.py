@@ -82,6 +82,8 @@ for (const n of ['twUpdate','twStart','twStop','finishStream','renderChat',
 win._streamingBubbleHTML = global._streamingBubbleHTML = () => '<div id="streaming-msg"></div>';
 win._TOFU_PLANNER_SVG = global._TOFU_PLANNER_SVG = '<svg></svg>';
 win.renderMarkdown = global.renderMarkdown = (s) => s;
+win._maskVuMachineTokens = global._maskVuMachineTokens = (s) =>
+  String(s || '').replace(/\[(?:VU|PROGRESS):[^\]]*\]/gi, '').trim();
 // i18n: the real t(key, params) interpolates; the harness only needs a
 // deterministic non-crashing string. Handlers like _handleMessagesSnapshot
 // call t('stream.roundMessages', {round,n}) — without this stub the whole
@@ -156,6 +158,7 @@ win._spliceInjectRow = global._spliceInjectRow = (arr, row, anchorLlmRound) => {
 // COLD/POLL routing calls projectColdSnapshot — so the harness must eval it
 // first too, or dispatch throws ReferenceError: projectColdSnapshot.
 eval(fs.readFileSync(process.argv[9], 'utf8'));  // ui/stream_reducer.js
+eval(fs.readFileSync(process.argv[10], 'utf8')); // ui/endpoint_turn_projection.js
 // Load the extracted property-only handlers FIRST (in production they're
 // concatenated into the bundle before sse_pipeline.js and share window scope).
 eval(fs.readFileSync(process.argv[4], 'utf8'));  // ui/sse_handlers_tool.js
@@ -191,6 +194,19 @@ function setup() {
   return { conv, am, ctx };
 }
 function line(obj) { return 'data: ' + JSON.stringify(obj); }
+
+// ── 0. an early push placeholder may be re-stamped after this dispatcher
+//        has pinned its temporary id. Follow the canonical id on the same live
+//        conversation message so subsequent deltas remain visible. ──
+{
+  const { conv, am, ctx } = setup();
+  check('restamp_setup_pins_temporary_id', ctx.pinnedMsgId === 'mid-worker');
+  am._msgId = 'mid-canonical';
+  T.dispatchSSEEvent(line({ type: 'delta', content: 'visible partial' }), ctx);
+  check('restamp_follows_canonical_id', ctx.pinnedMsgId === 'mid-canonical');
+  check('restamp_keeps_live_message_ref', ctx.assistantMsg === conv.messages[1]);
+  check('restamp_delta_remains_visible', conv.messages[1].content === 'visible partial');
+}
 
 // ── 1. delta accumulates into assistantMsg (doc SSOT); phase → session ──
 {
@@ -271,6 +287,25 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
   check('stale_state_returns_false', ret === false);
   check('stale_state_no_mutation', conv.messages.length === before &&
     ctx.assistantMsg.content === '');
+}
+
+// ── 6b. A delayed state snapshot from an older content generation may
+//          contribute sidecars, but must not resurrect reset prose or roll the
+//          generation backward. A newer generation still authorizes shrink. ──
+{
+  const { ctx } = setup();
+  ctx.assistantMsg.content = 'new generation text';
+  ctx.assistantMsg.thinking = 'new generation thinking';
+  ctx.assistantMsg._contentEpoch = 3;
+  T.dispatchSSEEvent(line({ type: 'state', content: 'old narration',
+    thinking: 'old thinking', contentEpoch: 2, endpointMode: false }), ctx);
+  check('stale_state_keeps_content', ctx.assistantMsg.content === 'new generation text');
+  check('stale_state_keeps_thinking', ctx.assistantMsg.thinking === 'new generation thinking');
+  check('stale_state_keeps_epoch', ctx.assistantMsg._contentEpoch === 3);
+  T.dispatchSSEEvent(line({ type: 'state', content: '', thinking: '',
+    contentEpoch: 4, endpointMode: false }), ctx);
+  check('newer_state_authorizes_shrink', ctx.assistantMsg.content === '' &&
+    ctx.assistantMsg.thinking === '' && ctx.assistantMsg._contentEpoch === 4);
 }
 
 // ── 7. endpoint_critic_msg finalizes critic + sets approval + KEEPS thinking ──
@@ -794,6 +829,59 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
     (am.toolRounds || []).some(x => x.status === 'searching'));
 }
 
+// ── 32. Flow-Autopilot projection: endpoint transport must preserve VU
+//        identity live, on reconnect, and at terminal-placeholder cleanup. ──
+{
+  const { conv, ctx } = setup();
+  T.dispatchSSEEvent(line({ type: 'endpoint_iteration', phase: 'reviewing',
+    iteration: 1, flowProjection: 'autopilot', turnRole: 'virtual_user',
+    emits: 'user', vuMsgId: 'vu-live-1', autopilotRunId: 'run-live-1' }), ctx);
+  const vu = conv.messages.find(m => m._msgId === 'vu-live-1');
+  check('flow_vu_live_uses_virtual_user_lane', !!vu && vu._isVirtualUser === true
+    && !vu._isEndpointReview && vu._autopilotRunId === 'run-live-1');
+  check('flow_vu_live_ctx_targets_vu', ctx.epCriticPhase === true
+    && ctx.epCriticMsg === vu);
+  T.dispatchSSEEvent(line({ type: 'delta', turnRole: 'virtual_user',
+    content: '[PROGRESS: resolved=1 remaining=2] Keep going' }), ctx);
+  check('flow_vu_live_masks_machine_tokens', vu.content === 'Keep going');
+  T.dispatchSSEEvent(line({ type: 'endpoint_critic_msg', iteration: 1,
+    flowProjection: 'autopilot', turnRole: 'virtual_user', emits: 'user',
+    vuMsgId: 'vu-live-1', content: 'Keep going', next_phase: 'worker' }), ctx);
+  check('flow_vu_finalize_keeps_vu_not_critic', vu._isVirtualUser === true
+    && !vu._isEndpointReview && vu._epNextPhase === undefined);
+}
+{
+  const { conv, ctx } = setup();
+  const before = conv.messages.length;
+  T.dispatchSSEEvent(line({ type: 'endpoint_iteration', phase: 'reviewing',
+    iteration: 1, flowProjection: 'autopilot', turnRole: 'virtual_user',
+    emits: 'user', vuMsgId: 'vu-terminal', autopilotRunId: 'run-terminal' }), ctx);
+  check('flow_vu_terminal_placeholder_created',
+    conv.messages.some(m => m._msgId === 'vu-terminal'));
+  T.dispatchSSEEvent(line({ type: 'endpoint_critic_msg', iteration: 1,
+    flowProjection: 'autopilot', turnRole: 'virtual_user', emits: 'user',
+    vuMsgId: 'vu-terminal', content: '', next_phase: 'stop', discard: true }), ctx);
+  check('flow_vu_terminal_placeholder_discarded', conv.messages.length === before
+    && !conv.messages.some(m => m._msgId === 'vu-terminal')
+    && ctx.epCriticMsg === null && ctx.epCriticPhase === false);
+}
+{
+  const { conv, ctx } = setup();
+  T.dispatchSSEEvent(line({ type: 'state', status: 'running',
+    endpointMode: true, flowMode: true, flowProjection: 'autopilot',
+    endpointPhase: 'reviewing', endpointIteration: 2,
+    turnRole: 'virtual_user', emits: 'user', vuMsgId: 'vu-reconnect',
+    autopilotRunId: 'run-reconnect',
+    endpointTurns: [{ role: 'assistant', content: 'work', _epIteration: 2,
+      _msgId: 'worker-reconnect' }],
+    content: '[PROGRESS: resolved=2 remaining=1] Continue' }), ctx);
+  const vu = conv.messages.find(m => m._msgId === 'vu-reconnect');
+  check('flow_vu_reconnect_restores_virtual_user_lane', !!vu
+    && vu._isVirtualUser === true && !vu._isEndpointReview
+    && vu._autopilotRunId === 'run-reconnect');
+  check('flow_vu_reconnect_masks_machine_tokens', vu && vu.content === 'Continue');
+}
+
 // ── 30. workspace_root_added: state parity — the handler refreshes
 //        projectState via Api.project.status(), mutates extraRoots, and
 //        persists the new root into conv.projectPaths (was toast-ONLY).
@@ -908,6 +996,7 @@ def _run_harness(sse_src_path: str, reducer_src_path: str | None = None) -> str:
              os.path.join(JS_DIR, 'ui', 'sse_handlers_misc.js'),   # argv[7]
              os.path.join(JS_DIR, 'ui', 'sse_handlers_lifecycle.js'),  # argv[8]
              reducer_src_path or os.path.join(JS_DIR, 'ui', 'stream_reducer.js'),  # argv[9]
+             os.path.join(JS_DIR, 'ui', 'endpoint_turn_projection.js'),  # argv[10]
              ],
             capture_output=True, text=True, timeout=60,
         )
@@ -998,7 +1087,8 @@ def test_nc_tool_handlers_route_through_reducer(tmp_path):
              os.path.join(JS_DIR, 'ui', 'sse_handlers_io.js'),
              os.path.join(JS_DIR, 'ui', 'sse_handlers_misc.js'),
              os.path.join(JS_DIR, 'ui', 'sse_handlers_lifecycle.js'),
-             str(nc_file)],
+             str(nc_file),
+             os.path.join(JS_DIR, 'ui', 'endpoint_turn_projection.js')],
             capture_output=True, text=True, timeout=60)
     finally:
         try:

@@ -1024,8 +1024,12 @@ class TestToolResultOrdering:
         """Empty messages list is handled gracefully."""
         from lib.tasks_pkg.cache_tracking import sort_tool_results
 
-        sort_tool_results([])
-        sort_tool_results([{'role': 'system', 'content': 'sys'}])
+        empty = []
+        system_only = [{'role': 'system', 'content': 'sys'}]
+        sort_tool_results(empty)
+        sort_tool_results(system_only)
+        assert empty == []
+        assert system_only == [{'role': 'system', 'content': 'sys'}]
 
     def test_tool_results_without_tool_call_id(self):
         """Tool results without tool_call_id sort by empty string."""
@@ -1064,10 +1068,11 @@ class TestCleanupCacheState:
         assert not any(k[0] == 'cleanup-1' for k in _cache_states)
 
     def test_cleanup_nonexistent_is_noop(self):
-        from lib.tasks_pkg.cache_tracking import cleanup_cache_state
+        from lib.tasks_pkg.cache_tracking import _cache_states, cleanup_cache_state
 
-        # Should not raise
+        before = dict(_cache_states)
         cleanup_cache_state('nonexistent-conv')
+        assert _cache_states == before
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1297,9 +1302,14 @@ class TestTaskIdPassthrough:
             'messages': [{'role': 'user', 'content': 'hi'}],
         }
         add_cache_breakpoints(body)
-        # For non-Claude, add_cache_breakpoints returns early — the key thing is
-        # it doesn't crash. _task_id is stripped later at the OpenAI
-        # serialization boundary in prepare_request.
+        # For non-Claude, add_cache_breakpoints returns early and leaves the
+        # body byte-for-byte unchanged. _task_id is stripped later at the
+        # OpenAI serialization boundary in prepare_request.
+        assert body == {
+            'model': 'gpt-4o',
+            '_task_id': 'task-123',
+            'messages': [{'role': 'user', 'content': 'hi'}],
+        }
 
     def test_task_id_survives_add_cache_breakpoints_for_claude(self):
         """_task_id must SURVIVE add_cache_breakpoints (read non-destructively).

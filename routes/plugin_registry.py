@@ -38,6 +38,8 @@ Design contract
 
 from __future__ import annotations
 
+import threading
+
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -50,11 +52,27 @@ _ENTRY_POINT_GROUP = 'tofu.blueprints'
 # ``register_all`` after all blueprints are mounted.
 _STARTUP_GROUP = 'tofu.startup'
 
+# Optional paired teardown hooks. A plugin that owns background workers should
+# publish ``hook(app)`` here and perform bounded, idempotent cleanup.
+_SHUTDOWN_GROUP = 'tofu.shutdown'
+
 # Entry-point group for plugin TaskRuntime instances, so the generic
 # /api/v1/tasks lifecycle endpoints can discover a plugin's background-task
 # kinds (e.g. trading-sim) without core naming them. Each loads to a callable
 # returning a TaskRuntime or a list of them.
 _TASK_RUNTIME_GROUP = 'tofu.task_runtimes'
+
+# ``importlib.metadata.entry_points()`` scans every installed distribution.
+# On the production environment this costs ~0.18 s even after warm-up and the
+# generic ``GET /api/v1/tasks`` path called it on EVERY request.  Plugins cannot
+# appear inside a running Python process (installation already requires a
+# server restart), so resolve task runtimes once per entry_points loader.
+# Keying the cache by the loader object also keeps monkeypatched tests and
+# embedders honest: replacing importlib.metadata.entry_points automatically
+# forces a fresh discovery rather than returning a stale test fixture.
+_TASK_RUNTIME_CACHE: tuple | None = None
+_TASK_RUNTIME_CACHE_LOADER = None
+_TASK_RUNTIME_CACHE_LOCK = threading.RLock()
 
 
 def discover_blueprint_plugins() -> list:
@@ -143,6 +161,39 @@ def run_startup_hooks(app) -> int:
     return ran
 
 
+def run_shutdown_hooks(app) -> int:
+    """Run fail-soft plugin teardown hooks during Quart's shutdown lifespan."""
+    ran = 0
+    try:
+        from importlib.metadata import entry_points
+    except Exception as e:  # pragma: no cover
+        logger.debug('[BlueprintRegistry] importlib.metadata unavailable: %s', e)
+        return 0
+    try:
+        eps = entry_points(group=_SHUTDOWN_GROUP)
+    except TypeError as exc:
+        logger.debug(
+            '[BlueprintRegistry] using legacy shutdown entry_points API: %s',
+            exc)
+        eps = entry_points().get(_SHUTDOWN_GROUP, [])  # type: ignore[attr-defined]
+    except Exception as e:
+        logger.debug('[BlueprintRegistry] shutdown entry_points lookup failed: %s', e)
+        return 0
+    for ep in eps:
+        name = getattr(ep, 'name', '?')
+        try:
+            hook = ep.load()
+            hook(app)
+            ran += 1
+            logger.info(
+                '[BlueprintRegistry] ran shutdown hook from plugin %r', name)
+        except Exception as e:
+            logger.warning(
+                '[BlueprintRegistry] shutdown hook %r failed: %s',
+                name, e, exc_info=True)
+    return ran
+
+
 def discover_task_runtime_plugins() -> list:
     """Load plugin ``TaskRuntime`` instances from ``tofu.task_runtimes``.
 
@@ -165,30 +216,41 @@ def discover_task_runtime_plugins() -> list:
     except Exception as e:  # pragma: no cover
         logger.debug('[BlueprintRegistry] importlib.metadata unavailable: %s', e)
         return runtimes
-    try:
-        eps = entry_points(group=_TASK_RUNTIME_GROUP)
-    except TypeError:
-        eps = entry_points().get(_TASK_RUNTIME_GROUP, [])  # type: ignore[attr-defined]
-    except Exception as e:
-        logger.debug('[BlueprintRegistry] task-runtime entry_points lookup failed: %s', e)
-        return runtimes
-    for ep in eps:
-        name = getattr(ep, 'name', '?')
+    global _TASK_RUNTIME_CACHE, _TASK_RUNTIME_CACHE_LOADER
+    with _TASK_RUNTIME_CACHE_LOCK:
+        if (_TASK_RUNTIME_CACHE is not None
+                and _TASK_RUNTIME_CACHE_LOADER is entry_points):
+            # Never expose the cached list itself: callers historically owned
+            # and could mutate their result without poisoning later requests.
+            return list(_TASK_RUNTIME_CACHE)
         try:
-            fn = ep.load()
-            result = fn()
-            if result is None:
-                continue
-            if isinstance(result, (list, tuple)):
-                runtimes.extend(result)
-            else:
-                runtimes.append(result)
-            logger.info('[BlueprintRegistry] loaded task runtime(s) from plugin %r', name)
+            eps = entry_points(group=_TASK_RUNTIME_GROUP)
+        except TypeError:
+            eps = entry_points().get(_TASK_RUNTIME_GROUP, [])  # type: ignore[attr-defined]
         except Exception as e:
-            logger.warning('[BlueprintRegistry] task-runtime plugin %r failed: %s',
-                           name, e, exc_info=True)
-    return runtimes
+            logger.debug('[BlueprintRegistry] task-runtime entry_points lookup failed: %s', e)
+            return runtimes
+        for ep in eps:
+            name = getattr(ep, 'name', '?')
+            try:
+                fn = ep.load()
+                result = fn()
+                if result is None:
+                    continue
+                if isinstance(result, (list, tuple)):
+                    runtimes.extend(result)
+                else:
+                    runtimes.append(result)
+                logger.info('[BlueprintRegistry] loaded task runtime(s) from plugin %r', name)
+            except Exception as e:
+                logger.warning('[BlueprintRegistry] task-runtime plugin %r failed: %s',
+                               name, e, exc_info=True)
+        _TASK_RUNTIME_CACHE = tuple(runtimes)
+        _TASK_RUNTIME_CACHE_LOADER = entry_points
+        return list(_TASK_RUNTIME_CACHE)
 
 
-__all__ = ['discover_blueprint_plugins', 'run_startup_hooks',
-           'discover_task_runtime_plugins']
+__all__ = [
+    'discover_blueprint_plugins', 'run_shutdown_hooks', 'run_startup_hooks',
+    'discover_task_runtime_plugins',
+]

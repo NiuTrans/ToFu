@@ -59,11 +59,14 @@ import sys
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+CONVERSATIONS_JS = runtime_section_path('core/conversations.js')
+VERIFY_RETRY_JS = runtime_section_path('core/conv_verify_retry.js')
 
 
 def _node_available() -> bool:
@@ -281,7 +284,7 @@ def _assert_all_pass(output: str):
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_verify_failure_restores_and_reheals():
-    conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
+    conv_js = CONVERSATIONS_JS
     proc = _run(conv_js)
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
@@ -302,7 +305,7 @@ def test_NC_needsLoad_restore_is_load_bearing(tmp_path):
     restorations on a COPY → check A FAILS (the unverified copy would be
     early-returned by every later open — the original sticky-stale bug).
     Real file untouched."""
-    conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
+    conv_js = CONVERSATIONS_JS
     with open(conv_js, encoding='utf-8') as f:
         src = f.read()
 
@@ -335,7 +338,7 @@ def test_NC_self_heal_scheduler_is_load_bearing(tmp_path):
     NOTE: the scheduler moved OUT of conversations.js in slice 11
     (pt_3879f00e sub-part 2) into core/conv_verify_retry.js — the neuter
     targets THAT file and the harness override swaps it in."""
-    sched_js = os.path.join(JS_DIR, 'core', 'conv_verify_retry.js')
+    sched_js = VERIFY_RETRY_JS
     with open(sched_js, encoding='utf-8') as f:
         src = f.read()
 
@@ -351,7 +354,7 @@ def test_NC_self_heal_scheduler_is_load_bearing(tmp_path):
     copy.write_text(neutered, encoding='utf-8')
 
     # Override the scheduler leaf, not conversations.js.
-    proc = _run(os.path.join(JS_DIR, 'core', 'conversations.js'),
+    proc = _run(CONVERSATIONS_JS,
                 override_extra={'core/conv_verify_retry.js': str(copy)})
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'

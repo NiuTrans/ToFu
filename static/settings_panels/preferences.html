@@ -1,29 +1,44 @@
         <div class="settings-tab-panel" id="settingsTab_preferences">
-          <div class="settings-section-title" data-i18n="prefsPanel.title">个人偏好档案</div>
-          <p class="settings-desc" data-i18n="prefsPanel.intro">
-            这是助手长期记住的关于你、以及「你希望它如何工作」的信息（语言、语气、编码习惯、禁忌，以及你的角色、技术栈等）。它会在每次对话中自动注入，跨项目生效。助手会在对话中自动学习并更新这些条目，你可以随时在此修改或删除。
-          </p>
+          <section class="ctx-hero" aria-labelledby="ctxPageTitle">
+            <div class="ctx-hero-copy">
+              <div class="ctx-eyebrow" data-i18n="context.eyebrow">PERSONAL CONTEXT</div>
+              <div class="settings-section-title ctx-title" id="ctxPageTitle" data-i18n="context.title">我的上下文</div>
+              <p class="ctx-intro" data-i18n="context.intro">这些信息会在每次对话中直接提供给助手，让它了解你的背景、遵循你的工作规则，并按你喜欢的方式回答。</p>
+            </div>
+            <div class="ctx-always-on">
+              <span class="ctx-live-dot" aria-hidden="true"></span>
+              <span data-i18n="context.alwaysOn">每轮对话都会生效</span>
+            </div>
+          </section>
 
-          <!-- Per-item editable preference list, grouped by section -->
-          <div id="prefsList" class="prefs-list"></div>
-
-          <div class="settings-row" style="justify-content:space-between;align-items:center;margin-top:14px;">
-            <span id="prefsCharCount" class="stg-badge" style="font-size:11px;">0 / 2500</span>
-            <div style="display:flex;gap:8px;">
-              <button class="btn btn-secondary btn-sm" onclick="refreshPreferences()" data-i18n="prefsPanel.reload">重新加载</button>
-              <button class="btn btn-primary btn-sm" onclick="savePreferences(this)" data-i18n="prefsPanel.save">保存</button>
+          <div class="ctx-toolbar">
+            <div class="ctx-capacity">
+              <span data-i18n="context.capacity">上下文容量</span>
+              <span id="prefsCharCount" class="ctx-capacity-count">0 / 2500</span>
+              <span class="ctx-capacity-track" aria-hidden="true"><span id="ctxCapacityFill"></span></span>
+            </div>
+            <div class="ctx-toolbar-actions">
+              <span id="ctxDirtyState" class="ctx-dirty-state" aria-live="polite"></span>
+              <button class="btn btn-secondary btn-sm" data-tofu-action="refreshPreferences()" data-i18n="context.reload">重新加载</button>
+              <button class="btn btn-primary btn-sm" id="ctxSaveBtn" data-tofu-action="savePreferences(this)" data-i18n="context.save">保存更改</button>
             </div>
           </div>
-          <div id="prefsStatus" class="settings-desc" style="font-size:12px;margin-top:6px;"></div>
 
-          <!-- ═══ Memories section (unified into this tab) ═══ -->
-          <div class="settings-section-divider"></div>
-          <div class="settings-row" style="justify-content:space-between;align-items:center;">
-            <div class="settings-section-title" data-i18n="memPrefs.memTitle">积累的记忆</div>
-            <button class="btn btn-secondary btn-sm" onclick="openMemoryModal()" data-i18n="memPrefs.manageAll">管理全部</button>
-          </div>
-          <p class="settings-desc" data-i18n="memPrefs.memIntro">
-            助手在对话中自动沉淀的经验与教训（项目约定、踩过的坑、工作流）。会按相关性在对话中检索注入。点击「管理全部」可新建、导入或拖入技能包。
-          </p>
-          <div id="prefsMemoryList" class="memory-list memory-list-embedded"></div>
+          <div id="prefsStatus" class="ctx-status" role="status" aria-live="polite"></div>
+          <div id="prefsList" class="ctx-groups" aria-busy="true"></div>
+
+          <section class="ctx-memory-zone" aria-labelledby="ctxMemoryTitle">
+            <div class="ctx-memory-head">
+              <div>
+                <div class="ctx-eyebrow" data-i18n="context.memoryEyebrow">RELEVANT WHEN NEEDED</div>
+                <div class="settings-section-title ctx-memory-title" id="ctxMemoryTitle" data-i18n="context.memoryTitle">经验记忆</div>
+                <p class="ctx-memory-intro" data-i18n="context.memoryIntro">这里仅保存经过验证、未来可复用的项目约定、故障模式和工具经验。它们不会每轮注入，只会在相关时召回。</p>
+              </div>
+              <div class="ctx-memory-actions">
+                <button class="btn btn-secondary btn-sm" data-tofu-action="clearLegacyMemories(this)" data-i18n="context.clearMemories">清空旧记忆</button>
+                <button class="btn btn-secondary btn-sm" data-tofu-action="openMemoryModal()" data-i18n="context.manageMemories">管理全部</button>
+              </div>
+            </div>
+            <div id="prefsMemoryList" class="memory-list memory-list-embedded"></div>
+          </section>
         </div>

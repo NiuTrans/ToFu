@@ -50,11 +50,13 @@ from .credentials import api_v1_credentials_bp
 from .memory import api_v1_memory_bp
 from .skills import api_v1_skills_bp
 from .tools import api_v1_tools_bp
+from .knowledge import api_v1_knowledge_bp
 from .mcp import api_v1_mcp_bp
 from .daily_report import api_v1_daily_report_bp
 from .oauth import api_v1_oauth_bp
 from .adapter import api_v1_adapter_bp
 from .project import api_v1_project_bp
+from .integration import api_v1_integration_bp
 from .translate import api_v1_translate_bp
 from .artifacts import api_v1_artifacts_bp
 from .paper import api_v1_paper_bp
@@ -101,11 +103,13 @@ ALL_V1_BLUEPRINTS = [
     api_v1_memory_bp,
     api_v1_skills_bp,
     api_v1_tools_bp,
+    api_v1_knowledge_bp,
     api_v1_mcp_bp,
     api_v1_daily_report_bp,
     api_v1_oauth_bp,
     api_v1_adapter_bp,
     api_v1_project_bp,
+    api_v1_integration_bp,
     api_v1_translate_bp,
     api_v1_artifacts_bp,
     api_v1_paper_bp,

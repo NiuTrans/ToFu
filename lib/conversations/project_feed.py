@@ -39,11 +39,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-import threading
 import time
 import uuid
 
-from lib.database import DOMAIN_CHAT, get_thread_db
+from lib.database import (
+    DOMAIN_CHAT,
+    allocate_scoped_sequence,
+    get_thread_db,
+    write_transaction,
+)
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -84,11 +88,6 @@ _SUMMARY_MAX_CHARS = 280
 # title + a "Completed: …" prefix + a reason) so realistic feed summaries are
 # kept verbatim, while a pathological multi-KB summary can't bloat every row.
 _SUMMARY_FULL_MAX_CHARS = 4000
-
-# Serializes the read-max-then-insert of the per-project monotonic seq so two
-# concurrent emitters for the SAME project can't mint the same (path, seq) PK.
-# Guards ONLY the DB write — holds no project identity.
-_project_events_lock = threading.Lock()
 
 # PushHub channel for the project pulse (sibling of paper/translate/notify/chat).
 PROJECT_CHANNEL = 'project'
@@ -187,12 +186,10 @@ def emit_project_event(project_path: str, conv_id: str, kind: str,
         payload = {}
 
     try:
-        with _project_events_lock:
-            db = get_thread_db(DOMAIN_CHAT)
-            row = db.execute(
-                'SELECT COALESCE(MAX(seq), 0) AS m FROM project_events '
-                'WHERE project_path=?', (project_path,)).fetchone()
-            seq = (row['m'] if row and row['m'] is not None else 0) + 1
+        db = get_thread_db(DOMAIN_CHAT)
+        with write_transaction(db, label='project-feed-append'):
+            seq = allocate_scoped_sequence(
+                db, 'project_events', project_path)
             db.execute(
                 'INSERT INTO project_events '
                 '(project_path, seq, event_id, conv_id, task_id, kind, title, '
@@ -208,7 +205,6 @@ def emit_project_event(project_path: str, conv_id: str, kind: str,
                     'DELETE FROM project_events '
                     'WHERE project_path=? AND seq <= ?',
                     (project_path, seq - _PROJECT_EVENTS_KEEP))
-            db.commit()
     except Exception as e:
         logger.warning('[ProjFeed] emit failed kind=%s conv=%s: %s',
                        kind, (conv_id or '')[:8], e)

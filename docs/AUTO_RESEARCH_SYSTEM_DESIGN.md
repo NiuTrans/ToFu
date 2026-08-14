@@ -1,8 +1,9 @@
 # Tofu 自动科研系统设计稿(Auto-Research System)——「一句话方向 → 可投稿的论文雏形」
 
-> 状态:**R1–R4 已落地,R5–R7 仍为设计稿**。2026-07-26 落笔,2026-07-27 更新实施进度。
+> 状态:**R1–R4 已落地,R5–R7 仍为设计稿**。2026-07-26 落笔,2026-08-10 更新真实运行审计。
 > 已落地范围见 §6 表格的 ✅ 行;**「已落地」= 代码 + 单测 + 可达性接缝测试全绿**,
-> **不等于**「已用真实 LLM 跑通一次端到端」——后者尚未做,见 §6 末尾的诚实备注。
+> **不等于**「产出质量已经稳定」——真实跑已暴露过整批结构闸误杀、并发重复启动与 corpus
+> folder 漂移,见 §6 末尾的诚实备注。
 > 作者视角:在完整盘点现有底盘后写成 —— 本稿的第一原则是**组合已有件,不造新轮子**。
 > 前置阅读:`docs/PRODUCTION_PIPELINE_DESIGN.md`(产出底盘/配方/知识包三层模型)、
 > `lib/paper/` 现有引擎(report / recommend / insight / citation_audit / terminology_audit)。
@@ -49,7 +50,7 @@
 |---|---|---|---|
 | 长任务生命周期 | `ProductionRuntime` + `stages.py` + `jobs.py` | `lib/production/` | 新配方 runtime 层实测 ~8 行;阶段图崩溃续跑是**正确性契约** |
 | 配方骨架范本 | 长报告配方(512 行,阶段列表数据驱动) | `lib/longform/recipe.py` | 直接照抄结构:`research → outline → sections×N → assemble` |
-| 联网调研 + 接地 | `run_agent_loop` + `_REPORT_TOOLS`(多查询 web_search + fetch_url)+ `_execute_report_tool` | `lib/paper/report_engine`、`lib/agent_loop.py` | 相关工作详查的**发现引擎原样可用**,14 轮有界 |
+| 联网调研 + 接地 | `run_agent_loop` + `_REPORT_TOOLS`(多查询 web_search + fetch_url)+ `_execute_report_tool` | `lib/paper/report_engine`、`lib/agent_loop.py` | 相关工作详查的**发现引擎原样可用**;研究调用方用 token 包络 + 重复工具模式强制收束,不改全局 Agent loop |
 | 描述 → 真实 arXiv 论文 | `recommend_papers` / `iter_recommend_events` + **anti-hallucination grounding** | `lib/paper/recommend_engine/` | 每个候选必须经 `search_arxiv`/`fetch_arxiv_title` 接地才surface —— 防幻觉引用的现成闸 |
 | 论文内容哈希 + 去重 | `_paper_hash` / `resolve_paper_hash` | `lib/paper/hashing.py` | `phash` 是全库唯一寻址键 |
 | parse-once 缓存三件套 | `paper_library`(parsed_text/images)+ `PAPER_IMG_DIR/<phash>/manifest.json` + `paper_reports(phash,lang)` | `lib/paper/library.py`、`lib/paper/images/` | 命中即跳过重解析(manifest 版本匹配) |
@@ -161,9 +162,10 @@
 不会把陈旧文本冻结一辈子;②markdown 管线不可用时的 raw 降级写入,版本戳与期望不同 → **永远不算
 markdown 语料命中**,下次 harvest 自动重解析自愈;③契约前写入的存量行 `parser_version=''` → 按构造
 miss → 下次触碰即自愈,**无需任何回填脚本**。降级写入同时是**响的**:ERROR 日志 + `audit_log` +
-`HarvestResult.degraded` + 批次计数,而不是埋进一行 warning。教训来源:本机 PyMuPDF 1.24.1 缺
-`pymupdf` 模块名导致 `pymupdf4llm` ImportError,解析静默降级为无结构裸文本(实测 39,607 字符、
-0 个 markdown 表行),而非空 `parsed_text` 又是无条件命中 —— 若无版本键,整个语料库会被永久污染。
+`HarvestResult.degraded` + 批次计数,而不是埋进一行 warning。安装器现把 PyMuPDF 三件套精确锁到
+同一版本,并运行 `scripts/verify_pdf_stack.py` 的真实 Markdown smoke,不会再把「包名存在」误当成
+「解析栈可用」。教训来源:旧环境的模块名/版本分裂曾令 `pymupdf4llm` 静默降级为无结构裸文本,
+而非空 `parsed_text` 又被无条件命中 —— 若无版本键,整个语料库会被永久污染。
 
 **类比**:建自己的「文献仓库」而不是每次读论文都从头翻 PDF —— 仓库里已经上架的书,再借不要钱。
 
@@ -487,7 +489,7 @@ R3 判新颖性时不能全信。
 | 通用任务端点 `/api/v1/tasks/*` | 零自建 poll/abort 路由(发现制已就绪) |
 | 进度双投影 | 气泡内联生产卡(当前阶段中文名/第几篇/已生成图缩略图/中止)+ 面板;抄 `code_exec.py` 的 `_partialOutput` 断线重放 |
 | 入口工具 | 一个语义明确的 `produce_research(direction=, venue=, lang=)`,门槛低到模型在完整 schema 上自然选中(照抄 `produce_video`) |
-| 知识包(技能商店) | 一个 `research-director` 包承载:各会议风格、图表美学规范、「什么是好 idea」的判据 —— 由阶段 4/6 的子 agent 按需 `activate_skill` |
+| 知识包(技能商店) | 一个 `research-director` 包承载:各会议风格、图表美学规范、「什么是好 idea」的判据 —— 由阶段 4/6 的子 agent 按需 `load_skill` |
 
 **净增代码估算(按长报告配方 512 行的先例)**:配方业务 ~700–1000 行(七阶段比长报告的四阶段重)+
 两个新原语(批量入库 ~150 行、新颖性闸 ~200 行,后者大量复用 insight rubric)+ runtime/入口 ~120 行。
@@ -530,23 +532,51 @@ report 的 upsert 写路径、PG/SQLite 桥、缓存读 —— **一行新 schem
 早做早验证「这系统到底会不会造缝合怪」;后半段(figures/typeset)重工具、依赖前半段产物,靠后。
 discover 放最后是因为它最"锦上添花"—— 没有它用户手动给方向也能跑,有了它才「一句话出片」。
 
-### R1–R4 落地后的诚实备注(别把绿测试读成「能用」)
+### R1–R4 落地后的诚实备注(别把绿测试读成「稳定且有价值」)
 
 **已证实的**:四阶段的代码路径、零 LLM 闸、schema 契约、崩溃续跑钩子均有单测覆盖(35 个用例);
 `produce_research` 的**四道可达性接缝**(工具 schema 进装配列表 / dispatch handler 已注册 / runtime 被
 通用任务端点发现 / 启动时调用崩溃续跑)各有一道守卫,且 **4 道均经 NEUTER 验证会真红**。
 
-**尚未证实的(下一步的真正门槛)**:
-- **未用真实 LLM + 真实网络跑通一次完整四阶段**。现有测试均为 stub/录回,证明的是「管道接对」而非
-  「产出质量」。尤其 R3 的核心主张——「反 A+B 闸真能淘汰缝合怪」——只在**构造的**缝合怪样本上
-  验证过,未在真实模型输出上验证。
+**真实运行审计(2026-08-10 回看 `data/research/jobs/`)**:
+- 同一方向留下 4 个 job:3 个 `error`,1 个 `done`;唯一完成的 run 读了 20 篇论文、产出一份可读综述,
+  但 6/6 idea 因 `kind` 大小写/同义词被结构闸误杀,昂贵的新颖性检索与 rubric 根本没跑。
+  所以该次 `done` **不能算有价值 insight 的成功样本**。后续已加入 kind 归一化和
+  `gate_reached/degraded` 双轴,结构闸全灭不再伪装成 clean success。
+- 4 个同方向 job 暴露了 dedup 的 check→create 竞态;共享论文又只有一个可变 `folder_id`,导致同一 corpus
+  的行被并发 job 分散到不同 folder,完成 run 明明读过的证据却被降成 `grounded/low_confidence`。
+  现已把 ProductionRuntime 的研究启动改为原子 claim,且 survey 以**实际加载的 arxiv id 集**作为
+  library-grade 证据,不再把可变 folder 当 provenance。
+- 旧产物没有逐调用 usage,无法回答「token 花在哪」;现 survey 全轮 + ideate 生成 + 每个 rubric 调用均走
+  `lib.cost` 统一计价并分阶段持久化/展示。Agent 工具事件也复用 Reading Mode 的统一时间线。
+
+**仍未证实的(下一步的真正门槛)**:
+- **修复后首个受约束真跑(2026-08-10)**已完整通过 harvest→survey→ideate:6 篇 corpus、3 个 gap、
+  2 个候选 idea;2/2 均在 rubric 以 3.0/5 淘汰,最终 0 个 accepted。全程 4 次 LLM 调用、
+  20,141 token、约 ¥0.0431;survey 14,456 token,ideate(含两个逐 idea judge)5,685 token,
+  未触发 100k/80k token 包络或重复工具收束。这证明链路、真实计量、引用前缀归一化与质量闸工作,
+  **不证明模型能持续产出好 idea**;零通过比把平庸候选包装成 insight 更诚实。
+- 人工 usefulness handoff 已替换为生产第四阶段 `evaluate`:默认两位独立、temperature=0 的 LLM
+  按固定八轴 rubric 复评,二元结论分裂或任一轴相差 ≥1.5 时才请第三位;逐轴取中位数并把 judge 原始
+  判词、用量、成本和机制修改建议一起持久化。首次旧产物复评为 4.22/5,两票一致“不值得继续”,
+  其中 `idea_mechanism_depth=2.75`;两位均指出候选只是反应式指标/防御 wrapper。把生成契约改为
+  `failure_cause → new_invariant → intervention_level` 后同题对照由 0/2 通过提升至 1/4,
+  机理深度中位数升至 3.50,三位 judge 以 2:1 判定值得跟进。第二轮同时暴露空 method matrix 与
+  语料外机制锚点,因此 survey 现要求 ≥80% 论文进入比较矩阵,ideate 要求每个 idea 用
+  `corpus_anchor_id/corpus_delta` 锚定 linked gap 的库内证据。
+- 同一次真跑曾有 2 篇 PDF 的页眉推断异常令整篇退化。根因不是没安装:三件套均为 1.27.2.3;
+  实际缺陷是逐页调用每次重扫全篇页眉(O(N²))、单页异常拖垮整篇,以及 `lines` 表格策略把一页
+  6,070 字符放大到 250,662 字符。现页眉只推断一次、异常只降级单页、策略改为 `lines_strict`,
+  并加 32k/8× 页面膨胀熔断。两篇原失败样本复测均走完整 `pymupdf4llm`(77,332 / 184,442
+  字符,17.82s / 135.20s),无 raw/partial 降级。
 - **`IDEATE_GATE_THRESHOLD = 4.0` 是拍的,不是校准的**。需要一批真实跑出的 idea + 淘汰留档数据
   才能定它(设计已把它做成单个常量就是为了这一天)。
 - **v2 修订的三档接地与 `low_confidence` 传导**已实现并有单测,但它本身是一次真跑暴露的问题的
   修补——下一次真跑很可能暴露下一个。**真跑是唯一能发现这类问题的手段。**
 
-**所以 R5 之前应先做一次真实端到端跑**(一个真方向、真爬论文、真 LLM),拿真数据回答:闸的严格度
-对不对、成本多少、idea 能不能看。否则 R5/R6 是在一个未验证的地基上加盖。
+**所以 R5 之前应再做一批可复现的真实端到端基准跑**(固定方向/种子/模型,记录 token、成本、闸深度、
+双 LLM judge usefulness verdict,有实质分歧时第三位裁决),拿真数据回答:闸的严格度对不对、成本多少、idea 能不能看。一次偶然成功也不足
+以证明稳定;否则 R5/R6 仍是在未验证的地基上加盖。
 
 ---
 

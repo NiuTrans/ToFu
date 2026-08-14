@@ -26,7 +26,8 @@ IGNORE_DIRS = {
     #   here ensures the same exclusion via rg's `-g '!dir/'` AND grep's
     #   `--exclude-dir` paths in _build_rg_cmd / _build_grep_cmd.
     'logs', 'data', '.project_sessions', 'swebench_workdir',
-    'abtest_workdir', 'overleaf_cache', '.ruff_cache',
+    'abtest_workdir', '.eval-runs', 'eval-runs', 'evaluation_results',
+    'sb-cli-reports', 'jobs', 'trials', 'overleaf_cache', '.ruff_cache',
     'uploads', '.migrate_backup',
 }
 
@@ -831,10 +832,9 @@ def save_recent_project(path):
 
 def clear_recent_projects():
     """Delete all recent project entries."""
-    from lib.database import DOMAIN_SYSTEM, get_db
+    from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, get_db
     db = get_db(DOMAIN_SYSTEM)
-    db.execute('DELETE FROM recent_projects')
-    db.commit()
+    db_execute_with_retry(db, 'DELETE FROM recent_projects')
 
 
 # ═══════════════════════════════════════════════════════

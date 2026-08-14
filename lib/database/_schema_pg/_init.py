@@ -18,7 +18,10 @@ from lib.database._schema_pg._selfheal import (
     _missing_core_tables,
     _missing_critical_columns,
 )
-from lib.database._schema_pg._chat import _init_chat_schema
+from lib.database._schema_pg._chat import (
+    _apply_chat_runtime_tuning,
+    _init_chat_schema,
+)
 from lib.database._schema_pg._system import _init_system_schema
 
 logger = get_logger(__name__)
@@ -54,8 +57,16 @@ def init_db(_new_pg_connection, _STATEMENT_TIMEOUT_MS):
         #    fast-path so a converged DB still heals): re-key the paper
         #    identity fork — reports saved under hash(strip(text)) vs library
         #    hash(raw) (epic pt_c9a103fe). No-op once flagged in schema_meta.
-        from lib.paper.hash_backfill import backfill_paper_hash_canonical
-        backfill_paper_hash_canonical(conn)
+        # Dependency-light import: schema maintenance must not initialize the
+        # eager lib.paper → PDF/ONNX/LLM/swarm graph. Data repair is isolated
+        # from core DDL just like the SQLite twin.
+        try:
+            from lib.paper_hash_backfill import backfill_paper_hash_canonical
+            backfill_paper_hash_canonical(conn)
+        except Exception as e:
+            logger.error('[DB] paper hash backfill failed — schema init continues '
+                         '(the idempotent heal retries next boot): %s', e,
+                         exc_info=True)
 
         # ── Fast path: check if schema is already at current version AND
         #    the set of optional domains is unchanged. The domain set is part
@@ -76,6 +87,12 @@ def init_db(_new_pg_connection, _STATEMENT_TIMEOUT_MS):
                                '— forcing full DDL migration to converge',
                                _SCHEMA_VERSION, missing, missing_tables)
             else:
+                # Schema versioning deliberately skips full DDL, but mutable
+                # table storage parameters (autovacuum/statistics) must still
+                # converge on existing installations. This pass is a handful
+                # of metadata-only ALTERs and handles its own failure without
+                # making a performance knob an availability dependency.
+                _apply_chat_runtime_tuning(conn)
                 elapsed = time.monotonic() - t0
                 logger.info('[DB] Schema version %d + domains [%s] current — skipping '
                             'DDL (fast startup, checked in %.2fs)',

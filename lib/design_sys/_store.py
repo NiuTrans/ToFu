@@ -18,6 +18,7 @@ import hashlib
 import os
 import shutil
 
+from lib.json_store import write_bytes_atomic
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -73,10 +74,7 @@ def store_bytes(data: bytes, *, name: str, subdir: str = '',
     dest = os.path.join(dest_dir, f'{digest[:20]}{ext}')
     if os.path.isfile(dest) and os.path.getsize(dest) == len(data):
         return dest
-    tmp = dest + '.tmp'
-    with open(tmp, 'wb') as f:
-        f.write(data)
-    os.replace(tmp, dest)
+    write_bytes_atomic(dest, data)
     logger.info('[DesignStore] stored %s (%d bytes)', name, len(data))
     return dest
 

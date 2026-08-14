@@ -24,7 +24,7 @@ import threading
 from lib.log import get_logger
 
 from lib.pricing._peak import peak_multiplier
-from lib.pricing._tables import MODEL_PRICING
+from lib.pricing._tables import MODEL_PRICING, QWEN_PRICING_CNY
 
 logger = get_logger(__name__)
 
@@ -37,6 +37,117 @@ logger = get_logger(__name__)
 # Populated at server-config load time from each provider template's per-model `pricing` field.
 PROVIDER_PRICING = {}
 _provider_pricing_lock = threading.Lock()
+
+
+def _legacy_context_tiers(model_id):
+    """Translate the legacy QWEN_PRICING_CNY row into contextTiers.
+
+    This is an input compatibility seam only. Runtime arithmetic consumes the
+    unified rows and therefore can select exactly one tier from total prompt
+    tokens for every component.
+    """
+    row = QWEN_PRICING_CNY.get(model_id)
+    if not row and 'qwen' in (model_id or '').lower():
+        row = QWEN_PRICING_CNY.get('_default')
+    if not row:
+        return []
+    by_limit = {}
+    for side in ('input', 'output'):
+        for limit, price in row.get(side, ()):
+            by_limit.setdefault(int(limit), {})[side] = float(price)
+    tiers = []
+    last = {'input': 0.0, 'output': 0.0}
+    for index, limit in enumerate(sorted(by_limit)):
+        last.update(by_limit[limit])
+        tiers.append({
+            'id': f'ctx_{limit}', 'maxPromptTokens': limit,
+            'input': last['input'], 'output': last['output'],
+            'currency': 'CNY', 'cacheWriteMul': 1.0,
+            'cacheReadMul': 0.0, 'order': index,
+        })
+    return tiers
+
+
+def normalize_pricing(model_id, info):
+    """Return one canonical pricing row supporting flat or context tiers."""
+    row = dict(info or {})
+    tiers = row.get('contextTiers')
+    if not tiers:
+        tiers = _legacy_context_tiers(model_id)
+    normalized = []
+    for index, raw in enumerate(tiers or ()):
+        if not isinstance(raw, dict):
+            continue
+        limit = raw.get('maxPromptTokens', raw.get('threshold'))
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError) as exc:
+            logger.debug('[Pricing] ignoring invalid context tier model=%s '
+                         'index=%d limit=%r: %s',
+                         model_id, index, limit, exc)
+            continue
+        if limit <= 0:
+            continue
+        normalized.append({
+            'id': str(raw.get('id') or f'ctx_{limit}'),
+            'maxPromptTokens': limit,
+            'input': float(raw.get('input') or 0),
+            'output': float(raw.get('output') or 0),
+            'currency': str(raw.get('currency') or row.get('currency') or 'USD').upper(),
+            'cacheWriteMul': float(raw.get('cacheWriteMul', row.get('cacheWriteMul', 1.25))),
+            'cacheReadMul': float(raw.get('cacheReadMul', row.get('cacheReadMul', 0.10))),
+            'order': index,
+        })
+    if normalized:
+        normalized.sort(key=lambda tier: tier['maxPromptTokens'])
+        row['contextTiers'] = normalized
+    return row
+
+
+def _choose_context_tier(tiers, prompt_tokens):
+    if not tiers:
+        return None
+    prompt = max(0, int(prompt_tokens or 0))
+    for tier in tiers:
+        if prompt <= tier['maxPromptTokens']:
+            return dict(tier)
+    return dict(tiers[-1])
+
+
+def build_rate_card():
+    """Export the read-only rate card from the actual resolver tables."""
+    models = {}
+    for model_id in sorted(set(MODEL_PRICING) | set(QWEN_PRICING_CNY) - {'_default'}):
+        row = normalize_pricing(model_id, MODEL_PRICING.get(model_id))
+        if row.get('contextTiers'):
+            models[model_id] = {'name': row.get('name', model_id),
+                                'kind': 'tiered',
+                                'contextTiers': row['contextTiers']}
+        else:
+            models[model_id] = {
+                'name': row.get('name', model_id), 'kind': 'flat',
+                'currency': str(row.get('currency') or 'USD').upper(),
+                'input': float(row.get('input') or 0),
+                'output': float(row.get('output') or 0),
+                'cacheWriteMul': float(row.get('cacheWriteMul', 1.25)),
+                'cacheReadMul': float(row.get('cacheReadMul', 0.10)),
+            }
+    providers = {}
+    for provider_id, rows in get_provider_pricing_snapshot().items():
+        providers[provider_id] = {}
+        for model_id, raw in sorted(rows.items()):
+            row = normalize_pricing(model_id, raw)
+            providers[provider_id][model_id] = {
+                'kind': 'tiered' if row.get('contextTiers') else 'flat',
+                **({'contextTiers': row['contextTiers']} if row.get('contextTiers') else {
+                    'currency': str(row.get('currency') or 'USD').upper(),
+                    'input': float(row.get('input') or 0),
+                    'output': float(row.get('output') or 0),
+                    'cacheWriteMul': float(row.get('cacheWriteMul', 1.25)),
+                    'cacheReadMul': float(row.get('cacheReadMul', 0.10)),
+                }),
+            }
+    return {'models': models, 'providers': providers}
 
 
 def set_provider_pricing(provider_id, model_id, info):
@@ -64,7 +175,7 @@ def clear_provider_pricing(provider_id):
         PROVIDER_PRICING.pop(provider_id, None)
 
 
-def lookup_pricing(model_id, provider_id=None, at=None):
+def lookup_pricing(model_id, provider_id=None, at=None, prompt_tokens=None):
     """Resolve pricing for a (model, provider) pair.
 
     Resolution order:
@@ -83,16 +194,33 @@ def lookup_pricing(model_id, provider_id=None, at=None):
     Returns a *copy* of the dict so callers can mutate freely.
     """
     info = None
+    source = ''
     if provider_id:
         with _provider_pricing_lock:
             prov = PROVIDER_PRICING.get(provider_id)
             if prov and model_id in prov:
                 info = dict(prov[model_id])
+                source = 'provider_override'
     if info is None:
         row = MODEL_PRICING.get(model_id)
         info = dict(row) if row else None
+        if info is not None:
+            source = 'model_table'
+    if info is None and _legacy_context_tiers(model_id):
+        info = {}
+        source = ('qwen_default_estimate' if model_id not in QWEN_PRICING_CNY
+                  else 'model_table')
     if info is None:
         return None
+    info = normalize_pricing(model_id, info)
+    chosen = _choose_context_tier(info.get('contextTiers'), prompt_tokens)
+    if chosen:
+        info.update(input=chosen['input'], output=chosen['output'],
+                    cacheWriteMul=chosen['cacheWriteMul'],
+                    cacheReadMul=chosen['cacheReadMul'],
+                    currency=chosen['currency'], selectedTier=chosen)
+    # Provenance rides the resolved copy only; the source tables stay clean.
+    info['_pricingSource'] = source
     mult = peak_multiplier(info, at=at)
     if mult != 1.0:
         info['input'] = float(info.get('input') or 0) * mult

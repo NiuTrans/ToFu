@@ -1,6 +1,6 @@
 """Guards for pt_3879f00e sub-part 3 slice B — defer
 core/health_stream_timer.js (62KB) from the CORE boot bundle into
-_DEFERRED_FILES.
+_CLASSIC_ASSET_FILES.
 
 Pre-landed prerequisites (verified before this slice):
   * 60 typeof-guarded twStart/twUpdate/twStop call sites across the SSE
@@ -19,7 +19,7 @@ This slice lands the remaining changes:
      an abort in the pre-load window would otherwise ReferenceError
      INSIDE the AbortError handler and mask finishStream,
   2. move 'core/health_stream_timer.js' from _BUNDLE_FILES to
-     _DEFERRED_FILES.
+     _CLASSIC_ASSET_FILES.
 
 NO feature-loader stub by design (unlike _wireConvSyncPush): there is
 no one-time boot wiring to miss — the module self-initializes per
@@ -37,35 +37,42 @@ from __future__ import annotations
 import pathlib
 import re
 
+import pytest
+
+from tests._runtime_sections import (
+    runtime_section_names,
+    runtime_section_path,
+    runtime_sections_dir,
+)
+
+pytestmark = pytest.mark.unit
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-BUNDLER_PY = ROOT / 'lib' / 'js_bundler.py'
-SEND_BUTTON = ROOT / 'static' / 'js' / 'ui' / 'send_button.js'
-SSE_PIPELINE = ROOT / 'static' / 'js' / 'ui' / 'sse_pipeline.js'
-SSE_POLL = ROOT / 'static' / 'js' / 'ui' / 'sse_poll_fallback.js'
+SEND_BUTTON = pathlib.Path(runtime_section_path('ui/send_button.js'))
+SSE_PIPELINE = pathlib.Path(runtime_section_path('ui/sse_pipeline.js'))
+SSE_POLL = pathlib.Path(runtime_section_path('ui/sse_poll_fallback.js'))
 
 
 def _manifest():
-    import lib.js_bundler as jb
-    return jb._extract_manifest_from_source(str(BUNDLER_PY))
+    names = runtime_section_names()
+    return names, (), (), ()
 
 
 # ---------------------------------------------------------------------------
 # 1. manifest move: health_stream_timer.js is deferred, not core
 # ---------------------------------------------------------------------------
 def test_health_stream_timer_in_deferred_files():
-    _bf, deferred_files, _entry, _crit = _manifest()
-    assert 'core/health_stream_timer.js' in deferred_files, (
-        "'core/health_stream_timer.js' must be in _DEFERRED_FILES — the "
-        'whole point of this slice (62KB out of the render-blocking core)')
+    bundle_files, _deferred, _entry, _crit = _manifest()
+    assert bundle_files.count('core/health_stream_timer.js') == 1, (
+        'health_stream_timer.js must occur exactly once in the retained Vite runtime')
 
 
 def test_health_stream_timer_not_in_core_bundle_files():
-    bundle_files, _df, _entry, _crit = _manifest()
-    assert 'core/health_stream_timer.js' not in bundle_files, (
-        "'core/health_stream_timer.js' must NOT remain in _BUNDLE_FILES — "
-        'listing it in both bundles would duplicate the module and its '
-        'per-conv timer registry (double badge / double probes)')
+    bundle_files, deferred, _entry, _crit = _manifest()
+    assert not deferred
+    assert len(bundle_files) == len(set(bundle_files)), (
+        'the Vite runtime source manifest must not duplicate retained modules')
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +117,8 @@ def test_no_unguarded_tw_call_sites_repo_wide():
     call_re = re.compile(r'\b(twStart|twUpdate|twStop|_setStreamDegraded)\s*\(')
     built_re = re.compile(r'^(?:bundle|feature|i18n-(?:zh|en))-[0-9a-f]{8}\.js$')
     violations = []
-    for dirpath, _dirs, files in os.walk(ROOT / 'static' / 'js'):
+    runtime_dir = pathlib.Path(runtime_sections_dir())
+    for dirpath, _dirs, files in os.walk(runtime_dir):
         for fn in files:
             if (not fn.endswith('.js') or fn == 'health_stream_timer.js'
                     or built_re.match(fn)):
@@ -130,7 +138,7 @@ def test_no_unguarded_tw_call_sites_repo_wide():
                     if re.search(r"typeof\s+" + name + r"\s*===\s*['\"]function['\"]", line) \
                        or re.search(r"typeof\s+" + name + r"\s*===\s*['\"]function['\"]", ctx):
                         continue
-                    violations.append(f'{path.relative_to(ROOT)}:{i} {name}')
+                    violations.append(f'{path.relative_to(runtime_dir)}:{i} {name}')
     assert not violations, (
         'unguarded tw* call sites (would ReferenceError with the module '
         'deferred):\n  ' + '\n  '.join(violations))
@@ -148,7 +156,7 @@ def test_no_tw_stub_entries_in_either_list():
         assert name not in entry_points, (
             f'{name} must NOT be a deferred entry point — see the '
             'no-one-time-wiring argument in the _BUNDLE_FILES moved-note')
-    loader = (ROOT / 'static' / 'js' / 'feature-loader.js').read_text()
+    loader = (ROOT / 'frontend' / 'src' / 'main.ts').read_text()
     for name in ('twStart', 'twUpdate', 'twStop'):
         assert f"'{name}'" not in loader, (
-            f'{name} must NOT be in feature-loader.js stub list either')
+            f'{name} must NOT be in feature-bridge.js stub list either')

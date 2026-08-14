@@ -17,13 +17,26 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.design_sys import visual_qa as vqa  # noqa: E402
+from lib.design_sys import temporal_qa as tqa  # noqa: E402
 
 pytestmark = pytest.mark.unit
+
+
+def test_temporal_qa_waits_for_render_ready_assets():
+    assert 'document.fonts.ready' in tqa._READINESS_JS
+    assert 'img.decode' in tqa._READINESS_JS
+    assert len(tqa.DEFAULT_PROGRESS_POINTS) == 4
+    assert tqa.DEFAULT_PROGRESS_POINTS[-2:] == (0.8, 0.94)
 
 
 # ── findings parsing ──────────────────────────────────────
 
 class TestParseFindings:
+    def test_annotation_grounding_is_a_first_class_axis(self):
+        ids = {item[0] for item in vqa.QA_CHECKLIST}
+        assert 'annotation-grounding' in ids
+        assert '窗户' in vqa._QA_PROMPT_ZH
+
     def test_valid_payload(self):
         content = ('{"findings": [{"check": "contrast", "element": "标题", '
                    '"issue": "副标题与背景对比不足", "severity": "major", '
@@ -122,6 +135,8 @@ class TestDegrade:
         # The theme palette must reach the prompt (theme-fidelity check).
         parts = seen['msg'][0]['content']
         assert any('#101418' in (p.get('text') or '') for p in parts)
+        assert any('逐条从标注文字沿线检查到端点' in (p.get('text') or '')
+                   for p in parts)
         assert any(p.get('type') == 'image_url' for p in parts)
 
 
@@ -186,7 +201,7 @@ class TestEngineRound:
         html = render_scene_html(scene, duration=5.0)
         task = {}
         called = {'shot': False}
-        monkeypatch.setattr(vqa, 'screenshot_composition',
+        monkeypatch.setattr(tqa, "screenshot_timeline_contact_sheet",
                             lambda *a, **k: called.__setitem__('shot', True))
         out = engine._visual_qa_round(
             task, scene, str(tmp_path), str(tmp_path / 'index.html'), html,
@@ -206,7 +221,7 @@ class TestEngineRound:
 
         monkeypatch.setattr(vqa, 'visual_qa_available',
                             lambda: (True, ''))
-        monkeypatch.setattr(vqa, 'screenshot_composition',
+        monkeypatch.setattr(tqa, "screenshot_timeline_contact_sheet",
                             lambda *a, **k: a[1])
         monkeypatch.setattr(vqa, 'qa_frame', lambda *a, **k: {
             'ok': True, 'skipped': False, 'reason': '',
@@ -236,16 +251,19 @@ class TestEngineRound:
             total_scenes=1)
         assert seen.get('extra_findings'), 'repair got no QA findings'
         assert '对比不足' in seen['extra_findings'][0]
-        # Repaired html was committed (no prior index.html → no regression).
-        assert out == '<html>repaired</html>'
-        assert open(index_path).read() == '<html>repaired</html>'
+        # Repaired HTML is sealed to the local runtime *before* the sole
+        # guarded commit (no prior index.html → no regression).
+        assert '<html>repaired</html>' in out
+        assert 'assets/gsap-3.14.2.min.js' in out
+        assert 'https://' not in out
+        assert open(index_path).read() == out
 
     def test_clean_findings_keep_html(self, tmp_path, monkeypatch):
         from lib.motion_video import engine
         scene = self._scene()
         html = '<html>authored</html>'
         monkeypatch.setattr(vqa, 'visual_qa_available', lambda: (True, ''))
-        monkeypatch.setattr(vqa, 'screenshot_composition',
+        monkeypatch.setattr(tqa, "screenshot_timeline_contact_sheet",
                             lambda *a, **k: a[1])
         monkeypatch.setattr(vqa, 'qa_frame', lambda *a, **k: {
             'ok': True, 'skipped': False, 'reason': '',
@@ -258,6 +276,41 @@ class TestEngineRound:
             total_scenes=1)
         assert out == html
 
+    def test_recipe_anchors_drive_temporal_capture_and_vlm_brief(
+            self, tmp_path, monkeypatch):
+        from lib.motion_video import engine
+        from lib.motion_video._creative_plan import normalise_scene_plan
+
+        scene = self._scene()
+        scene['text'] = '性能提升 44%'
+        normalise_scene_plan(scene, 1, 3)
+        scene['qa_progresses'] = [0.05, 0.46, 0.88]
+        html = '<html>authored composition with a metric graphic</html>'
+        seen = {}
+        monkeypatch.setattr(vqa, 'visual_qa_available', lambda: (True, ''))
+
+        def _capture(*args, **kwargs):
+            seen['progresses'] = kwargs.get('progresses')
+            return args[1]
+
+        def _qa(*args, **kwargs):
+            seen['subject'] = kwargs.get('subject')
+            return {'ok': True, 'skipped': False, 'reason': '',
+                    'findings': [], 'has_blocker': False, 'summary': '0'}
+
+        monkeypatch.setattr(tqa, 'screenshot_timeline_contact_sheet',
+                            _capture)
+        monkeypatch.setattr(vqa, 'qa_frame', _qa)
+        out = engine._visual_qa_round(
+            {}, scene, str(tmp_path), str(tmp_path / 'index.html'), html,
+            width=1080, height=1440, duration=5.0, scene_index=1,
+            total_scenes=3)
+        assert out == html
+        assert seen['progresses'] == [0.05, 0.46, 0.88]
+        assert '5% / 46% / 88%' in seen['subject']
+        assert 'hook-counter-burst' in seen['subject']
+        assert '最低落定停留' in seen['subject']
+
     def test_qa_outage_keeps_html(self, tmp_path, monkeypatch):
         from lib.motion_video import engine
         scene = self._scene()
@@ -266,7 +319,7 @@ class TestEngineRound:
 
         def _boom(*a, **k):
             raise RuntimeError('chromium gone')
-        monkeypatch.setattr(vqa, 'screenshot_composition', _boom)
+        monkeypatch.setattr(tqa, "screenshot_timeline_contact_sheet", _boom)
         out = engine._visual_qa_round(
             {}, scene, str(tmp_path), str(tmp_path / 'index.html'), html,
             width=1080, height=1440, duration=5.0, scene_index=1,

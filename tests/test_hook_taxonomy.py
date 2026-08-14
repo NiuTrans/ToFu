@@ -163,7 +163,11 @@ class TestUserPromptSubmit(_RegistrySandbox):
 class TestPreCompact(_RegistrySandbox):
 
     def test_no_hooks_no_op(self):
-        run_pre_compact_hooks([{'role': 'user', 'content': 'x'}], {})
+        _pre_compact_hooks[:] = []
+        messages = [{'role': 'user', 'content': 'x'}]
+        result = run_pre_compact_hooks(messages, {})
+        self.assertIsNone(result)
+        self.assertEqual(messages, [{'role': 'user', 'content': 'x'}])
 
     def test_hook_observes_messages(self):
         captured = []

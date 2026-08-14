@@ -45,8 +45,10 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tests._runtime_sections import runtime_section_path
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-REDUCER = os.path.join(REPO, 'static', 'js', 'core', 'conv_state_reducer.js')
+REDUCER = runtime_section_path('core/conv_state_reducer.js')
 
 try:
     import pytest

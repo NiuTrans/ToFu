@@ -15,11 +15,12 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
-from lib.tasks_pkg.endpoint_prompts import WORKER_DIRECTIVE_HEADER
+from lib.orchestration import loop_policy
 from lib.tasks_pkg.endpoint_review import _count_state_changing_rounds
 
-MAX_ITERATIONS = 10   # hard cap — safety valve to prevent runaway loops
-MAX_REPLANS = 3       # hard cap on CONTINUE_PLANNER branches per task
+MAX_ITERATIONS = loop_policy.DEFAULT_MAX_ITERATIONS
+MAX_REPLANS = loop_policy.MAX_REPLANS
+MAX_ZERO_DELIVERABLE_TURNS = loop_policy.MAX_ZERO_DELIVERABLE_TURNS
 
 # Zero-deliverable guard — if the worker produces zero state-changing tool
 # calls for this many consecutive turns, the orchestrator skips the Critic
@@ -27,9 +28,6 @@ MAX_REPLANS = 3       # hard cap on CONTINUE_PLANNER branches per task
 # advancing the iteration counter.  This pre-empts the analysis-paralysis
 # mode where the worker + critic agree that "more investigation is needed"
 # and burn token budget without shipping anything.
-MAX_ZERO_DELIVERABLE_TURNS = 2
-
-
 def _replan_enabled() -> bool:
     """Kill-switch: when '0', CONTINUE_PLANNER is downgraded to CONTINUE_WORKER.
 
@@ -41,19 +39,17 @@ def _replan_enabled() -> bool:
 
 
 def _build_worker_directive(plan_content: str) -> str:
-    """Wrap a plan body in the standard worker imperative directive.
+    """Return the planner brief used as the Worker's real user payload.
 
     Extracted so both the initial planner path AND the replan path produce
     the exact same ``user`` message shape — identical byte-for-byte apart
     from the plan body.  This keeps the prefix-cache discipline in place.
 
-    The directive header (``WORKER_DIRECTIVE_HEADER`` from
-    ``endpoint_prompts``) hard-codes the execution rules: start with a
-    state-changing tool call, no clarifying questions unless blocked,
-    narrative is secondary, etc.  See endpoint_prompts.py for the
-    rationale.
+    The execution rules are a round-scoped Context Composer role block. This
+    function intentionally leaves the plan unwrapped so workflow guidance is
+    never mistaken for text supplied by the user.
     """
-    return WORKER_DIRECTIVE_HEADER + plan_content
+    return plan_content
 
 
 def _reset_worker_messages_with_plan(
@@ -63,7 +59,7 @@ def _reset_worker_messages_with_plan(
     progress_summary: str = '',
 ) -> list:
     """Rebuild the worker's working messages: keep system prompts verbatim
-    (prefix-cache friendly), replace the last ``user`` with the wrapped plan.
+    (prefix-cache friendly), replace the last ``user`` with the plan.
 
     Used both at initial-plan time and after each CONTINUE_PLANNER replan.
     On replan, the caller passes ``original_messages`` (the task's original
@@ -261,7 +257,7 @@ def _build_replan_input_messages(
 _ZERO_DELIVERABLE_DIRECTIVE = (
     '[Orchestrator directive — execute, do not analyze]\n\n'
     'Your previous turn produced ZERO state-changing tool calls '
-    '(no write_file / apply_diff / insert_content / run_command / '
+    '(no write_file / edit_file / run_command / '
     'create_project).  That is analysis paralysis; it does not advance '
     'the plan.\n\n'
     'Your next tool call MUST be a state-changing one on a checklist '

@@ -78,7 +78,6 @@ from lib.paper.insight_engine._config import (  # noqa: E402,F401
     _CTX_MEMORY_MAX,
     _INSIGHT_LANG_PREFIX,
     _INSIGHT_TEMPERATURE,
-    _MAX_INSIGHT_TOOL_ROUNDS,
     _REPAIR_MAX_TOKENS,
     _RUBRIC_MAX_TOKENS,
     _RUBRIC_TEMPERATURE,

@@ -19,6 +19,13 @@ import json
 from lib.database import DOMAIN_CHAT, get_thread_db
 from lib.error_envelope import to_json as _err_to_json
 from lib.log import get_logger
+from lib.tasks_pkg.manager._events import snapshot_task_text
+from lib.storage_projection import (
+    _USAGE_TRANSIENT_KEYS,  # noqa: F401 — manager facade re-export
+    _sanitize_api_rounds_for_persist,
+    _sanitize_usage_for_persist,
+    _trim_round_for_persist,
+)
 
 logger = get_logger(__name__)
 
@@ -52,13 +59,11 @@ def load_tool_rounds_from_conversation(conv_id):
         return []
     try:
         db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT messages FROM conversations WHERE id=? AND user_id=1',
-            (conv_id,)
-        ).fetchone()
-        if not row or not row[0]:
+        from lib.database.conversation_repository import load_conversation
+        snapshot = load_conversation(db, conv_id)
+        if snapshot is None or not snapshot.messages:
             return []
-        messages = json.loads(row[0])
+        messages = snapshot.messages
         for m in reversed(messages):
             if m.get('role') == 'assistant' and m.get('toolRounds'):
                 return m['toolRounds']
@@ -93,13 +98,11 @@ def load_endpoint_turns_from_conversation(conv_id):
         return []
     try:
         db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT messages FROM conversations WHERE id=? AND user_id=1',
-            (conv_id,)
-        ).fetchone()
-        if not row or not row[0]:
+        from lib.database.conversation_repository import load_conversation
+        snapshot = load_conversation(db, conv_id)
+        if snapshot is None or not snapshot.messages:
             return []
-        messages = json.loads(row[0])
+        messages = snapshot.messages
         original_end = 0
         for i, m in enumerate(messages):
             if (not m.get('_epIteration')
@@ -164,7 +167,24 @@ def build_result_meta(task):
     dropped by the freshness guard, freezing the parent reply at its last
     streaming checkpoint (truncated, finishReason=None).
     """
-    meta = {}
+    if task.get('_costExperiment') and not task.get('costExperiment'):
+        try:
+            from lib.cost_experiments import build_task_cost_experiment_outcome
+            _outcome = build_task_cost_experiment_outcome(task)
+            if _outcome:
+                task['costExperiment'] = _outcome
+        except Exception as _xe:
+            logger.warning('[CostExperiment] pre-persist outcome failed '
+                           '(non-fatal): %s', _xe, exc_info=True)
+
+    meta = {'contentEpoch': int(task.get('_contentEpoch') or 0)}
+    if task.get('_turnProtocolV2'):
+        # Startup's legacy task-result recovery must settle this executor row
+        # but must not merge it back into the archived messages JSON. The
+        # attempt/turn tables already own that durable projection.
+        meta['turnProtocolV2'] = True
+        meta['turnId'] = task.get('_turnId') or ''
+        meta['attemptId'] = task.get('_attemptId') or ''
     if task.get('finishReason'): meta['finishReason'] = task['finishReason']
     if task.get('usage'): meta['usage'] = _sanitize_usage_for_persist(task['usage'])
     if task.get('preset'): meta['preset'] = task['preset']
@@ -180,6 +200,31 @@ def build_result_meta(task):
     if task.get('model'): meta['model'] = task['model']
     if task.get('provider_id'): meta['provider_id'] = task['provider_id']
     if task.get('thinkingDepth'): meta['thinkingDepth'] = task['thinkingDepth']
+    if task.get('_affinityKey'): meta['affinityKey'] = task['_affinityKey']
+    if task.get('_reconnectable'): meta['reconnectable'] = True
+    if task.get('_userId') not in (None, ''):
+        meta['userId'] = str(task['_userId'])
+    if task.get('costExperiment'):
+        meta['costExperiment'] = task['costExperiment']
+    elif task.get('_costExperiment'):
+        # Assignment is persisted even if outcome construction later fails;
+        # reports can then distinguish an unobserved turn from non-enrollment.
+        meta['costExperiment'] = task['_costExperiment']
+    if task.get('_responsesItems'):
+        meta['_responsesItems'] = task['_responsesItems']
+    if task.get('_anthropicContentBlocks'):
+        meta['_anthropicContentBlocks'] = task['_anthropicContentBlocks']
+    if task.get('programRuns'):
+        # Canonical PTC state for headless/task-results consumers. Regular chat
+        # messages also persist this as a top-level assistant field.
+        meta['programRuns'] = task['programRuns']
+    if task.get('_todoState'):
+        # Versioned checklist stack. Raw todo_write rounds remain the audit log;
+        # this compact sidecar is the recovery/current-state authority.
+        from lib.tools.todo import public_todo_state
+        meta['todoState'] = public_todo_state(task['_todoState'])
+    if task.get('_todo_blocked'):
+        meta['todoBlocked'] = task['_todo_blocked']
     if task.get('apiRounds'): meta['apiRounds'] = _sanitize_api_rounds_for_persist(task['apiRounds'])
     if task.get('modifiedFiles'): meta['modifiedFiles'] = task['modifiedFiles']
     if task.get('modifiedFileList'): meta['modifiedFileList'] = task['modifiedFileList']
@@ -199,6 +244,14 @@ def build_result_meta(task):
     #   tells the frontend to reconcile from there rather than from this row.
     if task.get('endpoint_mode'):
         meta['endpointMode'] = True
+        meta['endpointPhase'] = task.get('_endpoint_phase', 'planning')
+        meta['endpointIteration'] = task.get('_endpoint_iteration', 0)
+        if task.get('flow_mode'):
+            meta['flowMode'] = True
+            meta['flowProjection'] = task.get('_flow_projection', 'flow')
+            for key, value in (task.get('_flow_current_turn') or {}).items():
+                if key in ('turnRole', 'emits', 'vuMsgId', 'autopilotRunId'):
+                    meta[key] = value
         if task.get('_endpoint_stop_reason'):
             meta['endpointStopReason'] = task['_endpoint_stop_reason']
     return meta
@@ -229,59 +282,6 @@ def build_result_meta(task):
 # (toolRounds[].results[].imageDataUris[].uri) are ALSO multi-MB but ARE the
 # render source, so they are handled on the frontend cache side (strip from the
 # IndexedDB copy, keep in the live/DB copy) — not here.
-
-# usage sub-keys that are backend-only stream diagnostics (never read by any
-# render path). _wire_fp is the giant (~226 KB/round); the rest are tiny but
-# equally value-free once persisted, so drop the whole diagnostic set.
-_USAGE_TRANSIENT_KEYS = ('_wire_fp', '_wire_static', '_wire_routing')
-
-
-def _sanitize_usage_for_persist(usage):
-    """Return a copy of *usage* with transient wire-diagnostic keys dropped.
-
-    ``usage._wire_fp`` is a per-round ~226 KB canonical-message list captured
-    for live cache-miss tracing (lib/llm/_sse_core.py → cache_tracking.py); it
-    is consumed WITHIN the run and never read by any render path, so persisting
-    it just bloats the conversation. Returns *usage* unchanged (same object)
-    when there is nothing to strip, so the common small-usage case is free.
-    """
-    if not isinstance(usage, dict):
-        return usage
-    if not any(k in usage for k in _USAGE_TRANSIENT_KEYS):
-        return usage
-    return {k: v for k, v in usage.items() if k not in _USAGE_TRANSIENT_KEYS}
-
-
-def _sanitize_api_rounds_for_persist(api_rounds):
-    """Return a copy of *api_rounds* with each round's usage diagnostics stripped."""
-    if not isinstance(api_rounds, list):
-        return api_rounds
-    out = []
-    for r in api_rounds:
-        if isinstance(r, dict) and isinstance(r.get('usage'), dict):
-            r = {**r, 'usage': _sanitize_usage_for_persist(r['usage'])}
-        out.append(r)
-    return out
-
-
-def _trim_round_for_persist(r):
-    """Drop the transient run_command streaming buffer from a DONE tool round.
-
-    ``_partialOutput`` is the live terminal buffer accumulated during streaming
-    (lib/tasks_pkg/handlers/code_exec.py). On a completed round the authoritative
-    output is already in ``results[0].output`` / ``toolContent``; the buffer is
-    pure bloat (18 MB observed while toolContent was 2 KB). We only drop it once
-    the round is ``done`` — a still-running round keeps it so a mid-stream
-    state-snapshot reconnect can still replay the partial output. Returns *r*
-    unchanged when there is nothing to trim.
-    """
-    if not isinstance(r, dict):
-        return r
-    if r.get('status') == 'done' and r.get('_partialOutput'):
-        r = dict(r)
-        r.pop('_partialOutput', None)
-    return r
-
 
 def _merge_tool_rounds(task):
     """Merge checkpoint + current toolRounds, in order (the continue-flow merge).
@@ -356,9 +356,11 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
                      error_json, tr_json, meta_json, segments_json=None):
     """Single source of truth for the ``task_results`` upsert.
 
-    Owns the DB acquire + the ``upsert(..., insert_cols=[10], retry=True)``
-    shape (``retry=True`` commits — see lib/database._core_schema.upsert).
-    Callers supply only the fields that vary between the final-result write
+    Owns DB acquisition plus the conditional raw UPSERT and its explicit
+    commit. The conflict ``WHERE`` clause is the executor-ownership fence: a
+    late pre-restart writer cannot overwrite ``interrupted``, and a running
+    checkpoint cannot regress any terminal status. Callers supply only the
+    fields that vary between the final-result write
     (``status='done'|'error'``, full metadata) and the running checkpoint
     (``status='running'``, partial metadata).  ``created_at`` /
     ``completed_at`` are derived here identically for both.
@@ -375,7 +377,7 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
     they are NOT guarded.
     """
     import time
-    from lib.database._core_schema import TASK_RESULTS, upsert
+    from lib.database import db_execute_with_retry
     db = get_thread_db(DOMAIN_CHAT)
     if (conv_id and not task.get('_inline_messages')
             and not _conv_row_exists(db, conv_id)):
@@ -383,15 +385,41 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
                     'conversation row is gone (deleted); not resurrecting an '
                     'orphan row (status=%s)',
                     task['id'][:8], conv_id[:8], status)
-        return
-    upsert(db, TASK_RESULTS, {
-        'task_id': task['id'], 'conv_id': conv_id,
-        'content': content, 'thinking': thinking,
-        'error': error_json, 'status': status, 'tool_rounds': tr_json,
-        'metadata': meta_json, 'segments': segments_json,
-        'created_at': int(task.get('created_at', time.time()) * 1000),
-        'completed_at': int(time.time() * 1000),
-    }, insert_cols=list(_TASK_RESULTS_COLS), retry=True)
+        return False
+
+    # Startup recovery changes ``running`` → ``interrupted`` to transfer
+    # ownership away from the pre-boot executor. A late checkpoint/finalizer
+    # from that executor must never resurrect the row (or subsequently rewrite
+    # the conversation). Make that fence atomic at the conflict write itself;
+    # a SELECT-then-upsert check would retain the exact race it tries to close.
+    # Running checkpoints are stricter and may update only another running row,
+    # so no checkpoint can regress any terminal verdict.
+    update_guard = ("task_results.status = 'running'" if status == 'running'
+                    else "task_results.status <> 'interrupted'")
+    assignments = ', '.join(
+        f'{column}=excluded.{column}'
+        for column in _TASK_RESULTS_COLS if column != 'task_id')
+    placeholders = ', '.join('?' for _ in _TASK_RESULTS_COLS)
+    sql = (
+        f'INSERT INTO task_results ({", ".join(_TASK_RESULTS_COLS)}) '
+        f'VALUES ({placeholders}) '
+        'ON CONFLICT(task_id) DO UPDATE SET '
+        f'{assignments} WHERE {update_guard}'
+    )
+    params = (
+        task['id'], conv_id, content, thinking, error_json, status, tr_json,
+        meta_json, segments_json,
+        int(task.get('created_at', time.time()) * 1000),
+        int(time.time() * 1000),
+    )
+    cursor = db_execute_with_retry(
+        db, sql, params, commit=True, return_cursor=True)
+    wrote = cursor is None or int(getattr(cursor, 'rowcount', 1)) != 0
+    if not wrote:
+        logger.warning('[Task %s] conv=%s task_results write fenced: '
+                       'persisted recovery/terminal owner rejected status=%s',
+                       task['id'][:8], conv_id[:8], status)
+    return wrote
 
 
 # Heavy INPUT fields pinned on the task dict that have NO reader after the
@@ -405,8 +433,8 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
 # Released at the terminal persist chokepoint so a finished task no longer pins
 # a whole conversation's worth of bytes for the ttl=3600s retention window
 # (and forever, for the never-evicted carriers). ``events`` is deliberately
-# KEPT — a reconnecting SSE client replays ``task['events'][cursor:]`` within
-# the TTL window. The async profile-consolidation daemon captures ``messages``
+# KEPT — a reconnecting SSE client replays from the absolute cursor within the
+# retained TTL window. The async profile-consolidation daemon captures ``messages``
 # by its own reference arg (spawned by the orchestrator BEFORE this runs), so
 # nulling the dict key here frees the bytes exactly when that daemon finishes,
 # not at task-TTL — strictly better.
@@ -445,8 +473,9 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
     wedged run_command), so anything the parent owes the world must land
     first. But the VU also reads ``task['messages']`` — so the heavy-state
     release moves to AFTER the hook instead of riding this call."""
-    content_len = len(task.get('content') or '')
-    thinking_len = len(task.get('thinking') or '')
+    content, thinking, content_epoch = snapshot_task_text(task)
+    content_len = len(content)
+    thinking_len = len(thinking)
     error = task.get('error')
     status = task.get('status')
     task_id_short = task['id'][:8]
@@ -475,6 +504,7 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
 
     # Build meta BEFORE the try so it's always available for _sync_result_to_conversation
     meta = build_result_meta(task)
+    meta['contentEpoch'] = content_epoch
 
     # ★ Merge checkpoint toolRounds for DB persistence (continue flow)
     _merged_tr = _merge_tool_rounds(task)
@@ -492,6 +522,7 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
         logger.warning('[Task %s] segment assembly failed (non-fatal, dark): %s',
                        task_id_short, _seg_e, exc_info=True)
 
+    _task_row_owned = True
     try:
         # Only store the (potentially multi-MB) toolRounds blob when this task
         # has no conversation row to hold it — see _tool_rounds_have_dedicated_home.
@@ -517,10 +548,11 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
         # message persistence) round-trips through lib.error_envelope so the
         # frontend only ever sees the typed dict.
         error_json = _err_to_json(task['error']) if task.get('error') is not None else None
-        _upsert_task_row(task, task['convId'], content=task['content'],
-                         thinking=task['thinking'], status=task['status'],
-                         error_json=error_json, tr_json=tr_json, meta_json=meta_json,
-                         segments_json=segments_json)
+        _task_row_owned = _upsert_task_row(
+            task, task['convId'], content=content,
+            thinking=thinking, status=task['status'],
+            error_json=error_json, tr_json=tr_json, meta_json=meta_json,
+            segments_json=segments_json)
         logger.debug('[Task %s] conv=%s Persisted to DB successfully', task_id_short, conv_id_short)
     except Exception as _pf_err:
         from lib.database import is_expected_shutdown_error
@@ -540,6 +572,18 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
             logger.error('[Task %s] conv=%s ⚠️ TERMINAL METADATA NOT PERSISTED — %s',
                          task_id_short, conv_id_short,
                          terminal_state_log_summary(task, persisted=False))
+
+    if _task_row_owned is False:
+        # Recovery fenced this pre-boot executor. Every later action in this
+        # function is a durable side effect (conversation sync, queue dispatch,
+        # project-summary refresh), so continuing would let the stale owner
+        # clobber the recovered turn even though its task_results CAS lost.
+        logger.warning('[Task %s] conv=%s stale terminal finalizer stopped at '
+                       'recovery fence; downstream writes suppressed',
+                       task_id_short, conv_id_short)
+        if not _defer_heavy_release:
+            _release_heavy_task_state(task)
+        return False
 
     # ★ Write result back to conversation — ensures data survives even if
     #   no frontend client is connected (SSE closed, user closed tab, etc.)
@@ -580,8 +624,9 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
     #   task['messages'] (the VU inherits the parent's context); the caller
     #   releases after the hook returns.
     if _defer_heavy_release:
-        return
+        return True
     _released = _release_heavy_task_state(task)
     if _released:
         logger.debug('[Task %s] released %d heavy terminal field(s) to bound RSS',
                      task['id'][:8], _released)
+    return True

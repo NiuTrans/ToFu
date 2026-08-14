@@ -38,8 +38,8 @@ DOUBLE-NEUTER: drop the 2-fail confirmation gate (alarm on the FIRST failure)
 → (B) FAILS because the banner appears on a mere hiccup. Proves the gate is
 load-bearing. The shipped file is left byte-identical.
 
-Source-scan guards pin the registration: file in _BUNDLE_FILES AFTER push.js,
-a dev-fallback <script> tag in index.html, and the i18n keys in i18n.js.
+Source-scan guards pin the registration: file in _BUNDLE_FILES after push.js,
+no raw app tag in index.html, and the i18n keys in i18n.js.
 """
 
 from __future__ import annotations
@@ -50,12 +50,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_names, runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
-MODULE = os.path.join(JS_DIR, 'core', 'backend_offline_monitor.js')
+MODULE = runtime_section_path('core/backend_offline_monitor.js')
 
 
 def _node_available() -> bool:
@@ -114,17 +115,59 @@ global.document = {
   getElementById: () => null,
   createElement: (t) => makeEl(t),
   addEventListener: (ev, fn) => { (_docListeners[ev] = _docListeners[ev] || []).push(fn); },
+  removeEventListener: (ev, fn) => {
+    _docListeners[ev] = (_docListeners[ev] || []).filter(x => x !== fn);
+  },
 };
 
 // ── window events (window === global) ──
 let _winListeners = {};
 global.addEventListener = (ev, fn) => { (_winListeners[ev] = _winListeners[ev] || []).push(fn); };
+global.removeEventListener = (ev, fn) => {
+  _winListeners[ev] = (_winListeners[ev] || []).filter(x => x !== fn);
+};
+
+let _scopeCreates = 0, _scopeDestroys = 0;
+if (process.argv[3] === 'E') {
+  global.TofuModules = {
+    createLifecycleScope: () => {
+      _scopeCreates++;
+      const cleanups = [];
+      return {
+        signal: {},
+        listen(target, type, fn) {
+          target.addEventListener(type, fn);
+          cleanups.push(() => target.removeEventListener(type, fn));
+        },
+        interval(fn, ms) {
+          const id = setInterval(fn, ms);
+          cleanups.push(() => clearInterval(id));
+          return id;
+        },
+        timeout(fn, ms) {
+          const id = setTimeout(fn, ms);
+          cleanups.push(() => clearTimeout(id));
+          return id;
+        },
+        add(fn) { cleanups.push(fn); },
+        destroy() {
+          _scopeDestroys++;
+          while (cleanups.length) cleanups.pop()();
+        },
+      };
+    },
+  };
+}
 
 // ── Controllable health probe ──
 let _healthOk = true;
+let _healthStatus = 503;
 let _probeCount = 0;
 global.Api = {
-  health: { check: async () => { _probeCount++; return _healthOk ? { ok: true } : { ok: false, status: 503 }; } },
+  health: { check: async () => {
+    _probeCount++;
+    return _healthOk ? { ok: true, status: 200 } : { ok: false, status: _healthStatus };
+  } },
 };
 
 // ── push seams ──
@@ -248,6 +291,33 @@ function banner() {
     _clock += 61000;
     check('D4_elapsed_tick_fires', fireInterval(1000));
     check('D5_reshown_after_snooze', banner() !== null);
+  } else if (scenario === 'E') {
+    // ── Vite lifecycle scope owns listeners/subscriptions/timers ──
+    check('E1_scope_created', _scopeCreates === 1);
+    check('E2_booted', window.BackendOfflineMonitor.booted === true);
+    check('E3_window_listeners_owned',
+      (_winListeners.offline || []).length === 1 && (_winListeners.online || []).length === 1);
+    window.destroyBackendOfflineMonitor();
+    check('E4_scope_destroyed', _scopeDestroys === 1);
+    check('E5_listeners_released',
+      (_winListeners.offline || []).length === 0 && (_winListeners.online || []).length === 0
+      && (_docListeners.visibilitychange || []).length === 0);
+    check('E6_reset', window.BackendOfflineMonitor.booted === false);
+    window.initBackendOfflineMonitor();
+    check('E7_restart_one_owner', _scopeCreates === 2
+      && (_winListeners.offline || []).length === 1
+      && (_winListeners.online || []).length === 1);
+  } else if (scenario === 'F') {
+    // ── Proxy auth denial is not evidence that the app process is offline ──
+    _healthOk = false;
+    _healthStatus = 401;
+    _pushCbs.forEach(fn => fn({ ms: null, state: 'offline', connected: false, at: Date.now() }));
+    await flush();
+    check('F1_probe_fired', _probeCount === 1);
+    check('F2_no_backend_banner', banner() === null);
+    check('F3_title_untouched', document.title === 'Tofu');
+    check('F4_state_back_online', window.BackendOfflineMonitor.phase === 'online');
+    check('F5_no_confirm_timer', !fireTimeout(4000));
   }
   console.log(out.join('\n'));
 })();
@@ -301,6 +371,16 @@ def test_snooze_hides_then_reshows_banner():
 
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_vite_lifecycle_scope_releases_and_can_restart():
+    _assert_scenario_green(MODULE, 'E', 7)
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_proxy_auth_denial_never_claims_backend_is_offline():
+    _assert_scenario_green(MODULE, 'F', 5)
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_confirm_gate_double_neuter(tmp_path):
     """DOUBLE-NEUTER: replace the 2-fail confirmation gate with an immediate
     alarm on the FIRST failed probe. Scenario B (proxy hiccup) must then FAIL
@@ -329,26 +409,25 @@ def test_confirm_gate_double_neuter(tmp_path):
 # ── Registration guards (no node needed) ─────────────────────────────
 
 def test_registered_in_bundle_manifest_after_push():
-    from lib.js_bundler import _BUNDLE_FILES
     name = 'core/backend_offline_monitor.js'
-    assert name in _BUNDLE_FILES, f'{name} missing from lib/js_bundler.py:_BUNDLE_FILES'
-    assert _BUNDLE_FILES.index('push.js') < _BUNDLE_FILES.index(name), (
+    names = runtime_section_names()
+    assert name in names, f'{name} missing from the migrated Vite runtime'
+    assert names.index('push.js') < names.index(name), (
         f'{name} must load AFTER push.js (it subscribes pushOnLatency at boot)'
     )
 
 
-def test_dev_fallback_script_tag_in_index_html():
+def test_index_has_no_raw_backend_monitor_script():
     with open(os.path.join(ROOT, 'index.html'), encoding='utf-8') as f:
         html = f.read()
-    assert 'static/js/core/backend_offline_monitor.js' in html, (
-        'index.html lacks the dev-fallback <script> tag for '
-        'core/backend_offline_monitor.js (bundle-failure path would drop it)'
-    )
+    assert 'static/js/core/backend_offline_monitor.js' not in html
+    assert '<!-- TOFU_APP_ASSETS -->' in html
 
 
 def test_i18n_keys_present():
-    with open(os.path.join(JS_DIR, 'i18n.js'), encoding='utf-8') as f:
-        src = f.read()
+    locale_dir = os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales')
+    sources = [open(os.path.join(locale_dir, name), encoding='utf-8').read()
+               for name in ('zh.json', 'en.json')]
     for key in (
         'conn.backendOfflineTitle', 'conn.backendOfflineDesc',
         'conn.networkOfflineTitle', 'conn.networkOfflineDesc',
@@ -357,4 +436,4 @@ def test_i18n_keys_present():
         'conn.backendRestoredDesc', 'conn.backendOfflineTitlePrefix',
         'conn.networkOfflineTitlePrefix',
     ):
-        assert f"'{key}'" in src, f'i18n.js missing key {key}'
+        assert all(f'"{key}"' in src for src in sources), f'locales missing key {key}'

@@ -45,11 +45,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+IDB_CACHE = runtime_section_path('idb-cache.js')
 
 
 def _node_available() -> bool:
@@ -172,7 +174,7 @@ def _run_harness(idb_js_path: str) -> subprocess.CompletedProcess:
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_streaming_vu_placeholder_not_persisted():
-    idb_js = os.path.join(JS_DIR, 'idb-cache.js')
+    idb_js = IDB_CACHE
     proc = _run_harness(idb_js)
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
@@ -186,7 +188,7 @@ def test_streaming_vu_filter_neuter(tmp_path):
     """NEUTER: remove the `_streamingVu` filter from a COPY of idb-cache.js →
     the ghost IS persisted → proves the filter is load-bearing. Shipped file
     left byte-identical."""
-    idb_js = os.path.join(JS_DIR, 'idb-cache.js')
+    idb_js = IDB_CACHE
     with open(idb_js, encoding='utf-8') as f:
         src = f.read()
 

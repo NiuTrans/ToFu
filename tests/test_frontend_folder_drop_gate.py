@@ -26,17 +26,20 @@ predicate to always-true proves the gate is load-bearing.
 from __future__ import annotations
 
 import os
+import json
 import re
 import shutil
 import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-_SRC = os.path.join(ROOT, 'static', 'js', 'project.js')
+_SRC = runtime_section_path('project.js')
 
 
 def _node_available() -> bool:
@@ -166,14 +169,15 @@ def test_run_folder_drop_confirms_then_adds():
 
 def test_i18n_keys_present():
     """The confirm keys exist in zh + en so the dialog never renders a raw key."""
-    i18n = os.path.join(ROOT, 'static', 'js', 'i18n.js')
-    with open(i18n, encoding='utf-8') as f:
-        txt = f.read()
+    locale_dir = os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales')
+    with open(os.path.join(locale_dir, 'zh.json'), encoding='utf-8') as f:
+        zh = json.load(f)
+    with open(os.path.join(locale_dir, 'en.json'), encoding='utf-8') as f:
+        en = json.load(f)
     for key in ('folderDrop.notInWorkspace', 'folderDrop.addRootConfirm',
                 'folderDrop.addAndSave'):
-        m = re.search(r"'" + re.escape(key) + r"'\s*:\s*\{.*", txt)
-        assert m, f'missing i18n key {key}'
-        assert 'zh:' in m.group(0) and 'en:' in m.group(0), f'{key} needs zh+en'
+        assert key in zh, f'missing zh i18n key {key}'
+        assert key in en, f'missing en i18n key {key}'
 
 
 if __name__ == '__main__':

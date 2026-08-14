@@ -64,18 +64,39 @@ from lib.project_mod.command_analysis import (  # noqa: F401
     _mask_quoted_literals,
     _split_pipeline,
     _unbounded_recursive_scan_target,
+    _bound_scan_segments,
 )
 from lib.project_mod.grep_redirect import plan_grep_redirect
 
 logger = get_logger(__name__)
 
 
-def _get_cmd_env(cwd=None):
+_SENSITIVE_ENV_SUFFIX_RE = _re.compile(
+    r'(?:^|_)(?:API_KEYS?|TOKENS?|SECRETS?|PASSWORDS?|PASSWDS?|'
+    r'PRIVATE_KEY|ACCESS_KEY|AUTH)$')
+_SENSITIVE_ENV_EXACT = frozenset({
+    'AWS_ACCESS_KEY_ID',
+    'DATABASE_URL',
+    'GOOGLE_APPLICATION_CREDENTIALS',
+    'MYSQL_PWD',
+    'PGPASSWORD',
+    'REDIS_URL',
+    'SSH_AUTH_SOCK',
+})
+
+
+def _is_sensitive_inherited_env(name):
+    upper = str(name or '').upper()
+    return (upper in _SENSITIVE_ENV_EXACT
+            or bool(_SENSITIVE_ENV_SUFFIX_RE.search(upper)))
+
+
+def _get_cmd_env(cwd=None, credential_env=None, strip_credential_vars=None):
     """Return an env dict for subprocess calls spawned by run_command.
 
-    Subprocesses inherit the server's full environment (PATH, PYTHONPATH,
-    CONDA_PREFIX, etc.) so ``python`` / ``pip`` / installed CLIs resolve
-    exactly the way they would in the shell that started the server.
+    Subprocesses inherit the server's non-sensitive runtime environment
+    (PATH, PYTHONPATH, etc.) so ``python`` / ``pip`` / installed CLIs resolve
+    as expected; ambient machine credentials are removed below.
     Tofu users who launched via the standard install land in the Tofu
     conda env (the marker re-execs server.py into it); headless-API users
     who launched from their own venv keep their own env. Either way, no
@@ -107,26 +128,30 @@ def _get_cmd_env(cwd=None):
     if os.name != 'nt':
         env.setdefault('TERM', 'dumb')
 
-    # Skill credential overlay: vault-configured per-skill env vars (set in
-    # Settings → Skills) ride every subprocess, so a skill's documented
-    # os.environ['SOME_KEY'] lookup works without restarting the server.
-    # Never raises (degrades to {}); the child env is never logged.
+    # Parent-process credentials are machine capabilities, not ordinary shell
+    # configuration. Strip common secret names even when they are not yet in
+    # the app vault; otherwise an ambient GITHUB_TOKEN / LLM_API_KEY would
+    # bypass the explicit per-command capability. Skill bindings and selected
+    # vault entries are re-added below after this default-deny pass.
+    for var in list(env):
+        if _is_sensitive_inherited_env(var):
+            env.pop(var, None)
+
+    # The caller resolved this additional set from the same strict vault
+    # snapshot as the selected overlay. No vault I/O happens here.
+    for var in strip_credential_vars or ():
+        env.pop(var, None)
+
+    # Skill-scoped bindings keep their separate declaration/eligibility path.
     try:
         from lib.skills.env import exec_env_overlay
         env.update(exec_env_overlay(project_path=cwd))
     except Exception as _env_e:
         logger.debug('[run_command] skill env overlay skipped: %s', _env_e)
 
-    # General credential-vault overlay: non-skill entries (github_token →
-    # GITHUB_TOKEN, pypi_token → PYPI_TOKEN, …) so agent commands can
-    # reference $VAR without the value ever entering the conversation. The
-    # model discovers these via the <credential_vault> prompt block. Same
-    # never-raises contract; the child env is never logged.
-    try:
-        from lib.credentials_vault import exec_env_overlay as _vault_env_overlay
-        env.update(_vault_env_overlay())
-    except Exception as _vault_env_e:
-        logger.debug('[run_command] vault env overlay skipped: %s', _vault_env_e)
+    # Only values resolved for THIS run_command invocation enter the child.
+    if credential_env:
+        env.update(credential_env)
 
     # ── Block user-site-packages (~/.local/) writes & reads ──
     env['PYTHONNOUSERSITE'] = '1'
@@ -550,7 +575,8 @@ def _format_run_output(command, stdout, stderr, exit_code, timed_out=False,
 
 
 def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None,
-                     on_chunk=None, cwd_sink=None, on_spawn=None):
+                     on_chunk=None, cwd_sink=None, on_spawn=None,
+                     credentials=None, on_grep_intercept=None):
     """Execute a shell command with optional interactive stdin support.
 
     Args:
@@ -570,6 +596,7 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
             (original non-interactive behavior).
         task: Optional task dict — when provided, the subprocess is killed
             if ``task['aborted']`` becomes True (cooperative abort).
+        credentials: Vault entry-name array selected for this child only.
         on_chunk: Optional callback ``fn(stream, text)`` invoked for each
             output chunk as soon as it is read from the subprocess.  ``stream``
             is ``'stdout'`` or ``'stderr'``.  Used to forward output to the
@@ -589,12 +616,28 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
             ``Date.now()``. ``deadline_ms`` is None when the command runs
             unbounded, which is the DEFAULT. Exceptions are logged and
             swallowed — telemetry must never abort the command.
+        on_grep_intercept: Internal display-only callback
+            ``fn(number_of_segments)`` invoked after filesystem grep segments
+            have been rewritten to the runtime ``grep_search`` helper. It is
+            never written to stdout/stderr or the model-visible tool result.
     """
     if not command or not command.strip():
         return 'Error: Empty command.'
 
     if not base:
         base = os.path.expanduser('~')
+
+    try:
+        from lib.credentials_vault import resolve_run_command_env
+        requested_credentials = [] if credentials is None else credentials
+        strip_credential_vars, credential_env = resolve_run_command_env(
+            requested_credentials)
+    except (TypeError, ValueError) as e:
+        logger.debug('[run_command] credential request rejected: %s', e)
+        return f'Error: Credential request rejected: {e}'
+    except Exception as e:
+        logger.error('[run_command] credential resolution failed: %s', e)
+        return 'Error: Credential request rejected: vault unavailable.'
 
     # ★ Resolve timeout — NO DEFAULT CEILING.
     #   A build / test suite / pip install / big grep is a WAIT, not a crash,
@@ -664,20 +707,13 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
                     f"`timeout` to run_command; or (3) wrap the scan with "
                     f"coreutils `timeout <secs>`.")
 
-    # ★ Filesystem-grep TRANSPARENT REDIRECT (2026-08-06, owner ruling:
-    #   "redirect as correctly as possible; refuse+teach only as the
-    #   fallback"). The 2026-08-04 refuse-first guard taught the model to
-    #   avoid even LEGAL stream-filter greps when it misfired. Now a
-    #   filesystem-grep segment is executed in-process by the GNU-faithful
-    #   engine in lib/project_mod/grep_redirect.py (BRE/ERE translation,
-    #   IGNORE_DIRS descent pruning identical to the hardening layer,
-    #   internal deadline), its output persisted to temp files, and the
-    #   EXEC command spliced so the pipeline continues from those files —
-    #   the model believes it ran run_command. Refuse+teach survives only
-    #   for shapes that cannot be translated honestly (-P, command
-    #   substitution in arguments, grep targets writable by an earlier
-    #   segment of the same command, deadline exceeded). Stream filters
-    #   (`ps aux | grep python`) were never intercepted and still are not.
+    # ★ Filesystem-grep TRANSPARENT RUNTIME REDIRECT. Planning only replaces
+    #   the grep executable token with an absolute internal helper. The search
+    #   starts when the shell reaches that segment, so earlier writes, cd,
+    #   substitutions, redirections, pipelines and &&/|| retain native shell
+    #   ordering. The helper streams GNU-compatible output and owns the local
+    #   search timeout; it never adds a notice to normal stdout.
+    #   Stream filters (`ps aux | grep python`) are not intercepted.
     #   TOFU_RUN_GREP_GUARD=0 disables the layer; TOFU_GREP_REDIRECT=0
     #   reverts to refuse-always.
     _grep_spliced = None
@@ -691,11 +727,17 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
                              _gr_e, exc_info=True)
                 _plan = None
         if _plan is not None and _plan.rewritten is not None:
-            logger.info('[run_command] executed %d filesystem grep(s) via the '
-                        'internal engine (%.2fs) and spliced the pipeline '
+            logger.info('[run_command] delegated %d filesystem grep(s) to the '
+                        'runtime grep_search engine (planning %.3fs) '
                         '(cwd=%s): %.200s', _plan.n_redirected, _plan.elapsed,
                         base, command)
             _grep_spliced = _plan.rewritten
+            if on_grep_intercept is not None:
+                try:
+                    on_grep_intercept(_plan.n_redirected)
+                except Exception as _gr_cb_e:
+                    logger.debug('[run_command] grep intercept callback failed: %s',
+                                 _gr_cb_e)
         else:
             _gseg = (_plan.refused_segment if _plan is not None else None) \
                 or _grep_filesystem_segment(command)
@@ -758,14 +800,46 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
                        '[run_command] auto-added grep flags for FUSE/binary safety\n')
         command = hardened
 
+    # ★ Scanner segment budget: direct `find` remains a real streaming
+    #   command, but cannot wedge forever in a FUSE/NFS syscall loop. The
+    #   timeout wraps only the find segment, so downstream sort/head/xargs
+    #   keep normal pipe backpressure. A caller-provided run_command timeout
+    #   is already authoritative and suppresses this internal budget.
+    _exec_source = _grep_spliced if _grep_spliced is not None else command
+    if (timeout is None
+            and os.name == 'posix'
+            and os.environ.get('TOFU_RUN_SCAN_SEGMENT_TIMEOUT', '1') != '0'):
+        import shutil
+        _timeout_binary = shutil.which('timeout')
+        if _timeout_binary:
+            try:
+                _scan_seconds = int(os.environ.get(
+                    'TOFU_RUN_SCAN_SEGMENT_TIMEOUT_S', '40'))
+            except (TypeError, ValueError) as _scan_timeout_e:
+                logger.debug('[run_command] invalid scanner segment timeout: %s',
+                             _scan_timeout_e)
+                _scan_seconds = 40
+            _exec_source, _bounded_scans = _bound_scan_segments(
+                _exec_source, _timeout_binary, _scan_seconds)
+            if _bounded_scans:
+                logger.info('[run_command] bounded %d find segment(s) to %ds '
+                            '(cwd=%s): %.200s', _bounded_scans, _scan_seconds,
+                            base, command)
+                _safe_on_chunk(
+                    on_chunk, 'stderr',
+                    f'[run_command] find scan capped at {_scan_seconds}s '
+                    'to prevent network-filesystem stalls\n')
+        else:
+            logger.warning('[run_command] cannot bound find segments: '
+                           'coreutils timeout is unavailable')
+
     # ★ rm → trash rewrite: ordinary deletes become recoverable (moved to a
     #   per-workspace .tofu_trash/ instead of unlinked). Applied to the
     #   EXECUTED command only — the displayed/logged `command` stays clean so
     #   the model sees its own `rm ...` echoed back, not the shim. Catastrophic
     #   deletes are already rejected above and never reach here. The grep
-    #   redirect splice rides the same exec-side-only seam.
-    exec_command = _maybe_wrap_rm_with_trash(
-        _grep_spliced if _grep_spliced is not None else command, base)
+    #   redirect splice and scanner budget ride the same exec-side-only seam.
+    exec_command = _maybe_wrap_rm_with_trash(_exec_source, base)
 
     # ★ Sticky-cwd capture (layer 2): wrap the command so its FINAL cwd is
     #   written to a dedicated temp file, preserving the exit code. Only when a
@@ -826,15 +900,21 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
     # ── Non-interactive fast path (no stdin_callback) ──
     if not stdin_callback:
         try:
-            return _run_command_simple(command, full_command, timeout, base, task=task,
-                                       on_chunk=on_chunk, on_spawn=on_spawn)
+            return _run_command_simple(
+                command, full_command, timeout, base, task=task,
+                on_chunk=on_chunk, on_spawn=on_spawn,
+                credential_env=credential_env,
+                strip_credential_vars=strip_credential_vars)
         finally:
             _flush_cwd_capture()
 
     # ── Interactive path: Popen with stdin pipe + stdin detection ──
     try:
-        return _run_command_interactive(command, full_command, timeout, base, stdin_callback,
-                                        on_chunk=on_chunk, task=task, on_spawn=on_spawn)
+        return _run_command_interactive(
+            command, full_command, timeout, base, stdin_callback,
+            on_chunk=on_chunk, task=task, on_spawn=on_spawn,
+            credential_env=credential_env,
+            strip_credential_vars=strip_credential_vars)
     finally:
         _flush_cwd_capture()
 
@@ -934,7 +1014,8 @@ def _safe_on_chunk(on_chunk, stream, text):
 
 
 def _run_command_simple(command, full_command, timeout, base, task=None, on_chunk=None,
-                        on_spawn=None):
+                        on_spawn=None, credential_env=None,
+                        strip_credential_vars=None):
     """Execute command with abort-awareness + incremental output streaming.
 
     Reads stdout/stderr in non-blocking 64 KB chunks using ``safe_select_pipes``
@@ -957,7 +1038,7 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
             stdin=subprocess.DEVNULL,
             text=False,  # binary mode for non-blocking I/O
             cwd=base,
-            env=_get_cmd_env(base),
+            env=_get_cmd_env(base, credential_env, strip_credential_vars),
             start_new_session=True,  # own process group for clean kill
         )
     except (FileNotFoundError, NotADirectoryError) as e:
@@ -1421,7 +1502,8 @@ def _collect_descendants(parent_pid):
 
 
 def _run_command_interactive(command, full_command, timeout, base, stdin_callback,
-                              on_chunk=None, task=None, on_spawn=None):
+                              on_chunk=None, task=None, on_spawn=None,
+                              credential_env=None, strip_credential_vars=None):
     """Popen-based execution with stdin detection and interactive input.
 
     When *task* is provided, the subprocess PID/PGID is stored on the task
@@ -1445,7 +1527,7 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=base,
-            env=_get_cmd_env(base),
+            env=_get_cmd_env(base, credential_env, strip_credential_vars),
             text=False,  # binary mode for non-blocking I/O
             start_new_session=True,  # own process group for clean kill
         )
@@ -1686,4 +1768,3 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
     logger.info('run_command done (interactive): exit=%d, stdout=%dch, stderr=%dch',
                 exit_code, len(stdout), len(stderr))
     return _format_run_output(command, stdout, stderr, exit_code, timed_out=timed_out)
-

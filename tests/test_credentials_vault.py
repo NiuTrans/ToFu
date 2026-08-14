@@ -470,14 +470,20 @@ def test_vault_block_idempotent_and_own_cache_block(_isolated_vault):
 
 
 def test_vault_block_in_run_command_env_end_to_end(_isolated_vault, monkeypatch):
-    """The use-half of the seam: _get_cmd_env must surface vault values as
-    $VARS so `curl -H "Authorization: Bearer $GITHUB_TOKEN"` just works —
-    while skill-scoped bindings stay owned by the skills overlay."""
+    """General credentials are default-deny and injected only when selected."""
     v = _isolated_vault
     v.set_entry('github_token', _SECRET)
     v.set_entry('skill.flyai.some_api_key', 'sk-should-not-appear')
+    monkeypatch.setenv('GITHUB_TOKEN', 'inherited-value-must-not-bypass-capability')
+
     from lib.project_mod.run_command import _get_cmd_env
-    env = _get_cmd_env(cwd=None)
-    assert env.get('GITHUB_TOKEN') == _SECRET
+    strip_vars, selected = v.resolve_run_command_env([])
+    env = _get_cmd_env(cwd=None, credential_env=selected,
+                       strip_credential_vars=strip_vars)
+    assert 'GITHUB_TOKEN' not in env
     assert 'SKILL_FLYAI_SOME_API_KEY' not in env
-    assert 'some_api_key' not in str(env.get('SOME_API_KEY', ''))
+
+    strip_vars, selected = v.resolve_run_command_env(['github_token'])
+    env = _get_cmd_env(cwd=None, credential_env=selected,
+                       strip_credential_vars=strip_vars)
+    assert env.get('GITHUB_TOKEN') == _SECRET

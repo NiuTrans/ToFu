@@ -28,13 +28,16 @@ from pathlib import Path
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 _ROOT = Path(__file__).resolve().parent.parent
-_OAUTH_JS = _ROOT / 'static' / 'js' / 'settings' / 'oauth.js'
-_API_JS = _ROOT / 'static' / 'js' / 'api.js'
+_OAUTH_JS = Path(runtime_section_path('settings/oauth.js'))
+_API_JS = Path(runtime_section_path('api.js'))
 _PANEL = _ROOT / 'static' / 'settings_panels' / 'oauth.html'
-_I18N = _ROOT / 'static' / 'js' / 'i18n.js'
+_LOCALES = tuple((_ROOT / 'frontend/src/i18n/locales' / f'{lang}.json')
+                 for lang in ('zh', 'en'))
 
 
 def _run_node(script: str) -> dict:
@@ -60,8 +63,10 @@ const calls = [];
 function el(id, extra) {
   const o = Object.assign({ id: id, style: { display: '' }, value: '',
                             onclick: null, textContent: '', disabled: false,
+                            className: '',
                             classList: { contains: () => false, add(){}, remove(){}, toggle(){} },
                             querySelectorAll: () => [], appendChild(){} }, extra || {});
+  o.classList.contains = (name) => String(o.className || '').split(/\s+/).includes(name);
   return o;
 }
 const nodes = {};
@@ -77,9 +82,12 @@ global.document = {
   createElement: () => el('tmp'),
   addEventListener: () => {},
 };
-global.window = { addEventListener: () => {}, open: () => ({ closed: false }) };
+global.window = { addEventListener: () => {}, open: () => {
+  global._lastPopup = { closed: false };
+  return global._lastPopup;
+} };
 global.screen = { width: 1200, height: 900 };
-global.setInterval = () => 0;
+global.setInterval = (f) => { global._lastInterval = f; return 1; };
 global.clearInterval = () => {};
 global.setTimeout = (f) => { try { f(); } catch (e) {} return 0; };
 global.BroadcastChannel = function () { this.onmessage = null; };
@@ -164,21 +172,30 @@ _CONSOLE_RESP = {'auth_url': 'https://claude.ai/oauth/authorize?x=2',
 class TestEscapeHatchIsReachable(unittest.TestCase):
     """A user stuck in a loopback flow can reach the console flow."""
 
-    def test_loopback_flow_exposes_the_fallback_control(self):
+    def test_loopback_recovery_appears_only_after_the_popup_closes(self):
         v = _harness(
             """
+            document.getElementById('oauthClaudeManual').style.display = 'none';
             await _oauthLogin('claude');
             await new Promise(r => setImmediate(r));
+            const initialManual = document.getElementById('oauthClaudeManual').style.display;
+            global._lastPopup.closed = true;
+            global._lastInterval();
             console.log(JSON.stringify({
+              initialManual: initialManual,
+              recoveredManual: document.getElementById('oauthClaudeManual').style.display,
               fallbackVisible: document.getElementById('oauthClaudeConsoleFallbackRow').style.display !== 'none',
               handlerWired: typeof document.getElementById('oauthClaudeConsoleFallbackBtn').onclick === 'function',
               noteVisible: document.getElementById('oauthClaudeLoopbackNote').style.display !== 'none',
             }));
             """, _LOOPBACK_RESP)
-        self.assertTrue(v['fallbackVisible'],
-                        'a loopback flow must offer the way back to manual paste')
+        self.assertEqual(v['initialManual'], 'none',
+                         'the happy path must not pre-assign recovery work')
+        self.assertNotEqual(v['recoveredManual'], 'none',
+                            'closing an unfinished popup must reveal recovery')
+        self.assertTrue(v['fallbackVisible'])
         self.assertTrue(v['handlerWired'],
-                        'the control must not render as a dead button')
+                        'the revealed control must not be a dead button')
         self.assertTrue(v['noteVisible'])
 
     def test_clicking_it_restarts_the_flow_with_prefer_console(self):
@@ -187,6 +204,8 @@ class TestEscapeHatchIsReachable(unittest.TestCase):
             """
             await _oauthLogin('claude');
             await new Promise(r => setImmediate(r));
+            global._lastPopup.closed = true;
+            global._lastInterval();
             document.getElementById('oauthClaudeConsoleFallbackBtn').onclick();
             await new Promise(r => setImmediate(r));
             console.log(JSON.stringify({ calls: calls }));
@@ -459,9 +478,11 @@ class TestWiringRatchet(unittest.TestCase):
                           % node_id)
 
     def test_new_strings_are_translated(self):
-        i18n = _I18N.read_text(encoding='utf-8')
+        locales = [json.loads(path.read_text(encoding='utf-8'))
+                   for path in _LOCALES]
         for key in ('settings.oauthLoopbackNote', 'settings.oauthUseConsole'):
-            self.assertIn("'%s'" % key, i18n, 'missing i18n key %s' % key)
+            self.assertTrue(all(locale.get(key) for locale in locales),
+                            'missing i18n key %s' % key)
 
 
 if __name__ == '__main__':

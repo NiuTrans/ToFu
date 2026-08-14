@@ -43,14 +43,17 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
-ESCAPE_HTML = os.path.join(JS_DIR, 'core', 'escape_html.js')
-COST = os.path.join(JS_DIR, 'core', 'cost.js')
-CHAT_RENDER = os.path.join(JS_DIR, 'ui', 'chat_render.js')
+ESCAPE_HTML = runtime_section_path('core/escape_html.js')
+TRANSLATION_MODEL = runtime_section_path('core/translation_model.js')
+TRANSLATION_INDICATOR = runtime_section_path('ui/translation_indicator.js')
+COST = runtime_section_path('core/cost.js')
+CHAT_RENDER = runtime_section_path('ui/chat_render.js')
 
 
 def _node_available() -> bool:
@@ -88,8 +91,8 @@ global.Api = { conversations: {
 // translation_model.js for translationFingerprint; then chat_render for the
 // version function; then cost.js for _prefetchConvCosts.
 (0, eval)(fs.readFileSync(process.argv[2], 'utf8'));  // escape_html.js
-(0, eval)(fs.readFileSync(process.argv[2].replace('escape_html.js', 'translation_model.js'), 'utf8'));
-try { (0, eval)(fs.readFileSync(process.argv[2].replace('core/escape_html.js', 'ui/translation_indicator.js'), 'utf8')); } catch (e) {}
+(0, eval)(fs.readFileSync(process.argv[6], 'utf8'));
+(0, eval)(fs.readFileSync(process.argv[7], 'utf8'));
 (0, eval)(fs.readFileSync(process.argv[3], 'utf8'));  // chat_render.js
 
 let costSrc = fs.readFileSync(process.argv[4], 'utf8');
@@ -170,7 +173,8 @@ def _run(nc: str = '') -> str:
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, ESCAPE_HTML, CHAT_RENDER, COST, nc],
+            ['node', harness, ESCAPE_HTML, CHAT_RENDER, COST, nc,
+             TRANSLATION_MODEL, TRANSLATION_INDICATOR],
             capture_output=True, text=True, timeout=60,
         )
     finally:

@@ -10,11 +10,12 @@ from __future__ import annotations
 import os
 
 from lib.log import get_logger
+from lib.runtime_layout import install_root
 
 logger = get_logger(__name__)
 
-# ── Project root (one level up from lib/) ──
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# ── Project root (contains lib/, static/, server.py) ──
+_ROOT = install_root()
 
 # ── Official source — overridable for forks / mirrors via env ──
 UPDATE_REPO = os.environ.get('TOFU_UPDATE_REPO', 'rangehow/ToFu')

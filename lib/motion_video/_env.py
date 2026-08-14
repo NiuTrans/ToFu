@@ -201,10 +201,16 @@ def ensure_hyperframes(*, install: bool = True, timeout: int = 900) -> str:
     return path
 
 
-#: Static ffprobe source (same build family imageio-ffmpeg's ffmpeg comes
-#: from). Downloaded once on demand — the pip package ships ffmpeg only.
-_FFPROBE_TARBALL_URL = ('https://johnvansickle.com/ffmpeg/releases/'
-                        'ffmpeg-release-amd64-static.tar.xz')
+#: Immutable, separately packaged ffprobe build.  Do not point this at a
+#: ``latest``/``release`` alias: first-use bootstrap downloads an executable,
+#: so the bytes must stay pinned and match the review-time SHA-256.
+_FFPROBE_ARCHIVE_URL = (
+    'https://ffmpeg.martin-riedl.de/download/linux/amd64/'
+    '1723056602_7.0.2/ffprobe.zip')
+_FFPROBE_ARCHIVE_SHA256 = (
+    'f1761eb5668a4dc674e550f575a678ddbbb65a1fc4fcc61bb560af96fa12a7ef')
+_FFPROBE_ARCHIVE_MAX_BYTES = 64 * 1024 * 1024
+_FFPROBE_BINARY_MAX_BYTES = 128 * 1024 * 1024
 
 
 def media_shim_dir() -> str:
@@ -245,8 +251,9 @@ def ensure_ffprobe(*, install: bool = True, timeout: int = 600) -> str:
 
     ``imageio-ffmpeg`` ships ffmpeg only, and the HyperFrames CLI hard-
     requires ffprobe to probe media assets — so we fetch the matching
-    static build (johnvansickle, same family as the imageio binary) once
-    and extract just the ``ffprobe`` member into the shim dir.
+    pinned static build once and extract just the ``ffprobe`` member into the
+    shim dir.  The archive is streamed under a hard byte cap, SHA-256 checked,
+    and verified from a same-directory staging file before atomic publication.
     Never raises; failures are logged + reported as ''.
     """
     existing = ffprobe_bin()
@@ -256,38 +263,102 @@ def ensure_ffprobe(*, install: bool = True, timeout: int = 600) -> str:
         return ''
     dest = os.path.join(media_shim_dir(), 'ffprobe')
     logger.info('[MotionVideo] downloading static ffprobe (one-time bootstrap)')
-    import tarfile
+    import hashlib
     import tempfile
     import urllib.request
+    import zipfile
+    part_path = ''
     try:
         with tempfile.TemporaryDirectory(prefix='mv-ffprobe-') as tmp:
-            tar_path = os.path.join(tmp, 'ff.tar.xz')
-            urllib.request.urlretrieve(_FFPROBE_TARBALL_URL, tar_path)
-            with tarfile.open(tar_path) as tf:
-                member = next((m for m in tf.getmembers()
-                               if m.name.endswith('/ffprobe')), None)
-                if member is None:
-                    logger.warning('[MotionVideo] ffprobe member not found in tarball')
-                    return ''
-                src = tf.extractfile(member)
-                if src is None:
-                    return ''
-                with open(dest, 'wb') as out:
-                    out.write(src.read())
-        os.chmod(dest, 0o755)
+            archive_path = os.path.join(tmp, 'ffprobe.zip')
+            request = urllib.request.Request(
+                _FFPROBE_ARCHIVE_URL,
+                headers={'User-Agent': 'Tofu-ffprobe-bootstrap/1'})
+            digest = hashlib.sha256()
+            total = 0
+            with urllib.request.urlopen(request, timeout=max(1, timeout)) as response, \
+                    open(archive_path, 'wb') as archive:
+                try:
+                    declared = int(response.headers.get('Content-Length') or 0)
+                except (AttributeError, TypeError, ValueError) as exc:
+                    logger.debug('[MotionVideo] invalid ffprobe Content-Length: %s',
+                                 exc)
+                    declared = 0
+                if declared > _FFPROBE_ARCHIVE_MAX_BYTES:
+                    raise ValueError('ffprobe archive exceeds download limit')
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > _FFPROBE_ARCHIVE_MAX_BYTES:
+                        raise ValueError('ffprobe archive exceeds download limit')
+                    digest.update(chunk)
+                    archive.write(chunk)
+                archive.flush()
+                os.fsync(archive.fileno())
+            if digest.hexdigest() != _FFPROBE_ARCHIVE_SHA256:
+                raise ValueError('ffprobe archive SHA-256 mismatch')
+
+            with zipfile.ZipFile(archive_path) as zf:
+                members = [m for m in zf.infolist()
+                           if not m.is_dir() and os.path.basename(m.filename) == 'ffprobe']
+                if len(members) != 1:
+                    raise ValueError('ffprobe archive must contain exactly one ffprobe')
+                member = members[0]
+                mode = (member.external_attr >> 16) & 0xFFFF
+                if mode and (mode & 0o170000) == 0o120000:
+                    raise ValueError('ffprobe archive member must not be a symlink')
+                if member.file_size <= 0 or member.file_size > _FFPROBE_BINARY_MAX_BYTES:
+                    raise ValueError('ffprobe binary exceeds extraction limit')
+
+                fd, part_path = tempfile.mkstemp(
+                    prefix='.ffprobe.', suffix='.part', dir=media_shim_dir())
+                extracted = 0
+                with zf.open(member) as src, os.fdopen(fd, 'wb') as out:
+                    while True:
+                        chunk = src.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        extracted += len(chunk)
+                        if extracted > _FFPROBE_BINARY_MAX_BYTES:
+                            raise ValueError('ffprobe binary exceeds extraction limit')
+                        out.write(chunk)
+                    out.flush()
+                    os.fsync(out.fileno())
+                if extracted != member.file_size:
+                    raise ValueError('ffprobe binary length mismatch')
+        os.chmod(part_path, 0o755)
     except Exception as e:
         logger.warning('[MotionVideo] ffprobe download failed: %s', e, exc_info=True)
+        if part_path:
+            try:
+                os.remove(part_path)
+            except OSError as cleanup_error:
+                logger.debug('[MotionVideo] ffprobe partial cleanup failed: %s',
+                             cleanup_error)
         return ''
     try:
-        out = subprocess.run([dest, '-version'], capture_output=True,
+        out = subprocess.run([part_path, '-version'], capture_output=True,
                              text=True, timeout=30)
-        if out.returncode != 0:
+        if out.returncode != 0 or 'ffprobe version' not in (out.stdout or ''):
             logger.warning('[MotionVideo] downloaded ffprobe failed to run: %.300s',
                            out.stderr)
+            try:
+                os.remove(part_path)
+            except OSError as cleanup_error:
+                logger.debug('[MotionVideo] rejected ffprobe cleanup failed: %s',
+                             cleanup_error)
             return ''
     except Exception as e:
         logger.warning('[MotionVideo] downloaded ffprobe verify failed: %s', e)
+        try:
+            os.remove(part_path)
+        except OSError as cleanup_error:
+            logger.debug('[MotionVideo] unverifiable ffprobe cleanup failed: %s',
+                         cleanup_error)
         return ''
+    os.replace(part_path, dest)
     logger.info('[MotionVideo] ffprobe available at %s', dest)
     return dest
 

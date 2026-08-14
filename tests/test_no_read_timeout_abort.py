@@ -39,6 +39,7 @@ Run:  pytest tests/test_no_read_timeout_abort.py -m unit
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import threading
@@ -638,14 +639,21 @@ class TestBeatLabelHonesty:
         assert 'first byte' not in ev['detail'].lower()
 
     def test_stall_i18n_keys_shipped_zh_and_en(self):
-        with open(os.path.join(ROOT, 'static', 'js', 'i18n.js'),
-                  encoding='utf-8') as f:
-            src = f.read()
-        for key in ('stream.phase.stalledMidStream',
-                    'stream.phase.stalledMidStreamReason'):
-            assert f"'{key}'" in src, f'{key} missing from i18n.js'
-        # The dead first-byte-timeout reason key must be gone with its error.
-        assert "'stream.retryReason.firstByteTimeout'" not in src
+        locale_root = os.path.join(
+            ROOT, 'frontend', 'src', 'i18n', 'locales')
+        required = ('stream.phase.stalledMidStream',
+                    'stream.phase.stalledMidStreamReason')
+        retired = 'stream.retryReason.firstByteTimeout'
+        for language in ('zh', 'en'):
+            with open(os.path.join(locale_root, f'{language}.json'),
+                      encoding='utf-8') as f:
+                messages = json.load(f)
+            for key in required:
+                assert messages.get(key), (
+                    f'{key} missing from the shipped {language} locale')
+            # The dead first-byte-timeout reason key must be gone with its
+            # error in every lazily loaded Vite locale chunk.
+            assert retired not in messages
 
 
 if __name__ == '__main__':

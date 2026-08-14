@@ -35,11 +35,15 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+I18N_ZH = os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales', 'zh.json')
+FINISH_INFO = runtime_section_path('ui/finish_info.js')
+FINISH_INFO_RICH = runtime_section_path('ui/finish_info_rich.js')
 
 
 def _node_deps_available() -> bool:
@@ -71,8 +75,14 @@ win.Icon = global.Icon = () => '';
 win.calcCostCny = global.calcCostCny = () => null;
 win.formatCny = global.formatCny = (v) => '¥' + v;
 
-eval(fs.readFileSync(I18N, 'utf8'));
-win.t = global.t = t;
+const messages = JSON.parse(fs.readFileSync(I18N, 'utf8'));
+win.t = global.t = (key, params) => {
+  let value = messages[key] || key;
+  for (const [name, replacement] of Object.entries(params || {})) {
+    value = value.replaceAll('{' + name + '}', String(replacement));
+  }
+  return value;
+};
 
 let finishSrc = fs.readFileSync(FINISH, 'utf8');
 let richSrc = fs.readFileSync(RICH, 'utf8');
@@ -160,9 +170,9 @@ def _run(neuter: bool) -> str:
     try:
         proc = subprocess.run(
             ['node', harness,
-             os.path.join(JS_DIR, 'i18n.js'),
-             os.path.join(JS_DIR, 'ui', 'finish_info.js'),
-             os.path.join(JS_DIR, 'ui', 'finish_info_rich.js'),
+             I18N_ZH,
+             FINISH_INFO,
+             FINISH_INFO_RICH,
              ROOT,
              '1' if neuter else '0'],
             capture_output=True, text=True, timeout=60,

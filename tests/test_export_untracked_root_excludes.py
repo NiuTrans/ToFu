@@ -23,6 +23,8 @@ a fully-untracked directory to one ``dir/`` entry but lists individual files
 inside tracked dirs. The guard below pins exactly that boundary.
 """
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {'lib/core.py', 'lib/new_feature.py'}
+
 import os
 import subprocess
 import sys

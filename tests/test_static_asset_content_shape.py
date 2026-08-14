@@ -48,6 +48,7 @@ the "second hand-written implementation" charter #24 exists to prevent.
 from __future__ import annotations
 
 import ast
+import json
 import os
 
 import pytest
@@ -143,7 +144,14 @@ def test_js_asset_is_not_python():
     but only for files a JS-syntax guard actually visits. This covers the two
     largest, most-scanned entry points cheaply.
     """
-    for rel in ('static/js/api.js', 'static/js/main.js'):
+    manifest = json.loads(_read('static/vite/manifest.json'))
+    rels = {
+        'static/vite/' + entry['file']
+        for entry in manifest.values()
+        if entry.get('isEntry') and entry.get('file', '').endswith(('.js', '.mjs'))
+    }
+    assert rels, 'Vite manifest exposes no JavaScript entry assets'
+    for rel in sorted(rels):
         src = _read(rel)
         assert not _parses_as_python_module(src), (
             '%s parses as a Python module — it has been overwritten with '

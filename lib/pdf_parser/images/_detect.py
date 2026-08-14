@@ -367,6 +367,11 @@ def detect_and_clip_figures(page, page_idx, total_pages,
             'sizeKB': len(b64) * 3 // 4 // 1024,
             'source': source, 'caption': caption,
             'pages': composite_pages,
+            # PDF-point coordinates preserve exact evidence provenance.  The
+            # knowledge layer stores these separately from rendered pixels so
+            # future viewers can highlight the source region without reparsing.
+            'bbox': [round(clip.x0, 2), round(clip.y0, 2),
+                     round(clip.x1, 2), round(clip.y1, 2)],
         })
 
     return results

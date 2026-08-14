@@ -12,8 +12,8 @@ package facade at call time (``import lib.paper.insight_engine as _pkg``) so a
 patch on ``ie.<name>`` bites exactly as it did in the original flat module.
 """
 
-import json
 import time
+import uuid
 
 from lib.llm_errors import AbortedError
 from lib.log import get_logger
@@ -121,11 +121,10 @@ def _persist_insight(phash, ui_lang, markdown, model, *, items=None,
                      usage=None, baseline=None):
     """Persist an insight section under the ``insight:<ui_lang>`` key.
 
-    Reuses the report engine's EXACT write-path (``upsert(db, PAPER_REPORTS,
-    …)``) — no hand-rolled second writer — so the insight row obeys the same
-    schema, upsert semantics, and PG/SQLite bridge as every other paper_reports
-    row. The composite lang key keeps it a SEPARATE row from the plain report,
-    so it never overwrites the fidelity report.
+    Uses the Sidecar's versioned ``paper.report.upsert`` operation so the web
+    or worker process never owns a driver, connection, cursor, or transaction.
+    The composite lang key keeps it a SEPARATE row from the plain report, so it
+    never overwrites the fidelity report.
 
     v2 meta (design §3.2/§3.3): when ``items`` (the grounded insight dict,
     with resolved ``anchor_idx`` per item) is given, it rides the row's meta
@@ -143,17 +142,15 @@ def _persist_insight(phash, ui_lang, markdown, model, *, items=None,
         if usage:
             meta['usage'] = usage
     try:
-        from lib.database import get_thread_db
-        from lib.database._core_schema import PAPER_REPORTS, upsert
-        db = get_thread_db()
-        upsert(db, PAPER_REPORTS, {
+        from lib.storage import get_storage_client
+        get_storage_client(write=True).command('paper.report.upsert', {
             'paper_hash': phash,
             'lang': insight_lang_key(ui_lang),
             'report': markdown,
             'model': model or '',
-            'meta': json.dumps(meta, ensure_ascii=False),
+            'meta': meta,
             'created_at': int(time.time()),
-        }, retry=True)
+        }, f'paper.insight.upsert:{uuid.uuid4().hex}')
         logger.info('[Paper:Insight] Persisted insight — hash=%s key=%s %d chars (v%s)',
                     phash, insight_lang_key(ui_lang), len(markdown),
                     meta.get('v', 1))

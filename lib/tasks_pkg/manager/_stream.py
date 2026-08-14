@@ -130,12 +130,20 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
         _prep_done = task.get('_t_prep_done')
         _now = time.time()
         if _prep_done:
+            _ttft_seconds = max(0.0, _now - _prep_done)
             logger.info('%s [Timing] TTFT=%.3fs (context-ready→first-token), '
                         'request=%.3fs (build_body→first-token) model=%s',
                         pfx, _now - _prep_done, _now - _t_request_start, model)
         else:
+            _ttft_seconds = max(0.0, _now - _t_request_start)
             logger.info('%s [Timing] first-token after %.3fs (request) model=%s',
                         pfx, _now - _t_request_start, model)
+        try:
+            from lib.observability import record_llm_first_token
+            record_llm_first_token(
+                model, _ttft_seconds, task.get('provider_id') or '')
+        except Exception as _metrics_err:
+            logger.debug('%s TTFT metric skipped: %s', pfx, _metrics_err)
 
     def _maybe_checkpoint_during_stream():
         """Called on every content/thinking delta — checkpoint if interval elapsed."""

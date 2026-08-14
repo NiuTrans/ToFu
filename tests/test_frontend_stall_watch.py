@@ -39,13 +39,22 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
+
+from tests._runtime_sections import (
+    orchestration_legacy_test_root,
+    runtime_section,
+    runtime_section_names,
+    runtime_section_path,
+)
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
+LEGACY_TEST_ROOT = orchestration_legacy_test_root()
 
 
 def _node_deps_available() -> bool:
@@ -288,7 +297,7 @@ def _run_harness(harness: str) -> tuple[bool, str]:
     with open(probe, 'w', encoding='utf-8') as f:
         f.write(harness)
     try:
-        p = subprocess.run(['node', probe, ROOT], capture_output=True,
+        p = subprocess.run(['node', probe, LEGACY_TEST_ROOT], capture_output=True,
                            text=True, timeout=120)
     finally:
         os.unlink(probe)
@@ -313,6 +322,48 @@ class TestStallWatchDetector:
         ok, output = _run_harness(_HARNESS_WATCH_GATE)
         assert ok, 'stall-watch flow-gate harness failures:\n' + output
 
+    def test_typed_lifecycle_owns_and_releases_idle_timer(self, tmp_path):
+        source = Path(runtime_section_path('ui/stall_watch.js'))
+        harness = tmp_path / 'stall-watch-lifecycle.js'
+        harness.write_text(f"""
+global.window = global;
+global.twUpdate = () => {{}};
+global.Api = {{ chat: {{ abortTask() {{}}, abortConv() {{}} }} }};
+let created = 0;
+let active = 0;
+let destroyed = 0;
+global.TofuModules = {{
+  createLifecycleScope() {{
+    created += 1;
+    let live = true;
+    return {{
+      interval() {{ active += 1; return 41; }},
+      destroy() {{
+        if (!live) return;
+        live = false;
+        active -= 1;
+        destroyed += 1;
+      }},
+    }};
+  }},
+}};
+require({str(source)!r});
+stallWatchFeed('conv-1', 'task-1', {{type:'tool_start'}});
+stallWatchFeed('conv-1', 'task-1', {{type:'tool_progress'}});
+if (created !== 1 || active !== 1) throw Error('timer duplicated');
+stallWatchFeed('conv-1', 'task-1', {{type:'done'}});
+if (destroyed !== 1 || active !== 0) throw Error('terminal did not release');
+stallWatchFeed('conv-1', 'task-2', {{type:'tool_start'}});
+if (created !== 2 || active !== 1) throw Error('timer did not restart');
+_resetStallWatchForTests();
+_resetStallWatchForTests();
+if (destroyed !== 2 || active !== 0) throw Error('reset was not idempotent');
+""", encoding='utf-8')
+        result = subprocess.run(
+            ['node', str(harness)], cwd=ROOT, text=True,
+            capture_output=True, timeout=20)
+        assert result.returncode == 0, result.stderr
+
 
 @pytest.mark.unit
 class TestStallWatchRenderSeam:
@@ -328,15 +379,13 @@ class TestStallWatchWiringRatchets:
     behavioural harness above was itself neutered."""
 
     def test_feed_seam_present_in_dispatch(self):
-        src = open(os.path.join(ROOT, 'static/js/ui/sse_pipeline.js'),
-                   encoding='utf-8').read()
+        src = runtime_section('ui/sse_pipeline.js')
         assert 'stallWatchFeed(convId, taskId, ev)' in src, (
             'dispatchSSEEvent lost the stall-watch feed seam — the detector '
             'goes blind while staying green')
 
     def test_render_seam_present_in_streaming_ui(self):
-        src = open(os.path.join(ROOT, 'static/js/ui/streaming_ui.js'),
-                   encoding='utf-8').read()
+        src = runtime_section('ui/streaming_ui.js')
         assert 'stallWatchState(_swTaskId)' in src
         assert 'stream.stalled.banner' in src
         assert 'stallWatchStop(activeConvId' in src
@@ -346,8 +395,7 @@ class TestStallWatchWiringRatchets:
         a 'simplification' that drops the tick-flow gate re-opens the exact
         noise this ruling removed — and harness W's no-banner assertions
         would still pass if the detector were merely dead, so pin the gate."""
-        src = open(os.path.join(ROOT, 'static/js/ui/stall_watch.js'),
-                   encoding='utf-8').read()
+        src = runtime_section('ui/stall_watch.js')
         assert '_TICK_FLOW_WINDOW_S' in src, (
             'stall_watch.js lost the tick-flow window — the regime split is gone')
         assert '_ticksFlowing' in src, (
@@ -355,10 +403,10 @@ class TestStallWatchWiringRatchets:
             'healthy command execution again (the 2026-08-04 ruling)')
 
     def test_i18n_keys_shipped(self):
-        src = open(os.path.join(ROOT, 'static/js/i18n.js'),
-                   encoding='utf-8').read()
-        for key in ("'stream.stalled.banner'", "'stream.stalled.stop'"):
-            assert key in src, f'{key} missing from i18n.js'
+        src = (Path(ROOT) / 'frontend/src/i18n/locales/zh.json').read_text(
+            encoding='utf-8')
+        for key in ('stream.stalled.banner', 'stream.stalled.stop'):
+            assert f'"{key}"' in src, f'{key} missing from zh locale'
 
     def test_css_class_shipped(self):
         src = open(os.path.join(ROOT, 'static/styles.css'),
@@ -367,8 +415,6 @@ class TestStallWatchWiringRatchets:
         assert '.stream-stalled-stop' in src
 
     def test_bundle_registers_module(self):
-        src = open(os.path.join(ROOT, 'lib/js_bundler.py'),
-                   encoding='utf-8').read()
-        assert "'ui/stall_watch.js'" in src, (
+        assert 'ui/stall_watch.js' in runtime_section_names(), (
             'stall_watch.js is not in _BUNDLE_FILES — the served bundle '
             'never contains the detector (the _BUNDLE_FILES freeze lesson)')

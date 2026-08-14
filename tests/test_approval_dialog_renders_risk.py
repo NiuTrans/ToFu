@@ -45,7 +45,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_JS_DIR = os.path.join(_REPO, 'static', 'js')
+_JS_DIR = os.path.join(_REPO, 'frontend', 'src', 'runtime')
 _FN = '_renderPendingApprovalBlock'
 
 
@@ -70,7 +70,7 @@ def _resolve_renderer_source() -> tuple[str, str]:
             if needle in src:
                 hits.append((p, src))
     assert hits, (
-        f'{_FN} not found anywhere under static/js — the approval-dialog '
+        f'{_FN} not found anywhere under frontend/src/runtime — the approval-dialog '
         f'renderer appears to have been DELETED. If it was renamed, update '
         f'this guard; if it was removed, the write-approval UI is gone.'
     )
@@ -122,6 +122,10 @@ def _write_partition_tools() -> list[str]:
 CASES: dict[str, tuple[dict, str]] = {
     'run_command': ({'command': 'rm -rf /tmp/victim'}, 'rm -rf /tmp/victim'),
     'write_file': ({'path': 'a.py', 'content': 'PAYLOAD_X'}, 'PAYLOAD_X'),
+    'edit_file': ({'description': 'replace dangerous code', 'edits': [{
+        'path': 'a.py', 'operation': 'replace',
+        'anchor': 'OLD_X', 'content': 'NEW_X',
+    }]}, 'OLD_X'),
     'apply_diff': ({'path': 'a.py', 'search': 'OLD_X', 'replace': 'NEW_X'}, 'OLD_X'),
     'apply_diffs': ({'edits': [{'path': 'a.py', 'search': 'OLD_X',
                                 'replace': 'NEW_X'}]}, 'OLD_X'),
@@ -178,6 +182,10 @@ CASES: dict[str, tuple[dict, str]] = {
     'update_search_settings': ({'fetch_top_n': 5, 'llm_content_filter': False,
                                 'block_domain': 'pinterest.com'},
                                'pinterest.com'),
+    'call_mcp_write_tool': ({
+        'name': 'mcp__github__delete_issue',
+        'arguments': {'issue_id': 'issue-DELETE-X'},
+    }, 'issue-DELETE-X'),
 }
 
 
@@ -216,6 +224,8 @@ def _live_schema_properties() -> dict[str, set[str]]:
     for mod, attr in (('lib.tools.browser', 'BROWSER_TOOLS'),
                       ('lib.browser.advanced', 'ADVANCED_BROWSER_TOOLS'),
                       ('lib.desktop_tools', 'DESKTOP_TOOLS'),
+                      ('lib.tools.project', 'PROJECT_TOOLS_LEGACY'),
+                      ('lib.tools.project', 'PROJECT_TOOLS_UNIFIED'),
                       ('lib.tools.motion_video', 'MOTION_VIDEO_TOOLS'),
                       ('lib.memory', 'ALL_MEMORY_TOOLS'),
                       ('lib.scheduler.tool_defs', 'SCHEDULER_TOOLS')):

@@ -25,7 +25,9 @@ import io
 import os
 
 import requests
-from flask import Blueprint, request
+from quart import Blueprint, request
+
+from lib.quart_sync import request_files, request_form
 
 from lib.api_response import (
     api_bad_request, api_created, api_error, api_internal_error,
@@ -250,12 +252,14 @@ def install_skill_package_v1():
     fname = None
 
     if request.content_type and request.content_type.startswith('multipart/'):
-        if 'file' not in request.files:
+        files = request_files()
+        if 'file' not in files:
             return api_bad_request('No file uploaded')
-        f = request.files['file']
+        f = files['file']
         fname = f.filename or 'upload.zip'
-        scope = (request.form.get('scope') or 'global').strip().lower()
-        overwrite = request.form.get('overwrite', '').lower() in ('1', 'true', 'yes')
+        form = request_form()
+        scope = (form.get('scope') or 'global').strip().lower()
+        overwrite = form.get('overwrite', '').lower() in ('1', 'true', 'yes')
         data = f.read(_INSTALL_MAX_BYTES + 1)
         if len(data) > _INSTALL_MAX_BYTES:
             return api_error(

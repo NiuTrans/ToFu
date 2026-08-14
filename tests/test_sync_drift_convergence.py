@@ -106,11 +106,12 @@ def test_frozen_client_escalates_only_after_sustained_window():
 
 
 @_unit
-def test_idle_conversation_with_both_sides_frozen_is_not_a_fault():
-    """Neither side moving is a stale-but-quiet conv, not a dropped frame.
+def test_persistent_static_mismatch_is_a_fault():
+    """The usual lost terminal frame is static on BOTH sides.
 
-    Without the server_moved condition this would look identical to a stalled
-    client and would warn forever on every idle conversation.
+    The task is already gone before the first 60-second probe: the server stays
+    empty while the client keeps a ghost id.  Requiring a later server movement
+    made this real stale state permanently unrepairable.
     """
     reset()
     thresh = sustained_threshold_sec()
@@ -119,9 +120,23 @@ def test_idle_conversation_with_both_sides_frozen_is_not_a_fault():
         verdict = observe_divergence('cv-idle', 'rev', 42, 99,
                                      now=T0 + i * (thresh / 2.0))
     assert verdict['server_moved'] is False
-    assert verdict['stalled'] is False, (
-        'if the server is not advancing, the client is not missing anything')
-    assert verdict['severity'] == 'debug'
+    assert verdict['stalled'] is True
+    assert verdict['sustained'] is True
+    assert verdict['severity'] == 'warning'
+
+
+@_unit
+def test_client_that_moves_once_then_freezes_can_still_escalate():
+    """An early client advance must not immunise a later wedge forever."""
+    reset()
+    thresh = sustained_threshold_sec()
+    observe_divergence('cv-later-wedge', 'rev', 1, 10, now=T0)
+    observe_divergence('cv-later-wedge', 'rev', 2, 20, now=T0 + 60)
+    verdict = observe_divergence(
+        'cv-later-wedge', 'rev', 2, 30, now=T0 + 60 + thresh + 1)
+    assert verdict['client_moved'] is True
+    assert verdict['frozen_age'] >= thresh
+    assert verdict['sustained'] is True
 
 
 # ── Face 3: convergence is recorded (the positive evidence P6 needs) ─────
@@ -157,6 +172,29 @@ def test_tracking_is_scoped_per_conv_and_per_kind():
 
     observe_agreement('cv-a', 'rev', now=T0 + 10.0)
     assert tracked_count() == 2, 'clearing one pair must not clear the others'
+
+
+@_unit
+def test_agreement_from_sibling_observer_cannot_clear_stale_tab():
+    """Two browser tabs observing one conv need independent ledgers."""
+    reset()
+    thresh = sustained_threshold_sec()
+    observe_divergence(
+        'cv-tabs', 'rev', 4, 9, now=T0, observer_id='stale-tab')
+    observe_divergence(
+        'cv-tabs', 'rev', 4, 9, now=T0 + thresh + 1,
+        observer_id='stale-tab')
+    assert tracked_count() == 1
+
+    assert observe_agreement(
+        'cv-tabs', 'rev', now=T0 + thresh + 2,
+        observer_id='fresh-tab') is None
+    assert tracked_count() == 1, (
+        'a fresh sibling tab must not erase the stale tab repair evidence')
+    still = observe_divergence(
+        'cv-tabs', 'rev', 4, 9, now=T0 + thresh + 3,
+        observer_id='stale-tab')
+    assert still['sustained'] is True
 
 
 # ── Face 4: direction — client_ahead is a DIFFERENT defect ───────────────
@@ -209,7 +247,7 @@ def test_NEUTER_dropping_the_moving_client_check_would_warn_on_healthy_convs():
 
 
 @_unit
-def test_NEUTER_dropping_the_server_moved_check_would_warn_on_idle_convs():
+def test_NEUTER_requiring_server_movement_hides_lost_terminal_frame():
     reset()
     thresh = sustained_threshold_sec()
     verdict = None
@@ -217,13 +255,13 @@ def test_NEUTER_dropping_the_server_moved_check_would_warn_on_idle_convs():
         verdict = observe_divergence('cv-neuter-idle', 'rev', 42, 99,
                                      now=T0 + i * thresh)
 
-    stalled_without_server_check = (verdict['observations'] >= 2
-                                    and not verdict['client_moved'])
-    assert stalled_without_server_check is True, (
-        'without the server_moved condition an idle conv looks stalled')
-    assert verdict['stalled'] is False, (
-        'the shipped policy must require the server to be ADVANCING; if this '
-        'flips, every idle conversation becomes a false alarm')
+    old_policy = (verdict['observations'] >= 2
+                  and verdict['server_moved']
+                  and not verdict['client_moved'])
+    assert old_policy is False, (
+        'the old server-must-move policy hides this terminal-frame loss')
+    assert verdict['sustained'] is True, (
+        'a persistent inequality must self-heal even after the server settles')
 
 
 if __name__ == '__main__':

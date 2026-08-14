@@ -85,19 +85,17 @@ def _run_async(coro):
 #  Tests
 # ═══════════════════════════════════════════════════════════════════════
 
-class TestFlaskShim:
-    """Verify the Flask→Quart import shim works."""
+class TestQuartSyncBridge:
+    """Verify native Quart registration and temporary sync helpers."""
 
-    def test_flask_import_resolves_to_quart(self, quart_available):
-        """After shim install, `import flask` should give quart."""
-        # The shim is installed when server_async is imported
-        import flask
-        import quart
-        assert flask.Blueprint is quart.Blueprint
-        assert flask.request is quart.request
+    def test_server_source_has_no_flask_module_alias(self, quart_available):
+        """The server must not replace the process-global Flask module."""
+        root = os.path.dirname(os.path.dirname(__file__))
+        source = open(os.path.join(root, 'server.py'), encoding='utf-8').read()
+        assert "sys.modules['flask']" not in source
 
-    def test_flask_blueprint_registration(self, async_app):
-        """All Flask-style blueprints register successfully on Quart app."""
+    def test_quart_blueprint_registration(self, async_app):
+        """All native Quart blueprints register successfully."""
         # Check that core blueprints are registered. After the /api/v1
         # migration, config/conversations moved under the api_v1_* namespace
         # while chat/common kept their legacy bare names.
@@ -319,10 +317,11 @@ if __name__ == '__main__':
         traceback.print_exc()
         sys.exit(1)
 
-    # 3. Verify shim
-    import flask
-    assert flask.Blueprint is quart.Blueprint, 'Shim failed: flask.Blueprint != quart.Blueprint'
-    print('✓ Flask→Quart shim verified')
+    # 3. Verify native Quart boundary
+    source = open(os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                               'server.py'), encoding='utf-8').read()
+    assert "sys.modules['flask']" not in source
+    print('✓ Native Quart boundary verified')
 
     # 4. Check blueprints
     app = mod.app

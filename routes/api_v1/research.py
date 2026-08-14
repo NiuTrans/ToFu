@@ -26,7 +26,7 @@ not an error.
 
 from __future__ import annotations
 
-from flask import Blueprint, request
+from quart import Blueprint, request
 
 from lib.api_response import api_bad_request, api_internal_error, api_ok
 from lib.log import get_logger

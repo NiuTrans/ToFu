@@ -112,6 +112,16 @@ def _capture_system_for(lang_key):
         async with app.test_client() as client:
             r = await client.post('/api/v1/paper/report/start', json={
                 'paper_text': paper, 'lang': lang_key, 'force': True,
+                # This test asserts prompt assembly only.  Interactive paper
+                # second passes default ON and make real additional dispatcher
+                # calls after the report has already published status=done;
+                # letting those escape the mock leaves asyncio.run() waiting
+                # up to 300 seconds for its default executor at loop shutdown.
+                'config': {
+                    'paperInsightEnabled': False,
+                    'paperCheckpointsEnabled': False,
+                    'paperTermfillEnabled': False,
+                },
             })
             assert r.status_code == 200, r.status_code
             data = await r.get_json()
@@ -122,6 +132,13 @@ def _capture_system_for(lang_key):
                 if t and t['status'] in ('done', 'error'):
                     break
                 await asyncio.sleep(0.05)
+            # ``status=done`` is emitted before optional post-processing. Even
+            # with all optional passes disabled, await this route's tracked
+            # worker so no executor thread crosses the asyncio.run boundary.
+            pending = list(_report_runtime._bg_tasks)
+            if pending:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True), 10)
 
     try:
         asyncio.run(_t())

@@ -43,11 +43,14 @@ import base64
 import json
 import os
 import re
+import tempfile
 import time
 from urllib.parse import unquote
 
 import requests as _requests
-from flask import Blueprint, Response, request
+from quart import Blueprint, Response, request
+
+from lib.quart_sync import request_files, request_form
 
 from lib.api_response import (
     api_bad_request,
@@ -63,6 +66,7 @@ from lib.database import (
     async_fetchall,
     async_fetchone,
     db_execute_with_retry,
+    pooled_db,
 )
 from lib.http_client import http_get
 from lib.log import get_logger
@@ -76,7 +80,6 @@ from lib.paper import (  # noqa: F401  — back-compat re-exports
     _LIB_PARSED_TEXT_CAP,
     _LIB_QA_HISTORY_CAP,
     _LIB_TITLE_CAP,
-    _MAX_REPORT_TOOL_ROUNDS,
     _PAPER_LIB_COLUMNS,
     _REPORT_PROMPT_EN,
     _REPORT_PROMPT_ZH,
@@ -159,9 +162,144 @@ from lib.paper import (  # noqa: F401  — back-compat re-exports
 )
 from lib.request_parser import async_parse_body
 from routes._task_routes import register_task_routes
+from routes.task_http import task_replay_cursor, task_replay_response
 from routes.common import DEFAULT_USER_ID
 
 logger = get_logger(__name__)
+
+
+def _task_poll_fields(runtime, task_id: str, cursor: int) -> dict:
+    """Project the unified replay page onto legacy paper poll responses."""
+    # Preserve the producer-owned page verbatim. Domain poll handlers only add
+    # their terminal snapshot fields; they must not maintain a second list of
+    # replay metadata (clocks, correlation IDs, cursor reset information).
+    return dict(runtime.poll(task_id, cursor))
+
+
+class _PaperDownloadTooLarge(ValueError):
+    pass
+
+
+class _PaperInvalidPDF(ValueError):
+    pass
+
+
+def _paper_pdf_limit() -> int:
+    # Lazy import keeps the PDF engine out of the ordinary server import path.
+    from lib.pdf_parser._common import MAX_PDF_BYTES
+    return MAX_PDF_BYTES
+
+
+def _declared_pdf_length(resp) -> int:
+    """Parse and enforce Content-Length; streamed bytes are checked again."""
+    try:
+        declared = int(resp.headers.get('Content-Length') or 0)
+    except (AttributeError, TypeError, ValueError) as exc:
+        logger.debug('[Paper] invalid PDF Content-Length ignored: %s', exc)
+        declared = 0
+    if declared > _paper_pdf_limit():
+        raise _PaperDownloadTooLarge(
+            f'PDF exceeds the {_paper_pdf_limit() // 1048576} MB limit')
+    return max(0, declared)
+
+
+def _new_pdf_part(filepath: str):
+    directory = os.path.dirname(filepath)
+    os.makedirs(directory, exist_ok=True)
+    return tempfile.mkstemp(
+        prefix=f'.{os.path.basename(filepath)}.', suffix='.part', dir=directory)
+
+
+def _read_pdf_bounded(filepath: str) -> bytes:
+    limit = _paper_pdf_limit()
+    with open(filepath, 'rb') as fh:
+        data = fh.read(limit + 1)
+    if len(data) > limit:
+        raise _PaperDownloadTooLarge(
+            f'PDF exceeds the {limit // 1048576} MB limit')
+    return data
+
+
+def _store_uploaded_pdf_atomic(stream, filepath: str) -> bytes:
+    """Bound, validate and atomically publish one uploaded PDF.
+
+    The multipart parser may spool the incoming body, but the route must not
+    turn that into an unbounded second in-memory copy. Stream into a same-dir
+    staging file, enforce the parser's byte ceiling independently of request
+    headers, then materialize exactly one bounded byte string for validation
+    and parsing. A disconnect, invalid document, ENOSPC or parser rejection
+    never leaves a partially-written final cache entry.
+    """
+    limit = _paper_pdf_limit()
+    fd, part_path = _new_pdf_part(filepath)
+    published = False
+    try:
+        total = 0
+        with os.fdopen(fd, 'wb') as out:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > limit:
+                    raise _PaperDownloadTooLarge(
+                        f'PDF exceeds the {limit // 1048576} MB limit')
+                out.write(chunk)
+            out.flush()
+            os.fsync(out.fileno())
+
+        pdf_bytes = _read_pdf_bounded(part_path)
+        from lib.pdf_parser import validate_pdf_bytes
+        valid, _pages, error = validate_pdf_bytes(pdf_bytes)
+        if not valid:
+            raise _PaperInvalidPDF(error or 'invalid PDF')
+
+        os.replace(part_path, filepath)
+        published = True
+        # Make the rename durable where the filesystem supports directory
+        # fsync. Some FUSE implementations reject it; the file itself was
+        # already fsynced, so that rejection is not an upload failure.
+        try:
+            dir_fd = os.open(os.path.dirname(filepath), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError as exc:
+            logger.debug('[Paper:Upload] parent fsync unavailable: %s', exc)
+        return pdf_bytes
+    finally:
+        if not published:
+            try:
+                os.remove(part_path)
+            except FileNotFoundError as exc:
+                logger.debug('[Paper:Upload] partial already absent: %s', exc)
+            except OSError as exc:
+                logger.debug('[Paper:Upload] partial cleanup failed: %s', exc)
+
+
+def _load_valid_cached_pdf(filepath: str):
+    """Return validated cache bytes, deleting a stale partial/corrupt file."""
+    try:
+        if not os.path.exists(filepath) or os.path.getsize(filepath) <= 1000:
+            return None
+        pdf_bytes = _read_pdf_bounded(filepath)
+        from lib.pdf_parser import validate_pdf_bytes
+        valid, _pages, error = validate_pdf_bytes(pdf_bytes)
+        if valid:
+            return pdf_bytes
+        logger.warning('[Paper:arXiv] Discarding invalid cache %s: %s',
+                       filepath, error)
+    except (OSError, _PaperDownloadTooLarge) as exc:
+        logger.warning('[Paper:arXiv] Discarding unusable cache %s: %s',
+                       filepath, exc)
+    try:
+        os.remove(filepath)
+    except FileNotFoundError as exc:
+        logger.debug('[Paper:arXiv] invalid cache already absent: %s', exc)
+    except OSError as exc:
+        logger.debug('[Paper:arXiv] Invalid-cache cleanup failed: %s', exc)
+    return None
 
 paper_bp = Blueprint('paper', __name__)
 # v1 blueprint for the JSON routes (the 5 carve-outs above stay on paper_bp).
@@ -522,12 +660,9 @@ async def extract_images():
 def serve_paper_image(phash, filename):
     """Serve an extracted paper figure image.
 
-    SKIPPED from the native-async conversion: pure file-serving endpoint whose
-    only blocking call is ``send_file``, which the server.py Flask→Quart shim
-    replaces with a *sync-safe* wrapper. That wrapper, invoked from the event
-    loop, schedules the genuine coroutine via ``run_coroutine_threadsafe`` and
-    blocks on ``.result()`` — a deadlock inside an ``async def`` handler. Kept
-    sync (no DB / no body parse) so the shim runs it safely in an executor.
+    This stays synchronous so filesystem checks and the explicit
+    ``lib.quart_sync`` file-response boundary run in Quart's executor rather
+    than on the event loop.
     """
     phash_safe = _safe_hash_dir(phash)
     if not phash_safe:
@@ -839,9 +974,7 @@ async def start_report_task():
         "  4. Verify any specific quantitative claim you find ambiguous (citation counts, "
         "benchmark records, who first proposed an idea) via fetch_url on arXiv abstracts, "
         "Papers-with-Code, or the original paper page.\n\n"
-        "Tool-call budget: up to "
-        f"{_MAX_REPORT_TOOL_ROUNDS} rounds. You may batch many queries per round — "
-        "prefer a few wide rounds over many narrow ones. Once you've gathered enough, "
+        "You may batch many queries per round for efficiency. Once you've gathered enough, "
         "stop calling tools and write the FULL structured report in one pass.\n\n"
         "Quality reminder: methodology must be reproduction-grade (the *why* of every "
         "design choice, not just the *what*). Related-work survey must include "
@@ -896,11 +1029,7 @@ async def poll_report_task():
     feed them directly to its existing `renderToolRoundsHTML` pipeline.
     """
     task_id = request.args.get('task_id', '').strip()
-    try:
-        cursor = int(request.args.get('cursor', 0))
-    except (ValueError, TypeError) as _e_audit:
-        logger.debug('[paper] poll_report_task caught %s: %s', type(_e_audit).__name__, _e_audit)
-        cursor = 0
+    cursor = task_replay_cursor(request.args)
 
     if not task_id:
         return api_bad_request('task_id required')
@@ -912,19 +1041,8 @@ async def poll_report_task():
         logger.debug('[Paper:Report:Poll] Unknown task_id=%s', task_id)
         return api_not_found('task not found (may have expired)')
 
-    # Snapshot events since cursor
-    with task['events_lock']:
-        total = len(task['events'])
-        cursor = max(0, min(cursor, total))
-        new_events = list(task['events'][cursor:])
-
-    resp = {
-        'ok': True,
-        'status': task['status'],
-        'events': new_events,
-        'next_cursor': total,
-        'paper_hash': task['paper_hash'],
-    }
+    resp = _task_poll_fields(_report_runtime, task_id, cursor)
+    resp['paper_hash'] = task['paper_hash']
     if task['status'] == 'done':
         resp['report'] = task.get('enriched_text') or task.get('full_text', '')
         if task.get('report_meta'):
@@ -937,7 +1055,7 @@ async def poll_report_task():
         resp['partial'] = task.get('full_text', '')
     if task['status'] == 'error':
         resp['error'] = task.get('error', '')
-    return api_payload(resp, 200)
+    return task_replay_response(resp)
 
 
 @api_v1_paper_bp.route('/api/v1/paper/review/venues', methods=['GET'])
@@ -1375,11 +1493,7 @@ async def poll_qa_task():
     Returns: {ok, status, events, next_cursor, paper_hash, answer? (if done)}.
     """
     task_id = request.args.get('task_id', '').strip()
-    try:
-        cursor = int(request.args.get('cursor', 0))
-    except (ValueError, TypeError) as e:
-        logger.debug('[Paper:QA:Poll] bad cursor: %s', e)
-        cursor = 0
+    cursor = task_replay_cursor(request.args)
     if not task_id:
         return api_bad_request('task_id required')
 
@@ -1388,23 +1502,13 @@ async def poll_qa_task():
         logger.debug('[Paper:QA:Poll] Unknown task_id=%s', task_id)
         return api_not_found('task not found (may have expired)')
 
-    with task['events_lock']:
-        total = len(task['events'])
-        cursor = max(0, min(cursor, total))
-        new_events = list(task['events'][cursor:])
-
-    resp = {
-        'ok': True,
-        'status': task['status'],
-        'events': new_events,
-        'next_cursor': total,
-        'paper_hash': task['paper_hash'],
-    }
+    resp = _task_poll_fields(_qa_runtime, task_id, cursor)
+    resp['paper_hash'] = task['paper_hash']
     if task['status'] == 'done':
         resp['answer'] = task.get('full_text', '')
     if task['status'] == 'error':
         resp['error'] = task.get('error', '')
-    return api_payload(resp, 200)
+    return task_replay_response(resp)
 
 
 @api_v1_paper_bp.route('/api/v1/paper/translate/start', methods=['POST'])
@@ -1475,11 +1579,7 @@ async def start_translate_task():
 async def poll_translate_task():
     """Poll a translation task for new events."""
     task_id = request.args.get('task_id', '').strip()
-    try:
-        cursor = int(request.args.get('cursor', 0))
-    except (ValueError, TypeError) as _e_audit:
-        logger.debug('[paper] poll_translate_task caught %s: %s', type(_e_audit).__name__, _e_audit)
-        cursor = 0
+    cursor = task_replay_cursor(request.args)
     if not task_id:
         return api_bad_request('task_id required')
 
@@ -1487,24 +1587,16 @@ async def poll_translate_task():
     if not task:
         return api_not_found('task not found (expired?)')
 
-    with task['events_lock']:
-        total = len(task['events'])
-        cursor = max(0, min(cursor, total))
-        new_events = list(task['events'][cursor:])
-
-    resp = {
-        'ok': True,
-        'status': task['status'],
-        'events': new_events,
-        'next_cursor': total,
-        'paper_hash': task['paper_hash'],
-        'progress': dict(task['progress']),
-    }
+    resp = _task_poll_fields(_translate_runtime, task_id, cursor)
+    resp.update(
+        paper_hash=task['paper_hash'],
+        progress=dict(task['progress']),
+    )
     if task['status'] == 'done':
         resp['text'] = task.get('full_text', '')
     if task['status'] == 'error':
         resp['error'] = task.get('error', '')
-    return api_payload(resp, 200)
+    return task_replay_response(resp)
 
 
 @api_v1_paper_bp.route('/api/v1/paper/translate/lookup', methods=['POST'])
@@ -1670,11 +1762,7 @@ async def poll_recommend_task():
     Returns: {ok, status, events, next_cursor, results? / correction? (if done)}.
     """
     task_id = request.args.get('task_id', '').strip()
-    try:
-        cursor = int(request.args.get('cursor', 0))
-    except (ValueError, TypeError) as e:
-        logger.debug('[Paper:Recommend:Poll] bad cursor: %s', e)
-        cursor = 0
+    cursor = task_replay_cursor(request.args)
     if not task_id:
         return api_bad_request('task_id required')
 
@@ -1683,17 +1771,7 @@ async def poll_recommend_task():
         logger.debug('[Paper:Recommend:Poll] Unknown task_id=%s', task_id)
         return api_not_found('task not found (may have expired)')
 
-    with task['events_lock']:
-        total = len(task['events'])
-        cursor = max(0, min(cursor, total))
-        new_events = list(task['events'][cursor:])
-
-    resp = {
-        'ok': True,
-        'status': task['status'],
-        'events': new_events,
-        'next_cursor': total,
-    }
+    resp = _task_poll_fields(_recommend_runtime, task_id, cursor)
     if task['status'] == 'done':
         resp['results'] = task.get('results', [])
         resp['correction'] = task.get('correction')
@@ -1701,7 +1779,7 @@ async def poll_recommend_task():
     if task['status'] == 'error':
         resp['error'] = task.get('error', '')
         resp['llmError'] = bool(task.get('llmError'))
-    return api_payload(resp, 200)
+    return task_replay_response(resp)
 
 
 @api_v1_paper_bp.route('/api/v1/paper/recommend/abort', methods=['POST'])
@@ -1744,8 +1822,9 @@ async def fetch_arxiv():
     filename = f'arxiv_{arxiv_id.replace("/", "_")}.pdf'
     filepath = os.path.join(PAPER_DIR, filename)
 
-    if os.path.exists(filepath) and os.path.getsize(filepath) > 1000:
-        file_size = os.path.getsize(filepath)
+    cached_pdf = await asyncio.to_thread(_load_valid_cached_pdf, filepath)
+    if cached_pdf is not None:
+        file_size = len(cached_pdf)
         logger.info('[Paper:arXiv] Cache hit for %s — %d bytes at %s', arxiv_id, file_size, filepath)
         return api_ok({
             'pdf_url': f'/api/paper/pdf/{filename}',
@@ -1757,33 +1836,58 @@ async def fetch_arxiv():
     def _download():
         logger.info('[Paper:arXiv] Downloading PDF: %s', pdf_url)
         t0 = time.time()
-        resp = http_get(pdf_url, timeout=60, stream=True,
-                        headers={'User-Agent': 'Mozilla/5.0 (compatible; TofuBot/1.0)'})
-        resp.raise_for_status()
-        content_type = resp.headers.get('Content-Type', '')
-        if 'pdf' not in content_type and 'octet-stream' not in content_type:
-            logger.warning('[Paper:arXiv] Unexpected content type: %s for %s', content_type, pdf_url)
+        resp = None
+        part_path = None
+        try:
+            resp = http_get(pdf_url, timeout=60, stream=True,
+                            headers={'User-Agent': 'Mozilla/5.0 (compatible; TofuBot/1.0)'})
+            resp.raise_for_status()
+            _declared_pdf_length(resp)
+            content_type = resp.headers.get('Content-Type', '')
+            if 'pdf' not in content_type and 'octet-stream' not in content_type:
+                logger.warning('[Paper:arXiv] Unexpected content type: %s for %s', content_type, pdf_url)
 
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        chunks = []
-        with open(filepath, 'wb') as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                if not chunk:
-                    continue
-                f.write(chunk)
-                chunks.append(chunk)
+            fd, part_path = _new_pdf_part(filepath)
+            downloaded = 0
+            with os.fdopen(fd, 'wb') as f:
+                for chunk in resp.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    downloaded += len(chunk)
+                    if downloaded > _paper_pdf_limit():
+                        raise _PaperDownloadTooLarge(
+                            f'PDF exceeds the {_paper_pdf_limit() // 1048576} MB limit')
+                    f.write(chunk)
+                f.flush()
+                os.fsync(f.fileno())
 
-        # Validity gate: reject a truncated/aborted download that left a stub.
-        from lib.pdf_parser import validate_pdf_bytes as _validate_pdf_bytes
-        _ok, _np, _verr = _validate_pdf_bytes(b''.join(chunks))
-        if not _ok:
+            pdf_bytes = _read_pdf_bounded(part_path)
+            from lib.pdf_parser import validate_pdf_bytes as _validate_pdf_bytes
+            _ok, _np, _verr = _validate_pdf_bytes(pdf_bytes)
+            if not _ok:
+                raise ValueError('Downloaded file is not a readable PDF: ' + _verr)
+            os.replace(part_path, filepath)
+            part_path = None
+        finally:
+            if resp is not None:
+                close = getattr(resp, 'close', None)
+                if callable(close):
+                    close()
+            if part_path is not None:
+                try:
+                    os.remove(part_path)
+                except FileNotFoundError as e:
+                    logger.debug('[Paper:arXiv] partial already absent: %s', e)
+                except OSError as e:
+                    logger.debug('[Paper:arXiv] partial cleanup failed: %s', e)
+
+        size = len(pdf_bytes)
+        if not size:
             try:
                 os.remove(filepath)
             except OSError as e:
-                logger.debug('[Paper:arXiv] cleanup of rejected %s failed: %s', filepath, e)
-            raise ValueError('Downloaded file is not a readable PDF: ' + _verr)
-
-        size = os.path.getsize(filepath)
+                logger.debug('[Paper:arXiv] empty-cache cleanup failed: %s', e)
+            raise ValueError('Downloaded PDF body was empty')
         elapsed = time.time() - t0
         logger.info('[Paper:arXiv] Downloaded %s: %d bytes in %.1fs', arxiv_id, size, elapsed)
         return size
@@ -1796,6 +1900,9 @@ async def fetch_arxiv():
             'file_size': file_size,
         })
 
+    except _PaperDownloadTooLarge as e:
+        logger.warning('[Paper:arXiv] Oversized PDF for %s: %s', arxiv_id, e)
+        return api_error(str(e), status=413)
     except ValueError as e:
         logger.warning('[Paper:arXiv] Rejected invalid PDF for %s: %s', arxiv_id, e)
         return api_bad_request(str(e))
@@ -1805,6 +1912,10 @@ async def fetch_arxiv():
     except _requests.RequestException as e:
         logger.warning('[Paper:arXiv] Download failed: %s — %s', pdf_url, e)
         return api_error(f'Download failed: {str(e)}', status=502)
+    except OSError as e:
+        logger.error('[Paper:arXiv] Disk write failed for %s: %s',
+                     filepath, e, exc_info=True)
+        return api_error('Could not store the downloaded PDF', status=507)
 
 
 @paper_bp.route('/api/paper/fetch-arxiv-stream', methods=['POST'])
@@ -1865,10 +1976,9 @@ async def fetch_arxiv_stream():
         pdf_bytes = None
         cached = False
         try:
-            if os.path.exists(filepath) and os.path.getsize(filepath) > 1000:
+            pdf_bytes = _load_valid_cached_pdf(filepath)
+            if pdf_bytes is not None:
                 cached = True
-                with open(filepath, 'rb') as f:
-                    pdf_bytes = f.read()
                 file_size = len(pdf_bytes)
                 logger.info('[Paper:arXiv:Stream] Cache hit for %s — %d bytes', arxiv_id, file_size)
                 yield _sse({'stage': 'download_done', 'file_size': file_size,
@@ -1876,47 +1986,75 @@ async def fetch_arxiv_stream():
             else:
                 logger.info('[Paper:arXiv:Stream] Downloading PDF: %s', pdf_url)
                 t0 = time.time()
-                resp = http_get(pdf_url, timeout=60, stream=True,
-                                headers={'User-Agent': 'Mozilla/5.0 (compatible; TofuBot/1.0)'})
-                resp.raise_for_status()
-                content_type = resp.headers.get('Content-Type', '')
-                if 'pdf' not in content_type and 'octet-stream' not in content_type:
-                    logger.warning('[Paper:arXiv:Stream] Unexpected content type: %s for %s',
-                                   content_type, pdf_url)
-
-                total = 0
+                resp = None
+                part_path = None
                 try:
-                    total = int(resp.headers.get('Content-Length') or 0)
-                except (ValueError, TypeError) as e:
-                    logger.debug('[Paper:arXiv:Stream] Bad Content-Length: %s', e)
+                    resp = http_get(pdf_url, timeout=60, stream=True,
+                                    headers={'User-Agent': 'Mozilla/5.0 (compatible; TofuBot/1.0)'})
+                    resp.raise_for_status()
+                    total = _declared_pdf_length(resp)
+                    content_type = resp.headers.get('Content-Type', '')
+                    if 'pdf' not in content_type and 'octet-stream' not in content_type:
+                        logger.warning('[Paper:arXiv:Stream] Unexpected content type: %s for %s',
+                                       content_type, pdf_url)
 
-                downloaded = 0
-                last_progress_ts = 0.0
-                chunks = []
-                # Re-ensure PAPER_DIR (FUSE/cross-DC mounts can drop it after
-                # the import-time makedirs) so the write can't ENOENT.
-                os.makedirs(os.path.dirname(filepath), exist_ok=True)
-                with open(filepath, 'wb') as f:
-                    for chunk in resp.iter_content(chunk_size=32768):
-                        if not chunk:
-                            continue
-                        f.write(chunk)
-                        chunks.append(chunk)
-                        downloaded += len(chunk)
-                        # Emit at most ~10 progress events per second
-                        now = time.time()
-                        if now - last_progress_ts >= 0.1:
-                            last_progress_ts = now
-                            yield _sse({'stage': 'download',
-                                        'downloaded': downloaded,
-                                        'total': total})
-                pdf_bytes = b''.join(chunks)
+                    downloaded = 0
+                    last_progress_ts = 0.0
+                    fd, part_path = _new_pdf_part(filepath)
+                    with os.fdopen(fd, 'wb') as f:
+                        for chunk in resp.iter_content(chunk_size=64 * 1024):
+                            if not chunk:
+                                continue
+                            downloaded += len(chunk)
+                            if downloaded > _paper_pdf_limit():
+                                raise _PaperDownloadTooLarge(
+                                    f'PDF exceeds the {_paper_pdf_limit() // 1048576} MB limit')
+                            f.write(chunk)
+                            # Emit at most ~10 progress events per second
+                            now = time.time()
+                            if now - last_progress_ts >= 0.1:
+                                last_progress_ts = now
+                                yield _sse({'stage': 'download',
+                                            'downloaded': downloaded,
+                                            'total': total})
+                        f.flush()
+                        os.fsync(f.fileno())
+                    pdf_bytes = _read_pdf_bounded(part_path)
+                    from lib.pdf_parser import validate_pdf_bytes as _validate_pdf_bytes
+                    _ok, _np, _verr = _validate_pdf_bytes(pdf_bytes)
+                    if not _ok:
+                        raise ValueError(
+                            'Downloaded file is not a readable PDF (truncated or '
+                            'corrupted): ' + _verr)
+                    os.replace(part_path, filepath)
+                    part_path = None
+                finally:
+                    if resp is not None:
+                        close = getattr(resp, 'close', None)
+                        if callable(close):
+                            close()
+                    if part_path is not None:
+                        try:
+                            os.remove(part_path)
+                        except FileNotFoundError as e:
+                            logger.debug('[Paper:arXiv:Stream] partial already absent: %s', e)
+                        except OSError as e:
+                            logger.debug('[Paper:arXiv:Stream] partial cleanup failed: %s', e)
+
                 file_size = len(pdf_bytes)
                 elapsed = time.time() - t0
                 logger.info('[Paper:arXiv:Stream] Downloaded %s: %d bytes in %.1fs',
                             arxiv_id, file_size, elapsed)
                 yield _sse({'stage': 'download_done', 'file_size': file_size,
                             'elapsed': round(elapsed, 2), 'cached': False})
+        except _PaperDownloadTooLarge as e:
+            logger.warning('[Paper:arXiv:Stream] Oversized PDF for %s: %s', arxiv_id, e)
+            yield _sse({'stage': 'error', 'error': str(e)})
+            return
+        except ValueError as e:
+            logger.warning('[Paper:arXiv:Stream] Rejected PDF for %s: %s', arxiv_id, e)
+            yield _sse({'stage': 'error', 'error': str(e)})
+            return
         except _requests.Timeout:
             logger.warning('[Paper:arXiv:Stream] Download timeout (60s): %s', pdf_url)
             yield _sse({'stage': 'error', 'error': 'Download timed out (60s)'})
@@ -1935,23 +2073,6 @@ async def fetch_arxiv_stream():
         if not pdf_bytes:
             logger.warning('[Paper:arXiv:Stream] No PDF bytes after download for %s', arxiv_id)
             yield _sse({'stage': 'error', 'error': 'PDF body was empty after download'})
-            return
-
-        # Validity gate: an aborted/blocked download can leave a truncated stub
-        # that exists on disk yet is not an openable PDF. Reject it (delete the
-        # file, emit error) so it never gets parsed or seeded as a ghost row.
-        from lib.pdf_parser import validate_pdf_bytes as _validate_pdf_bytes
-        _ok, _np, _verr = _validate_pdf_bytes(pdf_bytes)
-        if not _ok:
-            logger.warning('[Paper:arXiv:Stream] Rejected invalid PDF for %s (%d bytes): %s',
-                           arxiv_id, file_size, _verr)
-            try:
-                os.remove(filepath)
-            except OSError as e:
-                logger.debug('[Paper:arXiv:Stream] cleanup of rejected %s failed: %s', filepath, e)
-            yield _sse({'stage': 'error',
-                        'error': 'Downloaded file is not a readable PDF (truncated or '
-                                 'corrupted): ' + _verr})
             return
 
         yield _sse({'stage': 'parse_start'})
@@ -2158,10 +2279,8 @@ def _stream_file_response(filepath, mimetype, chunk_size=262144):
 def serve_paper_pdf(filename):
     """Serve a downloaded paper PDF.
 
-    SKIPPED from the native-async conversion for the same reason as
-    ``serve_paper_image`` — its only blocking call is the sync-safe
-    ``send_file`` shim, which would deadlock the event loop if invoked from
-    an ``async def`` handler. No DB / no body parse here.
+    This stays synchronous for the same executor/file-response boundary as
+    ``serve_paper_image``. No DB or request-body parsing occurs here.
     """
     filename = os.path.basename(filename)
     filepath = os.path.join(PAPER_DIR, filename)
@@ -2364,10 +2483,8 @@ def _persist_ingested_library_row(paper_id, *, title, pdf_url, pdf_filename,
         return False
     now_ms = int(time.time() * 1000)
     try:
-        from lib.database._core import _pool_get, _pool_put
         from lib.database._core_schema import PAPER_LIBRARY, upsert
-        db = _pool_get()
-        try:
+        with pooled_db(DOMAIN_CHAT) as db:
             existing = db.execute(
                 'SELECT created_at, qa_history, babel_cache FROM paper_library '
                 'WHERE id=? AND user_id=?', (paper_id, DEFAULT_USER_ID),
@@ -2408,8 +2525,6 @@ def _persist_ingested_library_row(paper_id, *, title, pdf_url, pdf_filename,
             logger.info('[Paper:Ingest] Persisted library row %s — hash=%s imgs=%d',
                         paper_id[:16], (paper_hash or '')[:12], len(imgs))
             return True
-        finally:
-            _pool_put(db)
     except Exception as e:
         logger.error('[Paper:Ingest] Library persist failed for %s: %s',
                      paper_id[:16], e, exc_info=True)
@@ -2423,13 +2538,10 @@ def upload_paper():
     Single round-trip: save PDF → parse text → extract figures →
     return everything the frontend needs to populate library state.
 
-    SKIPPED from the native-async conversion: this multipart upload reads
-    ``request.files`` and calls ``file.save``. Under the server.py Flask→Quart
-    shim, ``request.files`` is a *sync-safe* property that drives Quart's async
-    body reader via ``run_coroutine_threadsafe(...).result()`` — safe from an
-    executor thread (sync handler) but a guaranteed deadlock if invoked from
-    the event loop inside an ``async def`` handler. Kept sync so the shim
-    parses the multipart body correctly.
+    This remains synchronous because PDF parsing and figure extraction are
+    blocking work. The multipart body crosses Quart's async boundary through
+    the explicit ``request_files`` helper while Quart runs this handler in its
+    executor.
 
     Returns:
         {
@@ -2445,10 +2557,11 @@ def upload_paper():
             parse_error: str (only on parse failure — PDF is still served)
         }
     """
-    if 'file' not in request.files:
+    files = request_files()
+    if 'file' not in files:
         logger.warning('[Paper:Upload] No file in request')
         return api_bad_request('No file')
-    file = request.files['file']
+    file = files['file']
     if not file.filename:
         logger.warning('[Paper:Upload] Empty filename')
         return api_bad_request('No filename')
@@ -2460,49 +2573,39 @@ def upload_paper():
     # Client-generated bookshelf id — the server persists the library row itself
     # (server-authoritative ingest), so a paper survives even if the client's
     # PUT never lands. Absent → skip persist (back-compat) but still serve.
-    client_paper_id = (request.form.get('paper_id') or '').strip()
-    filename = f"{int(time.time() * 1000)}_{original_name}"
-    filename = re.sub(r'[^\w\-.]', '_', filename)
+    client_paper_id = (request_form().get('paper_id') or '').strip()
+    # Cap the user-controlled stem below NAME_MAX and add entropy: two parallel
+    # uploads of the same file in one millisecond must never overwrite each
+    # other. Keep the original name only as display metadata.
+    _safe_stem = re.sub(r'[^\w\-.]', '_', os.path.splitext(original_name)[0])
+    _safe_stem = (_safe_stem or 'paper')[:160]
+    filename = (f"{int(time.time() * 1000)}_{os.urandom(4).hex()}_"
+                f"{_safe_stem}.pdf")
     filepath = os.path.join(PAPER_DIR, filename)
 
     try:
         # NOTE: Quart's FileStorage.save is an async coroutine. This is a SYNC
-        # handler (see docstring), so `file.save(...)` would return an un-awaited
-        # coroutine and silently write nothing → the next getsize() 500s. Read
-        # the bytes and write them ourselves, matching routes/upload.py.
+        # handler (see docstring), so consume its sync-safe stream explicitly.
+        # The helper bounds the stream and publishes only after PDF validation.
         file.stream.seek(0)
-        pdf_bytes = file.stream.read()
-        # PAPER_DIR is created once at import (lib/paper/hashing.py), but on a
-        # FUSE/cross-DC mount it can be missing at write time — ``open('wb')``
-        # then 500s with ENOENT and the PDF bytes are lost (the vanishing-paper
-        # bug). Re-ensure the dir on every write.
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        with open(filepath, 'wb') as out:
-            out.write(pdf_bytes)
-        file_size = os.path.getsize(filepath)
+        pdf_bytes = _store_uploaded_pdf_atomic(file.stream, filepath)
+        file_size = len(pdf_bytes)
         logger.info('[Paper:Upload] Saved: %s (%d bytes) — original=%s',
                     filename, file_size, original_name)
+    except _PaperDownloadTooLarge as e:
+        logger.warning('[Paper:Upload] Rejected oversized %s: %s', original_name, e)
+        return api_error(str(e), status=413)
+    except _PaperInvalidPDF as e:
+        logger.warning('[Paper:Upload] Rejected invalid PDF %s: %s', original_name, e)
+        return api_bad_request(
+            'The uploaded file is not a readable PDF (it may be truncated or '
+            'corrupted). Please re-upload. [' + str(e) + ']')
+    except OSError as e:
+        logger.error('[Paper:Upload] Failed to store %s: %s', filename, e, exc_info=True)
+        return api_error('Could not store the uploaded PDF', status=507)
     except Exception as e:
         logger.error('[Paper:Upload] Failed to save %s: %s', filename, e, exc_info=True)
         return api_internal_error(f'Upload failed: {str(e)}')
-
-    # Validity gate: a truncated / aborted / empty upload can land a file that
-    # exists (getsize > 0) but is not an openable PDF — e.g. a 15-byte
-    # ``%PDF-1.4`` header-only stub. Committing it seeds a permanent non-viewable
-    # ghost row the reader dead-ends on. Reject it HERE: delete the stub and
-    # return a real error instead of ok:true, so a ghost is never created.
-    from lib.pdf_parser import validate_pdf_bytes
-    _valid, _npages, _verr = validate_pdf_bytes(pdf_bytes)
-    if not _valid:
-        logger.warning('[Paper:Upload] Rejected invalid PDF %s (%d bytes): %s',
-                       filename, file_size, _verr)
-        try:
-            os.remove(filepath)
-        except OSError as e:
-            logger.debug('[Paper:Upload] cleanup of rejected %s failed: %s', filename, e)
-        return api_bad_request(
-            'The uploaded file is not a readable PDF (it may be truncated or '
-            'corrupted). Please re-upload. [' + _verr + ']')
 
     parsed_text = ''
     total_pages = 0
@@ -2510,8 +2613,6 @@ def upload_paper():
     parse_error = ''
     try:
         from lib.pdf_parser import parse_pdf as _parse_pdf
-        with open(filepath, 'rb') as f:
-            pdf_bytes = f.read()
         t0 = time.time()
         result = _parse_pdf(pdf_bytes, max_text_chars=0, max_images=0)
         parsed_text = result.get('text') or ''
@@ -2656,9 +2757,7 @@ async def upsert_library_entry(paper_id):
     # connection in a worker thread (checkout→use→return). DOMAIN_CHAT is the
     # default domain for the paper library tables (get_thread_db() default).
     def _do_upsert():
-        from lib.database._core import _pool_get, _pool_put
-        db = _pool_get()
-        try:
+        with pooled_db(DOMAIN_CHAT) as db:
             # Pull existing row so the client only has to send the small mutable
             # state (qaHistory, babelCache, pageCount, title) — it doesn't need
             # to re-ship parsed_text / images / paperHash on every save. The
@@ -2747,8 +2846,6 @@ async def upsert_library_entry(paper_id):
             }, retry=True)
             logger.info('[Paper:Library] Upserted %s — title=%.60s qa=%d imgs=%d',
                         paper_id[:16], title, len(qa), len(images))
-        finally:
-            _pool_put(db)
 
     # @safe_route (pt_63eb7f02 batch 5) catches any exception from _do_upsert.
     await asyncio.to_thread(_do_upsert)
@@ -2771,17 +2868,13 @@ async def delete_library_entry(paper_id):
     # db_execute_with_retry takes a raw connection — run on a borrowed pool
     # connection in a worker thread (DOMAIN_CHAT default for paper tables).
     def _do_delete():
-        from lib.database._core import _pool_get, _pool_put
-        db = _pool_get()
-        try:
+        with pooled_db(DOMAIN_CHAT) as db:
             db_execute_with_retry(
                 db,
                 'DELETE FROM paper_library WHERE id=? AND user_id=?',
                 (paper_id, DEFAULT_USER_ID),
             )
             logger.info('[Paper:Library] Deleted %s', paper_id[:16])
-        finally:
-            _pool_put(db)
 
     # @safe_route (pt_63eb7f02 batch 5) catches any exception from _do_delete.
     await asyncio.to_thread(_do_delete)
@@ -2804,10 +2897,8 @@ async def prune_broken_library_rows():
     Returns: { ok, pruned: int, ids: [str] }
     """
     def _prune():
-        from lib.database._core import _pool_get, _pool_put
-        db = _pool_get()
         pruned_ids = []
-        try:
+        with pooled_db(DOMAIN_CHAT) as db:
             rows = db.execute(
                 'SELECT ' + ', '.join(_PAPER_LIB_COLUMNS) +
                 ' FROM paper_library WHERE user_id=?', (DEFAULT_USER_ID,),
@@ -2831,8 +2922,6 @@ async def prune_broken_library_rows():
                         logger.debug('[Paper:Prune] stub file remove failed %s: %s', fn, e)
             if pruned_ids:
                 logger.info('[Paper:Prune] Hard-deleted %d broken stub row(s)', len(pruned_ids))
-        finally:
-            _pool_put(db)
         return pruned_ids
 
     # @safe_route (pt_63eb7f02 batch 5) catches any exception from _prune.
@@ -3196,11 +3285,7 @@ async def poll_podcast_task():
     """Poll podcast events. Same cursor protocol as the report poll; on done
     the response flattens script / audioUrl / durationSec / scriptOnly."""
     task_id = request.args.get('task_id', '')
-    try:
-        cursor = int(request.args.get('cursor', '0') or 0)
-    except (ValueError, TypeError) as _e:
-        logger.debug('poll podcast task: unparseable/unexpected type (%s)', _e)
-        cursor = 0
+    cursor = task_replay_cursor(request.args)
     with _podcast_tasks_lock:
         t = _podcast_tasks.get(task_id)
     if not t:
@@ -3214,6 +3299,7 @@ async def poll_podcast_task():
     base = _podcast_runtime.poll(task_id, cursor=cursor)
     status = t.get('status')
     resp = {
+        'format': base.get('format'),
         'ok': True,
         'status': base.get('status', status),
         'done': base.get('done', status in ('done', 'error', 'aborted')),
@@ -3221,10 +3307,18 @@ async def poll_podcast_task():
         # This endpoint's wire name for the cursor is `cursor`, not
         # `next_cursor` — keep it (the podcast client reads `cursor`).
         'cursor': base.get('next_cursor', 0),
+        # Add the standard producer-owned replay metadata without changing the
+        # legacy numeric ``cursor`` above. New clients can detect a trimmed-log
+        # reset; existing podcast clients keep advancing the integer field.
+        'next_cursor': base.get('next_cursor', 0),
+        'cursorInfo': base.get('cursor'),
+        'taskId': base.get('taskId', task_id),
         'progress': t.get('progress') or {'done': 0, 'total': 0},
         'createdAt': base.get('createdAt'),
         'updatedAt': base.get('updatedAt'),
     }
+    if base.get('requestId'):
+        resp['requestId'] = base['requestId']
     if base.get('finishedAt') is not None:
         resp['finishedAt'] = base['finishedAt']
     # The reap may have just flipped the task terminal.
@@ -3244,7 +3338,7 @@ async def poll_podcast_task():
                 if ev.get('reason'):
                     resp['reason'] = ev['reason']
                 break
-    return api_payload(resp, 200)
+    return task_replay_response(resp)
 
 
 @api_v1_paper_bp.route('/api/v1/paper/podcast/lookup', methods=['POST'])

@@ -2,8 +2,10 @@
 
 Goal
 ----
-The frontend has a single entry point for backend HTTP calls:
-``static/js/api.js``. Every other JS file MUST call into ``Api.*`` and
+The frontend has one native HTTP transport owner:
+``frontend/src/api/transport.ts``. The classic ``static/js/api.js`` endpoint
+registry delegates to it when Vite is available and retains its transport only
+for the no-Vite rollback. Every other source MUST call the owned client and
 MUST NOT issue a raw ``fetch('/api/...')`` or ``fetch(apiUrl('/api/...'))``.
 
 End state reached 2026-05-28
@@ -44,10 +46,16 @@ import re
 
 import pytest
 
+from tests._runtime_sections import runtime_section, runtime_section_names
+
+pytestmark = pytest.mark.unit
+
 
 # ── Configuration ────────────────────────────────────────────────────
 HERE = os.path.dirname(os.path.abspath(__file__))
 JS_DIR = os.path.normpath(os.path.join(HERE, '..', 'static', 'js'))
+FRONTEND_DIR = os.path.normpath(os.path.join(HERE, '..', 'frontend', 'src'))
+NATIVE_TRANSPORT = os.path.join(FRONTEND_DIR, 'api', 'transport.ts')
 
 # Matches:
 #   fetch('/api/foo'      fetch("/api/foo"      fetch(`/api/foo`
@@ -80,6 +88,12 @@ _ALLOWED_VARIABLE_FETCHES = {
     # extracted conversations.js → conv_image_hydrate.js by Epic-E slice 4
     # (2ba63a12); the carve-out follows the code.
     'core/conv_image_hydrate.js': 1,
+    # Browser-assisted desktop transport talks to the TofuAgent's
+    # loopback-only broker (127.0.0.1:15180..15189), not a Tofu /api route.
+    # It intentionally needs cross-origin/PNA RequestInit fields that do not
+    # belong in the authenticated backend API client. The actual same-origin
+    # /api/desktop/poll hop is routed through Api.desktop.relayPoll().
+    'local-control.js': 1,
     # (tofu-pet.js HAD a carve-out here for fetching its SVG frames; the
     # 2026-07-30 raster revamp loads frames with new Image() instead — zero
     # fetch() calls — so the entry was removed, tightening the ratchet.)
@@ -88,7 +102,11 @@ _ALLOWED_VARIABLE_FETCHES = {
 # Bundle output is generated; never count it. feature-*.js is the deferred
 # bundle family (same generator, same rule).
 def _is_generated(name: str) -> bool:
-    return name.startswith(('bundle-', 'feature-')) and name.endswith('.js')
+    return bool(re.fullmatch(
+        r'(?:bundle|feature)-[0-9a-f]{8}\.js'
+        r'|domain-[a-z0-9-]+-[0-9a-f]{8}\.js',
+        name,
+    ))
 
 
 # ── Per-file ratchet baseline ───────────────────────────────────────
@@ -133,25 +151,13 @@ def _scan_variable_fetches() -> dict[str, int]:
     """Count fetch() calls with a variable/expression URL per file (comments
     stripped). Same walk + skip rules as _scan_all()."""
     out: dict[str, int] = {}
-    for root, dirs, files in os.walk(JS_DIR):
-        dirs[:] = [d for d in dirs if not d.startswith(('.', '__'))]
-        for name in sorted(files):
-            if not name.endswith('.js'):
-                continue
-            if _is_generated(name) or name in ALLOWED_FILES:
-                continue
-            path = os.path.join(root, name)
-            if not os.path.isfile(path):
-                continue
-            try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-            except OSError:
-                continue
-            c = len(_VARIABLE_FETCH_RE.findall(_strip_comments(content)))
-            if c > 0:
-                rel = os.path.relpath(path, JS_DIR).replace(os.sep, '/')
-                out[rel] = c
+    for rel in runtime_section_names():
+        if rel in ALLOWED_FILES:
+            continue
+        content = runtime_section(rel)
+        c = len(_VARIABLE_FETCH_RE.findall(_strip_comments(content)))
+        if c > 0:
+            out[rel] = c
     return out
 
 
@@ -161,34 +167,45 @@ def _scan_all() -> dict[str, int]:
     dict so BASELINE entries can be e.g. ``'ui/sse_pipeline.js'``.
     """
     out: dict[str, int] = {}
-    for root, dirs, files in os.walk(JS_DIR):
-        # Skip any caches if present
-        dirs[:] = [d for d in dirs if not d.startswith(('.', '__'))]
-        for name in sorted(files):
-            if not name.endswith('.js'):
-                continue
-            if _is_generated(name) or name in ALLOWED_FILES:
-                continue
-            path = os.path.join(root, name)
-            if not os.path.isfile(path):
-                continue
-            c = _count_legacy_calls(path)
-            if c > 0:
-                # Use posix-style relative path so the BASELINE key is
-                # stable across OSes and matches the index.html layout.
-                rel = os.path.relpath(path, JS_DIR).replace(os.sep, '/')
-                out[rel] = c
+    for rel in runtime_section_names():
+        if rel in ALLOWED_FILES:
+            continue
+        c = len(_LEGACY_FETCH_RE.findall(runtime_section(rel)))
+        if c > 0:
+            out[rel] = c
     return out
 
 
 # ── Tests ───────────────────────────────────────────────────────────
 def test_api_js_exists():
-    """api.js — the unified frontend API client — must exist."""
-    path = os.path.join(JS_DIR, 'api.js')
-    assert os.path.isfile(path), (
-        'static/js/api.js is missing. It is the single entry point for '
-        'all frontend backend calls. Recreate it before any other change.'
+    """The migrated endpoint registry and typed transport must both exist."""
+    assert 'api.js' in runtime_section_names()
+    assert os.path.isfile(NATIVE_TRANSPORT)
+    source = runtime_section('api.js')
+    assert 'const Api = {' in source and 'global.Api = Api' in source
+
+
+def test_vite_transport_is_the_only_native_fetch_owner():
+    """Typed modules cannot grow a second, unobserved HTTP chokepoint."""
+    actual = {}
+    for root, _dirs, files in os.walk(FRONTEND_DIR):
+        for name in files:
+            if not name.endswith('.ts'):
+                continue
+            path = os.path.join(root, name)
+            with open(path, encoding='utf-8') as fh:
+                source = _strip_comments(fh.read())
+            count = len(re.findall(r'\bfetch\s*\(', source))
+            if count:
+                actual[os.path.relpath(path, FRONTEND_DIR).replace(os.sep, '/')] = count
+    assert actual == {'api/transport.ts': 1}, (
+        'native modules must route backend calls through api/transport.ts; '
+        f'raw fetch owners were {actual}'
     )
+    with open(NATIVE_TRANSPORT, encoding='utf-8') as fh:
+        transport = _strip_comments(fh.read())
+    assert "headers['X-Request-ID']" in transport
+    assert "headers['X-Tofu-Affinity-Key']" in transport
 
 
 def test_no_new_files_call_api_directly():

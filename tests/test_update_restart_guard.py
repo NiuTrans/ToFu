@@ -101,7 +101,20 @@ class UpdateRestartGuardTest(unittest.TestCase):
         cls._tmp.cleanup()
 
     def setUp(self):
-        # Fresh cooldown state per test (approvals may accumulate — ids are random).
+        # The approval document now owns both token state and the atomic
+        # restart-cooldown authority. Isolate both stores per test.
+        for path in (la._APPROVALS_FILE, la._STATE_FILE):
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def _clear_cooldown_only(self):
+        def _mut(document):
+            document = dict(document or {})
+            document.pop('last_restart_at', None)
+            return document
+
+        la.update_json_atomic(
+            la._APPROVALS_FILE, _mut, default={'records': []}, strict=True)
         if os.path.exists(la._STATE_FILE):
             os.unlink(la._STATE_FILE)
 
@@ -159,8 +172,7 @@ class UpdateRestartGuardTest(unittest.TestCase):
             self.assertEqual(r1.status_code, 200)
             # Clear the acceptance cooldown so THIS assertion isolates the
             # one-time-token property (otherwise the 429 net answers first).
-            if os.path.exists(la._STATE_FILE):
-                os.unlink(la._STATE_FILE)
+            self._clear_cooldown_only()
             # Second use of the SAME one-time token → 403 (one approval = one action).
             r2 = self._post({'approvalId': token})
             self.assertEqual(r2.status_code, 403)
@@ -267,7 +279,8 @@ class UpdateRestartGuardTest(unittest.TestCase):
                    return_value=[]), \
              patch('routes.api_v1.update._deferred_reexec') as reexec, \
              patch.object(la, 'validate', return_value=(True, '')), \
-             patch.object(la, 'consume', return_value=(True, '')):
+             patch.object(la, 'consume_restart',
+                          return_value=(True, '', 0)):
             r = self._post({'approvalId': token})
         self.assertEqual(r.status_code, 200)   # ← neutered gate lets it through
         reexec.assert_called_once()

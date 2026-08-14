@@ -420,7 +420,7 @@ import subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = os.path.join(ROOT, 'frontend', 'src', 'runtime')
 
 
 def _node_available() -> bool:
@@ -475,7 +475,7 @@ def test_renderer_emits_the_progress_only_for_a_real_batch():
     global.document = { getElementById: () => null, querySelectorAll: () => [],
                         addEventListener: () => {}, removeEventListener: () => {} };
 
-    const src = fs.readFileSync(path.join(process.argv[1], 'ui/tool_rounds.js'), 'utf8');
+    const src = fs.readFileSync(path.join(process.argv[1], 'app-runtime.js'), 'utf8');
     // Extract just the pure helper — loading the whole module would drag in the
     // full render stack this check does not need.
     const m = src.match(/function _renderBatchProgress\([\s\S]*?\n\}/);

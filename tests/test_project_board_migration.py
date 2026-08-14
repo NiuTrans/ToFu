@@ -32,6 +32,8 @@ NCs (load-bearing):
 
 from __future__ import annotations
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {'lib/x.py'}
+
 import json
 import os
 

@@ -24,6 +24,10 @@ from lib.model_info._family import (
     is_minimax,
     is_qwen,
 )
+from lib.model_info._openai_gpt56 import (
+    GPT56_MAX_OUTPUT_TOKENS,
+    is_official_gpt56_model,
+)
 
 logger = get_logger(__name__)
 
@@ -157,6 +161,12 @@ def _kimi_max_output(model: str) -> int:
     return 32768
 
 
+def _gpt_max_output(model: str) -> int:
+    """Use the verified 128K ceiling only for official GPT-5.6 ids."""
+    return (GPT56_MAX_OUTPUT_TOKENS
+            if is_official_gpt56_model(model) else 32768)
+
+
 _MODEL_MAX_OUTPUT = {
     # (checker_fn, limit) — limit can be int or callable(model) → int
     'longcat': (is_longcat, 65536),
@@ -166,7 +176,7 @@ _MODEL_MAX_OUTPUT = {
     'kimi':    (is_kimi,    _kimi_max_output),    # per-model lookup
     'doubao':  (is_doubao,  16384),
     'ernie':   (is_ernie,   _ernie_max_output),   # per-model lookup
-    'gpt':     (is_gpt,     32768),
+    'gpt':     (is_gpt,     _gpt_max_output),
     'glm':     (is_glm,     131072),
     'deepseek': (is_deepseek, _deepseek_max_output),  # per-model lookup
     # Claude: 128000 output limit — matches build_body's default. Listed

@@ -224,6 +224,39 @@ class TestBasicOperations:
         assert len(tool_msgs) == 1
         assert tool_msgs[0]['tool_calls'][0]['function']['name'] == 'web_search'
 
+    def test_save_is_a_snapshot_and_never_mutates_the_caller(self):
+        messages = [
+            _make_user('run it'),
+            _make_assistant_with_tools(
+                'I was interrupted',
+                [_make_tool_call('tc_orphan', 'shell', {'cmd': 'true'})]),
+        ]
+        before = json.loads(json.dumps(messages))
+
+        save_messages('conv_snapshot', messages)
+
+        assert messages == before
+        assert get_messages('conv_snapshot') == [
+            _make_user('run it'),
+            _make_assistant_text('I was interrupted'),
+        ]
+
+    def test_nested_mutations_cannot_cross_the_store_boundary(self):
+        messages = _build_full_history_turn1()
+        save_messages('conv_isolated', messages)
+
+        messages[2]['tool_calls'][0]['function']['name'] = 'mutated-input'
+        messages[3]['content'] = 'mutated-input-result'
+        first = get_messages('conv_isolated')
+        assert first[2]['tool_calls'][0]['function']['name'] == 'web_search'
+        assert first[3]['content'] != 'mutated-input-result'
+
+        first[2]['tool_calls'][0]['function']['name'] = 'mutated-output'
+        first[3]['content'] = 'mutated-output-result'
+        second = get_messages('conv_isolated')
+        assert second[2]['tool_calls'][0]['function']['name'] == 'web_search'
+        assert second[3]['content'] != 'mutated-output-result'
+
     def test_retrieve_nonexistent(self):
         assert get_messages('nonexistent') is None
 
@@ -429,6 +462,8 @@ class TestTokenOverhead:
         print(f"  Full (with tools):   {overhead['stored_chars']:,} chars ≈ {overhead['stored_est_tokens']:,} tokens")
         print(f"  Overhead:            +{overhead['overhead_chars']:,} chars ≈ +{overhead['overhead_est_tokens']:,} tokens")
         print(f"  Ratio:               {overhead['ratio']}x")
+        assert overhead['stored_chars'] > overhead['frontend_chars']
+        assert overhead['ratio'] > 1.0
 
         # With tool results typically 500-3000 chars each, expect ~2-5x overhead
         assert overhead['ratio'] >= 1.5
@@ -497,6 +532,8 @@ class TestTokenOverhead:
         print(f"  Full (with tools):   {overhead['stored_chars']:,} chars ≈ {overhead['stored_est_tokens']:,} tokens")
         print(f"  Overhead:            +{overhead['overhead_chars']:,} chars ≈ +{overhead['overhead_est_tokens']:,} tokens")
         print(f"  Ratio:               {overhead['ratio']}x")
+        assert overhead['stored_chars'] > overhead['frontend_chars']
+        assert overhead['ratio'] > 1.0
 
         # With 80K of tool content, this should be a massive overhead
         assert overhead['ratio'] >= 3.0
@@ -598,6 +635,9 @@ class TestTokenOverhead:
         print(f"  Full (with tools):   {overhead['stored_chars']:,} chars ≈ {overhead['stored_est_tokens']:,} tokens")
         print(f"  Overhead:            +{overhead['overhead_chars']:,} chars ≈ +{overhead['overhead_est_tokens']:,} tokens")
         print(f"  Ratio:               {overhead['ratio']}x")
+        assert overhead['stored_chars'] > overhead['frontend_chars']
+        assert overhead['overhead_chars'] > len(file_content)
+        assert overhead['ratio'] > 1.0
 
 
 # ═══════════════════════════════════════════════════════════
@@ -829,8 +869,10 @@ class TestOverheadReport:
         print(f"{'Scenario':<45} {'Frontend':>10} {'Full':>10} {'Overhead':>10} {'Ratio':>8}")
         print(f"{'-'*45} {'-'*10} {'-'*10} {'-'*10} {'-'*8}")
 
+        measurements = []
         for name, frontend, full in scenarios:
             oh = estimate_token_overhead(frontend, full)
+            measurements.append((name, oh))
             print(f"{name:<45} {oh['frontend_est_tokens']:>8}tk {oh['stored_est_tokens']:>8}tk "
                   f"+{oh['overhead_est_tokens']:>7}tk {oh['ratio']:>6.1f}x")
 
@@ -843,6 +885,11 @@ class TestOverheadReport:
         print("  - Risk: context window exhaustion on long conversations")
         print("  - Mitigation: truncate old tool results, use compaction for full history")
         print(f"{'='*80}\n")
+        assert len(measurements) == 4
+        assert all(oh['stored_chars'] > oh['frontend_chars']
+                   for _name, oh in measurements)
+        assert all(oh['overhead_est_tokens'] > 0
+                   for _name, oh in measurements)
 
 
 # ═══════════════════════════════════════════════════════════

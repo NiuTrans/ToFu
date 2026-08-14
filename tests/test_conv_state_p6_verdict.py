@@ -45,9 +45,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CROSS_TAB = os.path.join(REPO, 'static', 'js', 'core', 'cross_tab_sync.js')
-HEALTH = os.path.join(REPO, 'static', 'js', 'core', 'health_stream_timer.js')
-REDUCER = os.path.join(REPO, 'static', 'js', 'core', 'conv_state_reducer.js')
+RUNTIME = os.path.join(REPO, 'frontend', 'src', 'runtime', 'app-runtime.js')
+CROSS_TAB = HEALTH = REDUCER = RUNTIME
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _source_scan import js_function_body, strip_comments  # noqa: E402

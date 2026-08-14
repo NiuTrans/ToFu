@@ -8,9 +8,9 @@ Two backends behind a single ``record_and_check`` entry point:
     ``flask --threaded`` single-process deployment that ships today.
 
   * ``DatabaseRateLimitStore`` (``TOFU_RATE_LIMIT_BACKEND=db``):
-    INSERT-then-COUNT against the ``rate_limit_events`` table.  Survives
-    restarts and works correctly across multi-worker WSGI (gunicorn,
-    uWSGI).  Schema lives in ``lib/database/_schema_{pg,sqlite}.py``.
+    one atomic ``rate_limit.record_and_check`` semantic Sidecar command.
+    It survives restarts and is consistent across application workers while
+    keeping drivers, SQL, locks and the transaction inside the Sidecar.
 
 Failure mode is **fail-open**: if the DB write or count fails for any
 reason, the request is allowed through with a WARNING log.  A rate
@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import threading
 import time
+import uuid
 from collections import defaultdict
 from typing import Tuple
 
@@ -92,18 +93,17 @@ class MemoryRateLimitStore:
 
 
 class DatabaseRateLimitStore:
-    """SQLite/PG-backed counter via ``rate_limit_events`` table.
+    """Sidecar-backed counter via one atomic semantic command.
 
-    Each gated request inserts one row; the count is a SELECT against
-    the sliding window.  Opportunistic cleanup deletes rows older than
-    ``per_seconds * 2`` for the same (endpoint, ip) — by piggybacking on
-    the existing transaction we avoid a daemon thread.
+    The Sidecar serializes each bucket, admits and records in one transaction,
+    and opportunistically deletes rows older than ``per_seconds * 2``.
     """
 
-    def __init__(self):
-        # Lazy-import lib.database so a test environment without a DB
-        # can still construct this object and degrade gracefully on
-        # first call.
+    def __init__(self, client_provider=None):
+        if client_provider is None:
+            from lib.storage import get_storage_client
+            client_provider = lambda: get_storage_client(write=True)
+        self._client_provider = client_provider
         self._db_available = True
 
     def record_and_check(self, endpoint: str, ip: str,
@@ -112,86 +112,33 @@ class DatabaseRateLimitStore:
             # Permanently degraded — fail-open silently after first WARN.
             return True, 0
 
-        now_ms = int(time.time() * 1000)
-        window_start_ms = now_ms - (per_seconds * 1000)
-
         try:
-            from lib.database import (
-                DOMAIN_SYSTEM,
-                db_execute_with_retry,
-                get_thread_db,
+            command_id = uuid.uuid4().hex
+            result = self._client_provider().command(
+                'rate_limit.record_and_check',
+                {
+                    'endpoint': endpoint,
+                    'client_key': ip,
+                    'event_id': command_id,
+                    'limit': limit,
+                    'per_seconds': per_seconds,
+                },
+                command_id,
+                deadline=2.0,
             )
-            db = get_thread_db(domain=DOMAIN_SYSTEM)
-        except Exception as e:
-            # DB unavailable (init failed, fixture not provisioned, etc.) —
-            # log once and degrade to fail-open.
-            self._db_available = False
-            logger.warning(
-                '[RateLimitStore] DB backend unavailable (%s) — falling '
-                'back to fail-open; subsequent calls will not enforce '
-                'limits until restart', e)
-            return True, 0
-
-        try:
-            # Count existing events in the window for this (endpoint, ip).
-            row = db.execute(
-                'SELECT COUNT(*) FROM rate_limit_events '
-                'WHERE endpoint = ? AND ip = ? AND ts_ms >= ?',
-                (endpoint, ip, window_start_ms),
-            ).fetchone()
-            current = int(row[0]) if row else 0
-            if current >= limit:
-                # Don't INSERT a row when rejecting — keeps the table from
-                # growing under attack.  The trade-off: the rejection
-                # itself doesn't reset the window like a successful call
-                # would.  That matches the in-memory behaviour.
-                return False, current
-
-            # Record this request.  Use db_execute_with_retry so SQLite
-            # 'database is locked' under contention auto-retries.
-            db_execute_with_retry(
-                db,
-                'INSERT INTO rate_limit_events (endpoint, ip, ts_ms) '
-                'VALUES (?, ?, ?)',
-                (endpoint, ip, now_ms),
-                commit=True,
-            )
-
-            # Opportunistic cleanup — delete rows for THIS (endpoint, ip)
-            # that fell out of the window twice over.  Keeps the table
-            # bounded without a daemon thread.  Errors here are non-fatal.
-            stale_cutoff_ms = now_ms - (per_seconds * 2 * 1000)
-            try:
-                db_execute_with_retry(
-                    db,
-                    'DELETE FROM rate_limit_events '
-                    'WHERE endpoint = ? AND ip = ? AND ts_ms < ?',
-                    (endpoint, ip, stale_cutoff_ms),
-                    commit=True,
-                )
-            except Exception as ce:
-                logger.debug(
-                    '[RateLimitStore] cleanup non-fatal failure '
-                    'endpoint=%s ip=%s: %s', endpoint, ip, ce)
-
-            return True, current + 1
-
-        except Exception as e:
-            # Any other DB failure → fail-open with a WARN so the user
-            # still gets service.  We re-mark unavailable only if it
-            # looks like a structural failure (missing table, etc.) so a
-            # transient glitch doesn't permanently disable enforcement.
-            err_str = str(e)
-            if 'no such table' in err_str.lower() or 'does not exist' in err_str.lower():
+            return bool(result['allowed']), int(result['count'])
+        except Exception as exc:
+            from lib.storage.errors import StorageError
+            if isinstance(exc, StorageError) and exc.code in {
+                    'database_integrity', 'database_protocol_error'}:
                 self._db_available = False
                 logger.warning(
-                    '[RateLimitStore] rate_limit_events table missing '
-                    '(%s) — degrading to fail-open until restart', err_str)
+                    '[RateLimitStore] storage contract unavailable code=%s; '
+                    'failing open until restart', exc.code)
             else:
                 logger.warning(
-                    '[RateLimitStore] DB error during enforcement '
-                    '(endpoint=%s ip=%s): %s — failing open this request',
-                    endpoint, ip, err_str)
+                    '[RateLimitStore] storage request failed type=%s; '
+                    'failing open this request', type(exc).__name__)
             return True, 0
 
 

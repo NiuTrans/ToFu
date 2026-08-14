@@ -18,7 +18,7 @@ The server half of the progress-perception / anti-stuck contract
     terminal rows never linger as 'generating', mark_interrupted_podcasts
     sweep, lookup interrupted surface; video job-manifest disk fallback
     (lookup fragment + file/scenes serving after the task left memory).
-  * §2.1 video-abstract dedup + force bypass (NEUTER on index_register).
+  * §2.1 video-abstract dedup + force bypass (NEUTER on claim registration).
 
 Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/test_paper_media_ux.py
 """
@@ -86,14 +86,30 @@ def phash() -> str:
 
 
 @pytest.fixture()
-def podcast_env(tmp_path, monkeypatch):
+def storage_env(tmp_path):
+    """Own one isolated real Sidecar for tests that persist paper state."""
+    from lib.storage import StorageRuntime, StorageSupervisor
+    from lib.storage.service import install_runtime_for_test
+
+    runtime = StorageRuntime(StorageSupervisor(
+        project_root=tmp_path / 'storage', backend='sqlite'),
+        auto_restart=False)
+    install_runtime_for_test(runtime)
+    runtime.start()
+    try:
+        yield runtime
+    finally:
+        install_runtime_for_test(None)
+
+
+@pytest.fixture()
+def podcast_env(tmp_path, monkeypatch, storage_env):
     """Same seams as test_paper_podcast_api: paper dir redirected, script
     LLM + TTS provider stubbed."""
     import lib.paper.hashing as hashing
     import lib.paper.podcast_engine as PE
     import lib.paper.podcast_engine._audio as PA
     import lib.tts as T
-
     monkeypatch.setattr(hashing, 'PAPER_DIR', str(tmp_path))
     (tmp_path / 'podcast').mkdir(exist_ok=True)
     monkeypatch.setattr(PE, 'generate_script',
@@ -104,26 +120,26 @@ def podcast_env(tmp_path, monkeypatch):
     monkeypatch.setattr(T, '_post_speech',
                         lambda slot, text, *, voice, fmt, speed: _tiny_wav())
     monkeypatch.setattr(PA, '_transcode_to_mp3', lambda wav: None)
+    del storage_env
     return tmp_path
 
 
 def _insert_report(phash, lang='zh'):
-    from lib.database import get_thread_db
-    db = get_thread_db()
-    db.execute(
-        'INSERT OR REPLACE INTO paper_reports (paper_hash, lang, report, model,'
-        ' created_at) VALUES (?, ?, ?, ?, ?)',
-        (phash, lang, '报告:成绩 86.3,上一代 83.1。', 'm', int(time.time())))
-    db.commit()
+    from lib.storage import get_storage_client
+    get_storage_client(write=True).command('paper.report.upsert', {
+        'paper_hash': phash, 'lang': lang,
+        'report': '报告:成绩 86.3,上一代 83.1。', 'model': 'm',
+        'meta': {}, 'created_at': int(time.time()),
+    }, f'paper.podcast.report:{uuid.uuid4().hex}')
 
 
 def _podcast_row_status(phash, mode='short', lang='zh', voice='alloy'):
-    from lib.database import get_thread_db
-    row = get_thread_db().execute(
-        'SELECT status, meta FROM paper_podcasts WHERE paper_hash = ?'
-        ' AND mode = ? AND lang = ? AND voice = ?',
-        (phash, mode, lang, voice)).fetchone()
-    return (row['status'], row['meta']) if row else (None, None)
+    from lib.storage import get_storage_client
+    row = get_storage_client().query('paper.podcast.get', {
+        'paper_hash': phash, 'mode': mode, 'lang': lang, 'voice': voice,
+    })
+    return ((row['status'], json.dumps(row['meta'], ensure_ascii=False))
+            if row else (None, None))
 
 
 # ══════════════════════════════════════════════════════════
@@ -521,11 +537,12 @@ def test_video_abstract_dedup_and_force(video_env, phash, monkeypatch):
 
 def test_video_abstract_dedup_NEUTER_register_loadbearing(video_env, phash,
                                                           monkeypatch):
-    """NEUTER: amputate index_register → the second start spawns a NEW
-    task instead of joining — the register call is load-bearing."""
+    """NEUTER: amputate claim registration → the second start spawns a NEW
+    task instead of joining — the atomic claim's register is load-bearing."""
     import lib.paper.video_abstract as VA
-    monkeypatch.setattr('lib.motion_video.runtime._motion_index_register',
-                        lambda *a: None)
+    from lib.motion_video import runtime as motion_runtime
+    monkeypatch.setattr(motion_runtime._production, 'index_register',
+                        lambda *a, **kw: None)
     r1 = VA.start_video_abstract(phash, lang='zh')
     r2 = VA.start_video_abstract(phash, lang='zh')
     assert not r2.get('deduped') and r2['task_id'] != r1['task_id']
@@ -616,7 +633,7 @@ def test_podcast_poll_reaps_stalled_task(flask_client, podcast_env, phash):
 
 
 def test_video_lookup_and_file_disk_fallback(flask_client, tmp_path,
-                                             monkeypatch, phash):
+                                             monkeypatch, phash, storage_env):
     """Restart scenario: task gone from memory; lookup finds the disk job,
     the mp4 + scenes still serve (P-UX4 验收:成品重启后可播放)."""
     _insert_report(phash)
@@ -647,7 +664,7 @@ def test_video_lookup_and_file_disk_fallback(flask_client, tmp_path,
 
 
 def test_video_lookup_disk_interrupted(flask_client, tmp_path, monkeypatch,
-                                       phash):
+                                       phash, storage_env):
     _insert_report(phash)
     tid, _ = _write_disk_job(tmp_path, monkeypatch, phash, state='running')
     r = flask_client.get(f'/api/v1/paper/video/lookup?paper_hash={phash}')
@@ -656,7 +673,8 @@ def test_video_lookup_disk_interrupted(flask_client, tmp_path, monkeypatch,
     assert body.get('interrupted') is True and body['task_id'] == tid
 
 
-def test_video_start_route_dedup_and_force(flask_client, video_env, phash):
+def test_video_start_route_dedup_and_force(
+        flask_client, video_env, phash, storage_env):
     _insert_report(phash)
     payload = {'paper_hash': phash, 'lang': 'zh', 'narration': False}
     r1 = flask_client.post('/api/v1/paper/video/start', json=payload).get_json()

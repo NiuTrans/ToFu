@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import os
 import threading
-import time
 
 from lib.log import audit_log, get_logger
 
@@ -44,6 +43,9 @@ logger = get_logger(__name__)
 
 _DEFAULT_INTERVAL_SEC = 60.0
 _MIN_INTERVAL_SEC = 10.0
+_watch_thread: threading.Thread | None = None
+_watch_stop = threading.Event()
+_watch_lock = threading.Lock()
 
 
 def _auto_restart_enabled() -> bool:
@@ -152,12 +154,15 @@ def poll_once(state: dict, *, shutdown_requested=None, is_repo=None,
     return 'restart-triggered'
 
 
-def _watch_loop(shutdown_requested=None):
+def _watch_loop(shutdown_requested=None, stop_event=None):
     state: dict = {'baseline_sha': None, 'restarting': False}
     interval = _interval_sec()
+    stop = stop_event or _watch_stop
     logger.info('[AutoRestart] watcher started (interval=%ss)', interval)
     last_note = None
-    while True:
+    while not stop.is_set():
+        if shutdown_requested is not None and shutdown_requested.is_set():
+            return
         verdict = poll_once(state, shutdown_requested=shutdown_requested)
         if verdict == 'baseline':
             logger.info('[AutoRestart] baseline HEAD=%s',
@@ -169,7 +174,9 @@ def _watch_loop(shutdown_requested=None):
                 logger.info('[AutoRestart] HEAD moved; restart deferred: %s',
                             verdict)
             last_note = verdict
-        time.sleep(interval)
+        # Wake immediately for startup rollback or graceful process shutdown;
+        # ``time.sleep`` made the daemon unjoinable for up to a full minute.
+        stop.wait(interval)
 
 
 def maybe_start_auto_restart_watch(*, shutdown_requested=None) -> bool:
@@ -178,14 +185,55 @@ def maybe_start_auto_restart_watch(*, shutdown_requested=None) -> bool:
     Returns True when the watcher was armed. Called once from server.py's
     serving-loop startup, alongside the loop-stall watchdog.
     """
+    global _watch_thread
     if not _auto_restart_enabled():
         logger.debug('[AutoRestart] disabled (set TOFU_AUTO_RESTART=1 to enable)')
         return False
-    t = threading.Thread(target=_watch_loop,
-                         kwargs={'shutdown_requested': shutdown_requested},
-                         name='tofu-auto-restart', daemon=True)
-    t.start()
+    with _watch_lock:
+        if _watch_thread is not None and _watch_thread.is_alive():
+            return True
+        _watch_stop.clear()
+        thread = threading.Thread(
+            target=_watch_loop,
+            kwargs={
+                'shutdown_requested': shutdown_requested,
+                'stop_event': _watch_stop,
+            },
+            name='tofu-auto-restart',
+            daemon=True,
+        )
+        _watch_thread = thread
+        try:
+            thread.start()
+        except BaseException:
+            _watch_thread = None
+            _watch_stop.set()
+            raise
     return True
 
 
-__all__ = ['maybe_start_auto_restart_watch', 'poll_once']
+def stop_auto_restart_watch(*, timeout: float = 2.0) -> bool:
+    """Stop the optional watcher without waiting for its polling interval."""
+    global _watch_thread
+    _watch_stop.set()
+    with _watch_lock:
+        thread = _watch_thread
+    if thread is None:
+        return True
+    thread.join(max(0.0, timeout))
+    stopped = not thread.is_alive()
+    if stopped:
+        with _watch_lock:
+            if _watch_thread is thread:
+                _watch_thread = None
+    else:
+        logger.warning(
+            '[AutoRestart] watcher did not stop within %.1fs', timeout)
+    return stopped
+
+
+__all__ = [
+    'maybe_start_auto_restart_watch',
+    'poll_once',
+    'stop_auto_restart_watch',
+]

@@ -21,6 +21,12 @@ Usage:
 
 from __future__ import annotations
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {
+    'lib/tasks_pkg/compaction.py', 'lib/tasks_pkg/orchestrator.py',
+    'lib/tasks_pkg/server_message_store.py',
+    'lib/tasks_pkg/tool_dispatch.py',
+}
+
 import copy
 import json
 import os
@@ -807,7 +813,7 @@ def _make_large_result(tool_name: str, chars: int) -> str:
             '    messages = list(task["messages"])',
             '    tool_call_happened = False',
             '    accumulated_usage = {}',
-            '    for round_num in range(max_tool_rounds + 1):',
+            '    while True:',
             '        run_compaction_pipeline(messages, round_num, task=task)',
             '        body = build_body(model, messages, tools=tools)',
             '        assistant_msg, finish_reason, usage = stream_llm_response(task, body)',

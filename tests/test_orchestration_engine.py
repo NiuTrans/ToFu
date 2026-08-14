@@ -612,7 +612,8 @@ class BranchAndCapsTest(unittest.TestCase):
             'edges': [{'from': 's', 'to': 'br'},
                       {'from': 'br', 'to': 'a'}, {'from': 'br', 'to': 'b'},
                       {'from': 'a', 'to': 'e'}, {'from': 'b', 'to': 'e'}]}
-        out = FlowExecutor(defn, agent_runner=runner).run()
+        out = FlowExecutor(defn, agent_runner=runner).run(
+            initial_context='Earlier notes mention Coderpath')
         self.assertTrue(out['ok'])
         # writer ran (chosen), coder did not
         ran = [e['role'] for e in out['transcript']]
@@ -979,6 +980,56 @@ class IsolatedSubflowTest(unittest.TestCase):
         out = FlowExecutor(self._parent(), agent_runner=capture).run()
         self.assertTrue(out['ok'], out.get('error'))
         self.assertIn('coder', r_calls)   # downstream ran despite empty box
+
+
+class DefaultRunnerChatInheritanceTest(unittest.TestCase):
+    def test_subagent_inherits_system_prompt_and_thinking_preference(self):
+        """Chat policy must not disappear at the graph→SubAgent boundary."""
+        from types import SimpleNamespace
+        import lib.swarm.agent as agent_mod
+
+        captured = []
+        real_subagent = agent_mod.SubAgent
+
+        class FakeSubAgent:
+            def __init__(self, spec, **kwargs):
+                captured.append(kwargs)
+
+            def run(self):
+                return SimpleNamespace(
+                    final_answer='done',
+                    status='completed',
+                    error_message='',
+                    tool_log=[],
+                )
+
+        defn = {
+            'schema': 'tofu.orchestration/v1',
+            'name': 'inheritance',
+            'nodes': [
+                _ctrl('start', 'start'),
+                _role('worker', 'worker'),
+                _ctrl('stop', 'stop'),
+            ],
+            'edges': [
+                {'from': 'start', 'to': 'worker'},
+                {'from': 'worker', 'to': 'stop'},
+            ],
+        }
+        agent_mod.SubAgent = FakeSubAgent
+        try:
+            result = FlowExecutor(
+                defn,
+                system_prompt_base='PROJECT POLICY',
+                thinking_enabled=False,
+            ).run(initial_context='the request')
+        finally:
+            agent_mod.SubAgent = real_subagent
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0]['system_prompt_base'], 'PROJECT POLICY')
+        self.assertFalse(captured[0]['thinking_enabled'])
 
 
 class CompilePlanTest(unittest.TestCase):

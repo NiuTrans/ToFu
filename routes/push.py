@@ -18,10 +18,13 @@ Protocol:
 """
 
 import asyncio
+import hashlib
+import hmac
 import os
 
-from flask import Blueprint, request
-from quart import websocket
+from quart import Blueprint, websocket
+
+from lib.quart_sync import request_json
 
 from lib.api_response import api_error, api_ok
 from lib.log import get_logger, resolve_inbound_rid
@@ -30,6 +33,118 @@ from lib.push import PushClient, hub
 logger = get_logger(__name__)
 
 push_bp = Blueprint('push', __name__)
+
+
+async def _join_socket_halves(*tasks):
+    """End a duplex socket as soon as either transport half terminates."""
+    pending = set(tasks)
+    try:
+        _done, pending = await asyncio.wait(
+            pending, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in pending:
+            if not task.done():
+                task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+
+def _push_ws_peer():
+    """Return the direct ASGI socket peer, never a forwarded header."""
+    try:
+        peer = (websocket.scope or {}).get('client')
+        if peer:
+            return peer
+    except Exception as e:
+        logger.debug('[Push] WS peer scope read failed: %s', e)
+    try:
+        return websocket.headers.get('Remote-Addr') or ''
+    except Exception as e:
+        logger.debug('[Push] WS Remote-Addr fallback unavailable: %s', e)
+        return ''
+
+
+def _push_ws_token(headers, cookies) -> str:
+    """Extract a WebSocket credential in the HTTP gate's priority order."""
+    auth = (headers.get('Authorization') or '') if headers is not None else ''
+    parts = auth.split(None, 1)
+    if len(parts) == 2 and parts[0].lower() == 'bearer':
+        token = parts[1].strip()
+        if token:
+            return token
+    x_api_key = ((headers.get('x-api-key') or '').strip()
+                 if headers is not None else '')
+    if x_api_key.startswith(('tofu_live_', 'tofu_admin_')):
+        return x_api_key
+    from routes.api_v1.auth import SESSION_COOKIE
+    cookie_token = ((cookies.get(SESSION_COOKIE) or '').strip()
+                    if cookies is not None else '')
+    if cookie_token.startswith(('tofu_live_', 'tofu_admin_')):
+        return cookie_token
+    return ''
+
+
+def _legacy_ws_tunnel_ok(headers, cookies) -> bool:
+    """WebSocket twin of the HTTP gate's deprecated TUNNEL_TOKEN shim."""
+    expected_secret = os.environ.get('TUNNEL_TOKEN', '')
+    if not expected_secret:
+        return False
+    supplied = ((headers.get('X-Tunnel-Token') or '')
+                if headers is not None else '')
+    if supplied and hmac.compare_digest(supplied, expected_secret):
+        return True
+    cookie_value = ((cookies.get('_tunnel_auth') or '')
+                    if cookies is not None else '')
+    expected_cookie = hashlib.sha256(expected_secret.encode()).hexdigest()[:32]
+    return bool(cookie_value and hmac.compare_digest(cookie_value, expected_cookie))
+
+
+def _resolve_push_ws_auth(headers, cookies, peer):
+    """Resolve or reject a push socket using the HTTP gate's policy.
+
+    Returns ``(AuthContext | None, reason)``.  This is deliberately a pure
+    seam over supplied transport values so the otherwise long-lived socket
+    handler can be tested without accepting a connection first.
+    """
+    from lib.api_keys import AuthContext, local_admin_context, touch_key, validate_token
+    from lib.auth_mode import requires_credential
+    from routes.api_v1.auth import open_mode_peer_allowed
+
+    token = _push_ws_token(headers, cookies)
+    invalid_token = False
+    if token:
+        try:
+            ctx = validate_token(token)
+        except Exception as e:
+            logger.warning('[Push] WS token validation failed closed: %s', e)
+            return None, 'auth_error'
+        if ctx is not None:
+            try:
+                touch_key(ctx.key_id)
+            except Exception as e:
+                logger.debug('[Push] WS key touch failed: %s', e)
+            return ctx, 'token'
+        # Match HTTP: a supplied invalid token is definitive in a mode that
+        # requires credentials. In local open mode it may still fall back to
+        # the synthetic principal, preserving the zero-setup browser flow.
+        if requires_credential():
+            return None, 'invalid_token'
+        invalid_token = True
+
+    if invalid_token:
+        if open_mode_peer_allowed(peer):
+            return local_admin_context(), 'open_local'
+        return None, 'invalid_token'
+
+    if _legacy_ws_tunnel_ok(headers, cookies):
+        return AuthContext(
+            key_id='', name='tunnel', scopes=frozenset({'admin'}),
+            rate_limit_rpm=0, rate_limit_tpd=0, via_tunnel_token=True,
+        ), 'tunnel'
+
+    if not requires_credential() and open_mode_peer_allowed(peer):
+        return local_admin_context(), 'open_local'
+    return None, 'credential_required'
 
 
 @push_bp.route('/api/push/debug/presence', methods=['POST'])
@@ -53,7 +168,7 @@ def debug_presence():
     if os.environ.get('TOFU_PRESENCE_DEBUG') not in ('1', 'true', 'yes'):
         return api_error('presence debug disabled '
                         '(set TOFU_PRESENCE_DEBUG=1 to enable)', status=403)
-    body = request.get_json(silent=True) or {}
+    body = request_json(silent=True) or {}
     root = (body.get('root') or '').strip()
     action = (body.get('action') or 'scenario').strip()
     if not root:
@@ -113,10 +228,10 @@ async def push_ws():
     ``websocket.headers`` — same transports the HTTP gate accepts, but
     read from the WebSocket-scoped globals rather than ``request``.
 
-    Pre-auth / open-mode / bad-token clients still get through (empty
-    ``user_id='' → unscoped``); a valid Bearer/cookie token yields the
-    real ``AuthContext.user_id`` so multi-tenant snapshots are correctly
-    scoped. pt_ab42421158214591.
+    Open-mode loopback clients retain the zero-setup personal-install path;
+    remote open-mode clients and every private/multi-user client must satisfy
+    the same credential policy as HTTP.  A valid principal's ``user_id`` is
+    stashed so snapshots and control frames remain owner-scoped.
     """
     # ── Correlation id (pt_3d28727f / pt_ccaec091) ────────────────
     # Quart's @app.before_request does NOT run on WS routes, so the HTTP
@@ -133,15 +248,9 @@ async def push_ws():
     # too. There is deliberately no "no id" state — a socket whose lines
     # cannot be joined to anything is the exact failure this closes.
     #
-    # ⚠️ Deliberately NOT set_req_id(): lib.log stores the rid in a
-    # THREAD-LOCAL, not a ContextVar. This handler is a long-lived coroutine
-    # sharing its event-loop thread with every HTTP request, so writing the
-    # thread-local here would stamp THIS socket's id onto unrelated requests
-    # (measured: after two concurrent HTTP handlers ran, the socket coroutine
-    # itself observed the SECOND handler's id). The rid therefore rides the
-    # PushClient and is passed EXPLICITLY to the log calls that describe
-    # this socket — including the frame handlers, which are module-level
-    # functions and cannot see this coroutine's locals.
+    # Keep the rid on PushClient and pass it explicitly to socket log calls.
+    # lib.log now uses a ContextVar, but avoiding ambient state here also keeps
+    # frame handlers deterministic when they run in separately-created tasks.
     try:
         _rid = resolve_inbound_rid(websocket.headers.get('X-Request-ID'),
                                    websocket.args.get('_rid'))
@@ -151,40 +260,27 @@ async def push_ws():
         _rid = resolve_inbound_rid(None, None)
         logger.debug('[Push] rid resolve failed (minted %s): %s', _rid, _e)
 
-    # ── pt_ab42421158214591: resolve WS handshake auth ────────────
-    _user_id = ''
+    # ── Resolve WS handshake auth (HTTP before_request does not run) ────
     try:
-        from lib.api_keys import validate_token
-        from routes.api_v1.auth import SESSION_COOKIE
-        _tok = ''
-        # Priority mirrors _extract_bearer_or_cookie() in the HTTP gate:
-        # Authorization header > x-api-key > session cookie. Query-string
-        # token is not accepted on a WS upgrade (the URL is HTTP-only).
-        try:
-            _auth_hdr = (websocket.headers.get('Authorization') or '')
-            if _auth_hdr.lower().startswith('bearer '):
-                _tok = _auth_hdr[7:].strip()
-            if not _tok:
-                _xapi = (websocket.headers.get('x-api-key') or '').strip()
-                if _xapi.startswith(('tofu_live_', 'tofu_admin_')):
-                    _tok = _xapi
-            if not _tok:
-                _cookie = (websocket.cookies.get(SESSION_COOKIE) or '').strip()
-                if _cookie.startswith(('tofu_live_', 'tofu_admin_')):
-                    _tok = _cookie
-        except Exception as _e:
-            logger.debug('[Push] WS auth transport read failed: %s', _e)
-        if _tok:
-            _ctx = validate_token(_tok)
-            if _ctx is not None:
-                _user_id = getattr(_ctx, 'user_id', '') or ''
+        _ctx, _auth_reason = _resolve_push_ws_auth(
+            websocket.headers, websocket.cookies, _push_ws_peer())
     except Exception as _e:
-        logger.debug('[Push] WS auth resolve failed (proceeding unscoped): %s',
-                     _e)
-        _user_id = ''
+        logger.warning('[Push] WS auth resolve failed closed (rid=%s): %s',
+                       _rid, _e)
+        _ctx, _auth_reason = None, 'auth_error'
+    if _ctx is None:
+        # Abort before the first send/receive accepts the upgrade, allowing
+        # Quart/Hypercorn to return an HTTP 401 handshake response.
+        from quart import abort
+        logger.warning('[Push] WS rejected (reason=%s, rid=%s)',
+                       _auth_reason, _rid)
+        abort(401)
+    _user_id = getattr(_ctx, 'user_id', '') or ''
 
     client = PushClient(user_id=_user_id, req_id=_rid)
     hub.register(client)
+    from lib.observability import connection_close, connection_open
+    connection_open('ws', 'push')
     logger.info('[Push] WS connected (clients=%d, user=%s, rid=%s)',
                 hub.client_count, _user_id or '<unscoped>', _rid)
 
@@ -227,7 +323,12 @@ async def push_ws():
     try:
         send_task = asyncio.create_task(_sender())
         recv_task = asyncio.create_task(_receiver())
-        await asyncio.gather(send_task, recv_task)
+        # Either half ending means the socket lifetime is over. Waiting for
+        # gather() to see BOTH finish stranded a receiver after a send error,
+        # or a sender until its next 30s keepalive after peer disconnect.
+        # Cancel and drain the sibling immediately so hub membership and its
+        # queued frames are released at the transport boundary.
+        await _join_socket_halves(send_task, recv_task)
     except asyncio.CancelledError:
         pass
     finally:
@@ -239,6 +340,7 @@ async def push_ws():
             recv_task.cancel()
         logger.info('[Push] WS disconnected (clients=%d, rid=%s)',
                     hub.client_count, _rid)
+        connection_close('ws', 'push', 'disconnected')
 
 
 def _handle_client_frame(client: PushClient, raw) -> None:
@@ -285,7 +387,8 @@ def _handle_client_frame(client: PushClient, raw) -> None:
     elif action == 'unsubscribe' and channel:
         hub.unsubscribe(client, channel, task_id)
     elif action == 'abort' and channel == 'chat' and task_id != '*':
-        _handle_abort(task_id, req_id=client.req_id)
+        _handle_abort(task_id, req_id=client.req_id,
+                      user_id=client.user_id)
     elif action == 'ping':
         # Round-trip latency probe. Echo the client's timestamp back so the
         # client can compute RTT = now - t. Pure echo (no shared state) → works
@@ -300,7 +403,7 @@ def _handle_client_frame(client: PushClient, raw) -> None:
         client.enqueue_control({'channel': 'system', 'type': 'pong', 't': raw.get('t')})
 
 
-def _handle_abort(task_id: str, req_id: str = ''):
+def _handle_abort(task_id: str, req_id: str = '', user_id: str = ''):
     """Handle a client abort request for a chat task.
 
     Chat tasks predate the unified ``TaskRuntime.abort_event`` flag and
@@ -317,12 +420,25 @@ def _handle_abort(task_id: str, req_id: str = ''):
     from lib.tasks_pkg import tasks, tasks_lock
     with tasks_lock:
         task = tasks.get(task_id)
-    if not task:
+        if not task:
+            outcome = 'missing'
+        elif user_id and str(task.get('_userId') or '') != str(user_id):
+            outcome = 'forbidden'
+        else:
+            # Mutate under the same registry lock as the ownership read so a
+            # concurrent discard/replacement cannot turn the check into a
+            # time-of-check/time-of-use authorization race.
+            task['aborted'] = True
+            abort_evt = task.get('abort_event')
+            outcome = 'aborted'
+    if outcome == 'missing':
         logger.info('[Push] Client abort for unknown task %s (rid=%s)',
                     task_id[:8], req_id)
         return
-    task['aborted'] = True
-    abort_evt = task.get('abort_event')
+    if outcome == 'forbidden':
+        logger.warning('[Push] Client abort refused for foreign task %s '
+                       '(user=%s, rid=%s)', task_id[:8], user_id, req_id)
+        return
     if abort_evt is not None:
         try:
             abort_evt.set()

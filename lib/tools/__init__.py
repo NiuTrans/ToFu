@@ -53,25 +53,14 @@ from .registry import (  # noqa: E402,F401
     all_specs,
     assemble_tool_list,
     available_plugins,
-    clear_all_tool_list_latches,
-    clear_multiroot_sticky,
-    clear_project_ready_sticky,
-    clear_tool_list_latch,
     discover_plugin_specs,
-    latch_tool_list,
     register_tool_spec,
     resolve_enabled_plugins,
     sync_spec_handlers,
-    tool_list_diff,
-    tool_list_diverged,
 )
 
 __all__ += [
     'ToolContext', 'ToolSpec', 'all_specs', 'assemble_tool_list',
-    'available_plugins', 'clear_all_tool_list_latches',
-    'clear_multiroot_sticky', 'clear_project_ready_sticky',
-    'clear_tool_list_latch',
-    'discover_plugin_specs', 'latch_tool_list', 'register_tool_spec',
-    'resolve_enabled_plugins', 'sync_spec_handlers', 'tool_list_diff',
-    'tool_list_diverged',
+    'available_plugins', 'discover_plugin_specs',
+    'register_tool_spec', 'resolve_enabled_plugins', 'sync_spec_handlers',
 ]

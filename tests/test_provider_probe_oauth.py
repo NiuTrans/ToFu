@@ -64,7 +64,10 @@ def test_oauth_cell_resolves_live_token_and_uses_x_api_key(monkeypatch):
 
     monkeypatch.setattr('lib.oauth.outbound.resolve_oauth_request', _resolve)
     monkeypatch.setattr('lib.oauth.outbound.claude_oauth_url', lambda u: u + '?beta=true')
-    _patch_http(monkeypatch, captured, _FakeResp(200, '{}'))
+    monkeypatch.setattr('lib.desktop.egress.route_request',
+                        lambda url, user_id='': 'direct')
+    _patch_http(monkeypatch, captured, _FakeResp(
+        200, '{"content":[{"type":"text","text":"OK"}]}'))
 
     status, detail = pp.probe_one_cell(
         'https://api.anthropic.com/v1', 'oauth-managed', 'claude-opus-4-1',
@@ -121,7 +124,8 @@ def test_normal_provider_not_routed_through_oauth(monkeypatch):
 
     monkeypatch.setattr('lib.oauth.outbound.resolve_oauth_request', _resolve)
     captured = {}
-    _patch_http(monkeypatch, captured, _FakeResp(200, '{}'))
+    _patch_http(monkeypatch, captured, _FakeResp(
+        200, '{"choices":[{"message":{"content":"OK"}}]}'))
 
     status, _ = pp.probe_one_cell(
         'https://gw.example.com/v1', 'real-key-abc', 'kimi-k3',

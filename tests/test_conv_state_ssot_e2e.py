@@ -67,7 +67,9 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+from tests._runtime_sections import runtime_section_path
+
+REDUCER = runtime_section_path('core/conv_state_reducer.js')
 
 
 def _node_available() -> bool:
@@ -151,7 +153,7 @@ console.log(JSON.stringify({
     try:
         proc = subprocess.run(
             ['node', script_path,
-             os.path.join(JS_DIR, 'core', 'conv_state_reducer.js'),
+             REDUCER,
              json.dumps(convs),
              json.dumps({
                  'convId': conv_id,
@@ -305,7 +307,7 @@ console.log(JSON.stringify({ authoritativeSet: set, computeConvBusy: busy }));
     try:
         proc = subprocess.run(
             ['node', script_path,
-             os.path.join(JS_DIR, 'core', 'conv_state_reducer.js'),
+             REDUCER,
              conv_id, json.dumps(payloads)],
             capture_output=True, text=True, timeout=30,
         )

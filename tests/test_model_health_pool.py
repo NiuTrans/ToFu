@@ -91,7 +91,8 @@ function row(wireId, availableSlots, extra) {
 /* Build a probe cell (as probe-cells snapshots return). */
 function cell(keyIdx, wireId, status, detail) {
   return { key_idx: keyIdx, model_id: wireId, status: status,
-           detail: detail || '' };
+           detail: detail || '',
+           proof: status === 'ok' ? 'generated_text' : null };
 }
 
 const HOUR = 3600;
@@ -213,6 +214,31 @@ try {
     check('never_probed_class', modelHealthLevelClass(never) === 'unknown');
   }
 
+  // ══ 9. Mixed-version defence: HTTP 400 can never paint green ══
+  {
+    const legacy400 = {
+      key_idx: 0, model_id: 'aws.claude-fable-5', status: 'ok',
+      detail: 'HTTP 400', probe_surface: 'chat'
+    };
+    const bad = foldProbeHealth([legacy400], {
+      finishedAt: NOW, now: NOW, schemaVersion: 1
+    });
+    check('legacy_ok_http400_is_down', bad.level === 'down');
+    check('legacy_ok_http400_not_usable', modelHealthUsable(bad) === false);
+    check('legacy_ok_http400_effective_status',
+      bad.failures[0].status === 'bad_request');
+
+    const legacy200 = {
+      key_idx: 0, model_id: 'old-chat', status: 'ok',
+      detail: 'HTTP 200', probe_surface: 'chat'
+    };
+    const neutral = foldProbeHealth([legacy200], {
+      finishedAt: NOW, now: NOW, schemaVersion: 1
+    });
+    check('legacy_unvalidated_200_is_unverified', neutral.level === 'unverified');
+    check('legacy_unvalidated_200_not_usable', modelHealthUsable(neutral) === false);
+  }
+
   // ══ NEUTER 1: level rule → "any failure means down" ══
   // The exact regression this suite exists to prevent.
   {
@@ -252,7 +278,7 @@ try {
   // ══ NEUTER 3: count non-verdict cells as failures ══
   {
     const n = SRC.replace(
-      'var _NON_VERDICT = { skipped: 1, not_logged_in: 1 };',
+      'var _NON_VERDICT = { skipped: 1, not_logged_in: 1, unverified: 1 };',
       'var _NON_VERDICT = {};');
     check('N3_applied', n !== SRC);
     indirectEval(n);

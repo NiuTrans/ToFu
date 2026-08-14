@@ -19,6 +19,8 @@ Fixes covered:
      IS ported; the interactive tool is `ask_human`, not `ask_user`.
 """
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {'lib/tasks_pkg/system_prompt_cc.py'}
+
 import os
 
 import pytest

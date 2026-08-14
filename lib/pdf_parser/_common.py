@@ -34,20 +34,12 @@ for _var in ('OMP_NUM_THREADS', 'ORT_NUM_THREADS',
              'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS'):
     os.environ.setdefault(_var, _thread_hint)
 
-# ── Monkeypatch onnxruntime.InferenceSession (if installed) ──
-# pymupdf.layout creates InferenceSession objects without specifying
-# intra_op_num_threads. The default (0) makes onnxruntime spawn one
-# thread per *host* CPU and call pthread_setaffinity_np on each.
-# In cgroup-restricted containers most of those CPUs are inaccessible
-# → a wall of EINVAL errors on stderr. Env vars don't help because
-# onnxruntime only reads intra_op_num_threads from the SessionOptions
-# object, not from the environment.  The single source of truth for the
-# patch is lib/onnx_thread_guard.py (server.py installs it at the top of
-# boot — before the critical-import chain can create the first session).
-# Delegating here keeps worker processes and direct PDF-tool callers
-# covered even when they never went through server boot. Idempotent.
-from lib.onnx_thread_guard import install_onnx_thread_guard as _install_onnx_guard
-_install_onnx_guard()
+# Keep pymupdf4llm on the classic implementation Tofu actually calls.  Do not
+# import onnxruntime merely to install a future guard: importing ORT itself
+# retains a large native pool on this platform.  Docling installs that guard at
+# its real first use instead (lib/pdf_parser/docling.py::_get_converter).
+from runtime_guards import install_pymupdf_classic_policy
+install_pymupdf_classic_policy()
 
 __all__ = ['MAX_PDF_BYTES', 'HAS_PYMUPDF4LLM', 'HAS_PYMUPDF', 'HAS_DOCLING',
            'PYMUPDF_LOCK', 'PYMUPDF4LLM_UNAVAILABLE_REASON',
@@ -156,15 +148,15 @@ except ImportError as e:
 # better tables/formulas vs. pymupdf4llm. Silent at import-time when
 # missing — the structured-mode call site emits a single info-level
 # hint on first use so users know how to enable it.
+# Presence detection must not import this ~2 GB optional stack.  Its actual
+# import, model construction and possible download belong exclusively to an
+# explicit ``mode='structured'`` call.
+import importlib.util as _importlib_util
 try:
-    import docling  # noqa: F401
-    HAS_DOCLING = True
-except ImportError:
-    docling = None  # type: ignore[assignment]
+    HAS_DOCLING = _importlib_util.find_spec('docling') is not None
+except (ImportError, ValueError) as e:
+    logger.debug('[_common] docling presence probe failed: %s', e)
     HAS_DOCLING = False
-    # Intentionally silent on import — Docling is opt-in. We don't want
-    # to spam the log on every server start when the user never asked
-    # for the structured mode in the first place.
 
 
 # ─── Parse-once cache key: which extractor + version produced a parsed_text ───
@@ -188,6 +180,7 @@ def current_parser_version(extractor: str) -> str:
         return ''
     import importlib.metadata as _md
     pkg = {'pymupdf4llm': 'pymupdf4llm',
+           'pymupdf4llm-partial': 'pymupdf4llm',
            'pymupdf-raw': 'pymupdf',
            'pymupdf_raw': 'pymupdf',
            'docling': 'docling'}.get(tag)

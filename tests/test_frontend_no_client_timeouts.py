@@ -50,6 +50,8 @@ import sys
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Shared comment-stripping primitive (charter #24). Import works whether or not
@@ -62,7 +64,8 @@ except ImportError:  # pragma: no cover - path-layout fallback
     from _source_scan import strip_comments
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-JS = os.path.join(ROOT, 'static', 'js')
+JS = runtime_sections_dir()
+PAPER_FEATURES = os.path.join(ROOT, 'frontend', 'src', 'features', 'paper')
 
 
 def _src(*parts):
@@ -74,6 +77,11 @@ def _live(*parts):
     """Source with comments stripped — charter #24: a comment must never be
     able to satisfy OR violate a guard."""
     return strip_comments(_src(*parts), lang='js')
+
+
+def _live_paper_ts(name: str) -> str:
+    with open(os.path.join(PAPER_FEATURES, name), encoding='utf-8') as source:
+        return strip_comments(source.read(), lang='js')
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -147,9 +155,9 @@ class TestApiDefaultIsUnbounded:
 
     def test_pdf_fetch_has_no_abort_timer(self):
         """Also a ratchet find: a byte transfer is a wait, not a probe."""
-        live = _live('paper/pdf_viewer.js')
+        live = _live_paper_ts('pdf-viewer.ts')
         assert not _ABORT_TIMER_RE.search(live), \
-            'pdf_viewer.js still bounds the PDF download with an abort timer'
+            'pdf-viewer.ts still bounds the PDF download with an abort timer'
         assert '120000' not in live
 
 
@@ -240,6 +248,8 @@ _PROBE_FILES = frozenset({
     'core/conversations.js',             # conv-list load probes
     'core/pending_sync.js',              # queued-write flush probe
     'main/main_send_pipeline.js',        # chat-START handshake (not the stream)
+    'local-control.js',                  # loopback relay discovery/long-poll;
+                                         # never waits on an LLM/task stream
     'diag_collect.js',                   # diagnostics collector
     'api.js',                            # the seam itself: arms a timer ONLY
                                          # when a caller passes an explicit

@@ -6,8 +6,8 @@ retries over 4+ hours):
 
   * A virtual-user (VU) turn whose user row carries ``content=''`` hit the
     volatile-tail injection seams (``_refresh_tail_block`` /
-    ``_refresh_detail_block`` / ``_append_user_profile_block`` /
-    ``inject_relevant_memories``), which wrapped the empty string into a
+    ``_refresh_detail_block`` / ``_append_user_profile_block``), which wrapped
+    the empty string into a
     ``[{'type': 'text', 'text': ''}]`` block and then appended the reminder
     blocks. The R1 wire snapshot (task_events) shows block[0] =
     ``{'text': '', 'type': 'text'}`` followed by 5 reminder blocks.
@@ -49,7 +49,6 @@ from lib.llm_sanitize import (  # noqa: E402
     _fix_empty_user_messages,
     _strip_empty_text_blocks,
 )
-from lib.memory.prefetch._inject import inject_relevant_memories  # noqa: E402
 from lib.tasks_pkg.system_context._profile import (  # noqa: E402
     _append_user_profile_block,
     _refresh_detail_block,
@@ -285,17 +284,6 @@ class TestProducerGuards:
         ok = _append_user_profile_block(msgs, '[USER PREFERENCE PROFILE]\nx')
         assert ok is True
         assert _empty_text_blocks(msgs) == 0
-
-    def test_inject_relevant_memories_on_empty_user(self):
-        msgs = [{'role': 'user', 'content': ''}]
-        inject_relevant_memories(msgs, [{
-            'name': 'n', 'description': 'd', 'body': 'b',
-            'scope': 'project', 'filepath': 'f.md',
-        }])
-        assert _empty_text_blocks(msgs) == 0
-        texts = [b.get('text', '') for b in msgs[0]['content']]
-        assert any('relevant_memories' in t for t in texts)
-
 
 # ══════════════════════════════════════════════════════════
 #  Layer 3 — deterministic vendor 4xx is NOT a transient

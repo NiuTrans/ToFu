@@ -19,8 +19,8 @@ Why this checkpoint exists:
     The connection is provably DB-idle at this point: all per-round
     writes above committed (db_execute_with_retry commit=True), and
     the streaming-tool pool runs NO DB, so nothing spans the stream.
-    Releasing here caps connection-hold at one round; the next DB op
-    transparently re-acquires via get_thread_db. Best-effort — a
+    Releasing here caps connection-hold at one round; the next legacy DB op
+    transparently re-acquires its thread-local connection. Best-effort — a
     release failure must never break an otherwise-healthy task.
 """
 

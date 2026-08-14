@@ -15,25 +15,18 @@ list through :func:`register_tool_spec`, and :func:`all_specs` /
 list/set objects themselves, so tests that mutate ``registry._TOOL_SPECS[:]``
 in place touch this single home.
 
-Dependency direction: ``_spec → _latch`` only (``ToolContext.multiroot_active``
-uses the sticky-latch helpers). Never the reverse.
+Dependency direction: ``_spec`` depends only on schema/build-neutral helpers;
+the built-in builders import it, never the reverse.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from threading import RLock
 from typing import Any
 
 from lib.log import get_logger
-
-from lib.tools.registry._latch import (
-    clear_tool_list_latch,
-    is_multiroot_sticky,
-    mark_multiroot_sticky,
-    mark_project_ready_sticky,
-    mark_project_remote_sticky,
-)
 
 logger = get_logger(__name__)
 
@@ -106,6 +99,25 @@ class ToolContext:
     # ── Mutated by the assembler between phases ──
     current_count: int = 0
     has_base_tools: bool = False
+    # Populated only by the opt-in native router.  They are diagnostic state,
+    # not a second authority for tool execution.
+    routed_spec_keys: set[str] = field(default_factory=set)
+    omitted_spec_keys: set[str] = field(default_factory=set)
+    # Tool Search policy sidecars.  The registry records provenance while it
+    # still knows which ToolSpec produced each schema.  Protocol adapters use
+    # these sidecars later; they never ride a non-Responses wire.
+    frontend_selected_tool_names: set[str] = field(default_factory=set)
+    tool_namespace_by_name: dict[str, str] = field(default_factory=dict)
+    # The complete task-local execution surface.  Unlike the wire schema this
+    # is never reduced by composer/native exposure or provider-side discovery.
+    # The historic field name remains for extension compatibility; new task
+    # plumbing exposes it as ``_executable_tool_catalog``.
+    enabled_tool_catalog: list[dict[str, Any]] = field(default_factory=list)
+    discovery_policy_by_name: dict[str, str] = field(default_factory=dict)
+    script_safe_by_name: dict[str, bool] = field(default_factory=dict)
+    # Private retrieval text (ToolSpec family hints plus MCP aliases/intents).
+    # It is task-local search data, never serialized into provider tool schemas.
+    search_text_by_name: dict[str, str] = field(default_factory=dict)
 
     @property
     def tid(self) -> str:
@@ -132,41 +144,12 @@ class ToolContext:
         Read from ``cfg['projectPaths']`` (the full root list the frontend
         sends; element 0 is the primary, the rest are extras). Used to decide
         whether path-taking tool schemas should carry the ``rootname:`` prefix
-        hint — single-root sessions keep the cache-stable default schema.
-
-        **Sticky per conversation.** Once a conversation has gone multi-root,
-        the hint stays on for the rest of that conversation even if a later
-        task transiently reports a single ``projectPaths`` (e.g. an extra root
-        was auto-registered mid-conversation by an absolute-path write, then a
-        subsequent task's snapshot lags). Flapping this value rewrites every
-        path-taking tool's schema and breaks the prompt-cache prefix — see
-        ``mark_multiroot_sticky``. A conversation never silently downgrades to
-        single-root mid-stream; the latch is cleared only on cleanup.
+        hint. The value is evaluated live for every assembly.
         """
-        live = self._multiroot_live()
-        if not self.conv_id:
-            # Stateless assembly (tests / compat adapters): no latch.
-            return live
-        if live:
-            # Going multi-root is a LEGITIMATE one-time schema change: the
-            # model in THIS conversation needs the ``rootname:`` path hint
-            # immediately. On the OFF→ON transition, re-establish the
-            # tool-schema latch so the next assembly (this same round, since
-            # multiroot_active is read before latch_tool_list) re-freezes the
-            # snapshot WITH the hint — one deliberate cache rebuild, then
-            # byte-stable again, and no permanent phantom empty-name-diff
-            # divergence. Mirrors the clear_all_tool_list_latches MCP-mutation
-            # precedent. Idempotent: only the first mark fires the clear.
-            if mark_multiroot_sticky(self.conv_id):
-                clear_tool_list_latch(self.conv_id)
-                logger.info('[ToolLatch] conv=%s went multi-root — cleared '
-                            'tool-schema latch so the rootname hint re-freezes '
-                            '(one-time cache rebuild)', self.conv_id[:8])
-            return True
-        return is_multiroot_sticky(self.conv_id)
+        return self._multiroot_live()
 
     def _multiroot_live(self) -> bool:
-        """The raw, un-latched multi-root signal from this task's cfg."""
+        """Return the current request's multi-root signal."""
         paths = self.cfg.get('projectPaths') or []
         if not isinstance(paths, (list, tuple)):
             return False
@@ -181,59 +164,22 @@ class ToolContext:
         to gate the project tool family (list_dir / grep_search / find_files /
         write_file / apply_diff / … / run_command).
 
-        **Sticky per conversation, but only the OFF→ON transition matters.**
-        A conversation whose FIRST turn had no project (empty roots) freezes a
-        no-project tool-schema snapshot; without this hook, attaching a project
-        on a later turn is masked forever by the tool-schema latch. Attaching a
-        project mid-conversation is a LEGITIMATE one-time schema change, so on
-        the OFF→ON transition we clear the tool-schema latch (exactly like the
-        multi-root OFF→ON path) so the next assembly — this same round, since
-        this property is read before ``latch_tool_list`` — re-freezes the
-        snapshot WITH the project tools. One deliberate cache rebuild, then
-        byte-stable again.
-
-        Note the asymmetry vs :attr:`multiroot_active`: this returns the LIVE
-        ``project_enabled`` value (never forcing the sticky ON when live is
-        False), because a project genuinely being detached mid-conversation
-        SHOULD drop the tools. The sticky set is used ONLY to fire the
-        one-time latch-clear on the first attach, not to pin the gate on.
+        This is deliberately live on every assembly: attaching a project adds
+        the project tools on the next model round, and detaching it removes
+        them on the next model round.
         """
-        live = bool(self.project_enabled)
-        if not self.conv_id:
-            # Stateless assembly (tests / compat adapters): raw signal, no latch.
-            return live
-        if live and mark_project_ready_sticky(self.conv_id):
-            # First time this conversation has a project attached. If it had
-            # already frozen a no-project tool-schema snapshot on an earlier
-            # (empty-roots) round, clear it so the project tools re-freeze in.
-            clear_tool_list_latch(self.conv_id)
-            logger.info('[ToolLatch] conv=%s attached a project — cleared '
-                        'tool-schema latch so the project tools re-freeze '
-                        '(one-time cache rebuild)', self.conv_id[:8])
-        return live
+        return bool(self.project_enabled)
 
     @property
     def project_remote(self) -> bool:
         """True when this task's project is bound to a REMOTE worktree.
 
-        RWA 拍板 3A (same-name routing): tool NAMES + parameter schemas stay
-        byte-identical; only the tool descriptions gain the local-execution
-        hint (:func:`lib.tools.project.with_remote_hint`). Same one-time
-        OFF→ON latch-clear precedent as :attr:`project_ready` — binding a
-        conversation to a remote root mid-conversation must re-freeze the
-        schema snapshot ONCE, not flap every round.
+        Tool names and parameter schemas stay identical; descriptions gain the
+        local-execution hint from :func:`lib.tools.project.with_remote_hint`.
+        The binding is evaluated live for every assembly.
         """
         from lib.desktop.remote import remote_worktree_binding
-        live = remote_worktree_binding(self.cfg) is not None
-        if not self.conv_id:
-            # Stateless assembly (tests / compat adapters): raw signal, no latch.
-            return live
-        if live and mark_project_remote_sticky(self.conv_id):
-            clear_tool_list_latch(self.conv_id)
-            logger.info('[ToolLatch] conv=%s bound a REMOTE worktree — cleared '
-                        'tool-schema latch so the local-execution hint '
-                        're-freezes (one-time cache rebuild)', self.conv_id[:8])
-        return live
+        return remote_worktree_binding(self.cfg) is not None
 
     @property
     def has_conv_ref(self) -> bool:
@@ -302,15 +248,22 @@ class ToolSpec:
         Subsets of :attr:`provides` that mutate state / are safe to cache.
         Consumed by ``tool_dispatch`` to keep its concurrency + dedup
         partitions in sync without a second hand-maintained list.
+    programmatic_tools:
+        Subset of :attr:`provides` explicitly reviewed for execution from an
+        OpenAI Programmatic Tool Calling program.  This is intentionally NOT
+        derived from :attr:`idempotent_tools`: retry-safety alone does not
+        prove that a tool preserves citations/native artifacts, avoids an
+        approval boundary, or has a predictable program-facing result.
     category / description:
         Human-readable metadata for tooling and docs.
     gate:
         One short human-readable sentence naming the switch that turns this
         family on (e.g. ``'设置 → 搜索 → 联网搜索'`` or ``'连接浏览器扩展'``).
-        Purely presentational — consumed by the Settings → 工具 inventory
-        panel (``_introspect.build_tool_inventory``) so a gated-off family
-        can tell the user WHERE to turn it on. Never consulted by gating
-        logic; the ``build`` callable remains the only authority.
+        Purely diagnostic — emitted by
+        ``_introspect.build_tool_inventory`` for headless clients. The
+        Settings → 工具 page is a global catalogue and deliberately does
+        not render request-local gate state. Never consulted by gating logic;
+        the ``build`` callable remains the only authority.
     handler:
         Optional :data:`ToolHandlerFn` that executes this tool's calls.  When
         set, it is auto-synced into the dispatch ``tool_registry`` for every
@@ -342,6 +295,19 @@ class ToolSpec:
         caller lists in ``config.plugins`` / ``TOFU_DEFAULT_TOOL_PLUGINS`` to
         make the plugin visible.  One entry point may register several specs;
         they all share its ``plugin_name``.  Empty for built-ins.
+    catalog_active_only:
+        Omit this family from the global Settings catalogue when ``build``
+        contributes no live schemas.  Most families deliberately advertise
+        their gated surface; data-backed families such as local knowledge use
+        this to avoid showing a callable tool before any corpus exists.
+    discovery_policy:
+        ``'eager'`` keeps the family's schemas on the initial wire surface;
+        ``'searchable'`` makes them discoverable through Tool Search while
+        retaining them in the immutable task-level executable catalog.
+    script_safe:
+        Whether calls from a local ToolScript may execute without first being
+        handed back to the ordinary approval/execution lane.  This is a trust
+        property and deliberately independent of discovery policy.
     """
 
     key: str
@@ -358,11 +324,44 @@ class ToolSpec:
     handler_special: str = ''
     source: str = 'builtin'
     plugin_name: str = ''
+    # Appended for positional-constructor compatibility with third-party specs.
+    programmatic_tools: frozenset[str] = field(default_factory=frozenset)
+    catalog_active_only: bool = False
+    discovery_policy: str = 'eager'
+    script_safe: bool = False
+    # Private per-function aliases/intents for local discovery. Appended for
+    # positional-constructor compatibility and never copied into wire schemas.
+    search_hints: dict[str, str] = field(default_factory=dict)
+    # Optional request/UI exposure preference.  ``False`` means omit schemas
+    # from the wire while keeping task-available tools searchable and exactly
+    # callable. Environment/tenant availability remains the builder's job.
+    exposure_gate: Callable[[ToolContext], bool] | None = None
+    # A searchable family can still be explicitly pinned by its own composer
+    # toggle. Piggy-backed gates (for example Produce riding Web Search) leave
+    # this false so they remain deferred.
+    pin_on_exposure: bool = False
 
 
 # ── Module-level registry ─────────────────────────────────
 _TOOL_SPECS: list[ToolSpec] = []
 _REGISTERED_KEYS: set[str] = set()
+_SPEC_LOCK = RLock()
+
+
+def _ordinary_claims(spec: ToolSpec) -> set[str]:
+    # Policy tables are dispatch authority too. In particular, marking a core
+    # write tool idempotent would make repeated calls cacheable even without
+    # replacing its schema or handler, so those names participate in the same
+    # collision arbitration as ordinary bindings.
+    claims = (
+        set(spec.provides)
+        | set(spec.write_tools)
+        | set(spec.idempotent_tools)
+        | set(spec.programmatic_tools)
+    )
+    if spec.handler is not None and not spec.handler_special:
+        claims.update(spec.handler_names)
+    return claims
 
 
 def register_tool_spec(spec: ToolSpec, *, replace: bool = False) -> None:
@@ -378,13 +377,117 @@ def register_tool_spec(spec: ToolSpec, *, replace: bool = False) -> None:
             rejected with a warning so a misbehaving plugin can't silently
             shadow a built-in.
     """
+    with _SPEC_LOCK:
+        saved_specs = list(_TOOL_SPECS)
+        saved_keys = set(_REGISTERED_KEYS)
+        registry_snap = (
+            _dispatch_registry.snapshot()
+            if _dispatch_registry is not None
+            and hasattr(_dispatch_registry, 'snapshot')
+            else None
+        )
+        try:
+            _register_tool_spec_unlocked(spec, replace=replace)
+        except Exception:
+            _TOOL_SPECS[:] = saved_specs
+            _REGISTERED_KEYS.clear()
+            _REGISTERED_KEYS.update(saved_keys)
+            if registry_snap is not None:
+                _dispatch_registry.restore(registry_snap)
+            raise
+
+
+def _register_tool_spec_unlocked(spec: ToolSpec, *, replace: bool) -> None:
+    if spec.source not in {'builtin', 'plugin'}:
+        raise ValueError(
+            f'ToolSpec {spec.key!r} source must be builtin or plugin, '
+            f'got {spec.source!r}')
+    if spec.handler is not None and not (
+            spec.handler_special or spec.handler_names or spec.provides):
+        raise ValueError(
+            f'ToolSpec {spec.key!r} has a handler but no dispatch names')
+    for policy_name in ('idempotent_tools', 'programmatic_tools'):
+        undeclared = set(getattr(spec, policy_name)) - set(spec.provides)
+        if undeclared:
+            raise ValueError(
+                f'ToolSpec {spec.key!r} {policy_name} contains undeclared '
+                f'tool names: {sorted(undeclared)}')
+
+    claims = _ordinary_claims(spec)
+    name_collisions = [
+        (existing, sorted(claims & _ordinary_claims(existing)))
+        for existing in _TOOL_SPECS
+        if (existing.key != spec.key
+            and claims & _ordinary_claims(existing))
+    ]
+    if name_collisions and spec.source == 'plugin':
+        details = ', '.join(
+            f'{owner.key}:{names}' for owner, names in name_collisions)
+        logger.warning(
+            '[ToolRegistry] plugin %r REFUSED spec key=%r — declared tool '
+            'names already have owners (%s)', spec.plugin_name or '?',
+            spec.key, details)
+        return
+    if name_collisions:
+        builtin_collisions = [
+            (owner, names) for owner, names in name_collisions
+            if owner.source == 'builtin'
+        ]
+        if builtin_collisions:
+            details = ', '.join(
+                f'{owner.key}:{names}' for owner, names in builtin_collisions)
+            raise ValueError(
+                f'Built-in ToolSpec {spec.key!r} duplicates core tool names: '
+                f'{details}')
+        # Core specs normally load first. In a synthetic late-arrival case,
+        # remove a colliding plugin family in full: partially trimming a
+        # frozen spec would desynchronise its partitions and handler_names.
+        for owner, names in name_collisions:
+            logger.warning(
+                '[ToolRegistry] built-in spec key=%r reclaimed names %s; '
+                'removing colliding plugin spec key=%r (plugin=%r)',
+                spec.key, names, owner.key, owner.plugin_name or '?')
+            _TOOL_SPECS.remove(owner)
+            _REGISTERED_KEYS.discard(owner.key)
+            _unsync_all(owner, _dispatch_registry)
+
     if spec.key in _REGISTERED_KEYS:
+        existing = next(
+            item for item in _TOOL_SPECS if item.key == spec.key)
+
+        # A plugin-controlled ``replace=True`` must not turn the spec key into
+        # an authority bypass. Specs define visibility and the write/
+        # idempotency partitions in addition to schemas, so replacing a core
+        # spec is just as dangerous as replacing its dispatch handler.
+        if spec.source == 'plugin':
+            if existing.source == 'builtin':
+                logger.warning(
+                    '[ToolRegistry] plugin %r REFUSED spec key=%r — that key '
+                    'belongs to a built-in spec', spec.plugin_name or '?',
+                    spec.key)
+                return
+            if existing.plugin_name != spec.plugin_name:
+                logger.warning(
+                    '[ToolRegistry] plugin %r REFUSED spec key=%r — already '
+                    'provided by plugin %r', spec.plugin_name or '?', spec.key,
+                    existing.plugin_name or '?')
+                return
+
+        # Preserve the same arrival-order-independent authority as handler
+        # registration: core can reclaim a key a plugin registered first.
+        if spec.source == 'builtin' and existing.source == 'plugin':
+            replace = True
+            logger.warning(
+                '[ToolRegistry] built-in spec key=%r reclaimed from plugin %r',
+                spec.key, existing.plugin_name or '?')
+
         if replace:
             for i, existing in enumerate(_TOOL_SPECS):
                 if existing.key == spec.key:
                     _TOOL_SPECS[i] = spec
                     logger.info('[ToolRegistry] replaced spec key=%s', spec.key)
                     _sync_one(spec, _dispatch_registry)
+                    _unsync_removed(existing, spec, _dispatch_registry)
                     return
         logger.warning('[ToolRegistry] duplicate spec key=%s ignored '
                        '(pass replace=True to override)', spec.key)
@@ -392,6 +495,9 @@ def register_tool_spec(spec: ToolSpec, *, replace: bool = False) -> None:
     if spec.phase not in ('base', 'capability'):
         logger.warning('[ToolRegistry] spec key=%s has unknown phase=%r; '
                        'treating as capability', spec.key, spec.phase)
+    if spec.discovery_policy not in ('eager', 'searchable'):
+        raise ValueError(
+            f'ToolSpec {spec.key!r} discovery_policy must be eager or searchable')
     _TOOL_SPECS.append(spec)
     _REGISTERED_KEYS.add(spec.key)
     # If the dispatch registry already exists (late registration, e.g. a plugin
@@ -403,7 +509,8 @@ def register_tool_spec(spec: ToolSpec, *, replace: bool = False) -> None:
 
 def all_specs() -> list[ToolSpec]:
     """Return the registered specs in registration order (a shallow copy)."""
-    return list(_TOOL_SPECS)
+    with _SPEC_LOCK:
+        return list(_TOOL_SPECS)
 
 
 # ── Handler sync: push spec-attached handlers into the dispatch registry ──
@@ -414,33 +521,78 @@ def all_specs() -> list[ToolSpec]:
 _dispatch_registry: Any = None
 
 
-def _sync_one(spec: ToolSpec, registry: Any) -> None:
+def _sync_one(spec: ToolSpec, registry: Any) -> bool:
     """Register *spec*'s handler (if any) into the dispatch *registry*."""
     if spec.handler is None or registry is None:
-        return
-    try:
-        if spec.handler_special:
-            registry.register_special(
-                spec.handler_special, spec.handler,
-                category=spec.category, description=spec.description)
-            logger.info('[ToolRegistry] synced handler for special key=%s '
-                        '(spec=%s)', spec.handler_special, spec.key)
-            return
-        names = spec.handler_names or spec.provides
-        if not names:
-            logger.warning('[ToolRegistry] spec key=%s has a handler but no '
-                           'provides/handler_names to bind it to — skipped',
-                           spec.key)
-            return
-        registry.register(
-            set(names), spec.handler,
+        return False
+    if spec.handler_special:
+        bound = registry.register_special(
+            spec.handler_special, spec.handler,
             category=spec.category, description=spec.description,
             source=spec.source, plugin_name=spec.plugin_name)
-        logger.info('[ToolRegistry] synced handler for %s (spec=%s)',
-                    sorted(names), spec.key)
-    except Exception as e:
-        logger.error('[ToolRegistry] failed to sync handler for spec=%s: %s',
-                     spec.key, e, exc_info=True)
+        if bound is False:
+            raise ValueError(
+                f'ToolSpec {spec.key!r} could not claim special dispatch key '
+                f'{spec.handler_special!r}')
+        logger.info('[ToolRegistry] synced handler for special key=%s '
+                    '(spec=%s)', spec.handler_special, spec.key)
+        return True
+    names = spec.handler_names or spec.provides
+    bound = registry.register(
+        set(names), spec.handler,
+        category=spec.category, description=spec.description,
+        source=spec.source, plugin_name=spec.plugin_name)
+    if isinstance(bound, int) and bound != len(names):
+        raise ValueError(
+            f'ToolSpec {spec.key!r} could bind only {bound}/{len(names)} '
+            'handler names')
+    logger.info('[ToolRegistry] synced handler for %s (spec=%s)',
+                sorted(names), spec.key)
+    return True
+
+
+def _bound_names(spec: ToolSpec) -> set[str]:
+    if spec.handler is None or spec.handler_special:
+        return set()
+    return set(spec.handler_names or spec.provides)
+
+
+def _unsync_all(spec: ToolSpec, registry: Any) -> None:
+    """Remove every dispatch binding still owned by *spec*."""
+    if registry is None or spec.handler is None:
+        return
+    if spec.handler_special:
+        registry.unregister_special(
+            spec.handler_special, source=spec.source,
+            plugin_name=spec.plugin_name)
+        return
+    names = _bound_names(spec)
+    if names:
+        registry.unregister(
+            names, source=spec.source, plugin_name=spec.plugin_name)
+
+
+def _unsync_removed(previous: ToolSpec, current: ToolSpec, registry: Any) -> None:
+    """Remove bindings a replaced spec no longer owns.
+
+    The current spec is synced first so overlapping names change handlers
+    without an observable unbound window. Owner-checked unregister calls make
+    this safe when a built-in has already reclaimed one of the old names.
+    """
+    if registry is None or previous.handler is None:
+        return
+    old_special = previous.handler_special
+    new_special = current.handler_special if current.handler else ''
+    if old_special and old_special != new_special:
+        registry.unregister_special(
+            old_special, source=previous.source,
+            plugin_name=previous.plugin_name)
+
+    removed_names = _bound_names(previous) - _bound_names(current)
+    if removed_names:
+        registry.unregister(
+            removed_names, source=previous.source,
+            plugin_name=previous.plugin_name)
 
 
 def sync_spec_handlers(registry: Any) -> int:
@@ -454,13 +606,37 @@ def sync_spec_handlers(registry: Any) -> int:
         Count of specs whose handler was synced.
     """
     global _dispatch_registry
-    _dispatch_registry = registry
-    count = 0
-    for spec in _TOOL_SPECS:
-        if spec.handler is not None:
-            _sync_one(spec, registry)
-            count += 1
-    return count
+    with _SPEC_LOCK:
+        _dispatch_registry = registry
+        specs = list(_TOOL_SPECS)
+        count = 0
+        failed_plugin_keys: set[str] = set()
+        for spec in specs:
+            if spec.handler is not None:
+                registry_snap = (
+                    registry.snapshot()
+                    if hasattr(registry, 'snapshot') else None)
+                try:
+                    if _sync_one(spec, registry):
+                        count += 1
+                except Exception as e:
+                    if registry_snap is not None:
+                        registry.restore(registry_snap)
+                    logger.error(
+                        '[ToolRegistry] failed to sync handler for spec=%s: %s',
+                        spec.key, e, exc_info=True)
+                    if spec.source == 'plugin':
+                        failed_plugin_keys.add(spec.key)
+        if failed_plugin_keys:
+            _TOOL_SPECS[:] = [
+                spec for spec in _TOOL_SPECS
+                if spec.key not in failed_plugin_keys
+            ]
+            _REGISTERED_KEYS.difference_update(failed_plugin_keys)
+            logger.error(
+                '[ToolRegistry] quarantined plugin specs with unusable handlers: %s',
+                sorted(failed_plugin_keys))
+        return count
 
 
 def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
@@ -475,8 +651,38 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
         ``(tool_list, has_base_tools)``.  ``tool_list`` may be empty.
     """
     tool_list: list[dict] = []
+    with _SPEC_LOCK:
+        specs = list(_TOOL_SPECS)
+    declared_owner = {
+        name: spec.key
+        for spec in specs
+        for name in _ordinary_claims(spec)
+    }
+    runtime_owner = dict(declared_owner)
+    execution_scope = 'available'
+    native_mode = 'full'
+    selected_native: set[str] | None = None
+    try:
+        from lib.context_experiment_flags import (
+            normalize_context_experiment_flags)
+        normalized_tools = normalize_context_experiment_flags(
+            ctx.cfg)['tools']
+        native_mode = normalized_tools['nativeExposure']
+        execution_scope = normalized_tools['executionScope']
+        if native_mode == 'routed':
+            from lib.tools.routing import routed_native_spec_keys
+            selected_native = routed_native_spec_keys(ctx)
+            ctx.routed_spec_keys.update(selected_native)
+    except Exception as exc:
+        # Routing is experimental and must fail open to full exposure and the
+        # default all-task-available execution policy.
+        logger.warning('[ToolRouter] selection failed for task=%s: %s; '
+                       'using full exposure', ctx.tid, exc, exc_info=True)
+        native_mode = 'full'
+        execution_scope = 'available'
+        selected_native = None
 
-    def _visible(spec: ToolSpec) -> bool:
+    def _enabled(spec: ToolSpec) -> bool:
         # Built-ins always evaluated; plugins gated by the per-request
         # allow-list so one tenant's installed plugin can't leak into another's
         # tool surface on a shared server.
@@ -488,32 +694,136 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
                      'enabled_plugins', ctx.tid, spec.key, spec.plugin_name)
         return False
 
+    def _schema_name(tool: dict) -> str:
+        if not isinstance(tool, dict):
+            return ''
+        func = tool.get('function')
+        if isinstance(func, dict):
+            return str(func.get('name') or '')
+        return str(tool.get('name') or '')
+
+    def _validated_contribution(
+            spec: ToolSpec, contributed: list[dict]) -> list[dict]:
+        valid: list[dict] = []
+        seen_here: set[str] = set()
+        for tool in contributed:
+            name = _schema_name(tool)
+            if not name:
+                logger.warning(
+                    '[ToolRegistry] spec key=%s returned a schema without a '
+                    'function name; dropping it', spec.key)
+                continue
+            if name in seen_here:
+                logger.warning(
+                    '[ToolRegistry] spec key=%s returned duplicate schema %r; '
+                    'dropping the duplicate', spec.key, name)
+                continue
+            seen_here.add(name)
+            owner_key = runtime_owner.get(name)
+            if owner_key and owner_key != spec.key:
+                logger.warning(
+                    '[ToolRegistry] spec key=%s tried to contribute tool %r '
+                    'owned by spec key=%s; dropping the conflicting schema',
+                    spec.key, name, owner_key)
+                continue
+            valid.append(tool)
+            runtime_owner[name] = spec.key
+        return valid
+
+    def _record_contribution(
+            spec: ToolSpec, contributed: list[dict], exposed: bool) -> None:
+        namespace = (spec.category or spec.key or 'general').strip().lower()
+        pin = exposed and (
+            spec.discovery_policy == 'eager' or spec.pin_on_exposure)
+        # An explicit plugin allow-list is also a caller selection.  A legacy
+        # single-tenant "all plugins" default (None) remains searchable.
+        if (spec.source == 'plugin'
+                and ctx.enabled_plugins is not None
+                and ctx.plugin_allowed(spec.plugin_name)):
+            pin = True
+        authority = list(contributed)
+        if spec.key == 'mcp':
+            authority = _validated_contribution(
+                spec,
+                list(ctx.cfg.get('_mcpAllowedToolCatalog') or authority),
+            )
+            known = {_schema_name(tool) for tool in authority}
+            authority.extend(tool for tool in contributed
+                             if _schema_name(tool) not in known)
+        active_mcp = set(ctx.cfg.get('_mcpActiveToolNames') or [])
+        mcp_search_text = ctx.cfg.get('_mcpToolSearchTextByName') or {}
+        for tool in authority:
+            name = _schema_name(tool)
+            if not name:
+                continue
+            if execution_scope == 'selected_only' and not exposed:
+                continue
+            if name not in {_schema_name(row)
+                            for row in ctx.enabled_tool_catalog}:
+                ctx.enabled_tool_catalog.append(tool)
+            is_active_mcp = spec.key == 'mcp' and name in active_mcp
+            ctx.discovery_policy_by_name[name] = (
+                'eager' if is_active_mcp else (
+                    spec.discovery_policy if exposed else 'searchable'))
+            ctx.script_safe_by_name[name] = bool(spec.script_safe)
+            ctx.tool_namespace_by_name[name] = namespace
+            search_parts = [
+                spec.key, spec.category, spec.description,
+                str(spec.search_hints.get(name) or ''),
+            ]
+            if spec.key == 'mcp' and isinstance(mcp_search_text, dict):
+                search_parts.append(str(mcp_search_text.get(name) or ''))
+            ctx.search_text_by_name[name] = ' '.join(
+                part for part in search_parts if part)
+            if pin or is_active_mcp:
+                ctx.frontend_selected_tool_names.add(name)
+
+    def _wire_visible(spec: ToolSpec, exposed: bool) -> bool:
+        if not exposed:
+            return False
+        if selected_native is None or spec.key in selected_native:
+            return True
+        ctx.omitted_spec_keys.add(spec.key)
+        logger.debug('[Task %s] native spec key=%s hidden by routed exposure',
+                     ctx.tid, spec.key)
+        return False
+
     # ── Base phase ──
-    for spec in _TOOL_SPECS:
-        if spec.phase != 'base' or not _visible(spec):
+    for spec in specs:
+        if spec.phase != 'base' or not _enabled(spec):
             continue
-        ctx.current_count = len(tool_list)
+        exposed = bool(
+            spec.exposure_gate(ctx) if spec.exposure_gate else True)
+        ctx.current_count = len(ctx.enabled_tool_catalog)
         try:
             contributed = spec.build(ctx) or []
         except Exception as e:
             logger.error('[ToolRegistry] spec %s build failed: %s',
                          spec.key, e, exc_info=True)
             contributed = []
-        tool_list.extend(contributed)
+        contributed = _validated_contribution(spec, contributed)
+        _record_contribution(spec, contributed, exposed)
+        if _wire_visible(spec, exposed):
+            tool_list.extend(contributed)
 
-    ctx.has_base_tools = len(tool_list) > 0
+    ctx.has_base_tools = len(ctx.enabled_tool_catalog) > 0
 
     # ── Capability phase ──
-    for spec in _TOOL_SPECS:
-        if spec.phase != 'capability' or not _visible(spec):
+    for spec in specs:
+        if spec.phase != 'capability' or not _enabled(spec):
             continue
-        ctx.current_count = len(tool_list)
+        exposed = bool(
+            spec.exposure_gate(ctx) if spec.exposure_gate else True)
+        ctx.current_count = len(ctx.enabled_tool_catalog)
         try:
             contributed = spec.build(ctx) or []
         except Exception as e:
             logger.error('[ToolRegistry] spec %s build failed: %s',
                          spec.key, e, exc_info=True)
             contributed = []
-        tool_list.extend(contributed)
+        contributed = _validated_contribution(spec, contributed)
+        _record_contribution(spec, contributed, exposed)
+        if _wire_visible(spec, exposed):
+            tool_list.extend(contributed)
 
     return tool_list, ctx.has_base_tools

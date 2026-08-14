@@ -50,6 +50,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -57,9 +58,12 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-SSE = os.path.join(ROOT, 'static', 'js', 'ui', 'sse_pipeline.js')
-CL = os.path.join(ROOT, 'static', 'js', 'ui', 'conversation_list.js')
-CORE_DIR = os.path.join(ROOT, 'static', 'js', 'core')
+sys.path.insert(0, HERE)
+from _runtime_sections import runtime_section_path  # noqa: E402
+
+SSE = runtime_section_path('ui/sse_pipeline.js')
+CL = runtime_section_path('ui/conversation_list.js')
+REDUCER = runtime_section_path('core/conv_reducers.js')
 
 _REDUCER_SIG = 'function assistantTailIsPriorTurn('
 
@@ -73,12 +77,8 @@ def _reducer_module() -> str:
     this guard anchored to the semantic unit, so a future extraction re-points
     itself and only a real deletion fails.
     """
-    hits = sorted(
-        os.path.join(CORE_DIR, name)
-        for name in os.listdir(CORE_DIR)
-        if name.endswith('.js')
-        and _REDUCER_SIG in open(os.path.join(CORE_DIR, name), encoding='utf-8').read()
-    )
+    with open(REDUCER, encoding='utf-8') as fh:
+        hits = [REDUCER] if _REDUCER_SIG in fh.read() else []
     assert hits, (
         'assistantTailIsPriorTurn is not defined in any static/js/core/*.js — '
         'the shared prior-turn reducer was deleted, not relocated.'

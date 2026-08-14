@@ -824,7 +824,7 @@ def test_NC4_reopen_owner_clear_noop_breaks(flask_app):
 
     _patch_restore(
         _BOARD_SRC,
-        "        db.execute(\n            \"UPDATE project_tasks SET status='open', owner_conv_id='', \"\n            \"lease_expires_at=0, dispatched=0, blocked_until=0, block_count=0, \"\n            \"block_reason='', wait_paths='[]', dispatch_target='', \"\n            \"block_question='', human_answer='', updated_at=? \"\n            'WHERE id=? AND project_path=?',\n            (_now_ms(), task_id, project_path))\n        db.commit()",
+        "        cursor = db_execute_with_retry(\n            db,\n            \"UPDATE project_tasks SET status='open', owner_conv_id='', \"\n            \"lease_expires_at=0, dispatched=0, blocked_until=0, block_count=0, \"\n            \"block_reason='', wait_paths='[]', dispatch_target='', \"\n            \"block_question='', human_answer='', updated_at=? \"\n            'WHERE id=? AND project_path=? AND status=? '\n            \"AND COALESCE(owner_conv_id,'')=? \"\n            'AND COALESCE(blocked_until,0)=?',\n            (_now_ms(), task_id, project_path, prev_status, prev_owner,\n             previous_blocked_until), return_cursor=True)\n        if getattr(cursor, 'rowcount', 0) == 0:\n            return {'ok': False, 'error': 'reopen_conflict'}",
         "        pass  # NC-4 (reopen status/owner write disabled)",
         run,
     )

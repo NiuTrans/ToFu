@@ -699,16 +699,14 @@ def test_frontend_video_wiring_pins():
     wired for videos — a silent de-wire turns uploads into no-ops."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent.parent
-    send = (root / 'static/js/main/main_send_pipeline.js').read_text()
-    assert 'msgPayload.videos' in send
-    assert 'userMsg.videos = msgPayload.videos' in send
-    assert 'pendingVideos = [];' in send
-    assert '_waitForPendingVideos' in send
-    upload = (root / 'static/js/upload.js').read_text()
-    assert '_looksLikeVideo' in upload and 'Api.videos.upload' in upload
-    assert 'video-chip' in upload
-    api = (root / 'static/js/api.js').read_text()
-    assert '/api/v1/videos/upload' in api and '/api/v1/videos/' in api
+    runtime = (root / 'frontend/src/runtime/app-runtime.js').read_text()
+    assert 'msgPayload.videos' in runtime
+    assert 'userMsg.videos = msgPayload.videos' in runtime
+    assert 'pendingVideos = [];' in runtime
+    assert '_waitForPendingVideos' in runtime
+    assert '_looksLikeVideo' in runtime and 'Api.videos.upload' in runtime
+    assert 'video-chip' in runtime
+    assert '/api/v1/videos/upload' in runtime and '/api/v1/videos/' in runtime
     html = (root / 'index.html').read_text()
     assert 'video/*' in html
 
@@ -718,11 +716,12 @@ def test_body_cap_guard_matrix():
     everything else stays at the legacy 50 MiB (owner ruling). Source-pinned
     so a future refactor can't silently widen the default."""
     import inspect
-    import server as _srv
-    src = inspect.getsource(_srv)
+    import lib.http_body_policy as _body_policy
+    src = inspect.getsource(_body_policy)
     assert "'/api/v1/videos/upload', 512 * 1024 * 1024" in src
-    assert '_DEFAULT_BODY_CAP = 50 * 1024 * 1024' in src
-    assert "app.config['MAX_CONTENT_LENGTH'] = 520 * 1024 * 1024" in src
+    assert 'DEFAULT_BODY_CAP = 50 * 1024 * 1024' in src
+    assert 'cap = policy.default_cap' in src
+    assert 'app.before_request(_enforce_http_body_policy)' in src
 
 
 if __name__ == '__main__':

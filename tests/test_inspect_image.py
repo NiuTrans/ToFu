@@ -197,7 +197,7 @@ class TestInspectImageRegistration:
         # No project, no toggles — inspect_image must still be offered, just
         # like read_files (both classify by file type at call time).
         from lib.tasks_pkg.model_config import _assemble_tool_list
-        tl, _has, _mx = _assemble_tool_list(
+        tl, _has = _assemble_tool_list(
             {'messages': []}, None, False, 't-il', 'off', False, True,
             False, False, False, False)
         names = [t['function']['name'] for t in tl]

@@ -191,6 +191,39 @@ def test_save_margin_preserves_rate_rows(pricing_file):
     assert pr.get_default_margin() == 0.40
 
 
+def test_pricing_views_do_not_expose_the_nested_live_cache(pricing_file):
+    pr = pricing_file
+    view = pr.list_prices()
+    view['models']['gpt-4o']['input_per_mtok_micro'] = 1
+    view['default_model']['output_per_mtok_micro'] = 2
+
+    fresh = pr.list_prices()
+    assert fresh['models']['gpt-4o']['input_per_mtok_micro'] == 2_500_000
+    assert fresh['default_model']['output_per_mtok_micro'] == 15_000_000
+
+
+def test_save_margin_merges_the_latest_disk_document(pricing_file):
+    from lib.json_store import update_json_atomic
+
+    pr = pricing_file
+    pr.list_prices()  # populate the in-process cache with the old document
+
+    def _operator_edit(cfg):
+        cfg['operator_note'] = 'must survive margin update'
+        cfg['models']['operator-model'] = {
+            'input_per_mtok_micro': 123,
+            'output_per_mtok_micro': 456,
+        }
+        return cfg
+
+    update_json_atomic(pr._PRICING_PATH, _operator_edit, default={})
+    saved = pr.save_margin(0.33)
+
+    assert saved['default_margin'] == 0.33
+    assert saved['operator_note'] == 'must survive margin update'
+    assert saved['models']['operator-model']['output_per_mtok_micro'] == 456
+
+
 def test_save_margin_rejects_negative(pricing_file):
     pr = pricing_file
     with pytest.raises(pr.PricingError):
@@ -344,4 +377,3 @@ def test_all_completion_surfaces_wire_the_guard():
         src = inspect.getsource(mod)
         assert 'guard_model_relay_or_dispose(' in src, (
             f'{mod.__name__} no longer wires the model-relay guard')
-

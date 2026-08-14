@@ -70,12 +70,16 @@ import pytest
 pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parent.parent
-JS_DIR = ROOT / "static" / "js"
 STYLES_CSS = ROOT / "static" / "styles.css"
 SETTINGS_CSS = ROOT / "static" / "settings.css"
-DEVICES_JS = JS_DIR / "settings" / "devices.js"
+DEVICES_JS = ROOT / "frontend" / "src" / "features" / "settings" / "devices.ts"
 DEVICES_HTML = ROOT / "static" / "settings_panels" / "devices.html"
 ASSET_SCRIPT = ROOT / "scripts" / "release_assets.py"
+
+from tests._runtime_sections import runtime_section_path
+
+PROJECT_JS = Path(runtime_section_path('project.js'))
+LC_JS = Path(runtime_section_path('local-control.js'))
 
 
 def _node() -> str:
@@ -192,6 +196,9 @@ def test_every_class_the_devices_panel_uses_has_a_rule():
                     continue
                 if token.startswith(("stg-", "devices-")):
                     used.add(token)
+    for group in re.findall(r"element\([^,]+,\s*'([^']*)'", js):
+        used.update(token for token in group.split()
+                    if token.startswith(("stg-", "devices-")))
     assert used, "scraper found no classes — the regex stopped matching"
     both = _styles() + "\n" + _settings()
     missing = sorted(c for c in used if not _has_rule(both, c))
@@ -209,7 +216,7 @@ def test_the_remote_devices_picker_is_styled_too():
     for the same reason, so fixing only the settings tab would leave the other
     half of the feature raw.
     """
-    js = (JS_DIR / "project.js").read_text(encoding="utf-8")
+    js = PROJECT_JS.read_text(encoding="utf-8")
     used = {t for g in re.findall(r'class="([^"]+)"', js) for t in g.split()
             if t.startswith("remote-")
             and re.fullmatch(r"[A-Za-z_-][\w-]*", t)}
@@ -228,11 +235,6 @@ def test_the_remote_devices_picker_is_styled_too():
 DEVICES_DOM = """
 <div id="settingsTab_devices">
   <div id="devicesAgentsList"></div>
-  <input id="devicesMintName" value="">
-  <button id="devicesMintBtn"></button>
-  <div id="devicesMintedBox" style="display:none"></div>
-  <code id="devicesMintedToken"></code>
-  <button id="devicesCopyTokenBtn"></button>
   <div id="devicesTokensList"></div>
 </div>
 """
@@ -243,15 +245,21 @@ _HARNESS = textwrap.dedent("""
     global.document = dom.window.document;
     global.window = dom.window;
     global.navigator = dom.window.navigator;
+    global.HTMLElement = dom.window.HTMLElement;
+    global.DocumentFragment = dom.window.DocumentFragment;
+    global.AbortController = dom.window.AbortController;
+    global.AbortSignal = dom.window.AbortSignal;
     global.t = (k) => k;
     global.escapeHtml = (s) => String(s == null ? '' : s)
       .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     global.showToast = () => {{}};
     global.Api = {{ desktop: {{
       devices: () => {payload},
-      mintToken: () => Promise.resolve(null),
       revokeToken: () => Promise.resolve(null),
     }} }};
+    window.Api = global.Api;
+    window.t = global.t;
+    window.showToast = global.showToast;
 
     {shipped}
 
@@ -265,7 +273,7 @@ _HARNESS = textwrap.dedent("""
     }});
 
     const out = {{}};
-    _populateDevicesTab();
+    DevicesFeature.populateDevicesTab();
     // The FIRST frame: synchronous, before any promise can settle. This is
     // literally what the user sees at t=0.
     out.firstPaint = snap();
@@ -283,7 +291,7 @@ def _run_devices(payload_js: str) -> dict:
     src = _HARNESS.format(
         html=DEVICES_DOM.replace("\n", ""),
         payload=payload_js,
-        shipped=DEVICES_JS.read_text(encoding="utf-8"),
+        shipped=_devices_bundle(),
     )
     proc = subprocess.run([_node(), "-e", src], cwd=ROOT,
                           capture_output=True, text=True, timeout=60)
@@ -454,7 +462,10 @@ def test_the_shared_list_carries_a_machine_readable_platform_key():
     # the legs would fail every publish).
     assert mod.REQUIRED_PLATFORM_ASSETS == tuple(
         (label, glob) for _o, _a, label, glob, _min in (
-            mod.PLATFORM_ASSETS + mod.AGENT_PLATFORM_ASSETS)), (
+            mod.PLATFORM_ASSETS + mod.AGENT_PLATFORM_ASSETS)) + (
+                ('prebuilt frontend graph', 'frontend-dist-*.tar.gz'),
+                ('prebuilt frontend SHA-256', 'frontend-dist-*.tar.gz.sha256'),
+            ), (
         "REQUIRED_PLATFORM_ASSETS is not derived from "
         "PLATFORM_ASSETS + AGENT_PLATFORM_ASSETS")
 
@@ -591,7 +602,18 @@ def test_direct_urls_point_at_a_real_asset_not_the_listing_page():
 # fix was unreachable in the product" failure mode: the only way to rule it out
 # is a guard that drives the SHIPPED renderer end-to-end.
 
-LC_JS = JS_DIR / "local-control.js"
+@functools.lru_cache(maxsize=1)
+def _devices_bundle() -> str:
+    esbuild = ROOT / 'node_modules' / '.bin' / 'esbuild'
+    if not esbuild.is_file():
+        pytest.skip('esbuild not installed')
+    proc = subprocess.run(
+        [str(esbuild), str(DEVICES_JS), '--bundle', '--format=iife',
+         '--global-name=DevicesFeature', '--platform=browser'],
+        cwd=ROOT, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
 
 _LC_HARNESS = textwrap.dedent("""
     const {{ JSDOM }} = require('jsdom');
@@ -616,6 +638,9 @@ _LC_HARNESS = textwrap.dedent("""
     global.desktopEnabled = false;
     global.browserEnabled = false;
     global.showToast = () => {{}};
+    window.t = global.t;
+    window.escapeHtml = global.escapeHtml;
+    window.showToast = global.showToast;
 
     {shipped}
 
@@ -739,8 +764,8 @@ def test_the_client_resolves_its_own_architecture():
         "macOS two-DMG ambiguity can never be resolved for anyone")
     assert "Api.desktop.status(" in code, (
         "the resolved architecture is never threaded into the status probe")
-    api = (JS_DIR / "api.js").read_text(encoding="utf-8")
-    assert re.search(r"status:\s*\(arch\)", api), (
+    api = Path(runtime_section_path('api.js')).read_text(encoding='utf-8')
+    assert re.search(r"status:\s*\(arch", api), (
         "Api.desktop.status does not accept the client-resolved architecture, "
         "so the value local-control computes cannot reach the server")
 
@@ -748,13 +773,15 @@ def test_the_client_resolves_its_own_architecture():
 def test_every_new_download_string_is_translated():
     """A raw i18n key in the download row is a visible defect."""
     src = LC_JS.read_text(encoding="utf-8")
-    i18n = (JS_DIR / "i18n.js").read_text(encoding="utf-8")
     keys = set(re.findall(r"_lcT\('(local\.desktopDownload[A-Za-z]*|"
                           r"local\.desktopArchAmbiguous)'", src))
     assert keys, "the download row uses no translated strings at all"
+    catalogs = [json.loads((ROOT / 'frontend' / 'src' / 'i18n' / 'locales'
+                            / f'{language}.json').read_text(encoding='utf-8'))
+                for language in ('zh', 'en')]
     for key in sorted(keys):
-        assert re.search(r"^\s*'%s':" % re.escape(key), i18n, re.M), (
-            f"{key!r} is not defined in i18n.js — it renders as the literal key")
+        assert all(key in catalog for catalog in catalogs), (
+            f"{key!r} is not defined in every locale chunk")
 
 
 # ══════════════════════════════════════════════════════════════════

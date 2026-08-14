@@ -45,11 +45,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section, runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+SEND_BUTTON = runtime_section_path('ui/send_button.js')
 
 
 def _node_available() -> bool:
@@ -62,12 +64,11 @@ def _extract_helper() -> str:
     Faithful to the deployed code: any drift in the helper is picked up by the
     test because we eval the ACTUAL source, not a hand-copied duplicate.
     """
-    src_path = os.path.join(JS_DIR, 'main', 'main_send_pipeline.js')
-    with open(src_path, encoding='utf-8') as f:
-        src = f.read()
+    src = runtime_section('main/main_send_pipeline.js')
     m = re.search(
         r'function _dispatchableQueueCount\(convId\) \{.*?\n\}\n'
-        r'if \(typeof window !== .undefined.\) window\._dispatchableQueueCount = _dispatchableQueueCount;',
+        r"if \(typeof window !== ['\"]undefined['\"]\) "
+        r'runtimeScope\._dispatchableQueueCount = _dispatchableQueueCount;',
         src, re.DOTALL,
     )
     if not m:
@@ -78,6 +79,7 @@ def _extract_helper() -> str:
 _HARNESS = r"""
 const fs = require('fs');
 global.window = global;
+global.runtimeScope = global;
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -160,7 +162,7 @@ def test_autopilot_sentinel_excluded_from_queue_badge():
         proc = subprocess.run(
             ['node', harness,
              helper_js,
-             os.path.join(JS_DIR, 'ui', 'send_button.js'),
+             SEND_BUTTON,
              ],
             capture_output=True, text=True, timeout=60,
         )

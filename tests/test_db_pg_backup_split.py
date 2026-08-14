@@ -29,6 +29,9 @@ import importlib
 import pytest
 
 
+pytestmark = pytest.mark.unit
+
+
 # The functions that MUST live in the new backup module.
 _RELOCATED = [
     'backup_pg_database',

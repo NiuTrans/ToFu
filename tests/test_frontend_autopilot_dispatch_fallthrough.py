@@ -48,11 +48,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-SRC = os.path.join(ROOT, 'static', 'js', 'ui', 'stream_lifecycle.js')
+SRC = runtime_section_path('ui/stream_lifecycle.js')
 
 
 def _node_available() -> bool:

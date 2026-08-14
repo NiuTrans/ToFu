@@ -15,6 +15,8 @@ Run:  pytest tests/test_rate_limit_store.py -v
 """
 from __future__ import annotations
 
+import concurrent.futures
+import threading
 import time
 
 import pytest
@@ -25,6 +27,24 @@ from lib.rate_limit_store import (
     get_store,
     reset_for_test,
 )
+from lib.storage import StorageError, StorageSupervisor
+
+
+@pytest.fixture
+def storage_sidecar(tmp_path, monkeypatch):
+    monkeypatch.setenv('TOFU_STORAGE_SQLITE_READ_POOL', '1')
+    supervisor = StorageSupervisor(
+        project_root=tmp_path, backend='sqlite', startup_timeout=20)
+    supervisor.start()
+    try:
+        yield supervisor
+    finally:
+        supervisor.stop()
+
+
+def _database_store(storage_sidecar):
+    return DatabaseRateLimitStore(
+        client_provider=lambda: storage_sidecar.client)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -82,6 +102,27 @@ class TestMemoryStore:
         assert allowed is True
         assert count == 1
 
+    def test_concurrent_admission_never_oversubscribes_bucket(
+            self, storage_sidecar):
+        """Count + admission + insert is one database-serialized decision."""
+        endpoint = f'/db-concurrent-{time.time_ns()}'
+        ip = '10.0.0.77'
+        limit = 5
+        workers = 16
+        barrier = threading.Barrier(workers)
+        store = _database_store(storage_sidecar)
+
+        def _hit(_index):
+            barrier.wait(timeout=10)
+            return store.record_and_check(
+                endpoint, ip, limit=limit, per_seconds=60)
+
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=workers) as pool:
+            results = list(pool.map(_hit, range(workers)))
+
+        assert sum(1 for allowed, _count in results if allowed) == limit
+        assert all(count <= limit for _allowed, count in results)
 
 # ═══════════════════════════════════════════════════════════
 #  Database backend
@@ -89,33 +130,25 @@ class TestMemoryStore:
 
 @pytest.mark.unit
 class TestDatabaseStore:
-    """The DB backend uses ``get_thread_db(DOMAIN_SYSTEM)``.  The test
-    ``flask_app`` fixture (session-scoped) provisions the SQLite schema,
-    so these tests piggyback on it via the ``flask_client`` fixture
-    pulled from conftest.py."""
+    """The DB backend uses only the authenticated semantic Sidecar API."""
 
     @pytest.fixture(autouse=True)
-    def _provision_schema(self, flask_client):
-        """flask_client triggers schema init via the session app — this
-        fixture just exists so the DB has the rate_limit_events table."""
-        # Clear any leftover rows from prior tests in the same session.
-        try:
-            from lib.database import DOMAIN_SYSTEM, get_thread_db
-            db = get_thread_db(domain=DOMAIN_SYSTEM)
-            db.execute('DELETE FROM rate_limit_events').fetchall()
-        except Exception:
-            pass
+    def _provision_schema(self, storage_sidecar):
+        self.storage = storage_sidecar
         yield
 
+    def _store(self):
+        return _database_store(self.storage)
+
     def test_within_limit_returns_allowed(self):
-        store = DatabaseRateLimitStore()
+        store = self._store()
         for i in range(1, 6):
             allowed, count = store.record_and_check('/dbx', '10.0.0.1', limit=10, per_seconds=60)
             assert allowed is True, f'iteration {i} unexpectedly blocked'
             assert count == i
 
     def test_at_limit_rejects(self):
-        store = DatabaseRateLimitStore()
+        store = self._store()
         for _ in range(10):
             store.record_and_check('/dby', '10.0.0.1', limit=10, per_seconds=60)
         allowed, count = store.record_and_check('/dby', '10.0.0.1', limit=10, per_seconds=60)
@@ -123,7 +156,7 @@ class TestDatabaseStore:
         assert count == 10
 
     def test_distinct_ips_have_separate_buckets(self):
-        store = DatabaseRateLimitStore()
+        store = self._store()
         for _ in range(10):
             store.record_and_check('/dbz', '10.0.0.1', limit=10, per_seconds=60)
         allowed, count = store.record_and_check('/dbz', '10.0.0.2', limit=10, per_seconds=60)
@@ -133,7 +166,7 @@ class TestDatabaseStore:
     def test_window_slide_resets_counter(self):
         """1-second window: events older than per_seconds drop out of the
         SELECT COUNT — the next call gets through."""
-        store = DatabaseRateLimitStore()
+        store = self._store()
         for _ in range(3):
             store.record_and_check('/dbsl', '10.0.0.5', limit=3, per_seconds=1)
         time.sleep(1.2)
@@ -144,17 +177,13 @@ class TestDatabaseStore:
     def test_missing_table_fails_open(self, monkeypatch):
         """If the table is missing, the store must NOT crash the server —
         it logs a WARN, marks itself unavailable, and allows the request."""
-        store = DatabaseRateLimitStore()
+        class _BrokenClient:
+            def command(self, *_a, **_kw):
+                raise StorageError(
+                    'database_integrity', 'schema unavailable')
 
-        # Force the path: monkeypatch get_thread_db to return a wrapper
-        # whose execute raises 'no such table'.
-        class _BrokenDB:
-            def execute(self, *_a, **_kw):
-                raise RuntimeError('no such table: rate_limit_events')
-
-        import lib.database
-        monkeypatch.setattr(lib.database, 'get_thread_db',
-                            lambda **_kw: _BrokenDB())
+        store = DatabaseRateLimitStore(
+            client_provider=lambda: _BrokenClient())
 
         allowed, count = store.record_and_check('/missing', '10.0.0.9', limit=1, per_seconds=60)
         assert allowed is True

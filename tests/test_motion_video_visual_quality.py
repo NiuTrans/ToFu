@@ -31,6 +31,8 @@ import sys
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.motion_video._render import _collect_findings, _gate  # noqa: E402
@@ -170,11 +172,19 @@ def test_engine_records_gate_findings_on_the_quality_axis():
     not testing the wiring) — the compose stage must call the real-gate helper
     and feed its findings into both the emitted event and the degraded axis.
     """
-    import inspect
+    import ast
+    from pathlib import Path
 
     from lib.motion_video import engine
 
-    src = inspect.getsource(engine.run_motion_task)
+    # Assert the worktree wiring, independent of a behavioural test that may
+    # temporarily replace the imported function object in the shared module.
+    module_src = Path(engine.__file__).read_text(encoding='utf-8')
+    tree = ast.parse(module_src)
+    node = next(n for n in tree.body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and n.name == 'run_motion_task')
+    src = ast.get_source_segment(module_src, node) or ''
     assert '_scene_gate_findings(' in src, (
         'the compose stage no longer runs the real gates — the regex gate '
         'alone cannot see fonts, contrast, runtime errors or overflow')
@@ -446,6 +456,17 @@ def test_a_partly_authored_film_is_not_marked_degraded_for_that():
 # the same assertion instead of silently shipping template cards.
 
 
+def _tracked_python_files(root: str) -> list[str]:
+    """Return tracked Python files that still exist in the worktree."""
+    import subprocess
+
+    tracked = subprocess.run(
+        ['git', 'ls-files', 'lib', 'routes'],
+        capture_output=True, text=True, cwd=root, timeout=120).stdout.split()
+    return [rel for rel in tracked
+            if rel.endswith('.py') and os.path.isfile(os.path.join(root, rel))]
+
+
 def _motion_task_construction_sites() -> list[tuple[str, str]]:
     """Every ``_new_motion_task(...)`` call site, as (file, enclosing func).
 
@@ -454,16 +475,9 @@ def _motion_task_construction_sites() -> list[tuple[str, str]]:
     ``os.walk`` (which times out on this FUSE mount, charter note).
     """
     import ast
-    import subprocess
-
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    tracked = subprocess.run(
-        ['git', 'ls-files', 'lib', 'routes'],
-        capture_output=True, text=True, cwd=root, timeout=120).stdout.split()
     sites: list[tuple[str, str]] = []
-    for rel in tracked:
-        if not rel.endswith('.py'):
-            continue
+    for rel in _tracked_python_files(root):
         try:
             with open(os.path.join(root, rel), encoding='utf-8') as f:
                 tree = ast.parse(f.read())
@@ -550,16 +564,9 @@ def test_no_entry_point_hand_copies_the_default(monkeypatch):
     the next entry point would again be the one nobody remembered.
     """
     import ast
-    import subprocess
-
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    tracked = subprocess.run(
-        ['git', 'ls-files', 'lib', 'routes'],
-        capture_output=True, text=True, cwd=root, timeout=120).stdout.split()
     offenders = []
-    for rel in tracked:
-        if not rel.endswith('.py'):
-            continue
+    for rel in _tracked_python_files(root):
         with open(os.path.join(root, rel), encoding='utf-8') as f:
             src = f.read()
         if "'scene_author'" not in src:
@@ -635,9 +642,7 @@ def test_the_panel_renders_a_degrade_notice_when_the_axis_says_degraded():
     of defect as ``install_note`` (declared, rendered nowhere) — the promise
     exists only in a comment.
     """
-    js = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        'static', 'js', 'paper', 'video.js')
+    js = runtime_section_path('paper/video.js')
     src = open(js, encoding='utf-8').read()
     assert 'artifact_quality' in src, (
         'video.js never reads the quality axis, so a degraded film is '
@@ -658,15 +663,18 @@ def test_the_composition_choice_is_its_own_control_not_the_render_preset():
     card is a precise, credible false promise: the control claims to govern
     quality while the thing they object to is chosen elsewhere.
     """
-    js = os.path.join(
+    js = runtime_section_path('paper/video.js')
+    control_src = open(js, encoding='utf-8').read()
+    runtime = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        'static', 'js', 'paper', 'video.js')
-    src = open(js, encoding='utf-8').read()
-    assert 'videoVisualSel' in src, (
+        'frontend', 'src', 'features', 'paper', 'video-runtime.ts')
+    runtime_src = open(runtime, encoding='utf-8').read()
+    assert 'videoVisualSel' in control_src, (
         'the panel offers no composition control, so the render preset is '
         'still the only thing that looks like a quality choice')
-    assert 'scene_author' in src, (
+    assert 'videoVisualSel' in runtime_src and 'scene_author' in runtime_src, (
         'the composition choice is never sent to the backend')
+    assert "state.visual !== 'template'" in runtime_src
 
 
 # ── 10. The frame must be RIGHT, not merely well-formed ───

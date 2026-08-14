@@ -56,13 +56,13 @@ import re
 import pytest
 
 from tests._jsdom import run_harness, JS_DIR, ROOT
+from tests._runtime_sections import runtime_section, runtime_section_names
 
 pytestmark = pytest.mark.unit
 
 CONV_VIEW = os.path.join(JS_DIR, 'conv_view.js')
 TRANSLATION_RENDER = os.path.join(JS_DIR, 'ui', 'translation_render.js')
 MAIN_JS = os.path.join(JS_DIR, 'main.js')
-BUNDLER = os.path.join(ROOT, 'lib', 'js_bundler.py')
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -291,8 +291,8 @@ def test_raw_dom_write_ratchet():
     """No file may gain raw DOM writes beyond its Phase-3.5 baseline."""
     violations = []
     for rel, baseline in _RATCHET_BASELINE.items():
-        with open(os.path.join(ROOT, rel), encoding='utf-8') as f:
-            count = _scan_raw_dom_ops(f.read())
+        source = runtime_section(rel.removeprefix('static/js/'))
+        count = _scan_raw_dom_ops(source)
         if count > baseline:
             violations.append(
                 f'{rel}: {count} raw DOM ops > baseline {baseline} '
@@ -318,8 +318,7 @@ def test_NEUTER_ratchet_detects_injected_raw_op():
     """NEUTER: poisoning a file's source with one extra raw op must increment
     the count — proves the audit is load-bearing, not decorative."""
     rel = 'static/js/main/main_send_pipeline.js'   # mid-table baseline (23)
-    with open(os.path.join(ROOT, rel), encoding='utf-8') as f:
-        clean = f.read()
+    clean = runtime_section(rel.removeprefix('static/js/'))
     baseline = _scan_raw_dom_ops(clean)
     poisoned = clean + '\nvar x = document.getElementById("chatInner");\nx.innerHTML = "y";\n'
     after = _scan_raw_dom_ops(poisoned)
@@ -346,7 +345,7 @@ def test_boot_hard_check_convview_present():
     """
     with open(MAIN_JS, encoding='utf-8') as f:
         main_src = f.read()
-    assert 'MISSING at boot' in main_src and 'window.ConvView' in main_src, (
+    assert 'MISSING at boot' in main_src and 'runtimeScope.ConvView' in main_src, (
         'boot-time ConvView hard check is gone from main.js — the §5 step-4 '
         'precondition (loud startup failure instead of silent per-call '
         'degradation) must stay; see docs/RENDER_CONTRACT_PHASE3_5_PLAN.md §5')
@@ -355,12 +354,7 @@ def test_boot_hard_check_convview_present():
     assert 0 <= init_pos < check_pos, (
         'the ConvView boot check must run INSIDE main.js\'s init IIFE')
 
-    with open(BUNDLER, encoding='utf-8') as f:
-        bundler_src = f.read()
-    m = re.search(r'_BUNDLE_FILES\s*(?::\s*list\[str\])?\s*=\s*\[(.*?)\]',
-                  bundler_src, re.DOTALL)
-    assert m, 'could not locate _BUNDLE_FILES in lib/js_bundler.py'
-    entries = re.findall(r"'([^']+\.js)'", m.group(1))
+    entries = runtime_section_names()
     assert 'conv_view.js' in entries, (
         'conv_view.js missing from _BUNDLE_FILES — the boot check would fire '
         'on every page load (and rightly so)')

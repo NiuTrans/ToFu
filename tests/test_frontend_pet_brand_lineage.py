@@ -312,7 +312,7 @@ def test_no_mascot_switcher_grows_back():
 def _pet_i18n_keys():
     """Every ``pet.*`` key the scanner can reach IN THE DEFERRED pet module.
 
-    tofu-pet.js + tofu-scene.js moved to ``lib.js_bundler._DEFERRED_FILES``
+    tofu-pet.js + tofu-scene.js moved to ``lib.js_bundler._CLASSIC_ASSET_FILES``
     2026-08-01, so ``discover_boot_keys`` (which walks only the core
     ``_BUNDLE_FILES``) no longer sees ``pet.*`` — by design: the pet executes
     after the deferred bundle lands, so its keys ride the deferred rest-pack,
@@ -390,7 +390,7 @@ def test_pet_keys_are_bilingual():
 
 def test_pet_keys_ride_the_rest_pack_not_the_boot_pack():
     """CHARTER #18, updated for the 2026-08-01 deferral: the pet module is in
-    ``_DEFERRED_FILES`` now, so its keys must NOT be in the boot pack (dead
+    ``_CLASSIC_ASSET_FILES`` now, so its keys must NOT be in the boot pack (dead
     weight on first paint) — they ride the deferred rest-pack, which lands
     before the deferred bundle can execute. Two assertions, both load-bearing:
     every pet key stays DISCOVERABLE by the scanner's own regexes where the

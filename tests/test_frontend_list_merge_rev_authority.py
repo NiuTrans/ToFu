@@ -37,11 +37,13 @@ import sys
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = runtime_sections_dir()
 CONV_JS = os.path.join(JS_DIR, 'core', 'conversations.js')
 
 
@@ -183,6 +185,24 @@ const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve()
     check('count_grew_marks_stale', c._needsLoad === true);
   }
 
+  // ══ 5b. Every server-returned shell adopts rev, even with no delta ══
+  {
+    const c = seedLocal({ updatedAt: 1000 });
+    delete c._serverRev;
+    SERVER_LIST = [srvRow({ rev: 9, updatedAt: 1000 })];
+    global._bootLoadInFlight = false;
+    await loadConversationsFromServer(); await flush();
+    check('legacy_shell_adopts_rev_without_delta', c._serverRev === 9);
+  }
+  {
+    global.conversations = [];
+    SERVER_LIST = [srvRow({ id: 'new-server-row', rev: 11 })];
+    global._bootLoadInFlight = false;
+    await loadConversationsFromServer(); await flush();
+    const c = conversations.find(x => x.id === 'new-server-row');
+    check('new_shell_adopts_rev', !!c && c._serverRev === 11);
+  }
+
   // ══ 6. RESCUE-vs-DELETION (epic pt_2fd936cd15c34a7f) ──
   //   A conv absent from the server list that WAS server-known (had a
   //   _serverRev) = deleted elsewhere → drop + prune IDB, do NOT re-PUT.
@@ -266,7 +286,8 @@ def test_list_merge_rev_authority():
     for inv in ('skew_equal_rev_not_stale', 'higher_rev_marks_stale',
                 'higher_rev_adopted_as_base', 'rev_not_rewound',
                 'lower_rev_not_stale', 'legacy_wallclock_fallback_stale',
-                'count_grew_marks_stale',
+                'count_grew_marks_stale', 'legacy_shell_adopts_rev_without_delta',
+                'new_shell_adopts_rev',
                 'deleted_not_resurrected', 'deleted_dropped_locally',
                 'deleted_idb_pruned', 'offline_not_pruned',
                 'offline_kept_locally', 'offline_not_dropped_as_deletion'):

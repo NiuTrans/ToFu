@@ -112,7 +112,8 @@ def refresh_now() -> bool:
         for row in platforms._platform_assets(kind):
             _os, _arch, label, pattern, _min = row
             hit = next((a for a in assets
-                        if fnmatch.fnmatch(a.get('name', ''), pattern)), None)
+                        if store.artifact_path(a.get('name', '')) is not None
+                        and fnmatch.fnmatch(a.get('name', ''), pattern)), None)
             if hit:
                 wanted[hit['name']] = (row, hit, kind)
     if not wanted:
@@ -123,7 +124,12 @@ def refresh_now() -> bool:
     ok = True
     for name, (row, asset, kind) in wanted.items():
         _os, _arch, label, _pattern, _min = row
-        dest = os.path.join(store._store_dir(), name)
+        dest = store.artifact_path(name)
+        if dest is None:  # Defensive: wanted is already filtered above.
+            ok = False
+            logger.warning('[DesktopDist] refused unsafe release asset %r',
+                           name)
+            continue
         cur = existing.get(name)
         if (cur and os.path.isfile(dest)
                 and asset.get('size') is not None
@@ -165,7 +171,9 @@ def refresh_now() -> bool:
             and (e or {}).get('arch') == (entry or {}).get('arch')
             and (e or {}).get('kind', 'full') == (entry or {}).get(
                 'kind', 'full')
-            and os.path.isfile(os.path.join(store._store_dir(), n))
+            and (store.artifact_path(n) is not None)
+            and os.path.isfile(store.artifact_path(n))
+            and not os.path.islink(store.artifact_path(n))
             for n, e in arts.items())
         if not served:
             keep.add(name)

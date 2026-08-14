@@ -203,6 +203,54 @@ class TestWriteSafetyNet:
             'replace': 'zz', 'replace_all': True})
         assert out2.get('replacements') == 2
 
+    def test_edit_file_mixed_batch(self, proj):
+        pj.cmd_project_read_files({'root': 'app', 'path': 'README.md'})
+        out = pj.cmd_project_edit_file({
+            'root': 'app',
+            'edits': [
+                {'path': 'README.md', 'operation': 'insert_after',
+                 'anchor': '# app', 'content': 'inserted'},
+                {'path': 'README.md', 'operation': 'replace',
+                 'anchor': 'hello world', 'content': 'hello remote'},
+            ],
+        })
+        assert out.startswith('Applied 2/2 edits')
+        assert (proj['root'] / 'README.md').read_text() == (
+            '# app\ninserted\nhello remote\n')
+    def test_edit_file_wrap_replace_rejected_pre_execution(self, proj):
+        """Parity with the server-side tool_edit_file wrap gate: a replace
+        whose content keeps the anchor verbatim at a boundary is a pure
+        insertion and must be refused BEFORE the write lands."""
+        pj.cmd_project_read_files({'root': 'app', 'path': 'README.md'})
+        out = pj.cmd_project_edit_file({
+            'root': 'app',
+            'edits': [
+                {'path': 'README.md', 'operation': 'replace',
+                 'anchor': 'hello world', 'content': 'hello world\nappended'},
+                {'path': 'README.md', 'operation': 'insert_after',
+                 'anchor': '# app', 'content': 'inserted'},
+            ],
+        })
+        assert out.startswith('Applied 1/2 edits (1 failed)')
+        assert 'pure insertion rejected' in out
+        assert "operation='insert_after'" in out
+        # the rejected edit never landed; the sibling insert did
+        assert (proj['root'] / 'README.md').read_text() == (
+            '# app\ninserted\nhello world\n')
+
+    def test_edit_file_wrap_gate_kill_switch(self, proj, monkeypatch):
+        monkeypatch.setenv('TOFU_EDIT_WRAP_GATE', '0')
+        pj.cmd_project_read_files({'root': 'app', 'path': 'README.md'})
+        out = pj.cmd_project_edit_file({
+            'root': 'app',
+            'edits': [
+                {'path': 'README.md', 'operation': 'replace',
+                 'anchor': 'hello world', 'content': 'hello world\nappended'},
+            ],
+        })
+        assert out.startswith('Applied 1/1 edits')
+        assert 'appended' in (proj['root'] / 'README.md').read_text()
+
 
 # ═══════════════════════════════════════════════════════════
 #  grep / find(复用 lib/project_mod,ignore 规则含 .tofu)

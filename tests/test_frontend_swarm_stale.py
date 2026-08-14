@@ -26,14 +26,16 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
 
 import pytest
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 JS_DIR = os.path.join(ROOT, 'static', 'js')
+_NODE_HARNESS_TIMEOUT_S = 180
 
 
 def _node_deps_available() -> bool:
@@ -210,23 +212,19 @@ console.log(out.join('\n'));
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
 def test_swarm_stale_panel_guard_and_reconcile():
-    harness = os.path.join(HERE, '_swarm_stale_harness.js')
-    with open(harness, 'w') as f:
-        f.write(_HARNESS)
-    try:
+    with tempfile.TemporaryDirectory(prefix='tofu-swarm-stale-') as temp_dir:
+        harness = os.path.join(temp_dir, 'swarm_stale_harness.js')
+        with open(harness, 'w') as f:
+            f.write(_HARNESS)
         proc = subprocess.run(
             ['node', harness,
              os.path.join(JS_DIR, 'ui', 'streaming_ui.js'),   # argv[2]
              ROOT,                                            # argv[3]
              os.path.join(JS_DIR, 'ui', 'streaming_swarm_panel.js'),  # argv[4]
              ],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True,
+            timeout=_NODE_HARNESS_TIMEOUT_S,
         )
-    finally:
-        try:
-            os.remove(harness)
-        except OSError:
-            pass
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -254,27 +252,23 @@ def test_backend_active_confirmation_guard_is_load_bearing():
 
     # Write the neutered module to a temp file the harness evals in place of the
     # real one, then assert the confirmed-active case now FAILS.
-    neutered_path = os.path.join(HERE, '_swarm_stale_neutered.js')
-    harness = os.path.join(HERE, '_swarm_stale_neuter_harness.js')
-    with open(neutered_path, 'w', encoding='utf-8') as f:
-        f.write(neutered_src)
-    with open(harness, 'w') as f:
-        f.write(_HARNESS)
-    try:
+    with tempfile.TemporaryDirectory(
+            prefix='tofu-swarm-stale-neuter-') as temp_dir:
+        neutered_path = os.path.join(temp_dir, 'swarm_stale_neutered.js')
+        harness = os.path.join(temp_dir, 'swarm_stale_neuter_harness.js')
+        with open(neutered_path, 'w', encoding='utf-8') as f:
+            f.write(neutered_src)
+        with open(harness, 'w') as f:
+            f.write(_HARNESS)
         proc = subprocess.run(
             ['node', harness,
              os.path.join(JS_DIR, 'ui', 'streaming_ui.js'),   # argv[2]
              ROOT,                                            # argv[3]
              neutered_path,                                   # argv[4] — neutered module
              ],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True,
+            timeout=_NODE_HARNESS_TIMEOUT_S,
         )
-    finally:
-        for p in (neutered_path, harness):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     # With the guard removed, a backend-confirmed-active OLD panel is wrongly

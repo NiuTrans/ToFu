@@ -2,7 +2,7 @@
 
 **The dead instruction** (epic pt_db5602172ac44b11 item ③, measured 2026-07-29).
 ``guide/WORKFLOW.md`` told the author *"Activate `hyperframes-motion` when a
-scene needs real choreography"* — but ``activate_skill`` is a CHAT-agent tool,
+scene needs real choreography"* — but ``load_skill`` is a CHAT-agent tool,
 and the headless per-scene author's toolset is a fixed five
 (``write_composition`` / ``composition_check`` / ``web_search`` /
 ``generate_asset`` / ``fetch_url``). Measured: skill/blueprint hits in
@@ -30,7 +30,7 @@ own art direction. Instead the author gets two narrow reads:
     tags), ~6 KB, cheap enough to hand over with the prompt;
   * ``craft_reference(name)`` — ONE rule or blueprint in full, on demand.
 
-That mirrors how the chat agent uses ``activate_skill`` (index every turn →
+That mirrors how the chat agent uses ``load_skill`` (index every turn →
 full text on match) without borrowing a tool the engine cannot call.
 
 Never fatal: an unreachable network leaves the corpus absent and every

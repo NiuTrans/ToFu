@@ -37,8 +37,8 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 CSS = os.path.join(ROOT, 'static', 'styles.css')
-JS_DIR = os.path.join(ROOT, 'static', 'js')
-CORE_JS = os.path.join(JS_DIR, 'core.js')
+JS_DIR = os.path.join(ROOT, 'frontend', 'src')
+CORE_JS = os.path.join(JS_DIR, 'runtime', 'app-runtime.js')
 
 
 def _read(path: str) -> str:
@@ -245,7 +245,7 @@ def test_tablet_drawer_predicate_false_for_fine_pointer_desktop():
 
 # Files allowed to mention 768 near a viewport check:
 #   core.js         — DEFINES the constant + helpers (and documents the old sites)
-_ALLOWED_FILES = {'core.js'}
+_ALLOWED_FILES = {'app-runtime.js'}
 _GENERATED_RE = re.compile(r'^(?:bundle|feature|styles)-[0-9a-f]{8}\.js$')
 
 # A bare mobile-width comparison against the literal 768.
@@ -257,7 +257,7 @@ _LOCAL_CONST_RE = re.compile(r'\bMOBILE_BP\s*=\s*768\b')
 def _iter_source_js():
     for base, _dirs, files in os.walk(JS_DIR):
         for fn in files:
-            if not fn.endswith('.js'):
+            if not fn.endswith(('.js', '.ts')):
                 continue
             if fn in _ALLOWED_FILES or _GENERATED_RE.match(fn):
                 continue

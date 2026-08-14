@@ -10,11 +10,11 @@ a crashed/interrupted test left dirty, so one aborted NC can't poison the whole
 session.
 
 The fragility that bit us: that list was HAND-MAINTAINED with no binding to
-reality. When a sibling added ``test_frontend_tofu_scene_pixeldiff.py`` (which
-byte-patches ``static/js/tofu-scene.js`` in place) they did NOT add the file to
-the belt — so a SIGKILL of its node subprocess would have left the shipped JS
-neutered with nothing to heal it. It slipped in silently exactly the way the
-next such writer will, unless the registry polices ITSELF.
+reality. An earlier pixel-diff test byte-patched a shipped frontend source in
+place without registering it, so a SIGKILL of its node subprocess could leave
+the source neutered with nothing to heal it. That test now uses a temporary
+Vite runtime-section copy, but the incident still proves the registry must
+police ITSELF for every remaining in-place writer.
 
 THIS TEST closes that gap the same way ``test_db_guard.py`` polices the
 standalone-runner guard: it AST-scans every ``tests/*.py`` for an IN-PLACE write
@@ -277,15 +277,11 @@ def test_every_inplace_shipped_source_writer_is_registered():
     guarded = set(_load_guarded_registry())
     writers = _discover_inplace_shipped_writers()
 
-    # Sanity: the scanner must find the known population (tofu-scene frontend
-    # writer + the orphan-classifier reconcile.py writer), else the AST
-    # heuristic silently regressed and this test passes vacuously. The
-    # project_peer.py legacy writer that used to anchor this pin was migrated
-    # to the in-memory harness (158a3b7), so its absence here is BY DESIGN.
+    # Sanity: the scanner must find the orphan-classifier reconcile.py writer,
+    # else the AST heuristic silently regressed and this test passes vacuously.
+    # Frontend sources are now a Vite graph and their former in-place writers
+    # were retired with static/js; current frontend tests use temp artifacts.
     all_targets = {t for hits in writers.values() for t in hits}
-    assert 'static/js/tofu-scene.js' in all_targets, (
-        'scanner did not detect the tofu-scene in-place writer — the AST '
-        f'heuristic regressed. Detected writers: {writers}')
     assert 'lib/conversations/reconcile.py' in all_targets, (
         'scanner did not detect the reconcile.py in-place writer '
         '(test_orphan_resumable_classifier) — heuristic regressed. '

@@ -44,7 +44,8 @@ def tool_history_from_segments(segments: list[dict[str, Any]]) -> list[dict[str,
     Lets a Continue rebuild be driven from persisted segments byte-identically
     to the frontend-supplied toolHistory (the step-4 parity gate).
     """
-    rounds = _rounds_view_from_segments(segments)
+    from lib.tools.todo import compact_todo_rounds_for_replay
+    rounds = compact_todo_rounds_for_replay(_rounds_view_from_segments(segments))
     history: list[dict[str, Any]] = []
     by_batch: dict[Any, dict[str, Any]] = {}
     order: list[Any] = []
@@ -64,9 +65,14 @@ def tool_history_from_segments(segments: list[dict[str, Any]]) -> list[dict[str,
                               'arguments': r.get('toolArgs') or '{}'}
         if r.get('extraContent'):
             tc['extraContent'] = r['extraContent']
+        if isinstance(r.get('caller'), dict):
+            tc['caller'] = dict(r['caller'])
         by_batch[lr]['toolCalls'].append(tc)
-        by_batch[lr]['toolResults'].append(
-            {'tool_call_id': r['toolCallId'], 'content': r.get('toolContent') or ''})
+        result = {'tool_call_id': r['toolCallId'],
+                  'content': r.get('toolContent') or ''}
+        if isinstance(r.get('caller'), dict):
+            result['caller'] = dict(r['caller'])
+        by_batch[lr]['toolResults'].append(result)
     for lr in order:
         history.append(by_batch[lr])
     return history

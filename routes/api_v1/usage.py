@@ -10,7 +10,7 @@ Routes:
 
 from __future__ import annotations
 
-from flask import Blueprint, request
+from quart import Blueprint, request
 
 from lib.api_response import api_forbidden, api_ok
 from lib.log import get_logger

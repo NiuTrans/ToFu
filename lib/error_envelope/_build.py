@@ -15,6 +15,10 @@ from lib.error_envelope._constants import (
     _TITLES,
     _WARNING_KINDS,
 )
+from lib.error_envelope._schema import (
+    _CORE_FIELDS,
+    _is_complete_envelope,
+)
 
 logger = get_logger(__name__)
 
@@ -25,12 +29,13 @@ def make_envelope(kind: str, *, message: str = '', detail: str = '',
                   retryable: bool | None = None,
                   hint: str | None = None,
                   title_key: str | None = None,
-                  hint_key: str | None = None) -> dict[str, Any]:
+                  hint_key: str | None = None,
+                  extensions: dict[str, Any] | None = None) -> dict[str, Any]:
     """Build a typed error envelope.
 
     Most callers should prefer :func:`from_exception` — only use
     :func:`make_envelope` directly for non-exception failure paths
-    (e.g. tool-rounds budget, tool execution timeout, content filter
+    (e.g. a legacy persisted tool-round status, tool execution timeout, content filter
     detected by absence-of-content rather than a thrown exception).
 
     Parameters
@@ -61,6 +66,10 @@ def make_envelope(kind: str, *, message: str = '', detail: str = '',
         The legacy bilingual ``message`` / ``hint`` fields are ALWAYS
         populated byte-identically for headless clients and as the
         fallback when the frontend's i18n table predates the key.
+    extensions : dict | None
+        Optional domain/wire metadata (for example ``retry_after_s`` or a
+        versioned orchestration ``outcome``). Core envelope fields cannot be
+        overridden through this map.
     """
     if kind not in KINDS:
         logger.warning('[ErrorEnvelope] Unknown kind=%r — downgrading to generic', kind)
@@ -121,6 +130,11 @@ def make_envelope(kind: str, *, message: str = '', detail: str = '',
         hint_key = f'err.k.{kind}.hint'
     if hint_key:
         envelope['hintKey'] = hint_key
+    if extensions:
+        envelope.update({
+            key: value for key, value in extensions.items()
+            if key not in _CORE_FIELDS
+        })
     return envelope
 
 
@@ -139,3 +153,56 @@ def from_exception(exc: BaseException, *, model: str = '',
         source=source,
         raw=raw,
     )
+
+
+def normalize_envelope(error: Any, *, context: str = '',
+                       source: str = '',
+                       require_complete: bool = False) \
+        -> dict[str, Any] | None:
+    """Normalize any error value through one closed-kind boundary.
+
+    Complete valid envelopes retain object identity. Rebuilt dictionaries
+    keep additive domain fields such as orchestration's versioned ``outcome``
+    while core envelope fields are regenerated and validated here.
+    """
+    if error is None:
+        return None
+    if isinstance(error, dict):
+        kind = error.get('kind')
+        message = error.get('message')
+        if (kind in KINDS and isinstance(message, str) and message
+                and (not require_complete or _is_complete_envelope(error))):
+            return error
+        normalized = make_envelope(
+            kind if kind in KINDS else 'generic',
+            message=message if isinstance(message, str) and message else '',
+            detail=str(error.get('detail') or '')[:300],
+            model=str(error.get('model') or ''),
+            context=str(error.get('context') or context),
+            source=str(error.get('source') or source),
+            raw=str(error.get('raw') or error)[:300],
+            severity=(error.get('severity')
+                      if error.get('severity') in ('warning', 'error')
+                      else None),
+            retryable=(error.get('retryable')
+                       if isinstance(error.get('retryable'), bool) else None),
+            hint=(error.get('hint')
+                  if isinstance(error.get('hint'), str) else None),
+        )
+        normalized.update({
+            key: value for key, value in error.items()
+            if key not in _CORE_FIELDS
+        })
+        return normalized
+    if isinstance(error, BaseException):
+        return from_exception(error, context=context, source=source)
+    if isinstance(error, str):
+        if error in KINDS:
+            return make_envelope(error, context=context, source=source)
+        return make_envelope(
+            'generic', detail=error, context=context, source=source,
+            raw=error)
+    raw = str(error)
+    return make_envelope(
+        'generic', detail=raw[:300], context=context, source=source,
+        raw=raw[:300])

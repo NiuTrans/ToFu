@@ -44,11 +44,12 @@ logger = get_logger(__name__)
 
 # Tools whose rounds carry file-change information.
 _WRITE_TOOLS = frozenset({
-    'write_file', 'apply_diff', 'apply_diffs',
+    'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
     'insert_content', 'insert_contents',
 })
 _DIFF_TOOLS = frozenset({'apply_diff', 'apply_diffs'})
 _INSERT_TOOLS = frozenset({'insert_content', 'insert_contents'})
+_UNIFIED_EDIT_TOOLS = frozenset({'edit_file'})
 
 
 @dataclass
@@ -190,7 +191,9 @@ def extract_file_changes(tool_rounds: Iterable[dict]) -> List[FileChange]:
                         root, path = _split_root(p)
                         key = f'{root}|{path}'
                         if key not in changes:
-                            if tn in _DIFF_TOOLS:
+                            if tn in _UNIFIED_EDIT_TOOLS:
+                                pending_action = 'editing…'
+                            elif tn in _DIFF_TOOLS:
                                 pending_action = 'patching…'
                             elif tn in _INSERT_TOOLS:
                                 pending_action = 'inserting…'
@@ -204,7 +207,7 @@ def extract_file_changes(tool_rounds: Iterable[dict]) -> List[FileChange]:
         ok = meta.get('writeOk') is not False
 
         # ── apply_diff / insert_content: walk edits[] ──
-        if tn in _DIFF_TOOLS or tn in _INSERT_TOOLS:
+        if tn in _DIFF_TOOLS or tn in _INSERT_TOOLS or tn in _UNIFIED_EDIT_TOOLS:
             args = _coerce_args(round_.get('toolArgs'))
             if args:
                 edits = args.get('edits')
@@ -212,15 +215,18 @@ def extract_file_changes(tool_rounds: Iterable[dict]) -> List[FileChange]:
                     handled = False
                     for e in edits:
                         if isinstance(e, dict) and e.get('path'):
-                            action = ('inserted' if tn in _INSERT_TOOLS
-                                       else 'patched')
+                            if tn in _UNIFIED_EDIT_TOOLS:
+                                action = ('inserted' if str(e.get('operation', '')).startswith('insert_')
+                                          else 'patched')
+                            else:
+                                action = ('inserted' if tn in _INSERT_TOOLS
+                                          else 'patched')
                             _set(e['path'], action=action, ok=ok)
                             handled = True
                     if handled:
                         continue
                 if args.get('path'):
-                    action = ('inserted' if tn in _INSERT_TOOLS
-                               else 'patched')
+                    action = ('inserted' if tn in _INSERT_TOOLS else 'patched')
                     _set(args['path'], action=action, ok=ok)
                     continue
 

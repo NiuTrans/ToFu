@@ -58,21 +58,43 @@ _SETTINGS_TABS = (
     'advanced',
 )
 
-#: (label, JS expression that opens it, CSS selector proving it opened).
+#: (label, runtime action that opens it, CSS selector proving it opened).
 #: Every function here was confirmed to exist as a top-level definition; the
 #: names the epic guessed at (openMyDay/openScheduler/openArtifacts) do not.
 _MODAL_PANELS = (
-    ('memory', 'openMemoryModal()', '#memoryModal.open'),
-    ('myday', 'openDailyReport()', '#dailyReportModal.open'),
+    ('memory', 'openMemoryModal', '#memoryModal.open'),
+    ('myday', 'openDailyReport', '#dailyReportModal.open'),
     # orchModal is built lazily by openOrchestration() rather than living in
     # index.html, so the selector doubles as proof the builder ran.
-    ('orchestration', 'openOrchestration()', '#orchModal'),
+    ('orchestration', 'openOrchestration', '#orchModal'),
 )
 
 
 def _wait_ready(page, timeout=20000):
     page.wait_for_selector('#userInput', state='visible', timeout=timeout)
-    page.wait_for_function("typeof switchSettingsTab === 'function'", timeout=timeout)
+    page.wait_for_function(
+        "window.TofuModules?.version === 3"
+        " && typeof window.TofuModules.invokeFeature === 'function'",
+        timeout=timeout,
+    )
+
+
+def _invoke_action(page, name, *args):
+    """Drive the v3 command port used by production data-tofu-action seams."""
+    return page.evaluate(
+        """async ({name, args}) => {
+          const modules = window.TofuModules;
+          if (modules.canInvokeFeature(name)) {
+            return await modules.invokeFeature(name, args, () => {});
+          }
+          const action = modules.resolveAction(name);
+          if (typeof action !== 'function') {
+            throw new Error(`No frontend action registered for ${name}`);
+          }
+          return await action(...args);
+        }""",
+        {'name': name, 'args': list(args)},
+    )
 
 
 def _hard_errors(page):
@@ -103,7 +125,7 @@ def test_settings_tabs_open_without_js_errors(page):
     """
     _wait_ready(page)
     _drain(page)
-    page.evaluate('openSettings()')
+    _invoke_action(page, 'openSettings')
     # openSettings() fans out to every _populate*Tab (several are async and
     # fetch), so give the whole batch time to settle before judging it.
     page.wait_for_timeout(2500)
@@ -118,7 +140,7 @@ def test_settings_tabs_open_without_js_errors(page):
     missing_pane = []
     for tab in _SETTINGS_TABS:
         _drain(page)
-        page.evaluate(f"switchSettingsTab({tab!r})")
+        _invoke_action(page, 'switchSettingsTab', tab)
         page.wait_for_timeout(350)
         errs = _hard_errors(page)
         if errs:
@@ -149,7 +171,7 @@ def test_modal_panel_opens_without_js_errors(page, label, opener, selector):
     """Each modal panel opens cleanly AND actually appears in the DOM."""
     _wait_ready(page)
     _drain(page)
-    page.evaluate(opener)
+    _invoke_action(page, opener)
     page.wait_for_timeout(1200)
 
     errs = _hard_errors(page)
@@ -172,7 +194,7 @@ def test_paper_reading_mode_opens_without_js_errors(page):
     """
     _wait_ready(page)
     _drain(page)
-    page.evaluate("typeof togglePaperMode === 'function' && togglePaperMode()")
+    _invoke_action(page, 'togglePaperMode')
     page.wait_for_timeout(1500)
 
     errs = _hard_errors(page)
@@ -211,24 +233,25 @@ def test_auto_research_entry_is_reachable_without_a_paper(page):
     """
     _wait_ready(page)
     _drain(page)
-    page.evaluate("typeof togglePaperMode === 'function' && togglePaperMode()")
+    _invoke_action(page, 'togglePaperMode')
     page.wait_for_timeout(1500)
 
     # 1. The production entry point is rendered, and the shared describe box
     #    it reads from exists. Both come from paper-reader.js's landing screen.
     wired = page.evaluate("""() => {
         const btn = document.querySelector(
-            '[onclick*="_startResearchFromDescribe"]');
+            '[data-tofu-action*="_startResearchFromDescribe"]');
         return {
             button: !!btn,
             label: btn ? (btn.textContent || '').trim() : '',
             input: !!document.getElementById('paperDescribeInput'),
-            fn: typeof _startResearchFromDescribe === 'function',
+            fn: typeof window.TofuModules.resolveAction(
+                '_startResearchFromDescribe') === 'function',
         };
     }""")
     assert wired['fn'], (
         '_startResearchFromDescribe is not defined in the shipped bundle — '
-        'paper/research.js did not load')
+        'native Paper research owner did not load')
     assert wired['button'], (
         'no landing-screen button calls _startResearchFromDescribe() — the '
         'auto-research capability has no user-reachable entry point')
@@ -241,7 +264,7 @@ def test_auto_research_entry_is_reachable_without_a_paper(page):
     page.evaluate("""() => {
         document.getElementById('paperDescribeInput').value =
             'long-context KV cache compression';
-        _startResearchFromDescribe();
+        window.TofuModules.resolveAction('_startResearchFromDescribe')();
     }""")
     page.wait_for_timeout(1500)
 
@@ -259,8 +282,8 @@ def test_auto_research_entry_is_reachable_without_a_paper(page):
     print(f'\n  auto-research entry reachable pre-paper; label={wired["label"]!r}')
 
 
-def test_every_inline_onclick_handler_is_defined(page):
-    """No `onclick="foo()"` in the shipped page may call an undefined function.
+def test_every_actionable_inline_onclick_handler_is_defined(page):
+    """No actionable `onclick="foo()"` may call an undefined function.
 
     This is the generic form of the "click does nothing" bug: the handler is
     wired in HTML, the function was deleted or renamed, and nothing fails until
@@ -272,11 +295,22 @@ def test_every_inline_onclick_handler_is_defined(page):
 
     Resolution runs INSIDE the browser against the real bundle, so it cannot
     drift from what users actually load (charter: no hand-copied symbol lists).
+
+    Feature panels are loaded on demand.  Their hidden HTML is present in the
+    shell before the owning Vite domain installs its inner handlers, while the
+    user-reachable opener is a bridge stub that loads that domain.  Treating
+    those deliberately dormant controls as actionable produced false failures
+    for every lazy domain at once.  The panel tests above open those domains;
+    this generic sweep guards controls a user can actually click now.
     """
     _wait_ready(page)
     undefined = page.evaluate("""() => {
         const bad = [];
         document.querySelectorAll('[onclick]').forEach(el => {
+            // A lazy panel's dormant markup is not actionable until its owner
+            // is loaded. getClientRects() accounts for display:none on the
+            // element itself or any ancestor without copying CSS knowledge.
+            if (el.getClientRects().length === 0) return;
             const code = el.getAttribute('onclick') || '';
             // Leading identifier of each `;`-separated statement that looks
             // like a bare call: `foo()` / `foo(args)`.
@@ -286,7 +320,8 @@ def test_every_inline_onclick_handler_is_defined(page):
                 const name = m[1];
                 if (['if','for','while','switch','return','typeof','function']
                         .includes(name)) return;
-                if (typeof window[name] !== 'function') {
+                if (typeof window[name] !== 'function'
+                    && typeof window.TofuModules.resolveAction(name) !== 'function') {
                     bad.push(name + '  (on #' + (el.id || el.className || '?') + ')');
                 }
             });

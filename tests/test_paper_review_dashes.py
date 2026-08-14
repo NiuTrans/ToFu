@@ -115,8 +115,13 @@ def _patch_dispatch(body):
                 'stop', {'_dispatch': {}})
 
     orig = re_mod.dispatch_stream
+    orig_insight = re_mod._maybe_run_insight
     re_mod.dispatch_stream = _fake
-    return re_mod, orig
+    # This suite exercises report rendering, not the optional second-pass
+    # insight synthesizer.  A plain report enables that hook, whose dispatcher
+    # is owned by a different module and would otherwise make a real model call.
+    re_mod._maybe_run_insight = lambda *args, **kwargs: None
+    return re_mod, orig, orig_insight
 
 
 REVIEW_BODY = ('# Review\n\n## Summary\nThe method is novel ' + EMDASH + ' it improves X.\n'
@@ -126,7 +131,7 @@ REVIEW_BODY = ('# Review\n\n## Summary\nThe method is novel ' + EMDASH + ' it im
 def _run(lang_key, ui_lang, phash):
     import lib.paper.report_engine as re_mod
     from lib.paper import _new_report_task
-    re_mod2, orig = _patch_dispatch(REVIEW_BODY)
+    re_mod2, orig, orig_insight = _patch_dispatch(REVIEW_BODY)
     try:
         task = _new_report_task('t_' + phash[:6], phash, lang_key, None,
                                 client_title='P', ui_lang=ui_lang)
@@ -137,6 +142,7 @@ def _run(lang_key, ui_lang, phash):
         return task
     finally:
         re_mod2.dispatch_stream = orig
+        re_mod2._maybe_run_insight = orig_insight
 
 
 def test_engine_review_deslops_dashes():

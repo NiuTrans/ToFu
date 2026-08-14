@@ -13,7 +13,7 @@ recording mock 2d context, and assert:
   * switching scenes re-bakes with a different palette;
   * the reduced-motion / off-scene / non-tofu-theme gates keep it STATIC (no
     rAF loop) — the standing energy/accessibility prefs;
-  * it is registered in the JS bundler manifest + index.html dev fallback, and
+  * it is registered in the classic asset manifest, not raw index HTML, and
     the CSS mounts the canvas at z0 (below the pet + controls).
 A biting NEUTER removes the dab-drawing loop and proves the "is painterly"
 assertion catches a flat-fill regression.
@@ -1067,21 +1067,20 @@ def test_NEUTER_no_springback_persistence_is_caught():
 def test_registered_in_bundler_after_pet():
     """Must be registered in the bundler (else it's a silent no-op) and load
     after the pet (which owns the data-decor attribute it mirrors). Both moved
-    from _BUNDLE_FILES to _DEFERRED_FILES 2026-08-01 (the ~160KB decorative
+    from _BUNDLE_FILES to _CLASSIC_ASSET_FILES 2026-08-01 (the ~160KB decorative
     family out of the render-blocking core), so the ordering is asserted
-    inside _DEFERRED_FILES."""
+    inside _CLASSIC_ASSET_FILES."""
     b = BUNDLER.read_text()
     assert "'tofu-scene.js'" in b, "tofu-scene.js missing from the bundler manifests"
-    from lib.js_bundler import _DEFERRED_FILES
-    assert "tofu-pet.js" in _DEFERRED_FILES and "tofu-scene.js" in _DEFERRED_FILES, \
+    from lib.js_bundler import _CLASSIC_ASSET_FILES
+    assert "tofu-pet.js" in _CLASSIC_ASSET_FILES and "tofu-scene.js" in _CLASSIC_ASSET_FILES, \
         "the decorative pet family must ride the deferred pack"
-    assert _DEFERRED_FILES.index("tofu-scene.js") > _DEFERRED_FILES.index("tofu-pet.js"), \
+    assert _CLASSIC_ASSET_FILES.index("tofu-scene.js") > _CLASSIC_ASSET_FILES.index("tofu-pet.js"), \
         "tofu-scene.js must load after tofu-pet.js"
 
 
-def test_registered_in_index_html_fallback():
-    assert "tofu-scene.js" in INDEX.read_text(), \
-        "tofu-scene.js missing from index.html dev-fallback <script> tags"
+def test_not_registered_as_raw_index_script():
+    assert "static/js/tofu-scene.js" not in INDEX.read_text()
 
 
 def test_css_mounts_canvas_below_pet_and_controls():
@@ -1361,7 +1360,6 @@ if __name__ == "__main__":
                test_disturbance_is_large_and_lingers_then_recovers,
                test_NEUTER_no_springback_persistence_is_caught,
                test_registered_in_bundler_after_pet,
-               test_registered_in_index_html_fallback,
                test_css_mounts_canvas_below_pet_and_controls,
                test_foreground_plane_paints_occluders_on_its_own_canvas,
                test_foreground_plane_is_dab_only_no_stroke,

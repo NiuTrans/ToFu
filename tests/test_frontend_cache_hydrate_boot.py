@@ -11,14 +11,21 @@ the sidebar then paints ZERO conversations from cache.
 """
 import re
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.unit
+
 REPO = Path(__file__).resolve().parent.parent
-CONV_JS = REPO / "static" / "js" / "core" / "conversations.js"
+sys.path.insert(0, str(REPO / "tests"))
+from _runtime_sections import runtime_section_path  # noqa: E402
+
 # hydrateSidebarFromCache lives in its own leaf as of pt_3879f00e slice 6.
 # Point the fn-body extract at the leaf so the harness stays green post-split.
-HYDRATE_JS = REPO / "static" / "js" / "core" / "conv_hydrate_cache.js"
+HYDRATE_JS = Path(runtime_section_path("core/conv_hydrate_cache.js"))
 
 
 def _extract_fn(src: str, name: str) -> str:
@@ -138,7 +145,7 @@ def test_neuter_hydrate_paints_nothing():
     assert r["ids"] == [], r
 
 
-MAIN_JS = REPO / "static" / "js" / "main.js"
+MAIN_JS = Path(runtime_section_path("main.js"))
 
 
 def _extract_plain_fn(src: str, name: str) -> str:
@@ -170,6 +177,7 @@ const document = {
   createElement(){ return { id:'', style:{cssText:''}, innerHTML:'', remove(){ delete _nodes[this.id]; } }; },
 };
 const window = {};
+const runtimeScope = window;
 function debugLog(){}
 function renderConversationList(){}
 
@@ -221,15 +229,15 @@ def _run_recon(ok_sequence, neuter_trigger=False, concurrent=False, neuter_idemp
     show = show.replace("document.body.prepend(banner);",
                         "_bannerEverShown = true; _bannerShowCount++; document.body.prepend(banner);", 1)
     if neuter_idempotency:
-        # NEUTER: remove the `if (window._bootReconnectStarted) { ... return; }`
+        # NEUTER: remove the runtime-scope idempotency early exit.
         # early exit so a 2nd concurrent call runs a 2nd loop (double banner).
         before = backoff
         backoff = re.sub(
-            r"if \(window\._bootReconnectStarted\) \{.*?return;.*?\}",
+            r"if \(runtimeScope\._bootReconnectStarted\) \{.*?return;.*?\}",
             "/* guard neutered */",
             backoff, count=1, flags=re.DOTALL,
         )
-        assert backoff != before and "if (window._bootReconnectStarted)" not in backoff, \
+        assert backoff != before and "if (runtimeScope._bootReconnectStarted)" not in backoff, \
             "neuter did not strip the guard early-return"
     if neuter_trigger:
         # NEUTER: the backoff never actually retries / shows the banner.
@@ -307,11 +315,13 @@ def test_all_symbols_land_in_served_bundle_together():
     except Exception as e:  # bundler import failure shouldn't hard-fail the file
         import pytest
         pytest.skip(f"js_bundler unavailable: {e}")
-    build_bundle()
-    hits = sorted(glob.glob(str(REPO / "static" / "js" / "bundle-*.js")))
-    assert hits, "no bundle-*.js produced by build_bundle()"
-    # Newest by mtime = the one just built / currently served.
-    bundle = max(hits, key=lambda p: Path(p).stat().st_mtime)
+    built_name = build_bundle()
+    assert built_name, "build_bundle() did not produce a core bundle"
+    # Read the artifact returned by THIS build. Another xdist worker/process
+    # may publish a different valid content hash immediately afterwards, so
+    # choosing the globally-newest mtime can inspect somebody else's fixture.
+    bundle = str(REPO / "static" / "js" / built_name)
+    assert Path(bundle).is_file(), f"built bundle disappeared: {built_name}"
     text = Path(bundle).read_text()
     required = [
         "getAllMeta",              # idb-cache.js — the list primitive

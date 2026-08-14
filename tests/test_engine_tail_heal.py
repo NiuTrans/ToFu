@@ -71,7 +71,9 @@ def test_heal_rides_the_single_source():
     with open(_HEAL_SRC, encoding='utf-8') as f:
         src = f.read()
     assert 'is_engine_user_msg' in src and 'build_engine_no_reply_tombstone' in src
-    assert '_brainDispatch' not in src.split('is_engine_user_msg')[0].split('import')[-1] or True
+    assert '_brainDispatch' not in src, (
+        'the heal re-implemented an engine-message flag instead of using '
+        'is_engine_user_msg')
     # The flag tuple must live ONLY in lib/chat/messages.py
     assert "_ENGINE_USER_FLAGS" not in src
 

@@ -59,7 +59,7 @@
 
 1. **变化频率从低到高排列**：静态内容靠前（cache prefix 更稳定），动态内容靠后（变化不会破坏前面的缓存）。
 2. **`as_separate_block=True`**：静态指导内容作为 system message 中的独立 content block 注入。Anthropic 的缓存系统以 content block 为粒度做 breakpoint，独立 block 意味着即使前面的 project context 变化了，静态指导仍可被缓存。
-3. **Memory 不再注入为 XML listing，改用工具发现 + prefetch**：早期的 `<available_memories>` 列表注入 user message。后来改为两条路径：显式 `search_memories` 工具（模型主动查） + 隐式 prefetch（round 0 时 BM25→廉价模型筛选→注入 `<relevant_memories>`）。system message 只注入计数提示。
+3. **Memory 不再注入为 XML listing，改用工具发现 + prefetch**：早期的 `<available_memories>` 列表注入 user message。现在有两条路径：显式 `search_memories` 工具（模型主动查） + round 0 的本地 metadata/high-confidence prefetch。system message 只保留使用指导，命中证据由 Context Composer 放入 tail。
 4. **日期格式的 A/B 测试**：我们做了 4 个 arm 的 A/B 测试：
    - Arm A: 完整日期时间注入 user message → 77.9% cache 命中率，$0.49
    - Arm C: 仅日期注入 system prompt → **85.7% cache 命中率，$0.36**（Winner）
@@ -77,15 +77,15 @@
 if round_num > 0:
     return  # ★ 保持 cache prefix 稳定
 
-# Two-stage cascade: BM25 top-N → cheap-LLM top-M
+# Local precision-first selection: metadata BM25 → deterministic confidence
 query_text = _extract_last_user_text(messages)
 relevant = prefetch_relevant_memories(
     project_path=pp,
     query_text=query_text,
-    recent_turns=_last_k_turns(messages, k=3),
-    task=task,  # for SSE event emission
+    task=task,
 )
-inject_relevant_memories_block(messages, relevant)
+# No message mutation here: stash evidence for Context Composer.
+task['_prefetchedMemories'] = relevant[:2]
 ```
 
 ### 1.2 压缩管线 (Compaction Pipeline)
@@ -226,17 +226,17 @@ When using Flask blueprints with SQLAlchemy models...
 
 1. **显式发现（on-demand）**：模型自己判断当前任务可能需要过往经验，调用 `search_memories(query)`。返回 BM25 top-K 的紧凑索引（name + description + path），再用 `read_files` 加载需要的 memory 全文。
 
-2. **隐式预取（proactive prefetch）**：用户新一轮消息到达时，`lib/memory/prefetch.py` 在后台跑一次级联
+2. **隐式预取（proactive prefetch）**：用户新一轮消息到达时，`lib/memory/prefetch/` 运行一次本地选择
 
    ```
-   BM25 coarse top-N  →  cheap-LLM 精选  →  注入 <relevant_memories> 块
+   metadata-only BM25 top-N  →  确定性高置信门槛  →  Context Composer
    ```
 
-   * 构造 query：取最近 K 轮 user+assistant 文本（剥离所有 tool call / tool result / thinking block），与 last user query 拼接。
-   * BM25 在 name+description+tags+body 上打分，取 top-N（默认 40）。
-   * 廉价模型看到候选摘要和最近对话，输出 JSON `[id, ...]`（最多 M 个，默认 5）。目的是 **precision 优先**——宁可返回 `[]` 也不要误召。
-   * 命中的 memory 全文注入最后一条 user message 的 `<relevant_memories>` 块，用 `<system-reminder>` 包裹。
-   * 前端会显示 `🧠 prefetched N memories via MODEL (1.4s)` 指示器，点击可展开查看具体注入了哪些 memory。
+   * query 只取当前用户请求，并补充 task todo 中的明确标识符；不会把历史 assistant/tool 文本喂回检索。
+   * BM25 只在 `name + description + tags` 元数据上打分，粗排最多 20 条。
+   * 候选必须命中明确标识符，或至少两个不同 query token；否则宁可返回 `[]`。
+   * 最多选择 2 条。全文由 Context Composer 作为 evidence block 统一排序、限额、包裹和去重，不直接改写最后一条 user message。
+   * 全程同步本地执行，`auxiliaryLlmCalls=0`；前端 provenance 可展开查看命中项和理由。
 
 **BM25 相关性过滤**（`relevance.py`）：纯 stdlib math 实现，无外部依赖。作为 `search_memories` 工具和 prefetch 级联的共同底层。
 
@@ -255,11 +255,11 @@ def search_memories(query, top_k=30):
 
 隐式 prefetch 是为了解决"模型不会主动想起来去搜"这个痛点——即使写得再好的 memory，如果模型不搜，也等于不存在。
 
-**成本控制：**
+**成本与噪声控制：**
 - 隐式 prefetch 只在 round 0（用户新一轮消息）触发，不在 tool round 重复。
-- 单次调用限时 6-8 秒，超时则 fallback 到 BM25 top-K。
-- BM25 零分时直接跳过 cheap-LLM 步骤。
-- 注入总字节数上限 8KB，最多 5 条 memory。
+- 不调用任何 LLM，也没有异步 timeout/fallback/late-write 路径。
+- 只检索 metadata，不允许 memory body 自己触发自己。
+- 注入总字节数上限 6KB、约 1500 tokens，最多 2 条 memory。
 
 ### 1.4 Session Memory — 跨压缩的持久状态
 
@@ -319,13 +319,13 @@ sort_tool_results(messages)
 latch_extended_ttl(task_id)
 ```
 
-### 1.6 上下文预加载（Memory Prefetch）
+### 1.6 上下文读取与组装
 
 每个 task 从前端收到**全新的 messages 列表**（不包含之前注入的 project/memory
 context），所以每个 task 都必须重新加载并注入 project/memory context。FUSE 慢
-I/O 的兜底**完全由预加载 future 承担**：在工具组装期间用 2 线程池并行预加载
-project context 和 memory context，`_inject_system_contexts` 在需要时消费已就绪的
-结果（未就绪则同步回退）。
+I/O 较重的 project rules 在工具组装期间由单 worker future 预加载；memory 的
+metadata-only 选择则在工具组装后同步完成。两者只产出结构化 block，最终统一由
+Context Composer 组装。
 
 > **历史注记**：曾有一个 `_get_cached_or_compute` / `_last_context_cache` 的
 > conv 级 hash 缓存，号称"hash 未变就跳过 FUSE I/O"。实际上它**先无条件调用
@@ -333,12 +333,11 @@ project context 和 memory context，`_inject_system_contexts` 在需要时消�
 > 已于 2026-06 删除（真正的 FUSE 兜底是下面的预加载 future）。
 
 ```python
-_prefetch_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='mem-prefetch')
+_prefetch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='project-context')
 _prefetch_project_future = _prefetch_executor.submit(_prefetch_project)
-_prefetch_memory_future = _prefetch_executor.submit(_prefetch_memory)
-# 存储到 task dict，_inject_system_contexts 消费
+# project future 与本地 memory 选择结果都存到 task，由 Composer provider 消费
 task['_prefetch_project'] = _prefetch_project_future
-task['_prefetch_memory'] = _prefetch_memory_future
+task['_prefetchedMemories'] = run_memory_prefetch(...)
 ```
 
 ---
@@ -479,7 +478,7 @@ register_post_hook(_empty_result_marker_hook)  # 空结果标记
                             ↓
                   ┌────────────────────────────┐
                   │  Section 2: Tool Assembly   │
-                  │  + Memory Prefetch          │
+                  │  + Local Memory Match       │
                   └─────────┬──────────────────┘
                             ↓
                   ┌────────────────────────────┐
@@ -488,7 +487,7 @@ register_post_hook(_empty_result_marker_hook)  # 空结果标记
                   └─────────┬──────────────────┘
                             ↓
              ┌──────────────────────────────────────┐
-             │ WHILE round_num <= max_tool_rounds:   │
+             │ WHILE task remains active:             │
              │                                       │
              │  1. Abort check                       │
              │  2. Emit phase event                  │
@@ -520,7 +519,7 @@ register_post_hook(_empty_result_marker_hook)  # 空结果标记
 
 **关键设计决策：**
 
-1. **WHILE 循环而非 FOR 循环**：上限可扩展。当 premature stream close 触发重试时，`_premature_retry_count` 增加，循环上限扩展。FOR 循环的 `range(max_tool_rounds + 1)` 无法做到这一点。
+1. **WHILE 循环而非固定次数 FOR 循环**：工具列表每轮保持不变；模型返回不含工具调用的 assistant 消息时自然结束。premature stream close 的重试有独立的异常重试保护，不参与工具轮数计算。
 
 2. **不注入任何 `[SYSTEM NOTE]` 干扰模型**：我们禁止在运行时向 messages 注入反循环警告或预算提示。模型应该自主决定何时停止。
 
@@ -710,7 +709,7 @@ class SubAgent:
             self._inject_artifact_tools()
     
     def run(self):
-        """同步执行。安全网：timeout、abort、max_rounds。"""
+        """同步执行。安全网：timeout、abort、无进展检测。"""
         self._run_loop(start_time)
         # 如果 run_loop 结束时仍然 "running" → 提取部分答案
 ```
@@ -765,7 +764,6 @@ def _check_suspicious_completion(task, last_finish_reason, ...):
     # 检测模式：
     # - 空内容 + 空 thinking + 无错误 → 可能安全过滤
     # - 工具调用后内容 < 50 chars → 可能提前停止
-    # - max_rounds_exhausted → 可能无限工具循环
     # - finish_reason 为 None → stream 异常
     # - 不到 1 秒完成 + 空内容 → API 错误
     
@@ -793,9 +791,8 @@ else:
 
 ```python
 # SSE 流提前关闭（网络抖动）→ 不是立即失败
-# 而是重试（上限 2 次），WHILE 循环的上限自动扩展
+# 而是按独立的流异常重试规则重试
 _premature_retry_count += 1
-# round_num + 1 <= max_tool_rounds + _premature_retry_count
 continue  # 重试这一轮
 ```
 
@@ -836,7 +833,7 @@ V1 swarm 用 "等所有 agent 完成再启动下一波"。一个慢 agent 拖住
 
 ### ❌ 反模式 5: 在运行时注入 `[SYSTEM NOTE]` 干扰模型
 
-早期尝试在模型接近工具轮次上限时注入 "WARNING: approaching tool limit" 消息。结果：模型行为变得不稳定，有时提前停止，有时忽略。正确做法：让模型自主决定，靠 hard cap 做安全网。
+早期曾在固定工具轮数即将耗尽时注入 "WARNING: approaching tool limit" 消息。结果：模型行为变得不稳定，有时提前停止，有时忽略。固定轮数与这类提示现已一并移除；正确做法是每轮保持工具可用，让模型自然结束，并用 abort、timeout、预算和无进展检测处理各自的真实故障。
 
 ### ✅ 模式 1: Memory 列表放 user message，指令放 system message
 
@@ -861,7 +858,7 @@ V1 swarm 用 "等所有 agent 完成再启动下一波"。一个慢 agent 拖住
 | **Micro-compact** | microCompact (edit outside cache prefix) | cache-aware micro_compact | ✅ 已对齐 |
 | **Session Memory** | SessionMemory/ + CacheSafeParams | background dispatch_chat | ✅ 已对齐（架构不同） |
 | **Memory System** | CLAUDE.md + @include | .tofu/memories/ + BM25 | ✅ 已对齐 |
-| **Memory Prefetch** | startRelevantMemoryPrefetch() | 2-thread prefetch pool | ✅ 已对齐 |
+| **Memory Prefetch** | startRelevantMemoryPrefetch() | metadata-only local matcher, max 2 | ✅ 意图对齐、实现更轻 |
 | **Prompt Cache Detection** | promptCacheBreakDetection.ts | cache_tracking.py | ✅ 已对齐 |
 | **Todo Tracking** | TodoWriteTool + continuation enforcer | ❌ 无 | 🔜 Backlog |
 | **Planner Write-Block** | disallowedTools on planners | ❌ 无（planner 有完整工具） | 🔜 Backlog |

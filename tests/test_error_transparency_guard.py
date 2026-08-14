@@ -5,7 +5,7 @@ WHY
 Project invariant (owner, 2026-07-26): backend errors are passed to the
 frontend truthfully, precisely, and well-presented. The mechanism is the
 typed error envelope (``lib/error_envelope/``) + the frontend normalizer
-(``static/js/core/error_envelope.js``). Everything else — the classifier,
+(``frontend/src/runtime/app-runtime.js``). Everything else — the classifier,
 the i18n parity, the mojibake repair — already has its own suite. This
 suite is the RATCHET that keeps the invariant true as the code evolves:
 
@@ -77,7 +77,6 @@ _GRANDFATHERED = {
     ('lib/file_history/api.py', 'str(e)'): 2,
     ('lib/pdf_parser/vlm/_tasks.py', 'str(exc)'): 1,
     ('lib/provider_probe.py', 'str(e)[:300]'): 1,
-    ('lib/memory/prefetch/_rerank.py', 'e'): 1,
     ('routes/paper.py', 'ex'): 1,
 }
 
@@ -94,7 +93,8 @@ def _py_files():
     out = subprocess.check_output(
         ['git', 'ls-files', 'lib/*.py', 'routes/*.py'],
         cwd=ROOT, text=True)
-    return [os.path.join(ROOT, p) for p in out.split()]
+    return [os.path.join(ROOT, p) for p in out.split()
+            if os.path.isfile(os.path.join(ROOT, p))]
 
 
 def _iter_error_assignments():
@@ -175,19 +175,25 @@ class TestWorkerLostFirstClass(unittest.TestCase):
         self.assertIn('worker_lost', _TITLES)
 
     def test_frontend_chip_label_present(self):
-        with open(os.path.join(ROOT, 'static', 'js', 'core',
-                               'error_envelope.js'), encoding='utf-8') as f:
+        with open(os.path.join(ROOT, 'frontend', 'src', 'runtime',
+                               'app-runtime.js'), encoding='utf-8') as f:
             src = f.read()
         self.assertIn("worker_lost:", src,
                       'ERROR_KIND_LABELS missing worker_lost — the chip '
                       'would render the raw kind string')
 
     def test_i18n_keys_present(self):
-        with open(os.path.join(ROOT, 'static', 'js', 'i18n.js'),
-                  encoding='utf-8') as f:
-            src = f.read()
+        import json
+        locale_dir = os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales')
+        catalogs = []
+        for lang in ('zh', 'en'):
+            with open(os.path.join(locale_dir, f'{lang}.json'),
+                      encoding='utf-8') as f:
+                catalogs.append(json.load(f))
         for suffix in ('chip', 'title', 'hint'):
-            self.assertIn(f"'err.k.worker_lost.{suffix}'", src)
+            key = f'err.k.worker_lost.{suffix}'
+            for catalog in catalogs:
+                self.assertIn(key, catalog)
 
 
 class TestRuntimeEnvelopeCompletion(unittest.TestCase):
@@ -237,6 +243,40 @@ class TestRuntimeEnvelopeCompletion(unittest.TestCase):
         original = make_envelope('timeout', detail='slow')
         rt.finish(task['id'], error=original)
         self.assertIs(rt.get(task['id'])['error'], original)
+
+    def test_package_normalizer_closes_kinds_and_preserves_extensions(self):
+        from lib.error_envelope import is_envelope, normalize_envelope
+
+        env = normalize_envelope({
+            'kind': 'orchestration_outcome',
+            'message': 'Flow stopped',
+            'detail': 'max_iterations',
+            'outcome': {'format': 'tofu.orchestration.outcome/v1'},
+        }, context='test', source='unit')
+
+        self.assertTrue(is_envelope(env))
+        self.assertEqual(env['kind'], 'generic')
+        self.assertEqual(env['detail'], 'max_iterations')
+        self.assertEqual(
+            env['outcome'], {'format': 'tofu.orchestration.outcome/v1'})
+
+    def test_package_normalizer_can_require_complete_durable_diagnostics(self):
+        from lib.error_envelope import normalize_envelope
+
+        legacy = {'kind': 'worker_lost', 'message': 'worker stopped'}
+        env = normalize_envelope(
+            legacy,
+            context='durable recovery',
+            source='orchestration:test',
+            require_complete=True,
+        )
+
+        self.assertIsNot(env, legacy)
+        self.assertEqual(env['kind'], 'worker_lost')
+        self.assertEqual(env['context'], 'durable recovery')
+        self.assertEqual(env['source'], 'orchestration:test')
+        self.assertIsInstance(env['retryable'], bool)
+        self.assertIn(env['severity'], {'warning', 'error'})
 
     def test_reap_produces_complete_envelope(self):
         """The stall-reap path (podcast/video polling UIs consume

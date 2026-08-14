@@ -90,8 +90,10 @@ def test_discard_removes_leak_and_emits_reset():
     assert task['content'] == FINAL_ANSWER, (
         f'final content should be exactly the terminal answer: {task["content"]!r}')
     # Frontend contract: a delta_reset event must have fired.
-    types = [e.get('type') for e in task['events']]
-    assert 'delta_reset' in types, f'no delta_reset event emitted; got {types}'
+    resets = [e for e in task['events'] if e.get('type') == 'delta_reset']
+    assert resets, f'no delta_reset event emitted; got {task["events"]}'
+    assert task.get('_contentEpoch') == 1, task
+    assert resets[-1].get('contentEpoch') == 1, resets[-1]
     _ok('with fix: narration discarded, final answer clean, delta_reset emitted')
 
 

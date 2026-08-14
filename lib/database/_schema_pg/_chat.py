@@ -15,6 +15,185 @@ from lib.database._schema_pg._selfheal import (
 logger = get_logger(__name__)
 
 
+_CONVERSATIONS_REV_TRIGGER_FUNCTION_SQL = '''
+    CREATE OR REPLACE FUNCTION conversations_rev_bump() RETURNS trigger AS $$
+    BEGIN
+        IF (NEW.messages IS DISTINCT FROM OLD.messages) THEN
+            NEW.rev := COALESCE(OLD.rev, 0) + 1;
+            NEW.msg_count := CASE
+                WHEN jsonb_typeof(NEW.messages) = 'array'
+                THEN jsonb_array_length(NEW.messages)
+                ELSE 0
+            END;
+        END IF;
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+'''
+
+
+_LZ4_COMPRESSION_STATEMENTS = (
+    # Metadata-only policy: PostgreSQL uses it for newly written/re-written
+    # oversized values; existing TOAST rows are never rewritten at startup.
+    # LZ4 is attempted separately from the correctness/runtime-tuning
+    # transaction because a PostgreSQL build compiled without LZ4 support must
+    # remain fully usable (it simply keeps its current pglz policy).
+    'ALTER TABLE conversations '
+    'ALTER COLUMN messages SET COMPRESSION lz4, '
+    'ALTER COLUMN search_text SET COMPRESSION lz4',
+    'ALTER TABLE conversation_message_archives '
+    'ALTER COLUMN messages SET COMPRESSION lz4',
+    'ALTER TABLE conversation_messages '
+    'ALTER COLUMN content SET COMPRESSION lz4, '
+    'ALTER COLUMN content_json SET COMPRESSION lz4, '
+    'ALTER COLUMN thinking SET COMPRESSION lz4, '
+    'ALTER COLUMN translated_content SET COMPRESSION lz4, '
+    'ALTER COLUMN meta SET COMPRESSION lz4, '
+    'ALTER COLUMN translation_state SET COMPRESSION lz4, '
+    'ALTER COLUMN meta_light SET COMPRESSION lz4',
+    'ALTER TABLE task_events '
+    'ALTER COLUMN payload SET COMPRESSION lz4',
+    'ALTER TABLE task_results '
+    'ALTER COLUMN content SET COMPRESSION lz4, '
+    'ALTER COLUMN thinking SET COMPRESSION lz4, '
+    'ALTER COLUMN error SET COMPRESSION lz4, '
+    'ALTER COLUMN tool_rounds SET COMPRESSION lz4, '
+    'ALTER COLUMN search_results SET COMPRESSION lz4, '
+    'ALTER COLUMN metadata SET COMPRESSION lz4, '
+    'ALTER COLUMN segments SET COMPRESSION lz4',
+    'ALTER TABLE transcript_archive '
+    'ALTER COLUMN messages_json SET COMPRESSION lz4, '
+    'ALTER COLUMN summary SET COMPRESSION lz4',
+)
+
+
+def _apply_lz4_compression_policy(conn) -> bool:
+    """Prefer fast TOAST compression for future large values, fail-soft.
+
+    ``SET COMPRESSION`` changes only column metadata.  It neither rewrites nor
+    locks through gigabytes of existing transcript history.  PostgreSQL 14+
+    understands the syntax, but an installation built without LZ4 rejects the
+    method; that capability miss is an optimization skip, never a startup
+    failure and never a reason to roll back the independent autovacuum/index
+    tuning transaction.
+    """
+    cur = None
+    try:
+        cur = conn._conn.cursor()
+        for statement in _LZ4_COMPRESSION_STATEMENTS:
+            cur.execute(statement)
+        conn.commit()
+        return True
+    except Exception as exc:
+        logger.debug('[DB] LZ4 TOAST policy unavailable; keeping PostgreSQL '
+                     'default compression: %s', exc)
+        try:
+            conn.rollback()
+        except Exception as rollback_error:
+            logger.debug('[DB] LZ4 policy rollback failed: %s', rollback_error)
+        return False
+    finally:
+        if cur is not None:
+            try:
+                cur.close()
+            except Exception as close_error:
+                logger.debug('[DB] LZ4 policy cursor close failed: %s',
+                             close_error)
+
+
+def _apply_chat_runtime_tuning(conn):
+    """Converge mutable PG storage settings on every boot, best-effort.
+
+    These settings are not schema-versioned data migrations: changing an
+    autovacuum threshold or disabling statistics on a large payload column
+    must also reach installations whose schema version is already current.
+    Keeping this pass separate lets the normal fast path remain fast while
+    avoiding the bug where newly-added tuning lived forever behind a skipped
+    full-DDL branch.
+    """
+    statements = (
+        # This function is a data invariant, not a versioned migration.  CREATE
+        # OR REPLACE updates the already-wired trigger on current-schema installs
+        # without dropping it or forcing the expensive full DDL path.
+        _CONVERSATIONS_REV_TRIGGER_FUNCTION_SQL,
+        "ALTER TABLE conversations SET ("
+        "autovacuum_vacuum_scale_factor=0.02, "
+        "autovacuum_analyze_scale_factor=0.01, "
+        "autovacuum_vacuum_threshold=100, "
+        "autovacuum_analyze_threshold=100, "
+        "autovacuum_vacuum_cost_limit=1000, "
+        "autovacuum_vacuum_cost_delay=10)",
+        'ALTER TABLE conversations ALTER COLUMN messages SET STATISTICS 0',
+        "ALTER TABLE task_results SET ("
+        "autovacuum_vacuum_scale_factor=0.02, "
+        "autovacuum_analyze_scale_factor=0.01, "
+        "autovacuum_vacuum_threshold=200, "
+        "autovacuum_analyze_threshold=200, "
+        "autovacuum_vacuum_cost_limit=1000, "
+        "autovacuum_vacuum_cost_delay=10)",
+        'ALTER TABLE task_results ALTER COLUMN content SET STATISTICS 0',
+        'ALTER TABLE task_results ALTER COLUMN thinking SET STATISTICS 0',
+        # Cover retention discovery without touching wide/TOASTed task-result
+        # rows. PostgreSQL keeps its measured event-time-first stream plan;
+        # this index also serves the bounded terminal-result reaper.
+        "CREATE INDEX IF NOT EXISTS idx_task_terminal_retention "
+        "ON task_results(completed_at, task_id) INCLUDE (conv_id) "
+        "WHERE completed_at IS NOT NULL AND status IN ("
+        "'done','error','aborted','interrupted')",
+        "ALTER TABLE task_events SET ("
+        "autovacuum_vacuum_scale_factor=0.01, "
+        "autovacuum_analyze_scale_factor=0.005, "
+        "autovacuum_vacuum_threshold=5000, "
+        "autovacuum_analyze_threshold=5000, "
+        "autovacuum_vacuum_cost_limit=1000, "
+        "autovacuum_vacuum_cost_delay=10)",
+        'ALTER TABLE task_events ALTER COLUMN payload SET STATISTICS 0',
+        # The 15-second streaming-event reaper must be able to prove the
+        # steady-state empty tier without walking the much larger 30-day
+        # structural-event population.  INCLUDE keeps the ordered selector
+        # covering while the predicate bounds index residency to the 6h tier.
+        "CREATE INDEX IF NOT EXISTS idx_task_events_stream_ts "
+        "ON task_events(ts_ms) INCLUDE (task_id, event_id) "
+        "WHERE type NOT IN ("
+        "'messages_snapshot','round_usage','round_start','round_end')",
+        "ALTER TABLE conversation_messages SET ("
+        "autovacuum_vacuum_scale_factor=0.02, "
+        "autovacuum_analyze_scale_factor=0.01, "
+        "autovacuum_vacuum_threshold=200, "
+        "autovacuum_analyze_threshold=200, "
+        "autovacuum_vacuum_cost_limit=1000, "
+        "autovacuum_vacuum_cost_delay=10)",
+        # The primary key already supplies this exact (conv_id, seq) btree.
+        # Current-schema installs take this fast path, so the historical
+        # duplicate must be removed here as well as in the full DDL path.
+        'DROP INDEX IF EXISTS idx_conv_msgs_conv',
+    )
+    cur = None
+    try:
+        cur = conn._conn.cursor()
+        for statement in statements:
+            cur.execute(statement)
+        conn.commit()
+        # Independent best-effort transaction: unsupported LZ4 must not undo
+        # the trigger/autovacuum/index policies above.
+        _apply_lz4_compression_policy(conn)
+        return True
+    except Exception as exc:
+        logger.warning('[DB] Runtime PG table tuning deferred: %s', exc)
+        try:
+            conn.rollback()
+        except Exception as rollback_error:
+            logger.debug('[DB] Runtime tuning rollback failed: %s', rollback_error)
+        return False
+    finally:
+        if cur is not None:
+            try:
+                cur.close()
+            except Exception as close_error:
+                logger.debug('[DB] Runtime tuning cursor close failed: %s',
+                             close_error)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  Chat Schema
 # ═══════════════════════════════════════════════════════════════════════
@@ -41,6 +220,22 @@ def _init_chat_schema(conn):
     create_if_absent(conn, CONVERSATIONS, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_conv_user ON conversations(user_id, updated_at DESC)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_conv_meta ON conversations(user_id, updated_at DESC, id, title, msg_count, created_at)')
+    cur.execute(
+        'SELECT id FROM conversations GROUP BY id HAVING COUNT(*)>1 LIMIT 1')
+    if cur.fetchone() is not None:
+        raise RuntimeError(
+            'conversation id is not globally unique; normalized message rows '
+            'cannot safely identify their owner')
+    cur.execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS uq_conversations_global_id '
+        'ON conversations(id)')
+    cur.execute(
+        'CREATE INDEX IF NOT EXISTS idx_conv_rows_authority '
+        'ON conversations(id) '
+        'INCLUDE (user_id, rev, messages_rows_rev, msg_count)')
+    from lib.database._core_schema import CONVERSATION_MESSAGE_ARCHIVES
+    create_if_absent(
+        conn, CONVERSATION_MESSAGE_ARCHIVES, table_exists=_table_exists)
     # Partial expression index for stale-task startup recovery: the recovery
     # scan probes `settings->>'activeTaskId' IS NOT NULL` (see
     # lib/tasks_pkg/manager.py::recover_stale_tasks_on_startup). Only the handful
@@ -61,6 +256,11 @@ def _init_chat_schema(conn):
         TASK_RESULTS, TASK_EVENTS, create_if_absent,
     )
     create_if_absent(conn, TASK_RESULTS, table_exists=_table_exists)
+    # These tables are append/update heavy but contain large TOAST payloads.
+    # Default autovacuum waits for 20% dead rows — millions of events or
+    # hundreds of multi-megabyte result/conversation versions. Per-table low
+    # thresholds keep index-only scans visible and reclaim dead tuples early;
+    # the cost delay prevents a backlog cleanup from monopolising FUSE I/O.
     cur.execute('CREATE INDEX IF NOT EXISTS idx_task_conv ON task_results(conv_id)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_task_created ON task_results(created_at)')
     # Partial index for the startup stale-task sweep (recover_stale_tasks_on_startup
@@ -69,6 +269,21 @@ def _init_chat_schema(conn):
     # sweep at ~0.04ms instead of a full seq scan that grows with table size.
     cur.execute("CREATE INDEX IF NOT EXISTS idx_task_status ON task_results(status) "
                 "WHERE status IN ('running', 'interrupted')")
+    # Exact range/order index shared with SQLite's orphan-running watchdog.
+    # The older status-only index filters rows but still sorts completed_at.
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_task_running_completed "
+                "ON task_results(completed_at) "
+                "WHERE status='running' AND completed_at IS NOT NULL")
+    # Bounded terminal-result retention scans oldest completed rows.  Keep the
+    # index partial so live/running rows and the large TOAST payload columns do
+    # not inflate it; the maintenance query never needs those payloads.
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_task_terminal_completed "
+                "ON task_results(completed_at) WHERE completed_at IS NOT NULL "
+                "AND status IN ('done', 'error', 'aborted', 'interrupted')")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_task_terminal_retention "
+                "ON task_results(completed_at, task_id) INCLUDE (conv_id) "
+                "WHERE completed_at IS NOT NULL AND status IN "
+                "('done', 'error', 'aborted', 'interrupted')")
 
     # ── task_events: persisted SSE event log (durable Last-Event-ID resumption) ──
     # Replaces in-memory task['events'] for cross-restart and post-cleanup
@@ -83,6 +298,10 @@ def _init_chat_schema(conn):
     # seq scan that DETOASTS every snapshot payload — measured 5.9s on a ~900MB
     # table, which would show up as a multi-second stall when opening the drawer.
     cur.execute('CREATE INDEX IF NOT EXISTS idx_task_events_task_type ON task_events(task_id, type)')
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_task_events_stream_ts "
+                "ON task_events(ts_ms) INCLUDE (task_id, event_id) "
+                "WHERE type NOT IN ("
+                "'messages_snapshot','round_usage','round_start','round_end')")
 
     # ── conversation_messages: Phase 5 messages-as-rows (migrator-first) ──
     # Empty on existing installs until the TOFU_MESSAGES_ROWS-gated backfill /
@@ -90,11 +309,58 @@ def _init_chat_schema(conn):
     # on it until reads are flipped (a separate, verification-gated step).
     from lib.database._core_schema import CONVERSATION_MESSAGES
     create_if_absent(conn, CONVERSATION_MESSAGES, table_exists=_table_exists)
-    cur.execute('CREATE INDEX IF NOT EXISTS idx_conv_msgs_conv ON conversation_messages(conv_id, seq)')
+    if not _column_exists(conn, 'conversation_messages', 'meta_light'):
+        # Nullable by design: do not rewrite/detoast the whole table during
+        # startup. The online backfill fills it in bounded per-conversation
+        # transactions; the read gate rejects any mirror containing NULL.
+        cur.execute('ALTER TABLE conversation_messages ADD COLUMN meta_light JSONB')
+        logger.info('[DB] Migration: added nullable meta_light to conversation_messages')
+    if not _column_exists(conn, 'conversation_messages', 'translation_state'):
+        cur.execute('ALTER TABLE conversation_messages ADD COLUMN translation_state JSONB')
+        logger.info('[DB] Migration: added nullable translation_state to conversation_messages')
+    if not _column_exists(conn, 'conversation_messages', 'message_ts'):
+        # Nullable/no default keeps this a metadata-only upgrade; projection
+        # backfill is resumable and the reader falls back to meta_light.
+        cur.execute('ALTER TABLE conversation_messages ADD COLUMN message_ts BIGINT')
+        logger.info('[DB] Migration: added nullable message_ts to conversation_messages')
+    if not _column_exists(conn, 'conversation_messages', 'billing_meta'):
+        # Nullable/no default is a metadata-only upgrade. The delayed
+        # projection worker fills it without extending synchronous startup.
+        cur.execute('ALTER TABLE conversation_messages ADD COLUMN billing_meta JSONB')
+        logger.info('[DB] Migration: added nullable billing_meta to conversation_messages')
+    cur.execute(
+        'CREATE INDEX IF NOT EXISTS idx_conv_msgs_incomplete_projection '
+        'ON conversation_messages(conv_id) WHERE meta_light IS NULL '
+        'OR message_ts IS NULL OR billing_meta IS NULL')
+    _apply_chat_runtime_tuning(conn)
+    # The composite PRIMARY KEY already owns an identical btree on
+    # (conv_id, seq).  Keeping a second copy doubles index writes/WAL and cache
+    # residency without enabling any additional plan.  Remove the historical
+    # duplicate during the normal idempotent startup migration; fresh installs
+    # never create it.
+    cur.execute('DROP INDEX IF EXISTS idx_conv_msgs_conv')
     # Partial UNIQUE: _msgId is the per-conv addressing key WHEN PRESENT, but
     # legacy/un-backfilled messages carry msg_id='' and several may coexist in
     # one conversation, so empty ids are excluded from the uniqueness guarantee.
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_msgs_msgid ON conversation_messages(conv_id, msg_id) WHERE msg_id <> ''")
+
+    # ── Turn / attempt v2 authority ───────────────────────────────────
+    from lib.database._core_schema import (
+        CONVERSATION_TURNS, GENERATION_ATTEMPTS, ATTEMPT_EVENTS,
+    )
+    create_if_absent(conn, CONVERSATION_TURNS, table_exists=_table_exists)
+    create_if_absent(conn, GENERATION_ATTEMPTS, table_exists=_table_exists)
+    create_if_absent(conn, ATTEMPT_EVENTS, table_exists=_table_exists)
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_turns_conversation_order '
+                'ON conversation_turns(conversation_id, lane_id, ordinal)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_turns_current_attempt '
+                'ON conversation_turns(current_attempt_id)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_attempts_turn_created '
+                'ON generation_attempts(turn_id, created_at DESC)')
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_attempts_task_id "
+                "ON generation_attempts(task_id) WHERE task_id <> ''")
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_attempt_events_created '
+                'ON attempt_events(created_at)')
 
     # ── chat_artifacts: renderable reports promoted out of chat (md/html/svg) ──
     # First-class storage for "report-shaped" outputs so they survive
@@ -140,6 +406,8 @@ def _init_chat_schema(conn):
     for col, sql in {
         'search_results': "ALTER TABLE task_results ADD COLUMN IF NOT EXISTS search_results TEXT",
         'metadata':       "ALTER TABLE task_results ADD COLUMN IF NOT EXISTS metadata TEXT",
+        'abort_requested_at': "ALTER TABLE task_results ADD COLUMN IF NOT EXISTS abort_requested_at BIGINT NOT NULL DEFAULT 0",
+        'abort_source': "ALTER TABLE task_results ADD COLUMN IF NOT EXISTS abort_source TEXT NOT NULL DEFAULT ''",
         # segments (v36): the typed-segment timeline (epic pt_cb8f98b0cb9b47fb).
         # Nullable TEXT/JSON string — mirrors SQLite; pre-existing rows stay
         # NULL and readers fall back to deriving from the legacy channels.
@@ -161,22 +429,27 @@ def _init_chat_schema(conn):
     # The messages JSONB column stores assistant messages with a 'searchRounds' key.
     # Rename all occurrences to 'toolRounds' in a single SQL update.
     # This is idempotent — only updates messages that still have 'searchRounds'.
-    try:
-        cur.execute("""
-            UPDATE conversations
-            SET messages = REPLACE(messages::text, '"searchRounds":', '"toolRounds":')::jsonb
-            WHERE messages::text LIKE '%"searchRounds":%'
-        """)
-        _migrated_count = cur.rowcount
-        if _migrated_count > 0:
-            logger.info('[DB] Migration: renamed searchRounds → toolRounds in %d conversation(s)', _migrated_count)
-        conn.commit()
-    except Exception as _sr_err:
-        logger.warning('[DB] Migration: searchRounds→toolRounds in conversations failed (non-fatal): %s', _sr_err)
+    from lib.database._access_policy import rows_authority_configured
+    if not rows_authority_configured():
         try:
-            conn._conn.rollback()
-        except Exception as _re:
-            logger.debug('[DB] rollback after searchRounds migration failure: %s', _re)
+            cur.execute("""
+                UPDATE conversations
+                SET messages = REPLACE(messages::text, '"searchRounds":', '"toolRounds":')::jsonb
+                WHERE messages::text LIKE '%"searchRounds":%'
+            """)
+            _migrated_count = cur.rowcount
+            if _migrated_count > 0:
+                logger.info('[DB] Migration: renamed searchRounds → toolRounds in %d conversation(s)', _migrated_count)
+            conn.commit()
+        except Exception as _sr_err:
+            logger.warning('[DB] Migration: searchRounds→toolRounds in conversations failed (non-fatal): %s', _sr_err)
+            try:
+                conn._conn.rollback()
+            except Exception as _re:
+                logger.debug('[DB] rollback after searchRounds migration failure: %s', _re)
+    else:
+        logger.debug('[DB] Skipping legacy messages payload migration: '
+                     'normalized rows are authoritative')
 
     for col, sql in {
         'settings':  "ALTER TABLE conversations ADD COLUMN settings JSONB NOT NULL DEFAULT '{}'::jsonb",
@@ -184,6 +457,8 @@ def _init_chat_schema(conn):
         'search_text': "ALTER TABLE conversations ADD COLUMN search_text TEXT NOT NULL DEFAULT ''",
         # rev (v37): server-issued monotonic message-version, trigger-bumped.
         'rev': "ALTER TABLE conversations ADD COLUMN rev INTEGER NOT NULL DEFAULT 0",
+        # v46: proven row-mirror revision; -1 is fail-closed/unverified.
+        'messages_rows_rev': "ALTER TABLE conversations ADD COLUMN messages_rows_rev INTEGER NOT NULL DEFAULT -1",
     }.items():
         if not _column_exists(conn, 'conversations', col):
             cur.execute(sql)
@@ -243,16 +518,7 @@ def _init_chat_schema(conn):
     # cause a false CAS 409. `OF messages` scopes the trigger so it doesn't even
     # fire on non-messages updates. INSERT is intentionally NOT covered: a fresh
     # row starts at rev=0 (the column default), matching every pre-CAS client.
-    cur.execute('''
-        CREATE OR REPLACE FUNCTION conversations_rev_bump() RETURNS trigger AS $$
-        BEGIN
-            IF (NEW.messages IS DISTINCT FROM OLD.messages) THEN
-                NEW.rev := COALESCE(OLD.rev, 0) + 1;
-            END IF;
-            RETURN NEW;
-        END;
-        $$ LANGUAGE plpgsql;
-    ''')
+    cur.execute(_CONVERSATIONS_REV_TRIGGER_FUNCTION_SQL)
     cur.execute('DROP TRIGGER IF EXISTS conversations_rev_bump_trg ON conversations')
     cur.execute('''
         CREATE TRIGGER conversations_rev_bump_trg
@@ -276,9 +542,10 @@ def _init_chat_schema(conn):
 
     # ── Message queue: migrated onto Core. ──
     from lib.database._core_schema import (
-        MESSAGE_QUEUE, create_if_absent,
+        MESSAGE_QUEUE, SCOPED_SEQUENCES, create_if_absent,
     )
     create_if_absent(conn, MESSAGE_QUEUE, table_exists=_table_exists)
+    create_if_absent(conn, SCOPED_SEQUENCES, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_mq_conv ON message_queue(conv_id, position)')
     # ── Migration (v26): unified priority turn-source queue columns ──
     for col, sql in {
@@ -294,6 +561,12 @@ def _init_chat_schema(conn):
         except Exception as e:
             logger.debug('[DB] PG migration message_queue.%s skipped: %s', col, e)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_mq_conv_prio ON message_queue(conv_id, priority, position)')
+    cur.execute(
+        "INSERT INTO scoped_sequences(namespace, scope_key, value) "
+        "SELECT 'message_queue_position', conv_id, MAX(position) "
+        "FROM message_queue GROUP BY conv_id "
+        "ON CONFLICT(namespace, scope_key) DO UPDATE SET value="
+        "GREATEST(scoped_sequences.value, EXCLUDED.value)")
 
     # paper_reports: migrated onto Core (lib/database/_core_schema.py).
     # Parity-verified byte-equivalent; guarded create is a no-op on existing

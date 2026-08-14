@@ -42,7 +42,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[test]"
-      - name: Run unit tests (parallel)
+      - name: Run unit tests
         # `-n auto` on a 4-vCPU runner = 4 workers, and each worker spawns
         # node/jsdom subprocesses + ML-lib thread pools on top — measured
         # 2026-08-05 (f0a930e): the oversubscription starved timing- and
@@ -50,13 +50,9 @@ jobs:
         # that never reproduce on a fast box. `-n 2` halves the pressure;
         # `--dist loadscope` keeps each module's tests on one worker so
         # per-file fixtures can't interleave across workers.
-        run: pytest -m "unit and not ci_serial" -n 2 --dist loadscope --timeout=300 -ra -q
-      - name: Run timing-sensitive unit tests (serial)
-        # Suites marked ci_serial assert locking / CAS / heartbeat-window
-        # behaviour — even modest CPU contention flips them (they pass
-        # reliably on any non-starved box). They run SERIALLY here, with a
-        # longer timeout, after the parallel bulk.
-        run: pytest -m "unit and ci_serial" --timeout=600 -ra -q
+        # Make owns the exclusion of retired classic-js harnesses and the
+        # serial split for timing-sensitive backend contracts.
+        run: make test-unit JOBS=2
 
   # ── API integration tier (needs a DB; smaller, ~140 tests) ──
   # These boot the real app + hit routes. Run parallel too, but on a single
@@ -94,16 +90,13 @@ jobs:
       - name: Run slow tests
         run: pytest -m slow -n 4 --dist worksteal --timeout=600 -ra -q
 
-  # ── Frontend tests (jsdom harnesses + tsc --checkJs ratchet) ──
-  # The Python `test` job above has no Node, so every tests/test_frontend_*.py
-  # silently pytest.skip()s there. This job installs Node + the JS dev-deps so
-  # the jsdom harnesses and the type-check ratchet actually execute. `-ra`
-  # surfaces any residual skips so a missing dep can't hide a whole suite again.
+  # ── Frontend tests (the shipped Vite/ESM graph) ──
+  # This job builds once, then checks ESM owners, the recursively validated
+  # manifest, locale chunks, immutable serving and no-Node release contracts.
   frontend:
     runs-on: ubuntu-latest
-    # P0-1 (docs/TESTING_STRATEGY.md §4): this lane PROMISES to run the
-    # frontend suites — a missing node/jsdom must turn the lane red, never
-    # silently skip 467 suites to green.
+    # This lane promises to execute the ESM owner harnesses; missing Node or
+    # jsdom is a hard failure rather than a silently skipped frontend graph.
     env:
       TOFU_REQUIRE_FRONTEND: "1"
     steps:
@@ -114,46 +107,61 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Install JS dev-deps
-        run: npm ci || npm install
+      - name: Install JS dev-deps from lockfile
+        run: npm ci
+      - name: Type-check and build TypeScript modules
+        run: npm run check:frontend
+      - name: Enforce compressed frontend budgets
+        run: python3 scripts/frontend_budget.py
+      - name: Publish the verified frontend graph for browser lanes
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-frontend-dist
+          path: static/vite
+          if-no-files-found: error
       - name: Install package + test extra
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[test]"
       - name: Run frontend tests (parallel)
-        # Each jsdom test shells out to a `node` subprocess, so it's dominated
-        # by process-spawn latency and fans out cleanly across workers.
-        # ``--dist loadfile`` (NOT worksteal) is REQUIRED: several NC tests write
-        # a FIXED-NAME temp copy of a shipped source file into tests/ (e.g.
-        # _brain_tool_render_nc_copy.js), so two tests from the SAME file must
-        # not run on different workers concurrently — worksteal distributes by
-        # test and made them clobber each other's copy (ENOENT / stale content).
-        # loadfile keeps every file's tests on one worker while still fanning
-        # files across workers.
-        run: pytest tests/test_frontend_*.py -n auto --dist loadfile --timeout=180 -ra
+        run: make test-frontend JOBS=auto
 
-  # ── End-to-end smoke (real Quart/Hypercorn app + real headless Chromium) ──
+  # ── End-to-end smoke (real app + Chromium, Firefox and WebKit) ──
   # Boots the actual app on an ephemeral port with a STUB LLM (no API key /
-  # no network) and drives a real browser to it — asserting the served bundle
+  # no network) and drives a real browser to it — asserting the served Vite graph
   # loaded, streaming rendered, and a tool round rendered. This is the only
-  # lane that catches INTEGRATION-class bugs (bundler allowlist, SSE→render)
-  # that jsdom unit harnesses structurally cannot. CI runners are root, so
-  # `playwright install --with-deps chromium` installs the GUI libs cleanly;
+  # lane that catches INTEGRATION-class bugs (manifest loading, SSE→render)
+  # that source-level contract tests structurally cannot. CI runners are root, so
+  # `playwright install --with-deps <engine>` installs the GUI libs cleanly;
   # the conftest LD_LIBRARY_PATH bootstrap is a no-op there (libs already on
   # the system) and the rootless-conda fallback for shared dev nodes.
   e2e:
     runs-on: ubuntu-latest
+    needs: frontend
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    env:
+      TOFU_E2E_BROWSER: ${{ matrix.browser }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Consume the frontend graph built by the frontend lane
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-frontend-dist
+          path: static/vite
+      - name: Verify the downloaded graph without Node
+        run: python3 scripts/verify_frontend_dist.py
       - name: Install package + test extra
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[test]"
           pip install playwright
-      - name: Install Chromium + system deps
-        run: python -m playwright install --with-deps chromium
-      - name: Run E2E smoke + critical journeys
+      - name: Install ${{ matrix.browser }} + system deps
+        run: python -m playwright install --with-deps ${{ matrix.browser }}
+      - name: Run E2E smoke + critical journeys (${{ matrix.browser }})
         run: pytest tests/test_e2e_smoke.py tests/test_e2e_journeys.py -m visual -ra

@@ -12,7 +12,7 @@ Cross-platform: works on Linux, macOS, and Windows.
 
 Sub-modules
 -----------
-  _config       — managed postgresql.conf tuning block (+ restart-to-apply)
+  _config       — managed postgresql.conf tuning block (restart staged only)
   _verify       — identity / health / binary-presence probes
   _process      — port read, quiet stop, port scan, shutdown _stop_pg
   _database     — createdb + SQL-dump restore

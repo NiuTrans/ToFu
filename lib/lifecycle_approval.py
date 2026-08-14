@@ -63,12 +63,18 @@ Deliberate boundaries
 from __future__ import annotations
 
 import json
+import math
 import os
 import secrets
 import sys
 import time
 
-from lib.json_store import read_json, update_json_atomic, write_json_atomic
+from lib.json_store import (
+    JsonStoreReadError,
+    read_json,
+    update_json_atomic,
+    write_json_atomic as write_json_atomic,  # historical test/debug seam
+)
 from lib.log import audit_log, get_logger
 from lib.runtime_paths import data_root
 
@@ -122,15 +128,49 @@ def _prune(records: list) -> list:
                   reverse=True)[:_KEEP_RECORDS]
 
 
+def _document(data) -> dict:
+    """Validate one store snapshot while preserving future root fields."""
+    if data is None:
+        return {'records': []}
+    if not isinstance(data, dict) or not isinstance(data.get('records'), list):
+        raise JsonStoreReadError('lifecycle approval store has invalid shape')
+    if any(not isinstance(record, dict) for record in data['records']):
+        raise JsonStoreReadError(
+            'lifecycle approval store contains an invalid record')
+    document = dict(data)
+    document['records'] = data['records']
+    return document
+
+
 def _load() -> list:
-    data = read_json(_APPROVALS_FILE, default=None)
-    if isinstance(data, dict) and isinstance(data.get('records'), list):
-        return data['records']
-    return []
+    try:
+        return _document(read_json(
+            _APPROVALS_FILE, default=None, strict=True))['records']
+    except JsonStoreReadError as error:
+        # Reads fail closed: a broken approval store never manufactures a
+        # usable token, and remains untouched for operator recovery.
+        logger.warning('[Lifecycle] approval store read failed: %s', error)
+        return []
 
 
-def _save(records: list) -> None:
-    write_json_atomic(_APPROVALS_FILE, {'records': records})
+def _load_swept(now: float) -> list:
+    """Return a swept snapshot without stale read-modify-write overwrite."""
+    outcome: dict = {}
+
+    def _mut(cur):
+        document = _document(cur)
+        records = document['records']
+        changed = _sweep_expired(records, now)
+        outcome['records'] = records
+        return document if changed else None
+
+    try:
+        update_json_atomic(
+            _APPROVALS_FILE, _mut, default=None, strict=True)
+    except JsonStoreReadError as error:
+        logger.warning('[Lifecycle] approval expiry sweep failed: %s', error)
+        return []
+    return outcome.get('records') or []
 
 
 def _public(rec: dict) -> dict:
@@ -162,12 +202,15 @@ def create_request(action: str, origin: dict | None = None) -> dict:
     }
 
     def _mut(cur):
-        records = (cur or {}).get('records') or []
+        document = _document(cur)
+        records = document['records']
         _sweep_expired(records, now)
         records.append(rec)
-        return {'records': _prune(records)}
+        document['records'] = _prune(records)
+        return document
 
-    update_json_atomic(_APPROVALS_FILE, _mut, default={'records': []})
+    update_json_atomic(
+        _APPROVALS_FILE, _mut, default=None, strict=True)
     origin = rec['origin']
     logger.warning('[Lifecycle] %s PENDING human approval (id=%s, ua=%.80s, '
                    'peer=%s, conv=%s, force=%s, running=%s)',
@@ -197,14 +240,15 @@ def decide(approval_id: str, approved: bool, *, decided_by: str = 'ui',
     outcome: dict = {}
 
     def _mut(cur):
-        records = (cur or {}).get('records') or []
+        document = _document(cur)
+        records = document['records']
         _sweep_expired(records, now)
         for rec in records:
             if rec.get('id') != approval_id:
                 continue
             if rec.get('status') != 'pending':
                 outcome['record'] = None
-                return {'records': records}
+                return document
             rec['status'] = 'approved' if approved else 'denied'
             rec['decided_at'] = now
             rec['decided_by'] = decided_by
@@ -212,11 +256,12 @@ def decide(approval_id: str, approved: bool, *, decided_by: str = 'ui',
             if approved:
                 rec['expires_at'] = now + APPROVED_TTL_SEC
             outcome['record'] = dict(rec)
-            return {'records': records}
+            return document
         outcome['record'] = None
-        return {'records': records}
+        return document
 
-    update_json_atomic(_APPROVALS_FILE, _mut, default={'records': []})
+    update_json_atomic(
+        _APPROVALS_FILE, _mut, default=None, strict=True)
     rec = outcome.get('record')
     if rec is None:
         logger.warning('[Lifecycle] decide(%s, approved=%s) REJECTED — unknown/'
@@ -234,14 +279,9 @@ def decide(approval_id: str, approved: bool, *, decided_by: str = 'ui',
 
 
 def get(approval_id: str) -> dict | None:
-    """Read one record (sweeping expiry first, best-effort persist)."""
+    """Read one record, atomically persisting any expiry transition."""
     now = _now()
-    records = _load()
-    if _sweep_expired(records, now):
-        try:
-            _save(records)
-        except Exception as e:
-            logger.debug('[Lifecycle] expiry sweep persist failed: %s', e)
+    records = _load_swept(now)
     for rec in records:
         if rec.get('id') == approval_id:
             return _public(rec)
@@ -252,12 +292,7 @@ def list_records(*, status: str | None = None, action: str | None = None,
                  limit: int = 50) -> list:
     """List records newest-first, optionally filtered."""
     now = _now()
-    records = _load()
-    if _sweep_expired(records, now):
-        try:
-            _save(records)
-        except Exception as e:
-            logger.debug('[Lifecycle] expiry sweep persist failed: %s', e)
+    records = _load_swept(now)
     out = [r for r in records
            if (status is None or r.get('status') == status)
            and (action is None or r.get('action') == action)]
@@ -297,7 +332,8 @@ def consume(approval_id: str, action: str) -> tuple:
     outcome: dict = {}
 
     def _mut(cur):
-        records = (cur or {}).get('records') or []
+        document = _document(cur)
+        records = document['records']
         _sweep_expired(records, now)
         for rec in records:
             if rec.get('id') != approval_id:
@@ -308,17 +344,18 @@ def consume(approval_id: str, action: str) -> tuple:
                 rec['status'] = 'consumed'
                 rec['consumed_at'] = now
                 outcome['ok'] = True
-                return {'records': records}
+                return document
             outcome['ok'] = False
             outcome['why'] = (f'action-mismatch:{rec.get("action")}'
                               if rec.get('action') != action
                               else f'not-approved:{rec.get("status")}')
-            return {'records': records}
+            return document
         outcome['ok'] = False
         outcome['why'] = 'unknown-id'
-        return {'records': records}
+        return document
 
-    update_json_atomic(_APPROVALS_FILE, _mut, default={'records': []})
+    update_json_atomic(
+        _APPROVALS_FILE, _mut, default=None, strict=True)
     ok = bool(outcome.get('ok'))
     why = outcome.get('why') or ''
     if ok:
@@ -343,7 +380,8 @@ def consume_any(action: str) -> tuple:
     outcome: dict = {}
 
     def _mut(cur):
-        records = (cur or {}).get('records') or []
+        document = _document(cur)
+        records = document['records']
         _sweep_expired(records, now)
         # newest approved first
         cands = [r for r in records
@@ -354,15 +392,16 @@ def consume_any(action: str) -> tuple:
         if not cands:
             outcome['ok'] = False
             outcome['why'] = 'no-approved-token'
-            return {'records': records}
+            return document
         rec = cands[0]
         rec['status'] = 'consumed'
         rec['consumed_at'] = now
         outcome['ok'] = True
         outcome['id'] = rec.get('id')
-        return {'records': records}
+        return document
 
-    update_json_atomic(_APPROVALS_FILE, _mut, default={'records': []})
+    update_json_atomic(
+        _APPROVALS_FILE, _mut, default=None, strict=True)
     ok = bool(outcome.get('ok'))
     if ok:
         audit_log('lifecycle_approval_consumed', approval_id=outcome.get('id'),
@@ -375,26 +414,152 @@ def consume_any(action: str) -> tuple:
 
 # ── restart cooldown (idempotency) ────────────────────────────────────
 
-def restart_cooldown_remaining(*, now: float | None = None) -> int:
-    """Seconds left in the restart cooldown; 0 when a restart may proceed."""
-    now = _now() if now is None else now
-    data = read_json(_STATE_FILE, default=None)
-    last = (data or {}).get('last_restart_at') if isinstance(data, dict) else None
-    if not isinstance(last, (int, float)):
+def _valid_timestamp(value) -> bool:
+    return (isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value)))
+
+
+def _cooldown_remaining(last, now: float) -> int:
+    if not _valid_timestamp(last):
         return 0
     remaining = int(RESTART_COOLDOWN_SEC - (now - last))
     return max(0, remaining)
 
 
-def stamp_restart(*, now: float | None = None) -> None:
-    """Record an accepted restart (called just before the re-exec)."""
-    now = _now() if now is None else now
+def _read_legacy_restart_stamp():
     try:
-        write_json_atomic(_STATE_FILE, {'last_restart_at': now})
-    except Exception as e:
-        # Best-effort: never blocks a restart, but a lost stamp means the
-        # cooldown net is open — be loud.
-        logger.warning('[Lifecycle] cooldown stamp failed: %s', e)
+        data = read_json(_STATE_FILE, default=None, strict=True)
+    except JsonStoreReadError as error:
+        logger.warning('[Lifecycle] legacy cooldown state read failed: %s', error)
+        return None
+    return (data or {}).get('last_restart_at') if isinstance(data, dict) else None
+
+
+def restart_cooldown_remaining(*, now: float | None = None) -> int:
+    """Seconds left in the restart cooldown; 0 when a restart may proceed.
+
+    The approval document is the atomic authority because restart-token
+    consumption and the timestamp must commit together. ``_STATE_FILE`` is
+    still read as a compatibility mirror for stamps written by older builds.
+    """
+    now = _now() if now is None else now
+    approval_last = None
+    try:
+        document = _document(read_json(
+            _APPROVALS_FILE, default=None, strict=True))
+        approval_last = document.get('last_restart_at')
+    except JsonStoreReadError as error:
+        logger.warning('[Lifecycle] approval cooldown read failed: %s', error)
+    return max(
+        _cooldown_remaining(approval_last, now),
+        _cooldown_remaining(_read_legacy_restart_stamp(), now),
+    )
+
+
+def _mirror_restart_stamp(now: float) -> None:
+    """Best-effort compatibility mirror; never the acceptance authority."""
+    def _mut(cur):
+        if cur is not None and not isinstance(cur, dict):
+            raise JsonStoreReadError(
+                'legacy lifecycle cooldown state has invalid shape')
+        document = dict(cur or {})
+        previous = document.get('last_restart_at')
+        if not _valid_timestamp(previous) or previous < now:
+            document['last_restart_at'] = now
+        return document
+
+    try:
+        update_json_atomic(_STATE_FILE, _mut, default=None, strict=True)
+    except (JsonStoreReadError, OSError, ValueError) as error:
+        logger.warning('[Lifecycle] cooldown mirror stamp failed: %s', error)
+
+
+def stamp_restart(*, now: float | None = None) -> None:
+    """Record an accepted restart outside the token-acceptance workflow.
+
+    Timestamps advance monotonically, so a delayed older writer cannot shorten
+    a newer cooldown. HTTP acceptance uses :func:`consume_restart`, which
+    commits the token transition and this authority timestamp together.
+    """
+    now = _now() if now is None else now
+
+    def _mut(cur):
+        document = _document(cur)
+        previous = document.get('last_restart_at')
+        if not _valid_timestamp(previous) or previous < now:
+            document['last_restart_at'] = now
+        return document
+
+    try:
+        update_json_atomic(
+            _APPROVALS_FILE, _mut, default=None, strict=True)
+    except (JsonStoreReadError, OSError, ValueError) as error:
+        # Preserve the public helper's historical best-effort contract. The
+        # compatibility mirror still provides a cooldown when possible.
+        logger.warning('[Lifecycle] cooldown authority stamp failed: %s', error)
+    _mirror_restart_stamp(now)
+
+
+def consume_restart(approval_id: str, *, now: float | None = None) -> tuple:
+    """Atomically accept one restart token and start the global cooldown.
+
+    Returns ``(ok, why, cooldown_remaining)``. Exactly one transaction owns
+    both decisions, so two concurrently approved tokens cannot both pass a
+    stale zero-cooldown read and schedule two process re-execs.
+    """
+    now = _now() if now is None else now
+    legacy_last = _read_legacy_restart_stamp()
+    outcome: dict = {}
+
+    def _mut(cur):
+        document = _document(cur)
+        records = document['records']
+        _sweep_expired(records, now)
+        remaining = max(
+            _cooldown_remaining(document.get('last_restart_at'), now),
+            _cooldown_remaining(legacy_last, now),
+        )
+        if remaining > 0:
+            outcome.update(ok=False, why='cooldown', remaining=remaining)
+            return document
+        for rec in records:
+            if rec.get('id') != approval_id:
+                continue
+            if (rec.get('action') == 'restart'
+                    and rec.get('status') == 'approved'
+                    and isinstance(rec.get('expires_at'), (int, float))
+                    and now <= rec['expires_at']):
+                rec['status'] = 'consumed'
+                rec['consumed_at'] = now
+                document['last_restart_at'] = now
+                outcome.update(ok=True, why='', remaining=0)
+                return document
+            outcome.update(
+                ok=False,
+                why=(f'action-mismatch:{rec.get("action")}'
+                     if rec.get('action') != 'restart'
+                     else f'not-approved:{rec.get("status")}'),
+                remaining=0,
+            )
+            return document
+        outcome.update(ok=False, why='unknown-id', remaining=0)
+        return document
+
+    update_json_atomic(
+        _APPROVALS_FILE, _mut, default=None, strict=True)
+    ok = bool(outcome.get('ok'))
+    why = outcome.get('why') or ''
+    remaining = int(outcome.get('remaining') or 0)
+    if ok:
+        _mirror_restart_stamp(now)
+        audit_log('lifecycle_approval_consumed', approval_id=approval_id,
+                  action='restart', cooldown_started=True)
+    else:
+        audit_log('lifecycle_approval_consume_rejected',
+                  approval_id=approval_id, action='restart', reason=why,
+                  cooldown_remaining=remaining)
+    return ok, why, remaining
 
 
 # ── restart-class call detector (recovery no-refire note) ─────────────
@@ -406,6 +571,7 @@ _LIFECYCLE_PATTERNS = (
     'update/restart',
     'update/shutdown',
     'restart_15000.sh',
+    'serverctl.py restart',
     'supervisorctl restart',
     '_perform_server_reexec',
 )
@@ -475,6 +641,6 @@ if __name__ == '__main__':
 __all__ = [
     'ACTIONS', 'APPROVED_TTL_SEC', 'PENDING_TTL_SEC', 'RESTART_COOLDOWN_SEC',
     'create_request', 'decide', 'get', 'list_records', 'validate', 'consume',
-    'restart_cooldown_remaining', 'stamp_restart', 'detect_lifecycle_calls',
-    'consume_any',
+    'restart_cooldown_remaining', 'stamp_restart', 'consume_restart',
+    'detect_lifecycle_calls', 'consume_any',
 ]

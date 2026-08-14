@@ -152,6 +152,26 @@ function collectWindowAssignments(node, add, aliases) {
       const g = globalMemberName(n.left, aliases);
       if (g) add(g);
     }
+    if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) &&
+        ts.isIdentifier(n.expression.expression) &&
+        n.expression.expression.text === 'Object' &&
+        n.expression.name.text === 'assign' && n.arguments.length >= 2 &&
+        isWindowRef(n.arguments[0], aliases)) {
+      const source = unwrapExpression(n.arguments[1]);
+      if (source && ts.isObjectLiteralExpression(source)) {
+        for (const property of source.properties) {
+          if (ts.isShorthandPropertyAssignment(property)) {
+            add(property.name.text);
+          } else if ((ts.isPropertyAssignment(property) ||
+                      ts.isMethodDeclaration(property)) && property.name &&
+                     (ts.isIdentifier(property.name) ||
+                      ts.isStringLiteral(property.name) ||
+                      ts.isNumericLiteral(property.name))) {
+            add(property.name.text);
+          }
+        }
+      }
+    }
     ts.forEachChild(n, walk);
   }
   walk(node);
@@ -162,7 +182,10 @@ function collectWindowAssignments(node, add, aliases) {
 // — the UMD-ish wrapper api.js / voice.js use. The parameter that RECEIVES
 // window is an alias: `<alias>.X = …` declares a global, `<alias>.X` reads it.
 function isWindowishArg(e) {
+  e = unwrapExpression(e);
   if (ts.isIdentifier(e) && (e.text === 'window' || e.text === 'globalThis')) return true;
+  if (ts.isCallExpression(e) && ts.isIdentifier(e.expression) &&
+      e.expression.text === 'globals' && e.arguments.length === 0) return true;
   if (e.kind === SK.ThisKeyword) return true; // top-level this === window (sloppy script)
   if (ts.isParenthesizedExpression(e)) return isWindowishArg(e.expression);
   if (ts.isConditionalExpression(e)) {
@@ -174,6 +197,10 @@ function isWindowishArg(e) {
 function findWindowAliases(sf) {
   const aliases = new Set();
   (function walk(n) {
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) &&
+        n.initializer && isWindowishArg(n.initializer)) {
+      aliases.add(n.name.text);
+    }
     if (ts.isCallExpression(n)) {
       let fn = n.expression;
       while (ts.isParenthesizedExpression(fn)) fn = fn.expression;
@@ -191,7 +218,68 @@ function findWindowAliases(sf) {
   return aliases;
 }
 
+function collectWindowContractProperties(sf, add) {
+  function propertyName(member) {
+    const name = member && member.name;
+    return name && (ts.isIdentifier(name) || ts.isStringLiteral(name) ||
+                    ts.isNumericLiteral(name)) ? name.text : null;
+  }
+  function typeContainsWindow(type) {
+    if (!type) return false;
+    if (ts.isTypeReferenceNode(type) && ts.isIdentifier(type.typeName)) {
+      return type.typeName.text === 'Window';
+    }
+    if (ts.isIntersectionTypeNode(type) || ts.isUnionTypeNode(type)) {
+      return type.types.some(typeContainsWindow);
+    }
+    if (ts.isParenthesizedTypeNode(type)) return typeContainsWindow(type.type);
+    return false;
+  }
+  function addTypeLiteralMembers(type) {
+    if (ts.isTypeLiteralNode(type)) {
+      for (const member of type.members) {
+        const name = propertyName(member);
+        if (name) add(name);
+      }
+    } else if (ts.isIntersectionTypeNode(type) || ts.isUnionTypeNode(type)) {
+      for (const item of type.types) addTypeLiteralMembers(item);
+    } else if (ts.isParenthesizedTypeNode(type)) {
+      addTypeLiteralMembers(type.type);
+    }
+  }
+  for (const statement of sf.statements) {
+    if (ts.isTypeAliasDeclaration(statement) &&
+        typeContainsWindow(statement.type)) {
+      addTypeLiteralMembers(statement.type);
+    }
+    if (ts.isInterfaceDeclaration(statement) && statement.heritageClauses &&
+        statement.heritageClauses.some((clause) => clause.types.some(
+          (item) => ts.isIdentifier(item.expression) &&
+                    item.expression.text === 'Window'))) {
+      for (const member of statement.members) {
+        const name = propertyName(member);
+        if (name) add(name);
+      }
+    }
+  }
+}
+
+function unwrapExpression(node) {
+  while (node && (ts.isParenthesizedExpression(node) ||
+         ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) ||
+         ts.isNonNullExpression(node) ||
+         (ts.isSatisfiesExpression && ts.isSatisfiesExpression(node)))) {
+    node = node.expression;
+  }
+  return node;
+}
+
 function isWindowRef(node, aliases) {
+  node = unwrapExpression(node);
+  if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) &&
+      node.expression.text === 'globals' && node.arguments.length === 0) {
+    return true;
+  }
   return ts.isIdentifier(node) &&
          (node.text === 'window' || node.text === 'globalThis' || aliases.has(node.text));
 }
@@ -206,6 +294,12 @@ function globalMemberName(expr, aliases) {
     return expr.argumentExpression.text;
   }
   return null;
+}
+
+function parseSourceFile(unit) {
+  const kind = /\.tsx?$/.test(unit.name) ? ts.ScriptKind.TS : ts.ScriptKind.JS;
+  return ts.createSourceFile(
+    unit.name, unit.text, ts.ScriptTarget.ES2022, true, kind);
 }
 
 // ── typeof-guard extraction ─────────────────────────────────────────────
@@ -446,7 +540,7 @@ function analyze(opts) {
   }
 
   for (const unit of units) {
-    const sf = ts.createSourceFile(unit.name, unit.text, ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS);
+    const sf = parseSourceFile(unit);
     const globalScope = makeScope(null);
     // Top-level scope IS the shared global namespace — locals of this file
     // resolve via globalDecls; per-file top-level bindings were pre-collected.
@@ -470,16 +564,35 @@ function main() {
   for (const htmlRel of (spec.html || [])) {
     for (const u of extractInlineScripts(path.join(ROOT, htmlRel))) units.push(u);
   }
+  const declarationUnits = [];
+  for (const rel of (spec.declarationFiles || [])) {
+    const abs = path.join(ROOT, rel);
+    declarationUnits.push({ name: rel, text: fs.readFileSync(abs, 'utf8') });
+  }
 
   // Pass 1: global union (top-level decls of every unit + window.X assigns).
   const globalDecls = new Map(); // name -> first file
   const aliasesByFile = new Map();
   for (const unit of units) {
-    const sf = ts.createSourceFile(unit.name, unit.text, ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS);
+    const sf = parseSourceFile(unit);
     const aliases = findWindowAliases(sf);
     aliasesByFile.set(unit.name, aliases);
     collectScopeDeclarations(sf, (n) => { if (!globalDecls.has(n)) globalDecls.set(n, unit.name); });
     collectWindowAssignments(sf, (n) => { if (!globalDecls.has(n)) globalDecls.set(n, unit.name); }, aliases);
+  }
+  // Vite owners execute as modules, so only their explicit window exports
+  // join the classic shared-global namespace. Imported/module-local names do
+  // not satisfy classic reads.
+  for (const unit of declarationUnits) {
+    const sf = parseSourceFile(unit);
+    const aliases = findWindowAliases(sf);
+    collectWindowAssignments(
+      sf,
+      (n) => { if (!globalDecls.has(n)) globalDecls.set(n, unit.name); },
+      aliases,
+    );
+    collectWindowContractProperties(
+      sf, (n) => { if (!globalDecls.has(n)) globalDecls.set(n, unit.name); });
   }
 
   // Pass 2: resolve.

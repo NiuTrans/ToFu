@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import os
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.api_response import api_bad_request, api_ok
 from lib.cost import compute_cost
@@ -436,7 +436,7 @@ def client_logs_relay():
     scope='chat',
 )
 def log_aggregates_view():
-    from flask import request
+    from quart import request
 
     from lib.log_aggregates import query_aggregates
 

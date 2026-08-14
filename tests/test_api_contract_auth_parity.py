@@ -8,11 +8,9 @@ not routes), consumed by every client class including external SDKs:
   * bridge 401 literal       jsonify({'error': 'bridge_auth_required', 'hint': h}), 401
                               → api_unauthorized('bridge_auth_required', hint=h)
   * typed-envelope 401s      jsonify({'ok': False, 'error': {kind…}}), 401
-                              → api_error({kind…}, status=401) — the dict
-                              passes under 'error' verbatim (byte-identical
-                              modulo request_id)
+                              → api_typed_error('permission', status=401)
   * rate-limit 429           resp = jsonify({…}); apply_headers(resp, decision)
-                              → resp, _st = api_error({kind…}, status=429);
+                              → resp, _st = api_typed_error('ratelimit', ...);
                               apply_headers(resp, decision); return resp, _st
                               (the X-RateLimit-* headers are applied by the
                               caller AFTER the envelope is built — preserved)
@@ -56,13 +54,17 @@ async def _resolve(resp):
 
 
 def _sites():
-    from lib.api_response import api_error, api_unauthorized
-    unauth_env = {'kind': 'unauthorized',
-                  'detail': 'Invalid or expired API key.'}
-    required_env = {'kind': 'unauthorized',
-                    'detail': 'Authentication required.'}
-    rate_env = {'kind': 'rate_limited',
-                'detail': 'Rate limit exceeded (rpm)', 'retry_after_s': 1.5}
+    from lib.api_response import api_typed_error, api_unauthorized
+    from lib.error_envelope import make_envelope
+    unauth_env = make_envelope(
+        'permission', detail='Invalid or expired API key.',
+        source='api_v1.auth.token')
+    required_env = make_envelope(
+        'permission', detail='Authentication required.',
+        source='api_v1.auth.required')
+    rate_env = make_envelope(
+        'ratelimit', detail='Rate limit exceeded (rpm)',
+        source='api_v1.auth.rate_limit', extensions={'retry_after_s': 1.5})
     return [
         # (label, legacy_body, legacy_status, new_thunk, is_error)
         ('bridge-401', {'error': 'bridge_auth_required',
@@ -70,16 +72,23 @@ def _sites():
          lambda: api_unauthorized('bridge_auth_required',
                                   hint='set X-Bridge-Secret'), True),
         ('bad-token-401', {'ok': False, 'error': dict(unauth_env)}, 401,
-         lambda: api_error(dict(unauth_env), status=401), True),
+         lambda: api_typed_error(
+             'permission', status=401, detail='Invalid or expired API key.',
+             source='api_v1.auth.token'), True),
         ('no-cred-401', {'ok': False, 'error': dict(required_env)}, 401,
-         lambda: api_error(dict(required_env), status=401), True),
+         lambda: api_typed_error(
+             'permission', status=401, detail='Authentication required.',
+             source='api_v1.auth.required'), True),
         ('rate-429', {'ok': False, 'error': dict(rate_env)}, 429,
-         lambda: api_error(dict(rate_env), status=429), True),
+         lambda: api_typed_error(
+             'ratelimit', status=429, detail='Rate limit exceeded (rpm)',
+             source='api_v1.auth.rate_limit',
+             extensions={'retry_after_s': 1.5}), True),
     ]
 
 
 def test_envelope_parity():
-    from flask import jsonify
+    from quart import jsonify
     app = _make_app()
 
     async def _t():
@@ -120,6 +129,8 @@ def test_shipped_source_converted():
     assert 'apply_headers(resp, decision)' in src, (
         'the 429 must keep apply_headers(resp, decision) AFTER the '
         'envelope is built — the X-RateLimit-* headers ride the same resp')
+    assert src.count('api_typed_error(') == 3
+    assert "'permission'" in src and "'ratelimit'" in src
 
 
 if __name__ == '__main__':

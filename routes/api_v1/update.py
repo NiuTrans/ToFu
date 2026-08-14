@@ -27,7 +27,7 @@ import threading
 import time
 import uuid
 
-from flask import Blueprint, request
+from quart import Blueprint, request
 
 from lib import lifecycle_approval as _lca
 from lib.runtime_paths import data_root
@@ -496,14 +496,22 @@ def update_restart():
             % len(running),
             runningTasks=running, needsForce=True)
 
-    # Acceptance: consume the one-time token NOW (a refusal above — the
-    # running-tasks 409 — deliberately left it usable for the force retry).
-    c_ok, c_why = _lca.consume(approval_id, 'restart')
+    # Acceptance: atomically consume the one-time token AND start the global
+    # cooldown. A refusal above deliberately left the token usable for the
+    # force retry; once here, two concurrently approved requests must not both
+    # pass a stale cooldown read and schedule two re-execs.
+    c_ok, c_why, c_remaining = _lca.consume_restart(approval_id)
     if not c_ok:
+        if c_why == 'cooldown':
+            logger.warning('[Update] Restart approval %s lost acceptance race '
+                           '— cooldown now active (%ds remaining)',
+                           approval_id[:8], c_remaining)
+            return api_error(
+                'Restart refused: another restart was accepted concurrently. '
+                'Retry later.', status=429, retryAfterSec=c_remaining)
         logger.warning('[Update] Restart approval %s vanished at acceptance: %s',
                        approval_id[:8], c_why)
         return api_forbidden('Restart approval no longer valid (%s).' % c_why)
-    _lca.stamp_restart()
     audit_log('self_update_restart', pid=os.getpid(),
               forced=force, running_tasks=len(running),
               approval_id=approval_id)

@@ -40,9 +40,16 @@ import sys
 
 import pytest
 
+from tests._runtime_sections import native_module_path
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RESEARCH_VIEW_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'research-view.ts')
+RESEARCH_RUNTIME_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'research-runtime.ts')
+ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
 pytestmark = pytest.mark.unit
 
 _DIR_A = 'long-context KV-cache compression'
@@ -86,12 +93,21 @@ def _new_loop_run(coro):
 
 
 @pytest.fixture()
-def fresh_db(tmp_path):
+def fresh_db(tmp_path, monkeypatch):
     from lib.database import reset_sqlite_for_tests, restore_db_state
+    from lib.research import persistence
+    from lib.storage import StorageSupervisor
+
     snapshot = reset_sqlite_for_tests(str(tmp_path / 'research_disc.db'))
+    supervisor = StorageSupervisor(
+        project_root=tmp_path / 'sidecar', backend='sqlite', startup_timeout=20)
+    supervisor.start()
+    monkeypatch.setattr(
+        persistence, '_storage', lambda **_kwargs: supervisor.client)
     try:
-        yield
+        yield supervisor
     finally:
+        supervisor.stop()
         restore_db_state(snapshot)
 
 
@@ -193,17 +209,14 @@ def test_list_never_leaks_a_real_papers_report(client, fresh_db):
     instead, letting a `WHERE 1=1` regression pass unnoticed — measured: that
     exact NEUTER did not bite until this fixture was tightened.)
     """
-    import json as _json
-    from lib.database import get_thread_db
     from lib.research.persistence import persist_survey
-    db = get_thread_db()
-    db.execute("INSERT INTO paper_reports (paper_hash, lang, report, model,"
-               " meta, created_at) VALUES (?,?,?,'',?,?)",
-               ('deadbeef' * 4, 'en', 'A REAL PAPER REPORT',
-                _json.dumps({'kind': 'insight',
-                             'direction': 'NOT A RESEARCH DIRECTION'}),
-                9999999999))
-    db.commit()
+    fresh_db.client.command('paper.report.upsert', {
+        'paper_hash': 'deadbeef' * 4, 'lang': 'en',
+        'report': 'A REAL PAPER REPORT', 'model': '',
+        'meta': {'kind': 'insight',
+                 'direction': 'NOT A RESEARCH DIRECTION'},
+        'created_at': 9999999999,
+    }, 'research-discovery-paper-decoy')
     persist_survey(_DIR_A, 'en', '# A', _GAPS, model='m')
     _empty_the_task_registry()
 
@@ -215,8 +228,9 @@ def test_list_never_leaks_a_real_papers_report(client, fresh_db):
 # ═══ 2. ★ The panel must actually render the artifacts ═══
 
 def _node_ok():
-    return bool(shutil.which('node')) and os.path.isdir(
-        os.path.join(ROOT, 'node_modules', 'jsdom'))
+    return (bool(shutil.which('node'))
+            and os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
+            and os.path.isfile(ESBUILD))
 
 
 requires_node = pytest.mark.skipif(
@@ -228,7 +242,7 @@ const ROOT = process.argv[2];
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM('<!DOCTYPE html><body><div id="paperPdfViewer"></div></body>',
                       { url: 'http://localhost/' });
-global.window = dom.window; global.document = dom.window.document;
+global.window = global; global.document = dom.window.document;
 global.requestAnimationFrame = (fn) => setTimeout(fn, 0);
 global.escapeHtml = (s) => String(s == null ? '' : s)
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
@@ -258,16 +272,18 @@ const RESULT = {
   threshold: 4.0, gate_reached: 'accepted',
 };
 
-const calls = { lookup: [] };
+const calls = { lookup: [], events: [] };
 global.Api = {
   tasks: {
     start: async () => ({ ok: true, taskId: 'research_t1' }),
-    get: async () => ({ ok: true, id: 'research_t1', status: 'done',
+    events: async (_taskId, cursor) => { calls.events.push(cursor); return ({
+      ok: true, id: 'research_t1', status: 'done', done: true,
+      cursor: { requested: cursor, next: 0, reset: false }, events: [],
       createdAt: 1700000000000, updatedAt: 1700000900000,
       artifact_quality: { degraded: false, reason: '' },
       result: { accepted: RESULT.accepted, rejected: RESULT.rejected,
                 corpus_size: 18, gate_reached: 'accepted',
-                folder_id: 'research_t1' } }),
+                folder_id: 'research_t1' } }); },
     abort: async () => ({ ok: true }),
   },
   research: {
@@ -277,7 +293,7 @@ global.Api = {
 global.pushSubscribe = () => {}; global.pushUnsubscribe = () => {};
 global._paperHash = ''; global._activePaperId = '';
 
-const src = fs.readFileSync(path.join(ROOT, 'static/js/paper/research.js'), 'utf8');
+const src = fs.readFileSync(process.argv[4], 'utf8');
 (0, eval)(src);
 
 (async () => {
@@ -305,20 +321,20 @@ const src = fs.readFileSync(path.join(ROOT, 'static/js/paper/research.js'), 'utf
 
 
 def _run_render(scenario='live'):
-    h = os.path.join(ROOT, 'tests', '_tmp_research_render.js')
-    with open(h, 'w', encoding='utf-8') as f:
-        f.write(_RENDER_HARNESS)
-    try:
-        r = subprocess.run(['node', h, ROOT, scenario],
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix='tofu-research-render-') as temp_dir:
+        h = os.path.join(temp_dir, 'research-render.js')
+        built = native_module_path('paper/research-view.js', RESEARCH_VIEW_TS)
+        with open(h, 'w', encoding='utf-8') as f:
+            f.write(_RENDER_HARNESS)
+        r = subprocess.run(['node', h, ROOT, scenario, built],
                            capture_output=True, text=True, timeout=90)
         if r.returncode != 0:
             pytest.fail(f'render harness failed:\n{r.stdout}\n{r.stderr}')
         line = [x for x in r.stdout.strip().splitlines() if x.startswith('{')]
         assert line, f'no JSON from harness:\n{r.stdout}\n{r.stderr}'
         return json.loads(line[-1])
-    finally:
-        if os.path.exists(h):
-            os.remove(h)
 
 
 @requires_node
@@ -333,6 +349,9 @@ def test_accepted_idea_title_and_mechanism_reach_the_dom():
         'only showing counts')
     assert 'attention entropy varies per layer' in text, (
         'core_mechanism (the WHY of the idea) was dropped by the renderer')
+    assert out['calls']['events'] == [0], (
+        'live research must read the bounded cursor replay endpoint, not fetch '
+        'the complete task snapshot on every poll')
 
 
 @requires_node
@@ -393,9 +412,9 @@ def test_the_lookup_client_has_a_real_js_caller():
     load_research_artifacts before it."""
     from tests._source_scan import strip_comments
     src = strip_comments(
-        open(os.path.join(ROOT, 'static/js/paper/research.js'),
+        open(RESEARCH_RUNTIME_TS,
              encoding='utf-8').read(), lang='python')  # // lines are not '#'
-    assert 'Api.research.lookup' in src, (
+    assert 'researchApi().lookup' in src, (
         'no JS calls Api.research.lookup — the durable read path is still '
         'unreachable from the product')
 

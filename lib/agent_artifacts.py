@@ -62,6 +62,8 @@ USER_PROFILE_FILE = '.tofu_user_profile.md'
 # Staged, not-yet-confirmed preference proposals from the consolidation pass
 # (propose-then-confirm gate). JSON list; lives next to the profile.
 USER_PROFILE_PENDING_FILE = '.tofu_user_profile_pending.json'
+USER_CONTEXT_FILE = '.tofu_user_context.json'
+USER_CONTEXT_CHANGES_FILE = '.tofu_user_context_changes.json'
 # Live cross-conversation presence registry ("who is working in this project
 # right now"). Lives UNDER the existing ``.tofu/`` dir (so the ``.tofu*``
 # gitignore glob + every artifact consumer already cover it without change):
@@ -87,6 +89,8 @@ KNOWN_ARTIFACT_NAMES = (
     ENV_MARKER_FILE,
     USER_PROFILE_FILE,
     USER_PROFILE_PENDING_FILE,
+    USER_CONTEXT_FILE,
+    USER_CONTEXT_CHANGES_FILE,
 )
 
 # A single ``.gitignore`` pattern that covers every CURRENT and FUTURE
@@ -115,6 +119,7 @@ __all__ = [
     'ARTIFACT_PREFIX',
     'FILE_HISTORY_ROOT_DIR', 'TRASH_DIR', 'SANDBOX_DIR', 'ENV_MARKER_FILE',
     'USER_PROFILE_FILE', 'USER_PROFILE_PENDING_FILE',
+    'USER_CONTEXT_FILE', 'USER_CONTEXT_CHANGES_FILE',
     'PRESENCE_SUBDIR', 'PRESENCE_REGISTRY_FILE',
     'WORKTREES_DIR',
     'KNOWN_ARTIFACT_NAMES', 'GITIGNORE_PATTERN',

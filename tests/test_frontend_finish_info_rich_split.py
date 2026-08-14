@@ -31,13 +31,18 @@ from __future__ import annotations
 import pathlib
 import re
 
+import pytest
+
+from tests._runtime_sections import runtime_section_names, runtime_section_path
+
+pytestmark = pytest.mark.unit
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-BUNDLER_PY = ROOT / 'lib' / 'js_bundler.py'
 INDEX_HTML = ROOT / 'index.html'
-FI = ROOT / 'static' / 'js' / 'ui' / 'finish_info.js'
-RICH = ROOT / 'static' / 'js' / 'ui' / 'finish_info_rich.js'
-FEATURE_LOADER = ROOT / 'static' / 'js' / 'feature-loader.js'
+FI = pathlib.Path(runtime_section_path('ui/finish_info.js'))
+RICH = pathlib.Path(runtime_section_path('ui/finish_info_rich.js'))
+FEATURE_LOADER = pathlib.Path(runtime_section_path('feature-bridge.js'))
 
 MOVED = ('_buildCostPopover', '_hideCostPopover', '_costPopoverOutside',
          '_costPopoverScroll', '_toggleCostPopover', '_costPopoverEl')
@@ -47,8 +52,11 @@ COLD_STAYS = ('_CACHE_CAUSE_PHRASES', '_translateCacheCause',
 
 
 def _manifest():
-    import lib.js_bundler as jb
-    return jb._extract_manifest_from_source(str(BUNDLER_PY))
+    files = runtime_section_names()
+    source = FEATURE_LOADER.read_text()
+    match = re.search(r'_FEATURE_ENTRY_POINTS\s*=\s*\[([^\]]*)\]', source)
+    entries = set(re.findall(r"'([^']+)'", match.group(1))) if match else set()
+    return files, files, entries, set()
 
 
 def _fi():
@@ -65,15 +73,14 @@ def _rich():
 def test_rich_in_deferred_files():
     _bf, deferred, _ep, _crit = _manifest()
     assert 'ui/finish_info_rich.js' in deferred, (
-        "'ui/finish_info_rich.js' must be in _DEFERRED_FILES — the ~24KB "
+        "'ui/finish_info_rich.js' must be in _CLASSIC_ASSET_FILES — the ~24KB "
         'cost-popover family out of the render-blocking core')
 
 
 def test_rich_not_in_core_bundle_files():
     bundle, _df, _ep, _crit = _manifest()
-    assert 'ui/finish_info_rich.js' not in bundle, (
-        "'ui/finish_info_rich.js' must NOT be in _BUNDLE_FILES — "
-        'double-loading would double the popover singleton state')
+    assert bundle.count('ui/finish_info_rich.js') == 1, (
+        "'ui/finish_info_rich.js' must occur exactly once in the Vite runtime")
 
 
 # ---------------------------------------------------------------------------
@@ -140,10 +147,10 @@ def test_rich_toggle_lazy_builds():
 def test_toggle_stubbed_py_and_js():
     _bf, _df, entry_points, _crit = _manifest()
     assert '_toggleCostPopover' in entry_points, (
-        '_toggleCostPopover must be a _DEFERRED_ENTRY_POINTS member — the '
+        '_toggleCostPopover must be a _FEATURE_ENTRY_POINTS member — the '
         'cost tag is chat-rendered on every assistant message')
     assert "'_toggleCostPopover'" in FEATURE_LOADER.read_text(), (
-        'feature-loader.js must install the _toggleCostPopover stub')
+        'feature-bridge.js must install the _toggleCostPopover stub')
 
 
 def test_builder_not_stubbed():
@@ -153,6 +160,5 @@ def test_builder_not_stubbed():
     assert '_buildCostPopover' not in entry_points
 
 
-def test_dev_fallback_script_tag_kept():
-    assert 'static/js/ui/finish_info_rich.js' in INDEX_HTML.read_text(), (
-        'index.html must carry the finish_info_rich.js dev-fallback tag')
+def test_index_has_no_raw_rich_finish_script():
+    assert 'static/js/ui/finish_info_rich.js' not in INDEX_HTML.read_text()

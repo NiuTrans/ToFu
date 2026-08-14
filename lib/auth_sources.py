@@ -466,10 +466,15 @@ def _redact(row: dict, knowledge: Optional[dict] = None) -> dict:
     spec = source_spec(out.get('domain', ''))
     if not out.get('access_strategy'):
         out['access_strategy'] = spec.get('access_strategy') or 'browser_first'
-    if knowledge and knowledge.get('extractor_js'):
+    # Site knowledge is now keyed by operation.  Keep accepting the legacy
+    # flat search entry so upgrades do not temporarily lose their badge.
+    operations = knowledge.get('operations') if isinstance(knowledge, dict) \
+        and isinstance(knowledge.get('operations'), dict) else {}
+    pinned = operations.get('search') if operations else knowledge
+    if isinstance(pinned, dict) and pinned.get('extractor_js'):
         out['knowledge'] = {'pinned': True,
-                            'version': knowledge.get('version'),
-                            'verified_at': knowledge.get('verified_at')}
+                            'version': pinned.get('version'),
+                            'verified_at': pinned.get('verified_at')}
     else:
         out['knowledge'] = {'pinned': False}
     proxy = out.get('proxy') or ''
@@ -756,9 +761,18 @@ def delete_source(domain: str) -> bool:
             if r.get('domain') != dom:
                 continue
             if is_default:
+                spec = source_spec(dom)
                 r['enabled'] = False
                 r['cookies'] = []
                 r['proxy'] = ''
+                # A reset must restore the whole mutable catalog contract, not
+                # just credentials. Keeping a user-selected cookies_replay
+                # strategy made a reset browser-first source stay unusable with
+                # no cookies and leaked that state across processes/tests.
+                r['label'] = spec.get('label', dom)
+                r['aliases'] = list(spec.get('aliases', []))
+                r['access_strategy'] = (
+                    spec.get('access_strategy') or 'browser_first')
                 r['updated_at'] = time.time()
             else:
                 _cache.pop(i)

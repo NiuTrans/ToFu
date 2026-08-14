@@ -31,12 +31,13 @@ import json
 import os
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from typing import List, Optional
 
-from lib.database import DOMAIN_SYSTEM, get_thread_db as get_db
 from lib.ids import short_id
 from lib.log import audit_log, get_logger
+from lib.storage import StorageError, get_storage_client
 
 logger = get_logger(__name__)
 
@@ -65,11 +66,14 @@ class User:
             md = row['metadata']
         else:
             md = row[9]
-        try:
-            md_dict = json.loads(md) if md else {}
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.debug('[Users] Malformed metadata JSON, defaulting: %s', e)
-            md_dict = {}
+        if isinstance(md, dict):
+            md_dict = md
+        else:
+            try:
+                md_dict = json.loads(md) if md else {}
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.debug('[Users] Malformed metadata JSON, defaulting: %s', e)
+                md_dict = {}
         if hasattr(row, 'keys'):
             return cls(
                 id=row['id'], email=row['email'],
@@ -162,119 +166,106 @@ def create_user(
         raise ValueError(f'Invalid email: {email!r}')
     if role not in USER_ROLES:
         raise ValueError(f'Invalid role: {role!r}')
-    if find_user(email=email) is not None:
-        raise ValueError('email already registered')
     user_id = _new_user_id()
     now = int(time.time())
-    md_str = json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True)
-    db = get_db(DOMAIN_SYSTEM)
-    db.execute(
-        'INSERT INTO tenant_users '
-        '  (id, email, password_hash, display_name, role, status, '
-        '   created_at, last_login_at, email_verified, metadata) '
-        'VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?)',
-        (user_id, email, _hash_password(password),
-         display_name or '', role, 'active', now, md_str))
-    db.commit()
-    audit_log('user_created', user_id=user_id, email=email, role=role)
-    logger.info('[Users] created %s <%s> role=%s', user_id, email, role)
-    return User(
-        id=user_id, email=email, display_name=display_name or '',
-        role=role, status='active',
-        created_at=now, last_login_at=0, email_verified=False,
-        metadata=metadata or {},
-    )
+    if metadata is not None and not isinstance(metadata, dict):
+        raise ValueError('metadata must be an object')
+    password_hash = _hash_password(password)
+    try:
+        document = get_storage_client(write=True).command(
+            'tenant.user.create', {
+                'user_id': user_id, 'email': email,
+                'password_hash': password_hash,
+                'display_name': display_name or '', 'role': role,
+                'metadata': metadata or {}, 'created_at': now,
+            }, f'tenant.user.create:{user_id}',
+        )
+    except StorageError as exc:
+        if exc.code == 'database_conflict':
+            raise ValueError('email already registered') from None
+        raise
+    audit_log('user_created', user_id=user_id, role=role)
+    logger.info('[Users] created user_id=%s role=%s', user_id, role)
+    return User.from_row(document)
 
 
 def get_user(user_id: str) -> Optional[User]:
-    db = get_db(DOMAIN_SYSTEM)
-    row = db.execute(
-        'SELECT id, email, password_hash, display_name, role, status, '
-        '       created_at, last_login_at, email_verified, metadata '
-        '  FROM tenant_users WHERE id = ?',
-        (user_id,)).fetchone()
-    return User.from_row(row) if row is not None else None
+    if not user_id:
+        return None
+    document = get_storage_client().query(
+        'tenant.user.get', {'user_id': user_id})
+    return User.from_row(document) if document is not None else None
 
 
 def find_user(*, email: str = '') -> Optional[User]:
     if not email:
         return None
-    db = get_db(DOMAIN_SYSTEM)
-    row = db.execute(
-        'SELECT id, email, password_hash, display_name, role, status, '
-        '       created_at, last_login_at, email_verified, metadata '
-        '  FROM tenant_users WHERE email = ?',
-        ((email or '').strip().lower(),)).fetchone()
-    return User.from_row(row) if row is not None else None
+    document = get_storage_client().query(
+        'tenant.user.get', {'email': (email or '').strip().lower()})
+    return User.from_row(document) if document is not None else None
 
 
 def list_users(*, limit: int = 100, offset: int = 0,
                status: str = '') -> List[User]:
-    db = get_db(DOMAIN_SYSTEM)
     if status:
         if status not in USER_STATUSES:
             raise ValueError(f'Invalid status: {status!r}')
-        rows = db.execute(
-            'SELECT id, email, password_hash, display_name, role, status, '
-            '       created_at, last_login_at, email_verified, metadata '
-            '  FROM tenant_users WHERE status = ? '
-            ' ORDER BY created_at DESC LIMIT ? OFFSET ?',
-            (status, int(limit), int(offset))).fetchall()
-    else:
-        rows = db.execute(
-            'SELECT id, email, password_hash, display_name, role, status, '
-            '       created_at, last_login_at, email_verified, metadata '
-            '  FROM tenant_users ORDER BY created_at DESC LIMIT ? OFFSET ?',
-            (int(limit), int(offset))).fetchall()
-    return [User.from_row(r) for r in rows]
+    rows = get_storage_client().query('tenant.user.list', {
+        'limit': max(1, min(int(limit), 1000)),
+        'offset': max(0, int(offset)), 'status': status,
+    })
+    return [User.from_row(row) for row in rows]
 
 
 def set_user_status(user_id: str, status: str) -> User:
     if status not in USER_STATUSES:
         raise ValueError(f'Invalid status: {status!r}')
-    db = get_db(DOMAIN_SYSTEM)
-    db.execute('UPDATE tenant_users SET status = ? WHERE id = ?', (status, user_id))
-    db.commit()
-    audit_log('user_status_changed', user_id=user_id, status=status)
-    user = get_user(user_id)
-    if user is None:
+    document = get_storage_client(write=True).command(
+        'tenant.user.set_status', {'user_id': user_id, 'status': status},
+        f'tenant.user.set_status:{uuid.uuid4().hex}',
+    )
+    if document is None:
         raise ValueError(f'No such user: {user_id}')
-    return user
+    audit_log('user_status_changed', user_id=user_id, status=status)
+    return User.from_row(document)
 
 
 def update_user_role(user_id: str, role: str) -> User:
     if role not in USER_ROLES:
         raise ValueError(f'Invalid role: {role!r}')
-    db = get_db(DOMAIN_SYSTEM)
-    db.execute('UPDATE tenant_users SET role = ? WHERE id = ?', (role, user_id))
-    db.commit()
-    audit_log('user_role_changed', user_id=user_id, role=role)
-    user = get_user(user_id)
-    if user is None:
+    document = get_storage_client(write=True).command(
+        'tenant.user.set_role', {'user_id': user_id, 'role': role},
+        f'tenant.user.set_role:{uuid.uuid4().hex}',
+    )
+    if document is None:
         raise ValueError(f'No such user: {user_id}')
-    return user
+    audit_log('user_role_changed', user_id=user_id, role=role)
+    return User.from_row(document)
 
 
 def authenticate(email: str, password: str) -> Optional[User]:
     """Return the user iff the password matches and the account is active."""
-    user = find_user(email=email)
+    normalized_email = (email or '').strip().lower()
+    if not normalized_email:
+        return None
+    material = get_storage_client().query(
+        'tenant.user.authentication', {'email': normalized_email})
+    if material is None:
+        return None
+    user = User.from_row(material['user'])
     if user is None or user.status != 'active':
         return None
-    db = get_db(DOMAIN_SYSTEM)
-    row = db.execute(
-        'SELECT password_hash FROM tenant_users WHERE id = ?',
-        (user.id,)).fetchone()
-    if row is None:
+    if not _verify_password(password, material['password_hash']):
+        email_fingerprint = hashlib.sha256(
+            normalized_email.encode('utf-8')).hexdigest()[:16]
+        audit_log('user_login_failed', email_fingerprint=email_fingerprint)
         return None
-    stored = row[0] if not hasattr(row, 'keys') else row['password_hash']
-    if not _verify_password(password, stored):
-        audit_log('user_login_failed', email=email)
-        return None
-    db.execute(
-        'UPDATE tenant_users SET last_login_at = ? WHERE id = ?',
-        (int(time.time()), user.id))
-    db.commit()
-    audit_log('user_login_ok', user_id=user.id, email=email)
+    get_storage_client(write=True).command(
+        'tenant.user.record_login', {
+            'user_id': user.id, 'last_login_at': int(time.time()),
+        }, f'tenant.user.record_login:{uuid.uuid4().hex}',
+    )
+    audit_log('user_login_ok', user_id=user.id)
     return user
 
 

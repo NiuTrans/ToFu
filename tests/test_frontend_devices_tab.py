@@ -6,16 +6,19 @@
     标记 → static/settings_panels/devices.html(id=settingsTab_devices)→
     settings/devices.js 在 _BUNDLE_FILES → core_panel 的 switchSettingsTab
     钩子 → Api.desktop 域命中三端点 → i18n 键存在;
-  * 行为(jsdom):agents/tokens 渲染、mint 后原文上屏+列表刷新、revoke
-    后刷新;NEUTER:摘掉 core_panel 钩子 → 切页签不填充 = 钩子承重。
+  * 行为(jsdom):agents/自动授权渲染、revoke 后刷新；不暴露 mint/
+    copy 工作流;NEUTER:摘掉 core_panel 钩子 → 切页签不填充。
 
 Run isolated: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest tests/test_frontend_devices_tab.py
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +27,9 @@ from tests._jsdom import JS_DIR, ROOT, run_harness
 pytestmark = pytest.mark.unit
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEVICES_TS = Path(PROJECT_ROOT) / 'frontend/src/features/settings/devices.ts'
+SETTINGS_TS = Path(PROJECT_ROOT) / 'frontend/src/features/settings.ts'
+ESBUILD = Path(PROJECT_ROOT) / 'node_modules/.bin/esbuild'
 
 
 def _read(path):
@@ -47,16 +53,16 @@ def test_panel_fragment_exists_with_matching_id():
                               'devices.html'))
     assert 'id="settingsTab_devices"' in frag, (
         '片段 id 必须是 settingsTab_devices(switchSettingsTab 按此约定寻址)')
-    for el in ('devicesAgentsList', 'devicesTokensList', 'devicesMintBtn',
-               'devicesMintedBox', 'devicesMintedToken'):
+    for el in ('devicesAgentsList', 'devicesTokensList'):
         assert el in frag, f'面板缺关键元素 #{el}'
+    for retired in ('devicesMintBtn', 'devicesMintedBox',
+                    'devicesMintedToken', 'devicesMintName'):
+        assert retired not in frag, f'手工凭据流程泄回面板: #{retired}'
 
 
 def test_devices_js_in_bundle_list():
-    src = _read(os.path.join(PROJECT_ROOT, 'lib', 'js_bundler.py'))
-    assert "'settings/devices.js'" in src, (
-        'settings/devices.js 不在 _BUNDLE_FILES —— 生产环境静默不加载 '
-        '(§3.2.1 打包纪律)')
+    assert "import './settings/devices';" in SETTINGS_TS.read_text(), (
+        '原生 settings/devices.ts 未接入 Vite settings 入口')
 
 
 def test_switch_hook_delegates():
@@ -65,21 +71,21 @@ def test_switch_hook_delegates():
         'core_panel.switchSettingsTab 缺 devices 填充钩子 —— 切到页签白屏')
 
 
-def test_api_domain_hits_the_three_endpoints():
+def test_api_domain_keeps_inventory_and_revoke_endpoints():
     src = _read(os.path.join(JS_DIR, 'api.js'))
     assert "get('/api/v1/desktop/devices'" in src
-    assert "post('/api/v1/desktop/token'" in src
     assert '/api/v1/desktop/token/${encodeURIComponent(keyId)}' in src, (
-        'Api.desktop 三端点缺一(§3.2.0 统一客户端纪律)')
+        'Api.desktop 缺授权撤销端点')
 
 
 def test_i18n_keys_present_both_langs():
-    src = _read(os.path.join(JS_DIR, 'i18n.js'))
-    for key in ("'settings.tabDevices'", "'devices.mint'", "'devices.revoke'",
-                "'devices.empty'"):
-        assert key in src, f'i18n 缺键 {key}'
-    m = re.search(r"'settings\.tabDevices':\s*\{\s*zh:\s*'[^']+',\s*en:\s*'[^']+'\s*\}", src)
-    assert m, 'settings.tabDevices 必须双语'
+    locale_dir = Path(PROJECT_ROOT) / 'frontend/src/i18n/locales'
+    locales = [json.loads((locale_dir / f'{lang}.json').read_text())
+               for lang in ('zh', 'en')]
+    for key in ('settings.tabDevices', 'devices.tokensDesc',
+                'devices.revoke', 'devices.empty'):
+        assert all(key in locale and locale[key] for locale in locales), \
+            f'i18n 缺双语键 {key}'
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -94,7 +100,7 @@ const FRAG = process.argv[4];
 const fs = require('fs');
 const html = '<!DOCTYPE html><body>' + fs.readFileSync(FRAG, 'utf8') + '</body>';
 
-const calls = { get: [], post: [], del: [] };
+const calls = { get: [], del: [] };
 const fixture = {
   agents: [
     { agent_id: 'aaaaaaaabbbb', name: 'macbook', platform: 'darwin',
@@ -117,13 +123,19 @@ const { check, report } = setup({
     Api: {
       desktop: {
         devices: async () => { calls.get.push(1); return fixture; },
-        mintToken: async (name) => { calls.post.push(name);
-          return { id: 'k_2', name: name || 'desktop-bridge', token: 'secret-xyz' }; },
         revokeToken: async (id) => { calls.del.push(id); return { revoked: id }; },
       },
     },
   },
 });
+const owner = globalThis.DevicesModule || window.DevicesModule;
+for (const name of ['HTMLElement', 'HTMLButtonElement',
+                    'AbortController', 'AbortSignal']) {
+  global[name] = window[name];
+}
+global._renderDeviceAgents = owner.renderDeviceAgents;
+global._renderDeviceTokens = owner.renderDeviceTokens;
+global._devicesRevokeToken = owner.devicesRevokeToken;
 
 // ── 渲染:agents 两行 + tokens 一行 ──
 _renderDeviceAgents(fixture.agents);
@@ -136,16 +148,9 @@ check('token_row_present',
       document.querySelectorAll('.devices-token-row').length === 1);
 check('token_secret_never_rendered', !document.body.innerHTML.includes('secret'));
 
-// ── mint:POST 后原文上屏(唯一一次) ──
-document.getElementById('devicesMintName').value = 'my-mac';
-_devicesMintToken();
-for (let _i = 0; _i < 6; _i++) await Promise.resolve();
-check('mint_posted_with_name', calls.post[0] === 'my-mac');
-check('minted_token_shown_once',
-      document.getElementById('devicesMintedToken').textContent === 'secret-xyz');
-check('minted_box_visible',
-      document.getElementById('devicesMintedBox').style.display !== 'none');
-check('list_refreshed_after_mint', calls.get.length >= 1);
+check('no_manual_auth_controls',
+      !document.getElementById('devicesMintBtn') &&
+      !document.getElementById('devicesMintedToken'));
 
 // ── revoke:DELETE 后刷新 ──
 _devicesRevokeToken('k_1', null);
@@ -163,13 +168,28 @@ process.exit(0);
 """
 
 
-def test_devices_tab_behaviour_jsdom():
+def _compile_devices(tmp_path):
+    built = tmp_path / 'devices.js'
+    proc = subprocess.run(
+        [str(ESBUILD), str(DEVICES_TS), '--bundle', '--format=iife',
+         '--platform=browser', '--global-name=DevicesModule',
+         '--footer:js=globalThis.DevicesModule = DevicesModule;',
+         f'--outfile={built}'],
+        cwd=PROJECT_ROOT, capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return built
+
+
+@pytest.mark.skipif(not ESBUILD.is_file(), reason='esbuild not installed')
+def test_devices_tab_behaviour_jsdom(tmp_path):
+    built = _compile_devices(tmp_path)
     run_harness(
-        target_js=os.path.join(JS_DIR, 'settings', 'devices.js'),
+        target_js=str(built),
         body_js=_DEVICES_BODY,
         extra_targets=[os.path.join(PROJECT_ROOT, 'static',
                                     'settings_panels', 'devices.html')],
-        min_pass=11,
+        min_pass=8,
         label='devices tab',
     )
 

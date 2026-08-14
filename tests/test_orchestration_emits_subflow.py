@@ -11,12 +11,17 @@ both built-in orchestrations (endpoint + autopilot):
 """
 
 import unittest
+from pathlib import Path
 
 from lib.orchestration import (
-    MAX_SUBFLOW_DEPTH, SCHEMA_ID, VALID_SCOPES, build_autopilot_definition,
-    build_endpoint_definition, expand_subflows, resolve_emits, resolve_scope,
-    validate_definition,
+    DEFAULT_ROLE_ISOLATION, DEFAULT_ROLE_TIER, MAX_SUBFLOW_DEPTH, SCHEMA_ID,
+    VALID_SCOPES, build_autopilot_definition, build_endpoint_definition,
+    expand_subflows, resolve_emits, resolve_isolation, resolve_scope,
+    resolve_tier, validate_definition, VERIFIER_ROLES,
 )
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class ResolveEmitsTest(unittest.TestCase):
@@ -29,6 +34,8 @@ class ResolveEmitsTest(unittest.TestCase):
             'user')
 
     def test_derived_from_role(self):
+        self.assertEqual(
+            VERIFIER_ROLES, {'critic', 'reviewer', 'virtual_user'})
         self.assertEqual(resolve_emits({'role': 'critic'}), 'user')
         self.assertEqual(resolve_emits({'role': 'reviewer'}), 'user')
         self.assertEqual(resolve_emits({'role': 'virtual_user'}), 'user')
@@ -40,6 +47,23 @@ class ResolveEmitsTest(unittest.TestCase):
         self.assertEqual(
             resolve_emits({'role': 'critic', 'params': {'emits': 'bogus'}}),
             'user')
+
+
+class ResolveRoleExecutionAxesTest(unittest.TestCase):
+    def test_explicit_valid_values_win(self):
+        node = {
+            'type': 'role',
+            'params': {'tier': 'heavy', 'isolation': 'shared-context'},
+        }
+        self.assertEqual(resolve_tier(node), 'heavy')
+        self.assertEqual(resolve_isolation(node), 'shared-context')
+
+    def test_missing_or_invalid_values_use_one_shared_policy(self):
+        for params in ({}, {'tier': 'future', 'isolation': 'future'}):
+            node = {'type': 'role', 'params': params}
+            self.assertEqual(resolve_tier(node), DEFAULT_ROLE_TIER)
+            self.assertEqual(
+                resolve_isolation(node), DEFAULT_ROLE_ISOLATION)
 
 
 class EmitsValidationTest(unittest.TestCase):
@@ -103,6 +127,30 @@ class SubflowValidationTest(unittest.TestCase):
         d = self._wrap_subflow({'definition': self._child()})
         v = validate_definition(d)
         self.assertTrue(v['ok'], v['errors'])
+
+    def test_subflow_contract_has_one_physical_owner(self):
+        contract = (ROOT / 'lib/orchestration/_subflow_contract.py').read_text()
+        validator = (ROOT / 'lib/orchestration/_validate.py').read_text()
+        expansion = (ROOT / 'lib/orchestration/_subflow_expansion.py').read_text()
+        wire = (
+            ROOT / 'lib/orchestration/request_limit_contract.py'
+        ).read_text()
+        engine = (ROOT / 'lib/orchestration_engine.py').read_text()
+        runtime = (ROOT / 'lib/orchestration_subflow_runtime.py').read_text()
+
+        self.assertIn('MAX_SUBFLOW_DEPTH = 5', contract)
+        self.assertIn('def validate_subflow_node(', contract)
+        self.assertNotIn('MAX_SUBFLOW_DEPTH =', validator)
+        self.assertIn('validate_subflow_node(', validator)
+        dependency = (
+            'from lib.orchestration._subflow_contract import MAX_SUBFLOW_DEPTH'
+        )
+        self.assertIn(dependency, expansion)
+        self.assertIn(dependency, wire)
+        self.assertIn(dependency, runtime)
+        self.assertNotIn(dependency, engine)
+        self.assertLess(contract.count('\n'), 100)
+        self.assertLess(validator.count('\n'), 250)
 
     def test_subflow_without_def_or_ref_is_error(self):
         d = self._wrap_subflow({})
@@ -433,6 +481,53 @@ class ParallelVerdictChannelWarningTest(unittest.TestCase):
         return any('parallel' in w and (
             'feedback' in w or 'directive' in w or 'order-dependent' in w)
             for w in v['warnings'])
+
+    def test_topology_diagnostic_and_runtime_share_role_vocabulary(self):
+        topology = (ROOT / 'lib/orchestration/_topology_diagnostics.py').read_text()
+        validator = (ROOT / 'lib/orchestration/_validate.py').read_text()
+        roles = (ROOT / 'lib/orchestration/_role_axes.py').read_text()
+        engine = (ROOT / 'lib/orchestration_engine.py').read_text()
+        role_runtime = (ROOT / 'lib/orchestration_role_runtime.py').read_text()
+        agent_runner = (
+            ROOT / 'lib/orchestration_agent_runner.py'
+        ).read_text()
+        subflow_runtime = (
+            ROOT / 'lib/orchestration_subflow_runtime.py'
+        ).read_text()
+        adapter = (ROOT / 'lib/orchestration_endpoint_adapter.py').read_text()
+        endpoint_projection = (
+            ROOT / 'lib/orchestration_endpoint_projection.py'
+        ).read_text()
+
+        self.assertIn('def parallel_verdict_channel_warnings(', topology)
+        self.assertNotIn('def _parallel_verdict_channel_warnings(', validator)
+        self.assertIn('VERIFIER_ROLES = frozenset(', roles)
+        self.assertIn('from lib.orchestration._role_axes import VERIFIER_ROLES', topology)
+        self.assertIn(
+            'from lib.orchestration._role_axes import VERIFIER_ROLES',
+            endpoint_projection,
+        )
+        self.assertIn('endpoint_emits_for_role,', adapter)
+        self.assertIn('from lib.orchestration._role_axes import VERIFIER_ROLES', engine)
+        self.assertIn('resolve_node_runtime_param', role_runtime)
+        self.assertIn("node, 'isolation'", role_runtime)
+        self.assertIn("resolve_node_runtime_param(node, 'tier')", agent_runner)
+        self.assertNotIn("params.get('tier') or 'standard'", agent_runner)
+        self.assertIn(
+            'from lib.orchestration._runtime_params import '
+            'resolve_node_runtime_param',
+            subflow_runtime,
+        )
+        sources = '\n'.join((
+            roles, topology, engine, role_runtime, agent_runner, subflow_runtime,
+            endpoint_projection, adapter,
+        ))
+        self.assertEqual(
+            sources.count("frozenset({'critic', 'reviewer', 'virtual_user'})"),
+            1,
+        )
+        self.assertLess(topology.count('\n'), 110)
+        self.assertLess(validator.count('\n'), 300)
 
     def test_fresh_context_fanout_no_warning(self):
         # The safe/recommended pattern: two fresh-context one-shot workers.

@@ -145,6 +145,72 @@ class TestRelayAndModels(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 adapter.fetch_models('a', 8317, 'k')
 
+    def _management_resp(self, data, status=200):
+        return egress.EgressResponse(
+            status=status, headers={}, content=json.dumps(data).encode())
+
+    def test_accounts_are_sanitized_and_grouped_by_provider(self):
+        raw = {'files': [
+            {'name': 'claude-a.json', 'type': 'claude', 'email': 'a@x',
+             'auth_index': 1, 'access_token': 'must-not-leak'},
+            {'name': 'codex-b.json', 'provider': 'codex', 'email': 'b@x',
+             'status': 'active'},
+        ]}
+        policy = {'port': 8317, 'mgmt_secret': 'secret', 'api_key': 'key'}
+        with mock.patch.object(adapter, 'policy_for', return_value=policy), \
+             mock.patch.object(adapter, 'relay_http',
+                               return_value=self._management_resp(raw)) as relay:
+            accounts = adapter.adapter_accounts('acct-agent', force=True)
+        self.assertEqual([a['provider'] for a in accounts], ['claude', 'codex'])
+        self.assertFalse(any('access_token' in a for a in accounts))
+        self.assertEqual(relay.call_args.kwargs['headers']['Authorization'],
+                         'Bearer secret')
+
+    def test_start_oauth_uses_provider_management_endpoint(self):
+        policy = {'port': 8317, 'mgmt_secret': 'secret', 'api_key': 'key'}
+        response = self._management_resp(
+            {'status': 'ok', 'url': 'https://auth.example/', 'state': 'abc_123'})
+        with mock.patch.object(adapter, 'policy_for', return_value=policy), \
+             mock.patch.object(adapter, 'relay_http', return_value=response) as relay:
+            out = adapter.start_adapter_oauth('agent', 'codex')
+        self.assertEqual(out['state'], 'abc_123')
+        self.assertIn('/codex-auth-url?is_webui=true', relay.call_args.args[2])
+
+    def test_oauth_success_syncs_provider_before_reporting_success(self):
+        with mock.patch.object(adapter, '_management_request',
+                               return_value={'status': 'ok'}), \
+             mock.patch.object(adapter, 'sync_provider',
+                               return_value={'provider_id': 'adapter_a',
+                                             'models': 7}) as sync, \
+             mock.patch.object(adapter, 'adapter_accounts', return_value=[]):
+            out = adapter.adapter_oauth_status(
+                'agent', 'state', agent_name='box')
+        self.assertEqual(out['status'], 'ok')
+        self.assertEqual(out['models'], 7)
+        sync.assert_called_once()
+
+    def test_running_status_self_heals_missing_provider(self):
+        with adapter._status_lock:
+            adapter._status_cache.pop('heal-agent', None)
+        with mock.patch('lib.desktop.send_desktop_command',
+                        return_value=({'running': True, 'installed': True}, None)), \
+             mock.patch.object(adapter, 'adapter_accounts', return_value=[
+                 {'name': 'codex.json', 'provider': 'codex',
+                  'disabled': False, 'unavailable': False}]), \
+             mock.patch.object(adapter, '_adapter_provider_status',
+                               side_effect=[
+                                   {'provider_id': 'adapter_heal-age',
+                                    'provider_ready': False, 'model_count': 0},
+                                   {'provider_id': 'adapter_heal-age',
+                                    'provider_ready': True, 'model_count': 8},
+                               ]), \
+             mock.patch.object(adapter, 'sync_provider',
+                               return_value={'models': 8}) as sync:
+            status = adapter.adapter_status('heal-agent', agent_name='box')
+        self.assertTrue(status['provider_ready'])
+        self.assertEqual(status['provider_counts']['codex'], 1)
+        sync.assert_called_once()
+
 
 class TestProvisioning(unittest.TestCase):
 
@@ -206,6 +272,10 @@ class TestEnsureTask(unittest.TestCase):
                                    return_value=['m1', 'm2', 'm3']), \
                  mock.patch.object(adapter, 'provision_provider',
                                    return_value=True) as prov:
+                adapter._status_cache['agent-xyz'] = (
+                    time.monotonic(), {'ok': True, 'running': False})
+                adapter._accounts_cache['agent-xyz'] = (
+                    time.monotonic(), [])
                 task = adapter.ensure_adapter('agent-xyz', agent_name='box')
                 self.assertEqual(task.get('state'), 'ensuring')
                 deadline = time.time() + 5
@@ -226,6 +296,8 @@ class TestEnsureTask(unittest.TestCase):
             self.assertTrue(params['mgmt_secret'])
             self.assertEqual(kwargs.get('ttl'), 600)
             self.assertTrue(prov.called)
+            self.assertNotIn('agent-xyz', adapter._status_cache)
+            self.assertNotIn('agent-xyz', adapter._accounts_cache)
 
     def test_ensure_agent_error_surfaces(self):
         with tempfile.TemporaryDirectory() as td, \
@@ -242,6 +314,31 @@ class TestEnsureTask(unittest.TestCase):
                     time.sleep(0.05)
             self.assertEqual(state.get('state'), 'error')
             self.assertIn('download failed', state.get('detail', ''))
+
+    def test_first_run_without_accounts_is_ready_for_login(self):
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(adapter, '_policy_path',
+                               return_value=os.path.join(td, 'p.json')):
+            ensure_result = {'port': 8317, 'version': 'v7', 'running': True}
+            with mock.patch('lib.desktop.send_desktop_command',
+                            return_value=(ensure_result, None)), \
+                 mock.patch.object(adapter, 'fetch_models',
+                                   side_effect=RuntimeError(
+                                       'adapter /v1/models returned an empty list — no account')), \
+                 mock.patch.object(adapter, 'deprovision_provider',
+                                   return_value=False), \
+                 mock.patch.object(adapter, 'provision_provider') as provision:
+                adapter.ensure_adapter('agent-empty')
+                deadline = time.time() + 5
+                while time.time() < deadline:
+                    state = adapter.ensure_task_state('agent-empty')
+                    if state.get('state') != 'ensuring':
+                        break
+                    time.sleep(0.05)
+        self.assertEqual(state.get('state'), 'ready')
+        self.assertTrue(state.get('accounts_needed'))
+        self.assertEqual(state.get('models'), 0)
+        provision.assert_not_called()
 
     def test_stop_adapter_deprovisions(self):
         with mock.patch('lib.desktop.send_desktop_command',

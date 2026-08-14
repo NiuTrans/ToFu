@@ -180,6 +180,10 @@ class TestTruncatedToolArgsRetry(unittest.TestCase):
                          'PRIOR-PROSE poisoned-partial')
         types = [e.get('type') for e in task['events']]
         self.assertIn(EventType.DELTA_RESET, types)
+        resets = [e for e in task['events']
+                  if e.get('type') == EventType.DELTA_RESET]
+        self.assertEqual(task.get('_contentEpoch'), 1)
+        self.assertEqual(resets[-1].get('contentEpoch'), 1)
         phases = [e for e in task['events'] if e.get('type') == 'phase']
         self.assertTrue(phases and phases[-1].get('bucket')
                         == 'truncated_tool_args', task['events'])
@@ -413,7 +417,7 @@ def _mk_agent(dispatch_fn, events=None):
     from lib.swarm.agent import SubAgent
     from lib.swarm.types import SubTaskSpec
     spec = SubTaskSpec(role='coder', objective='truncation-guard test',
-                       max_rounds=0, timeout_seconds=0)
+                       timeout_seconds=0)
     agent = SubAgent(
         spec,
         parent_task={},

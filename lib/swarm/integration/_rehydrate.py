@@ -50,7 +50,7 @@ def _rebuild_tool_list(config: dict) -> list:
         # fail-closes, same as a fresh request. See docs/TOOL_PLUGINS.md.
         if 'plugins' in config:
             cfg['plugins'] = config['plugins']
-        tool_list, _has, _max = _assemble_tool_list(
+        tool_list, _has = _assemble_tool_list(
             cfg, project_path, bool(project_path),
             'swarm-rehydrate', search_mode,
             search_mode in ('single', 'multi'),

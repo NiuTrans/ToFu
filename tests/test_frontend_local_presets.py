@@ -25,6 +25,7 @@ swap. Removing any of them flips the corresponding check red.
 """
 
 import os
+import json
 import re
 
 import pytest
@@ -241,7 +242,9 @@ def test_local_presets_frontend(tmp_path):
 # ══════════════════════════════════════════════════════
 
 def _read(rel):
-    with open(os.path.join(JS_DIR, '..', rel), encoding='utf-8') as f:
+    if rel.startswith('js/'):
+        rel = rel[3:]
+    with open(os.path.join(JS_DIR, rel), encoding='utf-8') as f:
         return f.read()
 
 
@@ -269,16 +272,21 @@ def test_static_prose_hint_removed_everywhere():
 
 
 def test_static_i18n_keys_bilingual():
-    i18n = _read('js/i18n.js')
+    locale_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        'frontend', 'src', 'i18n', 'locales')
+    with open(os.path.join(locale_dir, 'zh.json'), encoding='utf-8') as f:
+        zh = json.load(f)
+    with open(os.path.join(locale_dir, 'en.json'), encoding='utf-8') as f:
+        en = json.load(f)
     for key in ('settings.localPresetTitle', 'settings.localPresetDesc',
                 'settings.localPresetVllmDesc', 'settings.localPresetSglangDesc',
                 'settings.localPresetOllamaDesc', 'settings.localPresetCustomName',
                 'settings.localPresetCustomDesc', 'settings.localEngineProviderName',
                 'settings.epServedModelsTitle'):
-        m = re.search(r"'%s': \{ zh: '.+', en: '.+' \}" % re.escape(key), i18n)
-        assert m, 'i18n key %s missing or not bilingual' % key
+        assert key in zh and key in en, 'i18n key %s missing or not bilingual' % key
     # The rewritten hint carries the binding semantics, not the old prose.
-    assert '独立路由' in i18n
+    assert '独立路由' in zh['settings.localEndpointsHint']
 
 
 def main():

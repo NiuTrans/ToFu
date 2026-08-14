@@ -89,6 +89,9 @@ def test_stale_rev_flagged(flask_client):
     divs = body['divergences']
     assert any(d['convId'] == conv_id and d['kind'] == 'rev'
                and d['client'] == 4 and d['server'] == 9 for d in divs), body
+    assert body['reloadConvIds'] == [conv_id], (
+        'a task-state snapshot cannot repair a stale conversation body; the '
+        'response must explicitly direct this tab to refresh it')
 
 
 def test_converged_digest_silent(flask_client):
@@ -104,6 +107,7 @@ def test_converged_digest_silent(flask_client):
         body = resp.get_json()
         assert body['divergences'] == [], body
         assert body['checked'] == 1
+        assert body['reloadConvIds'] == []
     finally:
         _unregister(tid)
 
@@ -151,6 +155,61 @@ def test_idle_conv_rev_lag_still_flagged(flask_client):
     assert any(d['convId'] == conv_id and d['kind'] == 'rev'
                and d['client'] == 43 and d['server'] == 48
                for d in body['divergences']), body
+
+
+def test_idle_rev_lookup_is_one_batch_query(flask_client, monkeypatch):
+    """A digest batch must not issue one serial DB query per conversation."""
+    import lib.database as database
+
+    conv_a, conv_b = _cid(), _cid()
+    _insert_conv(flask_client, conv_a, rev=10)
+    _insert_conv(flask_client, conv_b, rev=20)
+    real_fetchall = database.async_fetchall
+    calls = []
+
+    async def counted_fetchall(sql, params=(), **kwargs):
+        calls.append((sql, tuple(params)))
+        return await real_fetchall(sql, params, **kwargs)
+
+    monkeypatch.setattr(database, 'async_fetchall', counted_fetchall)
+    resp = _post(flask_client, [
+        {'convId': conv_a, 'taskIds': [], 'rev': 9},
+        {'convId': conv_b, 'taskIds': [], 'rev': 19},
+        # Duplicate ids must not inflate the IN list or query count.
+        {'convId': conv_a, 'taskIds': [], 'rev': 8},
+    ])
+
+    assert resp.status_code == 200
+    assert len(calls) == 1
+    assert calls[0][0].count('?') == 3  # user_id + two unique ids
+    assert calls[0][1][0] == 1
+    assert set(calls[0][1][1:]) == {conv_a, conv_b}
+
+
+def test_probe_identity_prevents_fresh_tab_clearing_stale_tab(flask_client):
+    """Route wiring keeps two browser pages in separate tracker buckets."""
+    from lib.conversations import drift_tracker
+
+    drift_tracker.reset()
+    conv_id = _cid()
+    _insert_conv(flask_client, conv_id, rev=12)
+    try:
+        stale = flask_client.post(
+            '/api/v1/conversations/sync-digest',
+            json={'probeId': 'tab-stale', 'digests': [
+                {'convId': conv_id, 'taskIds': [], 'rev': 3}]})
+        assert stale.status_code == 200
+        assert drift_tracker.tracked_count() == 1
+
+        fresh = flask_client.post(
+            '/api/v1/conversations/sync-digest',
+            json={'probeId': 'tab-fresh', 'digests': [
+                {'convId': conv_id, 'taskIds': [], 'rev': 12}]})
+        assert fresh.status_code == 200
+        assert drift_tracker.tracked_count() == 1, (
+            'fresh sibling agreement must not erase stale tab evidence')
+    finally:
+        drift_tracker.reset()
 
 
 def test_NEUTER_busy_skip_removed_flags_busy_lag_again():

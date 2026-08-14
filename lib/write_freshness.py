@@ -110,7 +110,9 @@ def _gate_enabled() -> bool:
 # why 4 MiB: it must cover every tracked TEXT file — styles.css alone is
 # ~1 MB — while excluding multi-MB data/binary payloads. Hashing 4 MiB
 # with blake2b costs single-digit milliseconds.
-_CONTENT_HASH_MAX_BYTES = 4 * 1024 * 1024
+# The retained Vite runtime is currently ~5.3 MiB. Hash it rather than leaving
+# the generated migration owner on the same-second/same-size mtime fast path.
+_CONTENT_HASH_MAX_BYTES = 8 * 1024 * 1024
 
 
 def _fingerprint(abs_path: str) -> tuple | None:

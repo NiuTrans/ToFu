@@ -18,7 +18,9 @@ import os
 import tempfile
 import time
 
-from flask import Blueprint, request
+from quart import Blueprint, request
+
+from lib.quart_sync import request_files
 
 from lib.api_response import (
     api_bad_request,
@@ -66,9 +68,10 @@ def upload_video():
     if not va.video_analysis_enabled():
         return api_error('Video analysis is disabled on this server', status=503)
 
-    if 'file' not in request.files:
+    files = request_files()
+    if 'file' not in files:
         return api_bad_request('No file')
-    file = request.files['file']
+    file = files['file']
     if not file.filename:
         return api_bad_request('No filename')
     ext = os.path.splitext(file.filename)[1].lower()

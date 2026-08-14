@@ -207,12 +207,12 @@ shrink-TTL / expand-permanent self-heal + big-drop strike gate). Reads/writes on
 concurrent writers). Well-bounded; the complexity is intrinsic to the self-heal
 correctness (§1d), not miscut.
 
-### 3.5 Memory (`lib/memory/`, 10 files, 3833 LOC)
+### 3.5 Memory (`lib/memory/`)
 
 | Module | LOC | Verdict | Status | Tests |
 |---|--:|---|---|---|
 | `storage.py` | 827 | **BIG** | HOT | `test_memory_global_server_store` |
-| `prefetch.py` | 814 | **BIG** | HOT | `test_prefetch_path_reconcile`, `test_streaming_and_prefetch` |
+| `prefetch/` | package | bounded local selector | HOT | `test_memory_prefetch_local` |
 | `user_profile.py` | 656 | **BIG** | live | `test_user_profile` |
 | `installer.py` | 398 | OK | live | via skill-install e2e |
 | `relevance.py` | 353 | OK | HOT | `test_relevance_cjk` |
@@ -226,9 +226,10 @@ correctness (§1d), not miscut.
 BM25 index (`search_memories`). The search/index cluster is separable from the
 persistence cluster. Split candidate: `memory/search.py`.
 
-`prefetch.py` — **BIG, but cohesive:** the per-turn BM25→cheap-LLM→inject
-pipeline (`<relevant_memories>` block). One flow, heavily commented (the
-path-reconcile + relevance-filter logic). BIG-but-cohesive; defer.
+`prefetch/` performs a metadata-only BM25 shortlist followed by deterministic
+high-confidence gates (exact identifier or at least two distinct token
+overlaps). It selects at most two entries, makes zero auxiliary LLM calls, and
+hands evidence to the Context Composer; it does not mutate messages directly.
 
 `user_profile.py` — **BIG.** The durable user-preference profile (the
 `[USER PREFERENCE PROFILE]` block). Bundles profile CRUD + the LLM-driven
@@ -329,15 +330,14 @@ The entire `token_counter/` package (reference-quality, one-backend-per-file);
 1. **`memory/storage.py` (827) → extract `memory/search.py`** for the BM25
    index/search cluster, leaving CRUD + file I/O in `storage.py`. Behind
    `test_memory_global_server_store` + `test_relevance_cjk`.
-2. **`system_context.py` (1088) → extract the delta-attachment cache** (the
-   hash/skip machinery) from the `_inject_system_contexts` orchestration. Shared
-   only via `_trace` telemetry. Behind `test_cc_alignment` + `test_context_trace`.
-   (This is the same file Unit 1 flagged; recorded here in its context-engineering
-   role.)
+2. ~~**`system_context.py` → split context ownership**~~ **Resolved
+   2026-08-12:** `lib/tasks_pkg/context_composer/` now owns typed providers,
+   deterministic ordering, budgets, dedupe, rendering, and manifests;
+   `system_context/` is a compatibility facade.
 
 **Big but optional (defer unless touched):**
-`conv_message_builder.py` (795 — one cohesive pipeline), `memory/prefetch.py`
-(814 — cohesive), `memory/user_profile.py` (656 — extraction/storage seam),
+`conv_message_builder.py` (795 — one cohesive pipeline),
+`memory/user_profile.py` (656 — extraction/storage seam),
 `compaction/_layer2.py` (913 — cohesive summary layer).
 
 **Do NOT split:** `token_counter/` modules, `compaction/_tokens.py` (pure +

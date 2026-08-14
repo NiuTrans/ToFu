@@ -52,12 +52,12 @@ from ._crud import (  # noqa: E402,F401
     force_trigger_timer,
     get_timer,
     get_timer_poll_log,
+    has_timer_history,
     list_active_timers,
 )
 
 # ── Poll logic + DB status writers ──────────────────────────────────────────
 from ._poll import (  # noqa: E402,F401
-    _MAX_POLL_AGENT_ROUNDS,
     _POLL_SYSTEM_PROMPT,
     _apply_reconcile_poll,
     _build_poll_tools,
@@ -86,7 +86,8 @@ from ._loop import (  # noqa: E402,F401
 # ── Public API — preserved VERBATIM from the pre-split module ───────────────
 __all__ = [
     'create_timer', 'cancel_timer', 'force_trigger_timer',
-    'get_timer', 'list_active_timers', 'get_timer_poll_log',
+    'get_timer', 'list_active_timers', 'has_timer_history',
+    'get_timer_poll_log',
     'poll_timer', 'start_timer_loop', 'resume_active_timers',
     'get_active_timer_count',
     # Used by scheduler/executor.py for inline blocking poll:

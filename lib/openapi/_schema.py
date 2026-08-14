@@ -12,6 +12,7 @@ Holds the static schema library used by :mod:`lib.openapi._spec`:
 
 from __future__ import annotations
 
+from lib.error_envelope import typed_error_envelope_schema
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -81,20 +82,27 @@ def _components() -> dict:
             },
         },
         'schemas': {
+            # The inner, reusable error object. Runtime validation and this
+            # schema share one definition in lib.error_envelope.
+            'TypedErrorEnvelope': typed_error_envelope_schema(),
+            # HTTP error-response wrapper. Keep this established component
+            # name for SDK compatibility; task.error references the typed
+            # inner object instead.
             'ErrorEnvelope': {
                 'type': 'object',
                 'properties': {
                     'ok': {'type': 'boolean', 'enum': [False]},
                     'error': {
-                        'oneOf': [
+                        'anyOf': [
                             {'type': 'string'},
-                            {'type': 'object',
-                             'properties': {
-                                 'kind': {'type': 'string'},
-                                 'detail': {'type': 'string'},
-                                 'context': {'type': 'string'},
-                                 'source': {'type': 'string'},
-                             }},
+                            {'$ref': '#/components/schemas/TypedErrorEnvelope'},
+                            {
+                                'type': 'object',
+                                'additionalProperties': True,
+                                'description': (
+                                    'Legacy structured error. New endpoints '
+                                    'should emit TypedErrorEnvelope.'),
+                            },
                         ],
                     },
                     'request_id': {'type': 'string'},
@@ -198,7 +206,12 @@ def _components() -> dict:
                     'created_at': {'type': 'number'},
                     'finished_at': {'type': 'number', 'nullable': True},
                     'result': {},
-                    'error': {'$ref': '#/components/schemas/ErrorEnvelope'},
+                    'error': {
+                        'oneOf': [
+                            {'$ref': '#/components/schemas/TypedErrorEnvelope'},
+                            {'type': 'null'},
+                        ],
+                    },
                     'meta': {'type': 'object', 'additionalProperties': True},
                 },
             },

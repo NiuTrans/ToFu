@@ -20,6 +20,8 @@ idempotent and degrades gracefully if any sub-system is unavailable.
 import os
 import re
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from urllib.parse import urlparse
 
 import lib as _lib
@@ -29,13 +31,16 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
-__all__ = ['install_search_bridge', 'sync_search_config']
+__all__ = [
+    'bind_search_browser', 'install_search_bridge', 'sync_search_config',
+]
 
 # Module-level filter knobs mirror the old lib/fetch/content_filter.py.
 _FILTER_MODEL = os.environ.get('FETCH_FILTER_MODEL', '')   # empty ⇒ dispatcher default
 _IRRELEVANT_STOP = '§§IRRELEVANT§§'
 
 _installed = False
+_search_browser_binding = ContextVar('tofu_search_browser_binding', default=None)
 
 
 def _env_bool(key: str, default: bool) -> bool:
@@ -168,13 +173,82 @@ def _is_browser_unrenderable(url: str) -> bool:
     return path.endswith(_BROWSER_UNRENDERABLE_EXTS)
 
 
+@contextmanager
+def bind_search_browser(*, user_id='', client_id=''):
+    """Bind one task's user/browser identity across tofu-search executors."""
+    uid = str(user_id or '')
+    try:
+        from lib.browser import get_connected_clients
+        clients = get_connected_clients(user_id=uid)
+        by_id = {str(row.get('client_id') or ''): row for row in clients}
+        selected = by_id.get(str(client_id or '')) if client_id else (
+            max(clients, key=lambda row: row.get('last_poll', 0))
+            if clients else None)
+        binding = (uid, str((selected or {}).get('client_id') or ''),
+                   str((selected or {}).get('profile') or ''))
+    except Exception as exc:
+        logger.debug('[Bridge] task browser binding failed: %s', exc)
+        binding = (uid, '', '')
+    token = _search_browser_binding.set(binding)
+    try:
+        yield binding
+    finally:
+        _search_browser_binding.reset(token)
+
+
+def _bind_browser_identity() -> tuple[str, str, str]:
+    """Capture the request user's freshest browser before worker fan-out."""
+    task_binding = _search_browser_binding.get()
+    if task_binding is not None:
+        return task_binding
+    try:
+        from routes.api_v1.auth import current_auth
+        ctx = current_auth()
+        user_id = str(getattr(ctx, 'user_id', '') or '')
+    except Exception as exc:
+        logger.debug('[Bridge] request identity lookup failed: %s', exc)
+        user_id = ''
+    try:
+        from lib.browser import get_connected_clients
+        clients = get_connected_clients(user_id=user_id)
+        client = max(clients, key=lambda row: row.get('last_poll', 0)) \
+            if clients else {}
+        return (user_id, str(client.get('client_id') or ''),
+                str(client.get('profile') or ''))
+    except Exception as exc:
+        logger.debug('[Bridge] browser identity binding failed: %s', exc)
+        return user_id, '', ''
+
+
 class _ChatuiBrowserProvider(tofu_search.BrowserProvider):
     """Routes tofu-search browser fallbacks through chatui's extension."""
+
+    def __init__(self, *, user_id='', client_id='', profile='', bound=False):
+        self.user_id = str(user_id or '')
+        self.client_id = str(client_id or '')
+        self.profile = str(profile or '')
+        self._bound = bool(bound)
+
+    def bind(self):
+        if self._bound:
+            return self
+        user_id, client_id, profile = _bind_browser_identity()
+        return type(self)(user_id=user_id, client_id=client_id,
+                          profile=profile, bound=True)
+
+    def _route(self) -> dict:
+        return {'client_id': self.client_id} \
+            if self._bound and self.client_id else {}
 
     def is_connected(self) -> bool:
         try:
             from lib.browser import is_extension_connected
-            return bool(is_extension_connected())
+            # Global providers are templates, not authority. Public tofu-search
+            # entry points call bind() before use; direct/unbound probes must be
+            # inert instead of observing another request's freshest browser.
+            if not self._bound or not self.client_id:
+                return False
+            return bool(is_extension_connected(self.client_id))
         except Exception as e:
             logger.debug('[Bridge] is_extension_connected failed: %s', e)
             return False
@@ -186,10 +260,12 @@ class _ChatuiBrowserProvider(tofu_search.BrowserProvider):
         if _is_browser_unrenderable(url):
             logger.info('[Bridge] browser fetch_url SKIP (binary/PDF, would download to client) — %s', url[:100])
             return None
+        if not self.is_connected():
+            return None
         try:
             from lib.browser import fetch_url_via_browser
             return fetch_url_via_browser(url, max_chars=max_chars or 50000,
-                                         timeout=max(timeout, 25))
+                                         timeout=max(timeout, 25), **self._route())
         except Exception as e:
             logger.warning('[Bridge] browser fetch_url failed for %s: %s', url[:80], e)
             return None
@@ -206,21 +282,30 @@ class _ChatuiBrowserProvider(tofu_search.BrowserProvider):
             logger.info('[Bridge] browser fetch_html SKIP (binary/PDF, would download to client) — %s', url[:100])
             return None
         try:
-            from lib.browser import is_extension_connected, send_browser_command
+            from lib.browser import send_browser_command
         except Exception as e:
             logger.debug('[Bridge] browser fetch_html import failed: %s', e)
             return None
-        if not is_extension_connected():
+        if not self.is_connected():
             return None
         try:
+            if self._bound:
+                from lib.browser import require_access
+                require_access(self.user_id, url, access='read',
+                               client_id=self.client_id, profile=self.profile)
             result, error = send_browser_command('fetch_url', {
                 'url': url, 'maxChars': 200000,
                 'timeoutMs': max(timeout, 20) * 1000,
-            }, timeout=max(timeout, 25))
+            }, timeout=max(timeout, 25), **self._route())
             if error or not isinstance(result, dict):
                 logger.warning('[Bridge] browser fetch_html failed for %s: %s',
                                url[:80], str(error)[:200])
                 return None
+            final_url = str(result.get('url') or url)
+            if self._bound:
+                from lib.browser import require_access
+                require_access(self.user_id, final_url, access='read',
+                               client_id=self.client_id, profile=self.profile)
             html = result.get('html', '') or result.get('text', '')
             if not html or len(html) < 100:
                 logger.info('[Bridge] browser fetch_html got %d chars (too short) for %s',
@@ -252,17 +337,21 @@ class _ChatuiBrowserProvider(tofu_search.BrowserProvider):
                         url[:100])
             return None
         try:
-            from lib.browser import is_extension_connected, send_browser_command
+            from lib.browser import send_browser_command
         except Exception as e:
             logger.debug('[Bridge] browser scrape import failed: %s', e)
             return None
-        if not is_extension_connected():
+        if not self.is_connected():
             return None
         tab_id = None
         try:
+            if self._bound:
+                from lib.browser import require_access
+                require_access(self.user_id, url, access='read',
+                               client_id=self.client_id, profile=self.profile)
             res, err = send_browser_command(
                 'create_tab', {'url': url, 'active': False},
-                timeout=max(timeout, 25))
+                timeout=max(timeout, 25), **self._route())
             if err or not isinstance(res, dict) or res.get('id') is None:
                 logger.warning('[Bridge] scrape create_tab failed for %s: %s',
                                url[:80], str(err)[:200])
@@ -273,20 +362,34 @@ class _ChatuiBrowserProvider(tofu_search.BrowserProvider):
                     'wait_for_element',
                     {'tabId': tab_id, 'selector': wait_selector,
                      'timeout': max(timeout, 15) * 1000},
-                    timeout=max(timeout, 15) + 10)
+                    timeout=max(timeout, 15) + 10, **self._route())
                 if werr or not (isinstance(wres, dict) and wres.get('found')):
                     # Slow/partial renders may still carry the data — extract anyway.
                     logger.info('[Bridge] scrape selector %r not confirmed for %s — '
                                 'extracting anyway', wait_selector, url[:80])
+            if self._bound:
+                tabs, terr = send_browser_command(
+                    'list_tabs', {}, timeout=8, **self._route())
+                current = next((row for row in (tabs or [])
+                                if str(row.get('id')) == str(tab_id)), None) \
+                    if not terr and isinstance(tabs, list) else None
+                if current is None:
+                    logger.warning('[Bridge] scrape cannot verify final tab URL for %s',
+                                   url[:80])
+                    return None
+                from lib.browser import require_access
+                require_access(
+                    self.user_id, current.get('url') or '', access='read',
+                    client_id=self.client_id, profile=self.profile)
             for _ in range(max(0, int(scrolls))):
                 send_browser_command(
                     'scroll_page',
                     {'tabId': tab_id, 'direction': 'bottom', 'pixels': 3000},
-                    timeout=10)
+                    timeout=10, **self._route())
                 time.sleep(1.2)   # human-ish pause; lets the lazy-load fire
             res, err = send_browser_command(
                 'execute_js', {'tabId': tab_id, 'code': extractor_js},
-                timeout=max(timeout, 15))
+                timeout=max(timeout, 15), **self._route())
             if err:
                 logger.warning('[Bridge] scrape execute_js failed for %s: %s',
                                url[:80], str(err)[:200])
@@ -305,10 +408,82 @@ class _ChatuiBrowserProvider(tofu_search.BrowserProvider):
         finally:
             if tab_id is not None:
                 try:
-                    send_browser_command('close_tab', {'tabId': tab_id}, timeout=5)
+                    send_browser_command('close_tab', {'tabId': tab_id},
+                                         timeout=5, **self._route())
                 except Exception as e:
                     logger.debug('[Bridge] scrape close_tab failed (tab %s may leak): %s',
                                  tab_id, e)
+
+
+_SiteSearchBase = getattr(tofu_search, 'SiteSearchProvider', object)
+
+
+class _ChatuiSiteSearchProvider(_SiteSearchBase):
+    """Expose ready read adapters to tofu-search without a host back-edge."""
+
+    def __init__(self, *, user_id='', client_id='', profile='', bound=False):
+        self.user_id = str(user_id or '')
+        self.client_id = str(client_id or '')
+        self.profile = str(profile or '')
+        self._bound = bool(bound)
+
+    def bind(self):
+        if self._bound:
+            return self
+        user_id, client_id, profile = _bind_browser_identity()
+        return type(self)(user_id=user_id, client_id=client_id,
+                          profile=profile, bound=True)
+
+    def list_sources(self):
+        try:
+            from lib.browser import adapter_health, list_adapters
+            # Site adapters execute inside one user's live browser.  Never let
+            # an unbound library call fall back to the globally freshest
+            # extension: that would make availability order-dependent and,
+            # more importantly, could cross a tenant boundary.  The search
+            # orchestrator calls bind() before fan-out.
+            if not self._bound or not self.client_id:
+                return []
+            rows = []
+            for adapter in list_adapters():
+                if not any(cmd.name == 'search' and cmd.access == 'read'
+                           for cmd in adapter.commands):
+                    continue
+                # A future write command may require upload/download support;
+                # that must not hide an otherwise healthy read-only search
+                # command from tofu-search.
+                health = adapter_health(
+                    adapter, client_id=self.client_id,
+                    command_name='search')
+                if not health.get('healthy'):
+                    continue
+                rows.append({
+                    'id': adapter.id, 'name': adapter.name,
+                    'aliases': list(adapter.aliases),
+                    'domains': list(adapter.domains), 'access': 'read',
+                    'metadata': {'adapter_version': adapter.version},
+                })
+            return rows
+        except Exception as exc:
+            logger.debug('[Bridge] site-search discovery failed: %s', exc)
+            return []
+
+    def search(self, source_id, query, *, max_results=10, freshness=''):
+        try:
+            from lib.browser import get_adapter, invoke_adapter
+            if not self._bound or not self.client_id:
+                return None
+            adapter = get_adapter(source_id)
+            if adapter is None:
+                return None
+            result = invoke_adapter(
+                adapter.id, 'search',
+                {'query': query, 'limit': max_results, 'pages': 1},
+                user_id=self.user_id, client_id=self.client_id)
+            return result.get('result') if result.get('ok') else None
+        except Exception as exc:
+            logger.warning('[Bridge] site-search %s failed: %s', source_id, exc)
+            return None
 
 
 # ═══════════════════════════════════════════════════════
@@ -368,10 +543,19 @@ class _ChatuiSiteKnowledgeProvider(_SiteKnowledgeBase):
 def _resolve_proxy_url() -> str:
     """Return chatui's effective HTTPS/HTTP proxy URL, or '' when none.
 
-    Prefers the Settings-resolved value from ``lib.proxy`` (which also mirrors
-    the env vars) so tofu-search's adaptive dual-attempt tries the SAME proxy
-    chatui itself uses, independent of env-var casing quirks.
+    Prefers the proxy pool's first healthy GLOBAL entry (2026-08-07 pool
+    feature), then the Settings-resolved legacy value from ``lib.proxy``
+    (which also mirrors the env vars) so tofu-search's adaptive
+    dual-attempt tries the SAME proxy chatui itself uses, independent of
+    env-var casing quirks.
     """
+    try:
+        from lib.proxy import first_global_proxy_url
+        pooled = first_global_proxy_url()
+        if pooled:
+            return pooled
+    except Exception as e:
+        logger.debug('[Bridge] pool proxy resolve failed: %s', e)
     try:
         from lib.proxy import get_proxy_config
         cfg = get_proxy_config()
@@ -462,6 +646,7 @@ def sync_search_config():
         block_private_addresses=block_private_addresses,
         allow_insecure_ssl_fallback=allow_insecure_ssl_fallback,
         min_request_interval_ms=min_request_interval_ms,
+        deepen_enabled=bool(getattr(_lib, 'SEARCH_DEEPEN_ENABLED', False)),
     )
     # Pass proxy_url ONLY when we resolved one. configure() applies its env
     # default just for fields ABSENT from kwargs, so an explicit '' would
@@ -505,6 +690,8 @@ def install_search_bridge():
     sync_search_config()
     if not _installed:
         tofu_search.register_browser_provider(_ChatuiBrowserProvider())
+        if hasattr(tofu_search, 'register_site_search_provider'):
+            tofu_search.register_site_search_provider(_ChatuiSiteSearchProvider())
         tofu_search.register_auth_source_provider(_ChatuiAuthSourceProvider())
         # tofu-search >=0.7.1: doctor-pinned selector knowledge + the drift
         # signal that feeds the autofix loop (lib/site_doctor.py). Older
@@ -518,6 +705,7 @@ def install_search_bridge():
             tofu_search.register_site_drift_listener(site_doctor.on_site_drift)
         _installed = True
         logger.info('[Bridge] tofu-search bridge installed '
-                    '(LLM=dispatch_chat, browser=extension, auth=auth_sources)')
+                    '(LLM=dispatch_chat, browser=extension, sites=adapters, '
+                    'auth=auth_sources)')
     else:
         logger.debug('[Bridge] tofu-search config re-synced')

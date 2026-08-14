@@ -62,11 +62,11 @@ class TestRefsOfTestFile:
         assert 'tests/_jsdom.py' in refs
 
     def test_literal_path_refs_captured(self):
-        src = "JS = os.path.join(ROOT, 'static', 'js', 'api.js')\n" \
-              "X = 'static/js/core/api.js'\n" \
+        src = "JS = os.path.join(ROOT, 'frontend', 'src', 'main.ts')\n" \
+              "X = 'frontend/src/api/transport.ts'\n" \
               "DOC = 'docs/API_CONTRACT.md'\n"
         refs = ts.refs_of_test_file(src)
-        assert _p('static', 'js/core/api.js') in refs
+        assert _p('frontend', 'src/api/transport.ts') in refs
         assert _p('docs', 'API_CONTRACT.md') in refs
 
     def test_external_packages_not_mapped(self):
@@ -84,10 +84,10 @@ class TestSelectTests:
     D = _p('tests', 'test_d.py')
     LIB_X = _p('lib', 'x.py')
     LIB_W = _p('lib', 'w.py')
-    UI_Y = _p('static', 'js/ui/y.js')
-    CORE_Z = _p('static', 'js/core/z.js')
+    UI_Y = _p('frontend', 'src/features/y.ts')
+    CORE_Z = _p('frontend', 'src/runtime/app-runtime.js')
     JSDOM_HELPER = _p('tests', '_jsdom.py')
-    API_JS = _p('static', 'js/api.js')
+    API_JS = _p('frontend', 'src/api/transport.ts')
     CONFTEST = _p('tests', 'conftest.py')
     INDEX = {
         A: {LIB_X},
@@ -109,7 +109,7 @@ class TestSelectTests:
         selected, _ = ts.select_tests(self.INDEX, [self.JSDOM_HELPER])
         assert self.C in selected
 
-    def test_blast_radius_api_js_pulls_frontend_family(self):
+    def test_blast_radius_api_transport_pulls_frontend_family(self):
         selected, _ = ts.select_tests(self.INDEX, [self.API_JS])
         assert self.C in selected
 
@@ -128,3 +128,33 @@ class TestSelectTests:
         selected, _ = ts.select_tests(self.INDEX, [self.CONFTEST])
         assert selected >= set(self.INDEX), (
             'conftest touches every session — the blast radius is the whole suite')
+
+
+class TestPytestCommand:
+    def test_parallel_command_explicitly_loads_xdist(self):
+        cmd = ts.build_pytest_command([_p('tests', 'test_a.py')], '2')
+
+        plugin = cmd.index('xdist.plugin')
+        workers = cmd.index('-n')
+        assert cmd[plugin - 1] == '-p'
+        assert plugin < workers
+        assert cmd[workers + 1] == '2'
+
+    def test_serial_command_does_not_load_xdist_or_pass_worker_flags(self):
+        cmd = ts.build_pytest_command(None, '0')
+
+        assert 'xdist.plugin' not in cmd
+        assert '-n' not in cmd
+        assert cmd[-5:-3] == ['-m', 'unit']
+
+    def test_implicit_single_file_selection_stays_serial(self):
+        cmd = ts.build_pytest_command([_p('tests', 'test_a.py')], None)
+
+        assert 'xdist.plugin' not in cmd
+        assert '-n' not in cmd
+
+    def test_implicit_multi_file_selection_caps_workers_at_make_default(self):
+        selected = [f'tests/test_{i}.py' for i in range(10)]
+        cmd = ts.build_pytest_command(selected, None)
+
+        assert cmd[cmd.index('-n') + 1] == '4'

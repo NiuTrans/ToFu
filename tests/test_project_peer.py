@@ -498,9 +498,14 @@ class _HybridRow:
     """A DB row supporting BOTH ``row['col']`` (SELECT messages/updated_at) and
     ``row[0]`` (SELECT COUNT(*) in _get_queue_depth)."""
     _D = {'messages': '[]', 'updated_at': 0, 'settings': '{}'}
+    def keys(self):
+        return self._D.keys()
+
     def __getitem__(self, k):
         if isinstance(k, int):
-            return 0            # COUNT(*) → 0 remaining
+            if k == 0:
+                return 0        # COUNT(*) → 0 remaining
+            raise IndexError(k)  # terminate Python's sequence fallback
         return self._D.get(k, None)
 
 
@@ -531,8 +536,9 @@ def test_peer_markers_survive_dispatch(monkeypatch):
     monkeypatch.setattr(mq, 'get_thread_db', lambda *a, **k: _FakeDB())
     monkeypatch.setattr(mq, 'db_execute_with_retry', lambda *a, **k: None)
     monkeypatch.setattr('lib.database.json_dumps_pg', lambda x: '[]')
-    monkeypatch.setattr('lib.chat.append_user_msg_idempotent',
-                        lambda msgs, m: captured.setdefault('msg', m))
+    monkeypatch.setattr(
+        mq, '_append_user_msg_with_cas',
+        lambda db, conv_id, msg: bool(captured.setdefault('msg', msg)))
     # Short-circuit AFTER the user_msg is built+appended (return [] → None).
     monkeypatch.setattr('lib.tasks_pkg.conv_message_builder.build_api_messages_from_db',
                         lambda *a, **k: [])
@@ -562,8 +568,9 @@ def test_NC_dispatch_drops_peer_markers(monkeypatch):
         monkeypatch.setattr(mq, 'get_thread_db', lambda *a, **k: _FakeDB())
         monkeypatch.setattr(mq, 'db_execute_with_retry', lambda *a, **k: None)
         monkeypatch.setattr('lib.database.json_dumps_pg', lambda x: '[]')
-        monkeypatch.setattr('lib.chat.append_user_msg_idempotent',
-                            lambda msgs, m: captured.setdefault('msg', m))
+        monkeypatch.setattr(
+            mq, '_append_user_msg_with_cas',
+            lambda db, conv_id, msg: bool(captured.setdefault('msg', msg)))
         monkeypatch.setattr('lib.tasks_pkg.conv_message_builder.build_api_messages_from_db',
                             lambda *a, **k: [])
         mq.dispatch_next_queued('cTARGET')

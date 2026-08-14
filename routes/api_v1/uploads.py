@@ -18,7 +18,7 @@ uploads or static-asset serving, not JSON REST verbs:
 
 from __future__ import annotations
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.log import get_logger
 

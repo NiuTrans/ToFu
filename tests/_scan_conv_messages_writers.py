@@ -53,11 +53,16 @@ _EXEMPT_PREFIXES = (
     'lib/database/_schema_pg/',    # defines the rev-bump trigger, not a writer
     'lib/database/_schema_sqlite/',
     'lib/database/messages_rows',  # the row-mirror target, not the blob owner
+    'lib/database/conversation_repository.py',  # the sole semantic owner
 )
 
 # Functions that are ALLOWED to overwrite unconditionally. Each needs a reason
 # recorded at its definition site; the guard asserts the reason exists.
 _SANCTIONED_UNCONDITIONAL = {
+    # Row authority has already frozen the parent blob. This bounded operator
+    # maintenance seam copies and verifies the archive transactionally before
+    # clearing it; a live-transcript CAS would be the wrong authority model.
+    'offload_frozen_message_archives',
     'overwrite_conversation_messages_unconditional',
 }
 
@@ -74,7 +79,7 @@ def _tracked_python_files() -> list[str]:
     untracked scratch files a sibling session may have left behind.
     """
     out = subprocess.run(
-        ['git', 'ls-files', '*.py'],
+        ['git', 'ls-files', '--cached', '--others', '--exclude-standard', '*.py'],
         cwd=REPO_ROOT, capture_output=True, text=True, timeout=60,
     )
     return [p for p in out.stdout.splitlines() if p.strip()]

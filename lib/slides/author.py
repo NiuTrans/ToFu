@@ -36,7 +36,8 @@ PAGE_STYLES_DOC = """\
 def _llm(messages, *, max_tokens: int, model: str | None = None):
     from lib.llm_dispatch.api import dispatch_chat
     return dispatch_chat(messages, max_tokens=max_tokens, temperature=0.35,
-                         prefer_model=model, log_prefix='[Slides:author]')
+                         prefer_model=model, strict_model=bool(model),
+                         log_prefix='[Slides:author]')
 
 
 def _validate_page_text(deck, page_path: str, text: str) -> list:
@@ -81,32 +82,74 @@ def _build_prompt(deck, brief: dict, page_index: int, total: int,
     layout = brief.get('layout_hint') or ''
     notes = brief.get('content_notes') or ''
     ptype = brief.get('pageType') or 'content'
+    from lib.slides._creative_plan import page_packet
+    packet = page_packet(brief, page_index, total, deck_title=deck.title)
     images_block = ''
     if image_urls:
         images_block = (
             '\n## 可用图片(只允许引用以下 URL;不允许编造其他图片地址)\n'
             + '\n'.join(f'- {u}' for u in image_urls[:12]) + '\n')
+    assigned = [str(p) for p in (brief.get('resolved_assets') or []) if p]
+    if assigned:
+        images_block = (
+            '\n## 本页已生成并验证的主视觉(必须实际放入页面)\n'
+            + '\n'.join(f'- {p}' for p in assigned)
+            + '\n这些路径是 deck 内的真实文件。至少一个 image 元素必须引用'
+              '本页指定路径;生成后不用等于没有素材。用裁切/蒙版/留白把它'
+              '做成构图主体,不要缩成卡片角落的装饰。\n')
+    source_cards = [s for s in (brief.get('sources') or [])
+                    if isinstance(s, dict) and s.get('url')]
+    sources_block = ''
+    if source_cards:
+        heading = (
+            '\n## 本页事实来源(必须保持事实与数字一致,并用 $caption '
+            '在页脚标注来源域名)\n' if lang == 'zh' else
+            '\n## Sources for this page (keep facts/numbers exact and cite '
+            'the source domains in a $caption footer)\n')
+        sources_block = heading + '\n'.join(
+            f'- [{s.get("id")}] {s.get("point")} — {s.get("url")}'
+            for s in source_cards) + '\n'
     if lang == 'zh':
+        grounding_rules = (
+            '## 素材—文案关联纪律(强制)\n'
+            '- 每句贴在图片上或紧邻图片的判断,都必须由当前裁切区域中真实可见的物体/部位支持。\n'
+            '- 若使用引线、箭头或圆点标注,逐条确认端点落在语义对应部位；'
+            '禁止指着窗户写地板、指着座椅写滑轨。\n'
+            '- 无法从图片明确确认具体部位时,不要猜也不要画引线,改用图片外 caption。'
+            '标注组使用 anno-line-N / anno-dot-N / anno-text-N 对应命名。\n')
         return (
             f'你是顶级演示设计师,正在为《{deck.title}》设计第 '
             f'{page_index + 1}/{total} 页(pageType: {ptype})。\n\n'
             f'## 本页任务\n- 读者任务: {purpose}\n- 核心信息: {key}\n'
             f'- 版式提示: {layout}\n- 内容素材: {notes}\n\n'
-            f'{theme_block}\n\n'
+            f'{packet}\n{theme_block}\n\n'
             f'## 主题文字样式\n{PAGE_STYLES_DOC}\n'
             f'{images_block}\n'
+            f'{sources_block}'
+            f'{grounding_rules}\n'
             f'## 设计圣经(本场景纪律,必须遵守)\n{bible_excerpt}\n\n'
             f'## PPTD 格式(只允许这个子集)\n{cheatsheet}\n\n'
             f'页面尺寸 {deck.width}×{deck.height} px。只输出本页的 YAML '
             f'(pageType/background/elements),不要代码围栏外的任何解释。')
+    grounding_rules = (
+        '## Asset-to-copy grounding (binding)\n'
+        '- Every claim on or beside an image must be supported by a visible '
+        'object/feature in the current crop.\n'
+        '- Trace every callout line/arrow/dot to its endpoint; the endpoint '
+        'must land on the feature named by the label.\n'
+        '- If the exact feature cannot be verified, omit the callout and use '
+        'an outside caption. Name groups anno-line-N / anno-dot-N / '
+        'anno-text-N.\n')
     return (
         f'You are a world-class presentation designer authoring page '
         f'{page_index + 1}/{total} (pageType: {ptype}) of "{deck.title}".\n\n'
         f'## This page\n- reader task: {purpose}\n- key message: {key}\n'
         f'- layout hint: {layout}\n- material: {notes}\n\n'
-        f'{theme_block}\n\n'
+        f'{packet}\n{theme_block}\n\n'
         f'## Theme text styles\n{PAGE_STYLES_DOC}\n'
         f'{images_block}\n'
+        f'{sources_block}'
+        f'{grounding_rules}\n'
         f'## Design bible (binding)\n{bible_excerpt}\n\n'
         f'## PPTD format (this subset only)\n{cheatsheet}\n\n'
         f'Page geometry {deck.width}×{deck.height} px. Output ONLY this '
@@ -116,7 +159,8 @@ def _build_prompt(deck, brief: dict, page_index: int, total: int,
 def author_page(deck, brief: dict, page_index: int, total: int, *,
                 theme=None, image_urls: list | None = None, lang: str = 'zh',
                 model: str | None = None, max_rounds: int = _MAX_ROUNDS,
-                extra_findings: list | None = None) -> dict:
+                extra_findings: list | None = None,
+                seed_yaml: str | None = None) -> dict:
     """Author one page. Returns ``{'ok', 'yaml', 'mode', 'rounds',
     'findings'}`` where mode is 'authored' or 'fallback' (never raises)."""
     from lib.design_sys.themes import design_bible_text, theme_prompt_block
@@ -132,6 +176,13 @@ def author_page(deck, brief: dict, page_index: int, total: int, *,
     if extra_findings:
         prompt += ('\n\n## 视觉评审发现的问题(本轮必须修复)\n'
                    + '\n'.join(f'- {f}' for f in extra_findings[:8]))
+    if seed_yaml:
+        prompt += (
+            '\n\n## 当前页面源码(在此基础上做最小修复)\n'
+            f'```yaml\n{seed_yaml}\n```\n'
+            '保留当前构图、文案、素材和无关元素；只调整问题元素的 bounds、'
+            '字号、行高或文案换行。allowOverlap 只允许用于确实有意叠放的装饰'
+            '字符，不得用来掩盖正文碰撞或溢出。输出完整页面 YAML。')
 
     messages = [{'role': 'user', 'content': prompt}]
     findings: list = []
@@ -146,6 +197,15 @@ def author_page(deck, brief: dict, page_index: int, total: int, *,
         yaml_text = _extract_yaml(content or '')
         findings = _validate_page_text(deck, f'pages/{page_index + 1:02d}.page',
                                        yaml_text)
+        required_assets = [str(path) for path in
+                           (brief.get('resolved_assets') or []) if path]
+        missing_assets = [path for path in required_assets
+                          if path not in yaml_text]
+        if not findings and missing_assets:
+            findings.append(
+                '页面没有引用已经生成的本页主视觉: '
+                + ', '.join(missing_assets)
+                + '。必须用 image 元素实际放入页面,不能生成后丢弃。')
         if not findings:
             logger.info('[Slides] page %d authored in %d round(s)',
                         page_index + 1, rnd)
@@ -162,6 +222,9 @@ def author_page(deck, brief: dict, page_index: int, total: int, *,
         ]
     logger.warning('[Slides] page %d degraded to fallback after %d rounds',
                    page_index + 1, max_rounds)
+    if seed_yaml:
+        return {'ok': False, 'yaml': seed_yaml, 'mode': 'unchanged',
+                'rounds': max_rounds, 'findings': findings}
     return {'ok': True, 'yaml': fallback_page(deck, brief, theme=theme),
             'mode': 'fallback', 'rounds': max_rounds, 'findings': findings}
 

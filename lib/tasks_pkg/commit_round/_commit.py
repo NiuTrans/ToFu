@@ -195,7 +195,7 @@ def _run_commit_round_async(task: dict, project_path: str) -> None:
             'web_search', 'fetch_url', 'inspect_image',
         })
         _TRACKED_EDIT_TOOLS = frozenset({
-            'write_file', 'apply_diff', 'apply_diffs',
+            'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
             'insert_content', 'insert_contents', 'run_command',
         })
         _round_has_opaque_writer = False

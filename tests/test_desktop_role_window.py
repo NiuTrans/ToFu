@@ -124,6 +124,14 @@ class AgentRoleStateTest(unittest.TestCase):
                          ['allow_write', 'allow_exec', 'allow_gui',
                           'allow_egress'])
 
+    def test_agent_link_state_is_exposed_for_the_status_card(self):
+        rw = _rw()
+        st = rw.role_state_agent('https://lab/proxy/15000', {}, True,
+                                 lang='zh', link_text='已连接',
+                                 link_state='ok')
+        self.assertEqual(st['link_text'], '已连接')
+        self.assertEqual(st['link_state'], 'ok')
+
 
 class ShowAtStartupGateTest(unittest.TestCase):
     """The gate reads the agent config blob. NEUTER target: flip the
@@ -197,6 +205,15 @@ class RendererDesignRatchetTest(unittest.TestCase):
             self.assertIsNotNone(pair, '%s missing from STRINGS' % desc_key)
             self.assertIn('en', pair, '%s missing en' % desc_key)
             self.assertIn('zh', pair, '%s missing zh' % desc_key)
+
+    def test_agent_panel_uses_compact_tiles_and_browser_primary_action(self):
+        src = _src('desktop/role_window.py')
+        self.assertIn('index // 2', src,
+                      'permission controls are no longer a two-column grid')
+        self.assertIn("actions.get('browser_relay')", src,
+                      'SSO recovery action vanished from the main panel')
+        self.assertIn('width=680', src,
+                      'the redesigned panel regressed to the cramped width')
 
     def test_tier_keys_cover_both_apps_tiers(self):
         rw = _rw()

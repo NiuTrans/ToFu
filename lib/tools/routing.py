@@ -1,0 +1,120 @@
+"""Conservative request-local routing for the native tool catalog.
+
+``tools.nativeExposure=full`` is the default and bypasses this module.  The
+``routed`` experiment arm selects tool families from the latest user request
+and explicit feature toggles.  Safety-critical/custom and progressive MCP
+surfaces are never hidden by the router.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Any
+
+
+_ALWAYS = frozenset({'read_files', 'inspect_image', 'knowledge', 'skills',
+                     'todo', 'mcp', 'custom'})
+
+_KEYWORDS: dict[str, tuple[str, ...]] = {
+    'search': ('search', 'research', 'browse', 'online', 'latest', 'news',
+               '查找', '搜索', '检索', '联网', '最新', '调研', '网页', 'http'),
+    'project': ('code', 'repo', 'file', 'test', 'bug', 'fix', 'implement',
+                'build', 'terminal', 'command', '代码', '仓库', '文件', '测试',
+                '修复', '实现', '构建', '命令'),
+    'browser': ('browser', 'page', 'dom', 'click', 'tab', 'cookie', '浏览器',
+                '页面', '点击', '标签页'),
+    'desktop': ('desktop', 'clipboard', 'application', '桌面', '剪贴板', '应用'),
+    'image': ('image', 'picture', 'photo', 'illustration', '图片', '图像', '插画'),
+    'video': ('video', 'motion', 'animation', 'slides', 'report', 'research report',
+              '视频', '动画', '幻灯片', '报告'),
+    'conversation': ('conversation', 'peer', 'project board', 'charter',
+                     '会话', '对话', '协作', '看板', '章程'),
+    'memory': ('remember', 'memory', 'recall', '记住', '记忆', '回忆'),
+    'scheduler': ('schedule', 'timer', 'remind', 'later', 'cron', '定时',
+                  '提醒', '计划任务', '稍后'),
+}
+
+
+def _latest_user_text(messages: Any) -> str:
+    if not isinstance(messages, list):
+        return ''
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get('role') != 'user':
+            continue
+        content = message.get('content', '')
+        if isinstance(content, str):
+            return content.lower()
+        if isinstance(content, list):
+            return ' '.join(str(block.get('text') or '').lower()
+                            for block in content if isinstance(block, dict))
+    return ''
+
+
+def _matches(text: str, group: str) -> bool:
+    return any(term in text for term in _KEYWORDS[group])
+
+
+def routed_native_spec_keys(ctx: Any) -> set[str]:
+    """Return the native ``ToolSpec.key`` set selected for this request."""
+    text = _latest_user_text(getattr(ctx, 'messages', None))
+    selected = set(_ALWAYS)
+
+    # Frontend/headless switches are hard constraints.  Keyword routing may
+    # add an unselected family for the current task, but it may never retract
+    # a family the human explicitly enabled in the toolbar or API config.
+    if (getattr(ctx, 'search_mode', 'off') in ('single', 'multi')
+            or getattr(ctx, 'search_enabled', False)):
+        selected.update({'search', 'fetch', 'search_settings'})
+    elif getattr(ctx, 'fetch_enabled', False):
+        selected.add('fetch')
+    if getattr(ctx, 'browser_enabled', False):
+        selected.add('browser')
+    if getattr(ctx, 'desktop_enabled', False):
+        selected.add('desktop')
+    if getattr(ctx, 'image_gen_enabled', False):
+        selected.add('image_gen')
+    if getattr(ctx, 'human_guidance_enabled', False):
+        selected.add('human_guidance')
+    if getattr(ctx, 'scheduler_enabled', False):
+        selected.add('scheduler')
+    if getattr(ctx, 'swarm_enabled', False):
+        selected.add('swarm')
+    cfg = getattr(ctx, 'cfg', {}) or {}
+    if cfg.get('memoryEnabled', True):
+        selected.add('memory')
+    if cfg.get('mcpEnabled', True):
+        selected.add('mcp')
+
+    if (getattr(ctx, 'project_enabled', False)
+            or getattr(ctx, 'code_exec_enabled', False)
+            or _matches(text, 'project')):
+        selected.add('project')
+        selected.add('page_preview')
+    if _matches(text, 'search'):
+        selected.update({'search', 'fetch', 'search_settings'})
+    if _matches(text, 'browser'):
+        selected.add('browser')
+    if _matches(text, 'desktop'):
+        selected.add('desktop')
+    if _matches(text, 'image'):
+        selected.add('image_gen')
+    if _matches(text, 'video'):
+        selected.update({'motion_video', 'produce', 'page_preview'})
+    if _matches(text, 'conversation') or any(
+            isinstance(message, dict)
+            and (message.get('convRefs') or message.get('convRefTexts'))
+            for message in (getattr(ctx, 'messages', None) or [])):
+        selected.add('conv_ref')
+    if _matches(text, 'memory'):
+        selected.add('memory')
+    if _matches(text, 'scheduler'):
+        selected.add('scheduler')
+
+    # A bare chat/research task still needs a way to acquire external facts.
+    if not getattr(ctx, 'project_enabled', False) and not re.search(
+            r'\b(code|repo|test|bug|file)\b', text):
+        selected.update({'search', 'fetch'})
+    return selected
+
+
+__all__ = ['routed_native_spec_keys']

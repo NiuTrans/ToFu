@@ -100,14 +100,17 @@ CONVERSATIONS = define_table(
     sa.Column('settings', jsonb_column(), nullable=False, server_default=sa.text("'{}'")),
     sa.Column('msg_count', sa.Integer, nullable=False, server_default=sa.text('0')),
     sa.Column('search_text', sa.Text, nullable=False, server_default=''),
-    # rev — server-issued monotonic message-version. Bumped by a DB trigger
-    # (NOT by any application writer) whenever the messages column actually
-    # changes, so it is impossible for a new writer to forget. Powers the
-    # compare-and-swap PUT + rev-based reconcile winner (a stale client copy
-    # carries an older rev and can never clobber fresh server truth). Starts at
-    # 0 on every existing row and pre-CAS client, so a client that sends no
-    # baseRev falls back to the legacy count-regression guard (fail-open).
+    # rev — server-issued monotonic transcript version. Transitional blob
+    # writes bump it through a DB trigger; row-authority writes bump it
+    # explicitly in conversation_repository in the same transaction as the
+    # canonical child rows. Powers compare-and-swap mutation/replay so a stale
+    # client or background task can never clobber fresh server truth.
     sa.Column('rev', sa.Integer, nullable=False, server_default=sa.text('0')),
+    # Revision for which conversation_messages is complete. -1 means
+    # unavailable/stale. During migration it is a parity marker; after cutover
+    # it advances atomically with canonical rows and startup refuses any drift.
+    sa.Column('messages_rows_rev', sa.Integer, nullable=False,
+              server_default=sa.text('-1')),
     sa.PrimaryKeyConstraint('id', 'user_id'),
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], ondelete='CASCADE'),
 )
@@ -128,10 +131,11 @@ CONVERSATIONS = define_table(
 # string; content holds the plain-string form. Exactly one is populated per row
 # (mirrors the str-vs-list branch in build_search_text). Composite PK
 # (conv_id, seq) preserves order; (conv_id, msg_id) is separately UNIQUE for
-# index-free addressing. FK to conversations(id) is intentionally OMITTED —
-# conversations has a COMPOSITE PK (id, user_id), so a single-column FK can't
-# target it; the migrator/dual-writer scope rows by conv_id within the owning
-# user's write path.
+# index-free addressing. Runtime schema migration enforces a UNIQUE index on
+# conversations(id), making this single-column ownership key unambiguous even
+# though the historical parent primary key remains (id, user_id). FK remains
+# application-owned for upgrade portability; delete_conversation performs the
+# explicit same-transaction cascade.
 CONVERSATION_MESSAGES = define_table(
     'conversation_messages',
     sa.Column('conv_id', sa.Text, nullable=False),
@@ -143,9 +147,141 @@ CONVERSATION_MESSAGES = define_table(
     sa.Column('thinking', sa.Text, nullable=False, server_default=''),
     sa.Column('translated_content', sa.Text, nullable=False, server_default=''),
     sa.Column('meta', jsonb_column(), nullable=False, server_default=sa.text("'{}'")),
+    # Small authoritative overlay for after-the-fact translation enrichment.
+    # A translation used to rewrite ``meta`` in full; real assistant rows can
+    # exceed 60 MB because they contain tool rounds and transport diagnostics.
+    # Keeping only translatedContent/UI flags/per-segment translatedText here
+    # lets that hot path update a few KB while ``meta`` remains the lossless
+    # base document. NULL means a pre-v54 row whose translation state is still
+    # read directly from ``meta``; newly materialized rows write a versioned
+    # object (including an empty one, which can explicitly clear stale state).
+    sa.Column('translation_state', jsonb_column(), nullable=True),
+    # Read-optimized first-paint projection of ``meta``. Nullable is
+    # intentional: upgraded databases and rows written by an older process
+    # start NULL, which makes the row-read gate fail closed until the online
+    # light-projection backfill has populated them. Full/lossless data remains
+    # in ``meta`` for hydration and parity verification.
+    sa.Column('meta_light', jsonb_column(), nullable=True),
+    # Nullable distinguishes an upgraded/unbackfilled row from a real legacy
+    # message with no timestamp (materialized as 0).
+    sa.Column('message_ts', bigint_column(), nullable=True),
+    # Small exact projection for daily cost aggregation.  NULL means an
+    # upgraded row has not been backfilled; ``{}`` is a valid projected
+    # message with no usage. Keeping this separate from ``meta_light`` avoids
+    # detoasting message content just to read a handful of token counters.
+    sa.Column('billing_meta', jsonb_column(), nullable=True),
     sa.Column('created_at', bigint_column(), nullable=False, server_default=sa.text('0')),
     sa.Column('updated_at', bigint_column(), nullable=False, server_default=sa.text('0')),
     sa.PrimaryKeyConstraint('conv_id', 'seq'),
+)
+
+# conversation_turns — authoritative visible transcript projection (v2).
+# A row is one stable bubble.  Generation retries and recovery never replace
+# its identity; they advance ``current_attempt_id`` and projection_revision.
+CONVERSATION_TURNS = define_table(
+    'conversation_turns',
+    sa.Column('turn_id', sa.Text, primary_key=True),
+    sa.Column('conversation_id', sa.Text, nullable=False),
+    sa.Column('user_id', sa.Integer, nullable=False),
+    sa.Column('lane_id', sa.Text, nullable=False, server_default='main'),
+    sa.Column('parent_turn_id', sa.Text, nullable=True),
+    sa.Column('ordinal', sa.Integer, nullable=False),
+    sa.Column('actor', sa.Text, nullable=False),
+    sa.Column('kind', sa.Text, nullable=False, server_default='reply'),
+    sa.Column('run_id', sa.Text, nullable=False, server_default=''),
+    sa.Column('status', sa.Text, nullable=False, server_default='pending'),
+    sa.Column('current_attempt_id', sa.Text, nullable=True),
+    sa.Column('projection', jsonb_column(), nullable=False,
+              server_default=sa.text("'{}'")),
+    sa.Column('projection_revision', sa.Integer, nullable=False,
+              server_default=sa.text('0')),
+    sa.Column('settlement', jsonb_column(), nullable=False,
+              server_default=sa.text("'{}'")),
+    sa.Column('created_at', bigint_column(), nullable=False),
+    sa.Column('updated_at', bigint_column(), nullable=False),
+    sa.ForeignKeyConstraint(
+        ['conversation_id', 'user_id'],
+        ['conversations.id', 'conversations.user_id'], ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(
+        ['parent_turn_id'], ['conversation_turns.turn_id'], ondelete='SET NULL'),
+    sa.UniqueConstraint('conversation_id', 'lane_id', 'ordinal',
+                        name='uq_conversation_turn_lane_ordinal'),
+    sa.CheckConstraint(
+        "actor IN ('human','assistant','planner','critic','virtual_user')",
+        name='ck_conversation_turn_actor'),
+    sa.CheckConstraint(
+        "status IN ('pending','running','completed','interrupted','truncated','failed')",
+        name='ck_conversation_turn_status'),
+)
+
+# generation_attempts — one billable execution against one stable turn.
+# ``(conversation_id, command_id)`` is the durable idempotency boundary for
+# lost ACKs, double-clicks, cross-tab retries and process restarts.
+GENERATION_ATTEMPTS = define_table(
+    'generation_attempts',
+    sa.Column('attempt_id', sa.Text, primary_key=True),
+    sa.Column('conversation_id', sa.Text, nullable=False),
+    sa.Column('turn_id', sa.Text, nullable=False),
+    sa.Column('command_id', sa.Text, nullable=False),
+    sa.Column('task_id', sa.Text, nullable=False, server_default=''),
+    sa.Column('operation', sa.Text, nullable=False),
+    sa.Column('status', sa.Text, nullable=False, server_default='pending'),
+    sa.Column('base_projection_revision', sa.Integer, nullable=False),
+    sa.Column('resume_anchor', jsonb_column(), nullable=False,
+              server_default=sa.text("'{}'")),
+    sa.Column('config', jsonb_column(), nullable=False,
+              server_default=sa.text("'{}'")),
+    sa.Column('error', jsonb_column(), nullable=False,
+              server_default=sa.text("'{}'")),
+    sa.Column('created_at', bigint_column(), nullable=False),
+    sa.Column('started_at', bigint_column(), nullable=True),
+    sa.Column('settled_at', bigint_column(), nullable=True),
+    sa.Column('superseded_at', bigint_column(), nullable=True),
+    sa.ForeignKeyConstraint(
+        ['turn_id'], ['conversation_turns.turn_id'], ondelete='CASCADE'),
+    sa.UniqueConstraint('conversation_id', 'command_id',
+                        name='uq_generation_attempt_command'),
+    sa.CheckConstraint(
+        "operation IN ('generate','continue','checkpoint_resume','regenerate')",
+        name='ck_generation_attempt_operation'),
+    sa.CheckConstraint(
+        "status IN ('pending','running','completed','interrupted','truncated','failed','superseded')",
+        name='ck_generation_attempt_status'),
+)
+
+# attempt_events — replayable durable stream.  seq is monotonic per attempt;
+# every row carries the complete public identity envelope.
+ATTEMPT_EVENTS = define_table(
+    'attempt_events',
+    sa.Column('attempt_id', sa.Text, nullable=False),
+    sa.Column('seq', bigint_column(), nullable=False),
+    sa.Column('conversation_id', sa.Text, nullable=False),
+    sa.Column('turn_id', sa.Text, nullable=False),
+    sa.Column('projection_revision', sa.Integer, nullable=False),
+    sa.Column('type', sa.Text, nullable=False),
+    sa.Column('payload', jsonb_column(), nullable=False),
+    sa.Column('created_at', bigint_column(), nullable=False),
+    sa.ForeignKeyConstraint(
+        ['attempt_id'], ['generation_attempts.attempt_id'], ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(
+        ['turn_id'], ['conversation_turns.turn_id'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('attempt_id', 'seq'),
+)
+
+# Immutable forensic copy of the retired conversations.messages value. Once
+# normalized rows are authoritative, keeping that multi-megabyte JSON value on
+# the frequently updated conversations row makes every rev/title/timestamp
+# update rewrite its overflow pages on SQLite. The reviewed offloader copies
+# the frozen value here before replacing the hot-row value with ``[]``.
+CONVERSATION_MESSAGE_ARCHIVES = define_table(
+    'conversation_message_archives',
+    sa.Column('conv_id', sa.Text, nullable=False),
+    sa.Column('user_id', sa.Integer, nullable=False),
+    sa.Column('messages', jsonb_column(), nullable=False),
+    sa.Column('source_rev', sa.Integer, nullable=False),
+    sa.Column('msg_count', sa.Integer, nullable=False),
+    sa.Column('archived_at', bigint_column(), nullable=False),
+    sa.PrimaryKeyConstraint('conv_id', 'user_id'),
 )
 
 # trading_config — key/value store; identical shape on PG + SQLite.
@@ -284,6 +420,12 @@ TASK_RESULTS = define_table(
     sa.Column('tool_rounds', sa.Text),
     sa.Column('search_results', sa.Text),
     sa.Column('metadata', sa.Text),
+    # Dedicated cross-process abort tombstone. Running checkpoints replace the
+    # metadata document wholesale, so an abort mark stored inside that JSON is
+    # inherently lossy under concurrent persistence.
+    sa.Column('abort_requested_at', bigint_column(), nullable=False,
+              server_default=sa.text('0')),
+    sa.Column('abort_source', sa.Text, nullable=False, server_default=''),
     # segments — the ordered typed-segment timeline (epic pt_cb8f98b0cb9b47fb).
     # TEXT holding a JSON string (the thin form; see segments.segments_to_json),
     # NOT JSONB — matches the sibling tool_rounds/search_results/metadata cols
@@ -788,6 +930,20 @@ PROJECT_WATCH_RESPONSES = define_table(
     sa.Column('trigger', sa.Text, nullable=False, server_default='manual'),
     sa.Column('ts', bigint_column(), nullable=False, server_default=sa.text('0')),
     sa.PrimaryKeyConstraint('item_id', 'seq'),
+)
+
+# scoped_sequences — database-owned monotonic counters for append-only streams.
+# A process-local Lock around ``SELECT MAX(seq) + 1`` is not a correctness
+# boundary: another worker process/host can observe the same MAX and collide.
+# The counter row is updated atomically by ``allocate_scoped_sequence`` inside
+# the SAME transaction as the stream insert, so SQLite and PostgreSQL share the
+# same multi-writer-safe allocation contract.
+SCOPED_SEQUENCES = define_table(
+    'scoped_sequences',
+    sa.Column('namespace', sa.Text, nullable=False),
+    sa.Column('scope_key', sa.Text, nullable=False),
+    sa.Column('value', bigint_column(), nullable=False, server_default=sa.text('0')),
+    sa.PrimaryKeyConstraint('namespace', 'scope_key'),
 )
 
 # optimizer_proposals — nightly self-tuning proposals. Single TEXT PK;

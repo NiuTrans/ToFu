@@ -29,9 +29,11 @@ source-assertion convention for boot wiring the e2e harness can't exercise):
 import re
 from pathlib import Path
 
+from tests._runtime_sections import runtime_section_path
+
 REPO = Path(__file__).resolve().parent.parent
-MAIN_JS = REPO / "static" / "js" / "main.js"
-INIT_JS = REPO / "static" / "js" / "main" / "main_init_tasks.js"
+MAIN_JS = Path(runtime_section_path('main.js'))
+INIT_JS = Path(runtime_section_path('main/main_init_tasks.js'))
 
 
 def _strip_js_comments(src: str) -> str:

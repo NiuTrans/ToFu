@@ -241,8 +241,8 @@ def test_reducer_normalizes_int_str_userid():
         pytest.skip('node not installed')
     HERE = _os.path.dirname(_os.path.abspath(__file__))
     ROOT = _os.path.normpath(_os.path.join(HERE, '..'))
-    reducer = _os.path.join(ROOT, 'static', 'js', 'core',
-                            'conv_state_reducer.js')
+    from tests._runtime_sections import runtime_section_path
+    reducer = runtime_section_path('core/conv_state_reducer.js')
 
     script = r"""
 const fs = require('fs');

@@ -25,9 +25,10 @@ logger = get_logger(__name__)
 def api_meta(*, summary: str = '', description: str = '',
              tags: Optional[list[str]] = None,
              scope: str = '',
-             request_body: Optional[dict] = None,
+             request_body: Optional[dict] | bool = None,
              responses: Optional[dict] = None,
              parameters: Optional[list[dict]] = None,
+             extensions: Optional[dict] = None,
              deprecated: bool = False,
              public: bool = False) -> Any:
     """Attach OpenAPI metadata to a route handler.
@@ -45,7 +46,8 @@ def api_meta(*, summary: str = '', description: str = '',
         the security requirement on the operation.
     request_body : dict | None
         OpenAPI ``requestBody`` object. Caller supplies an inline schema
-        or ``$ref``. If None, no body is documented.
+        or ``$ref``. ``False`` explicitly declares a bodyless operation;
+        ``None`` retains automatic object-body documentation for writes.
     responses : dict | None
         Mapping of status code → response object. Defaults to a generic
         200 ``{ok:true}`` response when unspecified.
@@ -56,7 +58,19 @@ def api_meta(*, summary: str = '', description: str = '',
     public : bool
         If True, document the operation as not requiring auth (e.g.
         capabilities/health endpoints).
+    extensions : dict | None
+        OpenAPI vendor extensions. Every key must start with ``x-``.
     """
+    declared_extensions = dict(extensions or {})
+    if any(not isinstance(key, str) or not key.startswith('x-')
+           for key in declared_extensions):
+        raise ValueError('OpenAPI extension keys must start with x-')
+    if request_body is True or (
+        request_body is not None
+        and request_body is not False
+        and not isinstance(request_body, dict)
+    ):
+        raise TypeError('OpenAPI request_body must be a dict, False or None')
     meta = {
         'summary': summary,
         'description': description,
@@ -68,6 +82,8 @@ def api_meta(*, summary: str = '', description: str = '',
         'deprecated': bool(deprecated),
         'public': bool(public),
     }
+    if declared_extensions:
+        meta['extensions'] = declared_extensions
 
     def decorator(fn):
         fn._api_meta = meta

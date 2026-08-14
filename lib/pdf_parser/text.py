@@ -96,22 +96,77 @@ def _safe_progress(cb, page: int, total: int) -> None:
 _pymupdf_rag = None
 _pymupdf_rag_tried = False
 
+# A single born-digital page should not plausibly expand to tens or hundreds
+# of thousands of Markdown characters.  PyMuPDF4LLM's permissive ``lines``
+# table strategy can duplicate a wide table cell once per detected column
+# (measured: a 6,070-char arXiv page became 250,662 chars).  ``lines_strict``
+# fixes that upstream failure shape; this ratio guard is the last-resort fuse
+# for future extractor regressions.
+_MAX_PAGE_MARKDOWN_CHARS = 32_000
+_MAX_PAGE_MARKDOWN_TO_RAW_RATIO = 8
 
-def _to_markdown_classic(md_doc, **kw):
-    """``pymupdf4llm.to_markdown`` pinned to the classic rag implementation."""
+
+def _load_pymupdf_rag():
+    """Load the classic implementation once without importing layout mode."""
     global _pymupdf_rag, _pymupdf_rag_tried
     if not _pymupdf_rag_tried:
         _pymupdf_rag_tried = True
         try:
-            from pymupdf4llm.helpers import pymupdf_rag as _rag
+            # Upstream prints a layout-backend promotion on import even when
+            # Tofu intentionally selected the classic path. Avoid confusing a
+            # successful parse/install with an action item for the user.
+            import contextlib
+            import io
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                from pymupdf4llm.helpers import pymupdf_rag as _rag
             _pymupdf_rag = _rag
         except Exception as e:
             logger.debug('[PDF] pymupdf_rag direct import unavailable, '
                          'falling back to top-level to_markdown: %s', e)
-    if _pymupdf_rag is not None:
-        return _pymupdf_rag.to_markdown(md_doc, **kw)
+    return _pymupdf_rag
+
+
+def _to_markdown_classic(md_doc, **kw):
+    """``pymupdf4llm.to_markdown`` pinned to the classic rag implementation."""
+    rag = _load_pymupdf_rag()
+    if rag is not None:
+        return rag.to_markdown(md_doc, **kw)
     import pymupdf4llm
     return pymupdf4llm.to_markdown(md_doc, **kw)
+
+
+def _classic_header_info(md_doc):
+    """Infer headings once per document; degrade headings, never the document.
+
+    The classic helper normally constructs ``IdentifyHeaders(doc)`` inside
+    every ``to_markdown(pages=[i])`` call.  Our honest per-page progress loop
+    therefore scanned an N-page document N times (quadratic work), and an
+    upstream header-inference ``ValueError: min() iterable argument is empty``
+    sent the *whole* paper to raw fallback.  Reuse one inference object.  If
+    that optional heuristic fails, ``False`` tells PyMuPDF4LLM to keep its
+    Markdown/table path while merely disabling inferred headings.
+    """
+    rag = _load_pymupdf_rag()
+    if rag is None or not hasattr(rag, 'IdentifyHeaders'):
+        return False
+    try:
+        return rag.IdentifyHeaders(md_doc)
+    except Exception as e:
+        logger.warning('[PDF] heading inference failed (%s); continuing with '
+                       'Markdown extraction and headings disabled', e,
+                       exc_info=True)
+        return False
+
+
+def _raw_page_text(md_doc, page_index: int) -> str:
+    """Best-effort local fallback for one page of an already-open document."""
+    try:
+        return md_doc[page_index].get_text() or ''
+    except Exception as e:
+        logger.warning('[PDF] raw fallback failed for page %d: %s',
+                       page_index + 1, e, exc_info=True)
+        return ''
 
 
 def extract_pdf_text(pdf_bytes: bytes, max_chars: int = 0, url: str = '',
@@ -145,7 +200,8 @@ def extract_pdf_text_with_meta(pdf_bytes: bytes, max_chars: int = 0, url: str = 
             raised by the callback are logged at DEBUG level and swallowed.
             NOTE: Docling (``mode='structured'``) does not expose mid-call
             per-page progress; only start (0/N) and end (N/N) ticks fire.
-        mode: ``'rich'`` (default) → use pymupdf4llm with table_strategy='lines'
+        mode: ``'rich'`` (default) → use pymupdf4llm with
+            table_strategy='lines_strict'
             for full Markdown preservation (tables, headers, math). Best
             quality / latency tradeoff with no extra deps.
             ``'structured'`` → try docling first (best for borderless tables
@@ -192,7 +248,7 @@ def extract_pdf_text_with_meta(pdf_bytes: bytes, max_chars: int = 0, url: str = 
                            '(falling back to pymupdf4llm)', e, exc_info=True)
 
     # ── Fast mode: jump straight to Strategy 2 (raw get_text) ──
-    # Skips pymupdf4llm + table_strategy='lines' entirely. Used by
+    # Skips pymupdf4llm + table_strategy='lines_strict' entirely. Used by
     # web_search and fetch_url callers that only need plain text for
     # BM25 ranking / snippet display. ≈50× faster on academic PDFs.
     if mode == 'fast':
@@ -217,18 +273,50 @@ def extract_pdf_text_with_meta(pdf_bytes: bytes, max_chars: int = 0, url: str = 
                     parts = []
                     total = 0
                     truncated = False
+                    page_fallbacks = 0
+                    # Reusing this object changes header scanning from O(N²)
+                    # to O(N) and isolates the upstream empty-minimum bug.
+                    header_info = _classic_header_info(md_doc)
                     for pi in range(n):
-                        chunks = _to_markdown_classic(
-                            md_doc,
-                            pages=[pi],
-                            page_chunks=True,
-                            show_progress=False,
-                            table_strategy="lines",
-                        )
                         page_md = ''
-                        if chunks:
-                            c0 = chunks[0]
-                            page_md = c0.get('text', '') if isinstance(c0, dict) else str(c0)
+                        try:
+                            chunks = _to_markdown_classic(
+                                md_doc,
+                                pages=[pi],
+                                page_chunks=True,
+                                show_progress=False,
+                                table_strategy="lines_strict",
+                                hdr_info=header_info,
+                            )
+                            if chunks:
+                                c0 = chunks[0]
+                                page_md = (c0.get('text', '')
+                                           if isinstance(c0, dict) else str(c0))
+                        except Exception as e:
+                            # One malformed page must not downgrade every good
+                            # page in the paper to flat raw text.
+                            logger.warning('[PDF] pymupdf4llm page %d/%d failed '
+                                           '(%s); using raw text for this page',
+                                           pi + 1, n, e, exc_info=True)
+                            page_md = _raw_page_text(md_doc, pi)
+                            page_fallbacks += 1
+
+                        # Protect the corpus from table-cell multiplication.
+                        # Only replace when BOTH an absolute and relative bound
+                        # are exceeded, so genuinely dense pages remain intact.
+                        if len(page_md) > _MAX_PAGE_MARKDOWN_CHARS:
+                            raw_page = _raw_page_text(md_doc, pi)
+                            raw_len = len(raw_page)
+                            if raw_page and len(page_md) > max(
+                                    _MAX_PAGE_MARKDOWN_CHARS,
+                                    raw_len * _MAX_PAGE_MARKDOWN_TO_RAW_RATIO):
+                                logger.warning('[PDF] pymupdf4llm page %d/%d '
+                                               'expanded %d raw chars to %d '
+                                               'Markdown chars; using raw page '
+                                               'to prevent table duplication',
+                                               pi + 1, n, raw_len, len(page_md))
+                                page_md = raw_page
+                                page_fallbacks += 1
                         page_md = strip_manuscript_line_numbers(page_md)
                         page_md = postprocess_math_blocks(page_md)
                         page_md = cleanup_markdown(page_md)
@@ -251,9 +339,12 @@ def extract_pdf_text_with_meta(pdf_bytes: bytes, max_chars: int = 0, url: str = 
 
             text = '\n\n---\n\n'.join(parts)
             logger.debug('pymupdf4llm OK: %d pages, %s chars '
-                         '(table_strategy=lines, per-page, truncated=%s) — %s',
-                         n, f'{total:,}', truncated, url[:60])
-            return text, 'pymupdf4llm'
+                         '(table_strategy=lines_strict, per-page, truncated=%s, '
+                         'page_fallbacks=%d) — %s',
+                         n, f'{total:,}', truncated, page_fallbacks, url[:60])
+            extractor = ('pymupdf4llm-partial' if page_fallbacks
+                         else 'pymupdf4llm')
+            return text, extractor
 
         except Exception as e:
             logger.warning('pymupdf4llm failed (%s), falling back to pymupdf raw', e, exc_info=True)

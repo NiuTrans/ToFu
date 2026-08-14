@@ -114,6 +114,7 @@ def emit_messages_snapshot_event(
             roundNum=round_num + 1,
             label=f'Round {round_num + 1} 请求前 · {len(snapshot)}条',
             messages=snapshot,
+            contextManifest=list(task.get('_contextManifest') or []),
         )
         if tools:
             snap_evt['tools'] = tools

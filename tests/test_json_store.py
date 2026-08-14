@@ -152,6 +152,53 @@ def test_write_text_atomic():
     _ok('write_text_atomic + read_text round-trip')
 
 
+def test_write_bytes_atomic_is_private_mode_capable_and_concurrent(tmp_path):
+    from lib.json_store import write_bytes_atomic
+
+    path = tmp_path / 'asset.bin'
+    payloads = [bytes([index]) * 32_768 for index in range(16)]
+    errors = []
+
+    def _write(payload):
+        try:
+            write_bytes_atomic(str(path), payload, mode=0o600)
+        except Exception as error:
+            errors.append(error)
+
+    threads = [threading.Thread(target=_write, args=(payload,))
+               for payload in payloads]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert path.read_bytes() in payloads
+    assert (os.stat(path).st_mode & 0o777) == 0o600
+    assert not list(tmp_path.glob('.binstore-*.tmp'))
+
+
+def test_write_bytes_atomic_failure_preserves_previous_file(
+        tmp_path, monkeypatch):
+    from lib import json_store
+
+    path = tmp_path / 'asset.bin'
+    json_store.write_bytes_atomic(str(path), b'old')
+    monkeypatch.setattr(
+        json_store.os, 'replace',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError('disk full')))
+
+    try:
+        json_store.write_bytes_atomic(str(path), b'new')
+    except OSError as error:
+        assert 'disk full' in str(error)
+    else:
+        raise AssertionError('injected replace failure did not propagate')
+
+    assert path.read_bytes() == b'old'
+    assert not list(tmp_path.glob('.binstore-*.tmp'))
+
+
 def test_update_json_atomic_initial_default():
     """update_json_atomic on missing file uses default and writes result."""
     from lib.json_store import update_json_atomic, read_json
@@ -198,6 +245,24 @@ def test_update_json_atomic_none_skips_write():
     assert os.path.getmtime(p) == mtime_before
     assert read_json(p) == {'a': 1}
     _ok('update_json_atomic with mutator→None skips write')
+
+
+def test_strict_update_never_overwrites_an_existing_corrupt_store(tmp_path):
+    from lib.json_store import JsonStoreReadError, update_json_atomic
+
+    path = tmp_path / 'corrupt.json'
+    path.write_text('{broken', encoding='utf-8')
+
+    try:
+        update_json_atomic(
+            str(path), lambda _current: {'replacement': True},
+            default={}, strict=True)
+    except JsonStoreReadError:
+        pass
+    else:
+        raise AssertionError('strict update accepted a corrupt store')
+
+    assert path.read_text(encoding='utf-8') == '{broken'
 
 
 def test_update_json_atomic_thread_safe():
@@ -315,6 +380,74 @@ def test_write_then_read_json_array():
     _ok('top-level list is supported')
 
 
+def test_atomic_output_path_concurrent_publishers_are_isolated():
+    """Path-only writers get unique staging files and whole-file publish."""
+    from lib.json_store import atomic_output_path
+    p, _ = _tmp('artifact.bin')
+    payloads = [bytes([index]) * 65536 for index in range(16)]
+    barrier = threading.Barrier(len(payloads))
+    staging = []
+    failures = []
+
+    def publish(payload):
+        try:
+            with atomic_output_path(p, fsync=False) as tmp:
+                staging.append(tmp)
+                with open(tmp, 'wb') as handle:
+                    handle.write(payload)
+                barrier.wait(timeout=5)
+        except Exception as error:  # retain worker errors for the main thread
+            failures.append(error)
+
+    threads = [threading.Thread(target=publish, args=(payload,))
+               for payload in payloads]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not failures
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(set(staging)) == len(payloads)
+    assert open(p, 'rb').read() in payloads
+    assert not any(name.startswith('.output-')
+                   for name in os.listdir(os.path.dirname(p)))
+    _ok('atomic_output_path isolates concurrent path-only writers')
+
+
+def test_atomic_output_path_failure_preserves_last_good_file():
+    from lib.json_store import atomic_output_path
+    p, _ = _tmp('artifact.bin')
+    with open(p, 'wb') as handle:
+        handle.write(b'last-good')
+    try:
+        with atomic_output_path(p, fsync=False) as tmp:
+            with open(tmp, 'wb') as handle:
+                handle.write(b'partial')
+            raise RuntimeError('injected writer failure')
+    except RuntimeError:
+        pass
+    assert open(p, 'rb').read() == b'last-good'
+    assert not any(name.startswith('.output-')
+                   for name in os.listdir(os.path.dirname(p)))
+    _ok('atomic_output_path failure preserves destination and cleans staging')
+
+
+def test_temporary_output_path_preserves_suffix_and_never_auto_publishes():
+    from lib.json_store import temporary_output_path
+    p, _ = _tmp('movie.mp4')
+    with open(p, 'wb') as handle:
+        handle.write(b'last-good')
+    with temporary_output_path(p, suffix='.tmp.mp4') as tmp:
+        assert tmp.endswith('.tmp.mp4')
+        assert os.path.basename(tmp).startswith('.movie.mp4-')
+        with open(tmp, 'wb') as handle:
+            handle.write(b'unverified')
+    assert open(p, 'rb').read() == b'last-good'
+    assert not os.path.exists(tmp)
+    _ok('temporary_output_path keeps format suffix and requires promotion')
+
+
 def test_unicode_preserved():
     """Non-ASCII characters round-trip without escaping."""
     from lib.json_store import write_json_atomic, read_json
@@ -367,6 +500,9 @@ def main():
         test_update_json_atomic_jsonc_default,
         test_per_path_lock_is_per_path,
         test_write_then_read_json_array,
+        test_atomic_output_path_concurrent_publishers_are_isolated,
+        test_atomic_output_path_failure_preserves_last_good_file,
+        test_temporary_output_path_preserves_suffix_and_never_auto_publishes,
         test_unicode_preserved,
         test_strip_jsonc_alone,
     ]

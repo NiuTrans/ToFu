@@ -7,7 +7,7 @@ under jsdom:
   1. toggleDebug() now opens the RIGHT-SIDE DRAWER (body.ri-open +
      #riDrawer visible) — the global floating box is retired.
   2. Task rows render from Api.tasks.byConv (SERVER-authoritative), with
-     live badge / request counts / expired state.
+     plain-language status / action / expired state (no request-count jargon).
   3. Selecting a task folds request rows (R1/R2) + attempts + the coverage
      chip for endpoint-driven tasks; state mirrors render SEPARATELY
      (never mixed into the request list).
@@ -68,17 +68,43 @@ win.escapeHtml = global.escapeHtml = (s) =>
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 win.Icon = global.Icon = (name, size) => `<svg data-icon="${name}" width="${size||14}"></svg>`;
 const _I18N = {
-  'ri.title': 'Request Inspector',
-  'ri.requests': 'requests',
-  'ri.states': 'State mirrors',
-  'ri.stateNote': 'not LLM requests',
+  'ri.title': 'Run details',
+  'ri.states': 'Tool-result records',
+  'ri.stateNote': 'for troubleshooting only',
   'ri.empty': 'No tasks recorded',
   'ri.loading': 'Loading…',
   'ri.expired': 'Event log expired',
   'ri.coveragePartial': 'endpoint partial',
-  'ri.live': 'live',
+  'ri.selectTask': 'Select a run to see what it did',
+  'ri.detailTitle': 'Turn details',
+  'ri.selectRound': 'Expand Technical details and select a turn.',
+  'ri.viewProcess': 'View what happened',
+  'ri.summaryLabel': 'Run summary',
+  'ri.statusRunning': 'Task in progress',
+  'ri.statusDone': 'Task completed',
+  'ri.statusFailed': 'Task did not complete',
+  'ri.statusStopped': 'Task stopped',
+  'ri.statusUnknown': 'Status unknown',
+  'ri.operationCountOne': 'Completed 1 operation',
+  'ri.operationCount': 'Completed {n} operations',
+  'ri.operationCountApproxOne': 'Completed about 1 operation',
+  'ri.operationCountApprox': 'Completed about {n} operations',
+  'ri.noOperations': 'No tool operations were run',
+  'ri.operationUnavailable': 'Operation count unavailable',
+  'ri.operationHelp': 'Counts real tool actions. System logs are not counted.',
+  'ri.taskLabel': 'Task {id}',
+  'ri.technicalDetails': 'View technical details',
+  'ri.modelTurns': '{n} model turns',
+  'ri.roundNumber': 'Turn {n}',
+  'ri.roundMeta': '{messages} messages · ~{tokens} tokens',
+  'ri.availableTools': '{n} tools available',
 };
-win.t = global.t = (k) => _I18N[k] || k;
+win.t = global.t = (k, vars) => {
+  let value = _I18N[k] || k;
+  for (const [name, replacement] of Object.entries(vars || {}))
+    value = value.replaceAll('{' + name + '}', String(replacement));
+  return value;
+};
 win.activeConvId = global.activeConvId = 'conv-1';
 win.conversations = global.conversations = [{ id: 'conv-1' }];
 win.debugVisible = global.debugVisible = false;
@@ -100,8 +126,16 @@ win.Api = global.Api = {
     },
     getRequests: async (taskId) => {
       CALLS.getRequests++;
+      if (taskId === 'task-OLD') return {
+        taskId, eventsAvailable: false, requestCount: 0,
+        operationCount: 0, operationCountAvailable: false,
+        operationCountApproximate: false,
+        requests: [], states: [], coverage: 'full',
+      };
       return {
         taskId, eventsAvailable: true, coverage: 'partial', requestCount: 2,
+        operationCount: 2, operationCountApproximate: false,
+        operationCountAvailable: true,
         requests: [
           { roundNum: 1, ts: 1753400001000, model: 'm-x',
             params: { maxTokens: 1000 }, messageCount: 3, toolsCount: 2,
@@ -153,12 +187,17 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
   check('drawer_opens', document.body.classList.contains('ri-open') &&
     document.getElementById('riDrawer').style.display === 'flex');
   check('byconv_called', CALLS.byConv === 1);
+  check('detail_empty_state_is_actionable',
+    document.getElementById('debugTitle').textContent === 'Turn details' &&
+    document.getElementById('debugContent').textContent.indexOf('Expand Technical details') !== -1);
 
   /* ── 2. Task rows (server-authoritative) ── */
   const taskEls = document.querySelectorAll('#riTaskList .ri-task');
   check('task_rows_rendered', taskEls.length === 2);
-  check('task_request_count_shown',
-    taskEls.length && taskEls[0].innerHTML.indexOf('2 requests') !== -1);
+  check('task_request_count_hidden',
+    taskEls.length && taskEls[0].textContent.indexOf('2 requests') === -1);
+  check('task_action_is_plain_language',
+    taskEls.length && taskEls[0].textContent.indexOf('View what happened') !== -1);
   check('expired_task_marked',
     taskEls.length === 2 && taskEls[1].innerHTML.indexOf('Event log expired') !== -1);
 
@@ -166,8 +205,17 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
   taskEls[0].onclick();
   await new Promise(r => setTimeout(r, 10));
   check('getrequests_called', CALLS.getRequests === 1);
+  const summary = document.querySelector('#riRoundList .ri-summary');
+  check('human_summary_is_primary', !!summary &&
+    summary.querySelector('.ri-summary-count').textContent === 'Completed 2 operations' &&
+    summary.querySelector('.ri-summary-help').textContent.indexOf('System logs are not counted') !== -1);
+  const technical = document.querySelector('#riRoundList .ri-technical');
+  check('technical_details_start_collapsed', !!technical && !technical.open &&
+    technical.querySelector('summary').textContent.indexOf('2 model turns') !== -1);
   const roundEls = document.querySelectorAll('#riRoundList .ri-round');
   check('round_rows_rendered', roundEls.length === 2);
+  check('available_tools_are_not_executed_tools', roundEls.length &&
+    roundEls[0].textContent.indexOf('2 tools available') !== -1);
   check('round1_two_attempts',
     roundEls.length &&
     roundEls[0].querySelectorAll('.ri-attempt').length === 2);
@@ -188,7 +236,7 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
   const hdr1 = document.querySelector('#debugContent .debug-msg-header');
   check('detail_rendered',
     document.getElementById('debugTitle').innerHTML.indexOf('Messages') !== -1 &&
-    !!hdr1);
+    !!hdr1 && document.getElementById('riDrawer').classList.contains('ri-detail-active'));
   if (hdr1) hdr1.onclick();
   check('detail_payload_shown',
     document.getElementById('debugContent').innerHTML.indexOf('payload-from-server') !== -1);
@@ -216,7 +264,15 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
     tA.rounds['1']._stripped === true &&
     tA.rounds['1'].messageCount === 1);
 
-  /* ── 7. closeDebug hides the drawer ── */
+  /* ── 7. Expired logs must say unavailable, never invent zero work ── */
+  taskEls[1].onclick();
+  await new Promise(r => setTimeout(r, 10));
+  const expiredSummary = document.querySelector('#riRoundList .ri-summary-count');
+  check('expired_count_is_unavailable', !!expiredSummary &&
+    expiredSummary.textContent === 'Operation count unavailable' &&
+    expiredSummary.textContent.indexOf('No tool operations') === -1);
+
+  /* ── 8. closeDebug hides the drawer ── */
   closeDebug();
   check('drawer_closes', !document.body.classList.contains('ri-open') &&
     document.getElementById('riDrawer').style.display === 'none');

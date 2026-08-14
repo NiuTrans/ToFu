@@ -9,6 +9,7 @@ it via ``from lib.tasks_pkg.executor import ToolRegistry, tool_registry``.
 
 from __future__ import annotations
 
+from threading import RLock
 from typing import Any
 
 from lib.log import get_logger
@@ -58,6 +59,7 @@ class ToolRegistry:
     """
 
     def __init__(self) -> None:
+        self._lock = RLock()
         self._exact: dict[str, ToolHandler] = {}          # name → handler
         self._sets: list[tuple[frozenset, ToolHandler]] = []  # (name_set, handler)
         self._metadata: dict[str, dict[str, str]] = {}    # name → {category, description}
@@ -65,6 +67,7 @@ class ToolRegistry:
         # name → (source, plugin_name) — who owns this tool name. Drives the
         # built-in hijack protection in :meth:`_claim_name`.
         self._provenance: dict[str, tuple[str, str]] = {}
+        self._special_provenance: dict[str, tuple[str, str]] = {}
 
     # ── State snapshot / restore (test isolation) ─────────
     #
@@ -90,17 +93,18 @@ class ToolRegistry:
         Containers are copied one level (the handlers inside are immutable
         function references, so a shallow copy per container is exact).
         """
-        snap: dict[str, Any] = {}
-        for attr, value in self.__dict__.items():
-            if isinstance(value, dict):
-                snap[attr] = dict(value)
-            elif isinstance(value, list):
-                snap[attr] = list(value)
-            elif isinstance(value, set):
-                snap[attr] = set(value)
-            else:
-                snap[attr] = value
-        return snap
+        with self._lock:
+            snap: dict[str, Any] = {}
+            for attr, value in self.__dict__.items():
+                if isinstance(value, dict):
+                    snap[attr] = dict(value)
+                elif isinstance(value, list):
+                    snap[attr] = list(value)
+                elif isinstance(value, set):
+                    snap[attr] = set(value)
+                else:
+                    snap[attr] = value
+            return snap
 
     def restore(self, snap: dict[str, Any]) -> None:
         """Restore state captured by :meth:`snapshot`, in place.
@@ -109,30 +113,61 @@ class ToolRegistry:
         module that captured a direct reference to a table — e.g. a test
         holding ``registry._exact`` — pointing at the live object.
         """
-        for attr, saved in snap.items():
-            current = getattr(self, attr, None)
-            if isinstance(current, dict) and isinstance(saved, dict):
-                current.clear()
-                current.update(saved)
-            elif isinstance(current, list) and isinstance(saved, list):
-                current[:] = saved
-            elif isinstance(current, set) and isinstance(saved, set):
-                current.clear()
-                current.update(saved)
-            else:
-                setattr(self, attr, saved)
-        # A table created AFTER the snapshot was taken is not in ``snap``;
-        # clearing it is the only way "restore" can mean what it says.
-        for attr, value in list(self.__dict__.items()):
-            if attr in snap:
-                continue
-            if isinstance(value, (dict, list, set)):
-                value.clear()
+        with self._lock:
+            for attr, saved in snap.items():
+                current = getattr(self, attr, None)
+                if isinstance(current, dict) and isinstance(saved, dict):
+                    current.clear()
+                    current.update(saved)
+                elif isinstance(current, list) and isinstance(saved, list):
+                    current[:] = saved
+                elif isinstance(current, set) and isinstance(saved, set):
+                    current.clear()
+                    current.update(saved)
+                else:
+                    setattr(self, attr, saved)
+            # A table created AFTER the snapshot was taken is not in ``snap``;
+            # clearing it is the only way "restore" can mean what it says.
+            for attr, value in list(self.__dict__.items()):
+                if attr in snap:
+                    continue
+                if isinstance(value, (dict, list, set)):
+                    value.clear()
 
     # ── Name provenance + built-in hijack protection ──────
 
-    def _claim_name(self, name: str, source: str, plugin_name: str) -> bool:
-        """Decide whether *source* may bind *name*; record the owner.
+    def _evict_binding(self, name: str) -> None:
+        """Remove every ordinary dispatch binding for *name*.
+
+        Provenance decides *who* may own a name, but lookup has two physical
+        binding tables. Replacing only ``_exact`` leaves an older set-based
+        binding live (and replacing only ``_sets`` can leave an exact shadow).
+        Keep the stronger invariant that an ordinary tool name has exactly one
+        active binding, regardless of which registration API the owner uses.
+        """
+        self._exact.pop(name, None)
+        retained: list[tuple[frozenset, ToolHandler]] = []
+        for names, handler in self._sets:
+            if name not in names:
+                retained.append((names, handler))
+                continue
+            remaining = names - {name}
+            if remaining:
+                retained.append((frozenset(remaining), handler))
+        # Preserve direct references captured by snapshot/restore fixtures and
+        # diagnostics; the registry's state tables are intentionally stable.
+        self._sets[:] = retained
+
+    def _claim_owner(
+        self,
+        name: str,
+        source: str,
+        plugin_name: str,
+        provenance: dict[str, tuple[str, str]],
+        *,
+        kind: str,
+    ) -> bool:
+        """Decide whether *source* may bind an identifier; record its owner.
 
         **Built-ins always beat plugins, regardless of arrival order.** A
         "first writer wins" rule would be wrong in both directions here:
@@ -141,8 +176,8 @@ class ToolRegistry:
         ``lib.tasks_pkg.handlers`` have run. So at real startup a plugin binds
         first and the built-in binds second — ordering carries no authority.
 
-        Two distinct hijack shapes are covered, which is why this cannot live
-        in :meth:`register` as a dict-overwrite check:
+        For ordinary names, two distinct hijack shapes are covered, which is
+        why this cannot live in :meth:`register` as a dict-overwrite check:
 
         * **overwrite** — the name is already in ``_exact`` (7 names today) and
           gets replaced.
@@ -152,50 +187,64 @@ class ToolRegistry:
           :meth:`lookup` consults ``_exact`` FIRST, the built-in set entry is
           silently shadowed while remaining physically present.
 
-        Returns True when the caller may bind the name.
+        Special dispatch keys use the same authority rule. Otherwise a plugin
+        could bypass ordinary name protection through ``handler_special`` and
+        replace the code-execution handler directly.
+
+        Returns True when the caller may bind the identifier.
         """
-        prev = self._provenance.get(name)
+        if source not in {'builtin', 'plugin'}:
+            raise ValueError(
+                f'ToolRegistry source must be builtin or plugin, got {source!r}')
+
+        prev = provenance.get(name)
         if prev is None:
-            self._provenance[name] = (source, plugin_name)
+            provenance[name] = (source, plugin_name)
             return True
         prev_source, prev_plugin = prev
 
         if source == 'builtin':
             if prev_source == 'plugin':
-                # Plugin got there first (the normal startup order). Evict its
-                # _exact entry too, or it would keep shadowing a built-in that
-                # resolves through _sets.
-                self._exact.pop(name, None)
                 logger.warning(
-                    '[ToolRegistry] built-in tool %r reclaimed from plugin %r '
-                    '— a plugin may not provide a core tool name; its handler '
-                    'has been evicted', name, prev_plugin or '?')
-            self._provenance[name] = (source, plugin_name)
+                    '[ToolRegistry] built-in %s %r reclaimed from plugin %r '
+                    '— a plugin may not provide a core identifier; its '
+                    'handler has been evicted', kind, name,
+                    prev_plugin or '?')
+            provenance[name] = (source, plugin_name)
             return True
 
         # source == 'plugin'
         if prev_source == 'builtin':
             logger.warning(
-                '[ToolRegistry] plugin %r REFUSED tool name %r — that is a '
-                'built-in tool. Binding it would run third-party code while '
+                '[ToolRegistry] plugin %r REFUSED %s %r — that is a '
+                'built-in identifier. Binding it would run third-party code while '
                 'inheriting the built-in write partition and approval prompt '
                 '(the user would see the familiar dialog for a different '
                 'callable). Rename the plugin tool.',
-                plugin_name or '?', name)
+                plugin_name or '?', kind, name)
             return False
         if prev_plugin != plugin_name:
             logger.warning(
-                '[ToolRegistry] plugin %r REFUSED tool name %r — already '
-                'provided by plugin %r', plugin_name or '?', name,
+                '[ToolRegistry] plugin %r REFUSED %s %r — already provided '
+                'by plugin %r', plugin_name or '?', kind, name,
                 prev_plugin or '?')
             return False
         # Same plugin re-syncing its own name: idempotent, stay silent.
         return True
 
+    def _claim_name(self, name: str, source: str, plugin_name: str) -> bool:
+        return self._claim_owner(
+            name, source, plugin_name, self._provenance, kind='tool name')
+
+    def _claim_special(self, key: str, source: str, plugin_name: str) -> bool:
+        return self._claim_owner(
+            key, source, plugin_name, self._special_provenance,
+            kind='special dispatch key')
+
     # ── Registration ──────────────────────────────────────
 
     def register(self, names, handler: ToolHandler, *, category: str = '', description: str = '',
-                 source: str = 'builtin', plugin_name: str = ''):
+                 source: str = 'builtin', plugin_name: str = '') -> int:
         """Register *handler* for one or more exact tool names.
 
         Parameters
@@ -217,36 +266,107 @@ class ToolRegistry:
         """
         if isinstance(names, str):
             names = {names}
-        for name in names:
-            if not self._claim_name(name, source, plugin_name):
-                continue
-            self._exact[name] = handler
-            self._metadata[name] = {'category': category, 'description': description}
+        bound = 0
+        with self._lock:
+            for name in names:
+                if not self._claim_name(name, source, plugin_name):
+                    continue
+                self._evict_binding(name)
+                self._exact[name] = handler
+                self._metadata[name] = {
+                    'category': category, 'description': description}
+                bound += 1
+        return bound
 
     def register_set(self, name_set, handler: ToolHandler, *, category: str = '', description: str = '',
-                     source: str = 'builtin', plugin_name: str = ''):
+                     source: str = 'builtin', plugin_name: str = '') -> int:
         """Register *handler* for a set of tool names (checked in order).
 
         Unlike ``register()``, set-based entries are checked sequentially
         after exact matches, preserving priority ordering.
         """
-        allowed = frozenset(
-            n for n in name_set if self._claim_name(n, source, plugin_name))
-        if not allowed:
-            return
-        self._sets.append((allowed, handler))
-        meta = {'category': category, 'description': description}
-        for name in allowed:
-            self._metadata.setdefault(name, meta)
+        with self._lock:
+            allowed = frozenset(
+                n for n in name_set
+                if self._claim_name(n, source, plugin_name))
+            if not allowed:
+                return 0
+            for name in allowed:
+                self._evict_binding(name)
+            self._sets.append((allowed, handler))
+            meta = {'category': category, 'description': description}
+            for name in allowed:
+                self._metadata[name] = meta
+            return len(allowed)
 
-    def register_special(self, key: str, handler: ToolHandler, *, category: str = '', description: str = ''):
+    def register_special(
+        self,
+        key: str,
+        handler: ToolHandler,
+        *,
+        category: str = '',
+        description: str = '',
+        source: str = 'builtin',
+        plugin_name: str = '',
+    ) -> bool:
         """Register a handler for a special dispatch key (e.g. ``'__code_exec__'``).
 
         Special handlers are matched via ``round_entry`` metadata rather
         than ``fn_name`` directly.
         """
-        self._special[key] = handler
-        self._metadata[key] = {'category': category, 'description': description}
+        with self._lock:
+            if not self._claim_special(key, source, plugin_name):
+                return False
+            self._special[key] = handler
+            self._metadata[key] = {
+                'category': category, 'description': description}
+            return True
+
+    def _drop_metadata_if_unbound(self, name: str) -> None:
+        if name in self._exact or name in self._special:
+            return
+        if any(name in names for names, _handler in self._sets):
+            return
+        self._metadata.pop(name, None)
+
+    def unregister(
+        self,
+        names,
+        *,
+        source: str = 'builtin',
+        plugin_name: str = '',
+    ) -> int:
+        """Remove ordinary names only when the caller still owns them."""
+        if isinstance(names, str):
+            names = {names}
+        owner = (source, plugin_name)
+        removed = 0
+        with self._lock:
+            for name in names:
+                if self._provenance.get(name) != owner:
+                    continue
+                self._evict_binding(name)
+                self._provenance.pop(name, None)
+                self._drop_metadata_if_unbound(name)
+                removed += 1
+        return removed
+
+    def unregister_special(
+        self,
+        key: str,
+        *,
+        source: str = 'builtin',
+        plugin_name: str = '',
+    ) -> bool:
+        """Remove a special key only when the caller still owns it."""
+        owner = (source, plugin_name)
+        with self._lock:
+            if self._special_provenance.get(key) != owner:
+                return False
+            self._special.pop(key, None)
+            self._special_provenance.pop(key, None)
+            self._drop_metadata_if_unbound(key)
+            return True
 
     def handler(self, names, *, category='', description=''):
         """Decorator form of :meth:`register`.
@@ -331,21 +451,22 @@ class ToolRegistry:
         3. Set-based match (linear scan, first match wins).
         4. ``None`` if no handler found.
         """
-        # 1. Exact
-        h = self._exact.get(fn_name)
-        if h is not None:
-            return h
-
-        # 2. Special: code_exec identified by round_entry, not fn_name
-        if round_entry and round_entry.get('toolName') == 'code_exec':
-            h = self._special.get('__code_exec__')
+        with self._lock:
+            # 1. Exact
+            h = self._exact.get(fn_name)
             if h is not None:
                 return h
 
-        # 3. Set-based
-        for name_set, handler in self._sets:
-            if fn_name in name_set:
-                return handler
+            # 2. Special: code_exec identified by round_entry, not fn_name
+            if round_entry and round_entry.get('toolName') == 'code_exec':
+                h = self._special.get('__code_exec__')
+                if h is not None:
+                    return h
+
+            # 3. Set-based
+            for name_set, handler in self._sets:
+                if fn_name in name_set:
+                    return handler
 
         return None
 
@@ -353,38 +474,44 @@ class ToolRegistry:
 
     def list_tools(self):
         """Return a list of ``(name, category, description)`` for all registered tools."""
-        seen = set()
-        result = []
-        # Exact registrations first
-        for name in self._exact:
-            if name not in seen:
-                meta = self._metadata.get(name, {})
-                result.append((name, meta.get('category', ''), meta.get('description', '')))
-                seen.add(name)
-        # Special registrations
-        for key in self._special:
-            if key not in seen:
-                meta = self._metadata.get(key, {})
-                result.append((key, meta.get('category', ''), meta.get('description', '')))
-                seen.add(key)
-        # Set-based registrations
-        for name_set, _ in self._sets:
-            for name in sorted(name_set):
+        with self._lock:
+            seen = set()
+            result = []
+            # Exact registrations first
+            for name in self._exact:
                 if name not in seen:
                     meta = self._metadata.get(name, {})
-                    result.append((name, meta.get('category', ''), meta.get('description', '')))
+                    result.append((name, meta.get('category', ''),
+                                   meta.get('description', '')))
                     seen.add(name)
-        return result
+            # Special registrations
+            for key in self._special:
+                if key not in seen:
+                    meta = self._metadata.get(key, {})
+                    result.append((key, meta.get('category', ''),
+                                   meta.get('description', '')))
+                    seen.add(key)
+            # Set-based registrations
+            for name_set, _ in self._sets:
+                for name in sorted(name_set):
+                    if name not in seen:
+                        meta = self._metadata.get(name, {})
+                        result.append((name, meta.get('category', ''),
+                                       meta.get('description', '')))
+                        seen.add(name)
+            return result
 
     def __contains__(self, fn_name):
         """Support ``fn_name in registry`` syntax."""
         return self.lookup(fn_name) is not None
 
     def __repr__(self):
-        n_exact = len(self._exact)
-        n_sets = sum(len(s) for s, _ in self._sets)
-        n_special = len(self._special)
-        return f'<ToolRegistry exact={n_exact} set_names={n_sets} special={n_special}>'
+        with self._lock:
+            n_exact = len(self._exact)
+            n_sets = sum(len(s) for s, _ in self._sets)
+            n_special = len(self._special)
+            return (f'<ToolRegistry exact={n_exact} set_names={n_sets} '
+                    f'special={n_special}>')
 
 
 # Module-level singleton — all tool handlers register here.

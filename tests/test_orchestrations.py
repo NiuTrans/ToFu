@@ -11,12 +11,13 @@ tmp file so the real config is never touched.
 
 import asyncio
 import os
-import re
 import sys
 import tempfile
 import unittest
 
 import pytest
+
+pytest_plugins = ('tests._artifact_sidecar',)
 
 
 # ── Pure validator tests (no app needed) ────────────────────────────
@@ -224,9 +225,82 @@ class CrudTest(unittest.TestCase):
 
     def test_requires_auth(self):
         async def go():
-            r = await self._cli().get('/api/v1/orchestrations')
-            self.assertEqual(r.status_code, 401)
+            cli = self._cli()
+            for method, path in (
+                ('get', '/api/v1/orchestrations'),
+                ('get', '/api/v1/orchestrations/run/poll/missing'),
+                ('post', '/api/v1/orchestrations/run/abort/missing'),
+            ):
+                r = await getattr(cli, method)(path)
+                self.assertEqual(r.status_code, 401, path)
         _run(go())
+
+    def test_repository_failure_uses_typed_500_envelope(self):
+        from lib.orchestration.definition_service import DefinitionServiceError
+        import routes.api_v1.orchestrations as orch_mod
+
+        class BrokenDefinitions:
+            @staticmethod
+            def list_summaries():
+                raise DefinitionServiceError('repository offline')
+
+        original = orch_mod._definitions
+        orch_mod._definitions = lambda: BrokenDefinitions()
+        try:
+            async def go():
+                response = await self._cli().get(
+                    '/api/v1/orchestrations', headers=self._hdr())
+                self.assertEqual(response.status_code, 500)
+                body = await response.get_json()
+                self.assertFalse(body['ok'])
+                self.assertEqual(body['error']['kind'], 'internal')
+                self.assertEqual(
+                    body['error']['context'],
+                    'api_v1.orchestrations.list',
+                )
+            _run(go())
+        finally:
+            orch_mod._definitions = original
+
+    def test_definition_resolution_failure_is_shared_by_all_consumers(self):
+        from lib.orchestration.definition_service import DefinitionServiceError
+        import routes.api_v1.orchestrations as orch_mod
+
+        class BrokenDefinitions:
+            @staticmethod
+            def resolve(**_selection):
+                raise DefinitionServiceError('repository offline')
+
+        original = orch_mod._definitions
+        orch_mod._definitions = lambda: BrokenDefinitions()
+        try:
+            async def go():
+                cli = self._cli()
+                for path in (
+                    '/api/v1/orchestrations/layout',
+                    '/api/v1/orchestrations/plan',
+                    '/api/v1/orchestrations/run',
+                    '/api/v1/orchestrations/tasks',
+                ):
+                    response = await cli.post(
+                        path, headers=self._hdr(), json={'id': 'stored-flow'})
+                    self.assertEqual(response.status_code, 500, path)
+                    body = await response.get_json()
+                    self.assertFalse(body['ok'], path)
+                    self.assertEqual(body['error']['kind'], 'internal', path)
+                    self.assertEqual(
+                        body['error']['context'],
+                        'api_v1.orchestrations.resolve_definition',
+                        path,
+                    )
+                    self.assertEqual(
+                        body['error']['source'],
+                        'orchestration:application-service',
+                        path,
+                    )
+            _run(go())
+        finally:
+            orch_mod._definitions = original
 
     def test_validate_endpoint(self):
         async def go():
@@ -236,12 +310,31 @@ class CrudTest(unittest.TestCase):
             self.assertEqual(r.status_code, 200)
             body = await r.get_json()
             self.assertTrue(body['ok'])
+            self.assertEqual(
+                body['format'], 'tofu.orchestration.inspection/v1')
+            self.assertEqual(body['diagnostics'], [])
 
             bad = self._def(); bad['name'] = ''
             r = await cli.post('/api/v1/orchestrations/validate',
                                headers=self._hdr(), json=bad)
             body = await r.get_json()
             self.assertFalse(body['ok'])
+            self.assertTrue(body['diagnostics'])
+            self.assertEqual(body['diagnostics'][0]['severity'], 'error')
+
+            # Diagnostic ingress intentionally accepts an incomplete object;
+            # generated clients must not apply the persistence schema here.
+            incomplete = await cli.post(
+                '/api/v1/orchestrations/validate',
+                headers=self._hdr(),
+                json={},
+            )
+            self.assertEqual(incomplete.status_code, 200)
+            incomplete_body = await incomplete.get_json()
+            self.assertFalse(incomplete_body['ok'])
+            self.assertIn('/name', {
+                item['path'] for item in incomplete_body['diagnostics']
+            })
         _run(go())
 
     def test_full_crud_cycle(self):
@@ -253,19 +346,31 @@ class CrudTest(unittest.TestCase):
             self.assertEqual(r.status_code, 201)
             created = await r.get_json()
             oid = created['id']
+            self.assertEqual(created['format'],
+                             'tofu.orchestration.definition-entry/v1')
             self.assertEqual(created['name'], 'CycleFlow')
+            self.assertEqual(r.headers['ETag'],
+                             f'"{created["updatedAt"]}"')
 
             # List
             r = await cli.get('/api/v1/orchestrations', headers=self._hdr())
             self.assertEqual(r.status_code, 200)
-            lst = (await r.get_json())['items']  # {items} envelope
-            self.assertTrue(any(e['id'] == oid for e in lst))
+            list_body = await r.get_json()
+            self.assertEqual(list_body['format'],
+                             'tofu.orchestration.definition-list/v1')
+            lst = list_body['items']
+            listed = next(e for e in lst if e['id'] == oid)
+            self.assertEqual(listed['nodeCount'], 3)
+            self.assertNotIn('definition', listed)
 
             # Get
             r = await cli.get(f'/api/v1/orchestrations/{oid}', headers=self._hdr())
             self.assertEqual(r.status_code, 200)
             got = await r.get_json()
+            self.assertEqual(got['format'],
+                             'tofu.orchestration.definition-entry/v1')
             self.assertEqual(len(got['definition']['nodes']), 3)
+            self.assertEqual(r.headers['ETag'], f'"{got["updatedAt"]}"')
 
             # Update (rename)
             upd = self._def('CycleFlow v2')
@@ -273,13 +378,84 @@ class CrudTest(unittest.TestCase):
                               headers=self._hdr(), json=upd)
             self.assertEqual(r.status_code, 200)
             updated = await r.get_json()
+            self.assertEqual(updated['format'],
+                             'tofu.orchestration.definition-entry/v1')
             self.assertEqual(updated['name'], 'CycleFlow v2')
+            self.assertEqual(r.headers['ETag'],
+                             f'"{updated["updatedAt"]}"')
 
             # Delete
             r = await cli.delete(f'/api/v1/orchestrations/{oid}', headers=self._hdr())
             self.assertEqual(r.status_code, 200)
             r = await cli.get(f'/api/v1/orchestrations/{oid}', headers=self._hdr())
             self.assertEqual(r.status_code, 404)
+        _run(go())
+
+    def test_guarded_update_rejects_stale_tab_without_overwrite(self):
+        async def go():
+            cli = self._cli()
+            created_response = await cli.post(
+                '/api/v1/orchestrations',
+                headers=self._hdr(),
+                json=self._def('Shared draft'),
+            )
+            created = await created_response.get_json()
+            oid = created['id']
+            initial_version = created['updatedAt']
+            guarded_headers = {
+                **self._hdr(),
+                'If-Match': f'"{initial_version}"',
+            }
+
+            first = await cli.put(
+                f'/api/v1/orchestrations/{oid}',
+                headers=guarded_headers,
+                json=self._def('First tab'),
+            )
+            self.assertEqual(first.status_code, 200)
+            first_body = await first.get_json()
+            self.assertGreater(first_body['updatedAt'], initial_version)
+            self.assertEqual(first.headers['ETag'],
+                             f'"{first_body["updatedAt"]}"')
+
+            stale = await cli.put(
+                f'/api/v1/orchestrations/{oid}',
+                headers=guarded_headers,
+                json=self._def('Stale tab'),
+            )
+            self.assertEqual(stale.status_code, 409)
+            stale_body = await stale.get_json()
+            self.assertEqual(stale_body['conflict'], 'stale_definition')
+            self.assertEqual(stale_body['write']['format'],
+                             'tofu.orchestration.definition-write/v1')
+            self.assertEqual(stale_body['write']['expectedUpdatedAt'],
+                             initial_version)
+            self.assertEqual(stale_body['write']['currentUpdatedAt'],
+                             first_body['updatedAt'])
+
+            stored = await cli.get(
+                f'/api/v1/orchestrations/{oid}', headers=self._hdr())
+            stored_body = await stored.get_json()
+            self.assertEqual(stored_body['definition']['name'], 'First tab')
+
+            stale_delete = await cli.delete(
+                f'/api/v1/orchestrations/{oid}',
+                headers=guarded_headers,
+            )
+            self.assertEqual(stale_delete.status_code, 409)
+            stale_delete_body = await stale_delete.get_json()
+            self.assertEqual(stale_delete_body['write']['operation'], 'delete')
+            still_stored = await cli.get(
+                f'/api/v1/orchestrations/{oid}', headers=self._hdr())
+            self.assertEqual(still_stored.status_code, 200)
+
+            invalid = await cli.put(
+                f'/api/v1/orchestrations/{oid}',
+                headers={**self._hdr(), 'If-Match': 'not-a-version'},
+                json=self._def('Never written'),
+            )
+            self.assertEqual(invalid.status_code, 400)
+
         _run(go())
 
     def test_compose_empty_requirement_is_400(self):
@@ -301,6 +477,23 @@ class CrudTest(unittest.TestCase):
             self.assertIn('critic', ids)
         _run(go())
 
+    def test_all_studio_builtins_use_the_same_api(self):
+        async def go():
+            client = self._cli()
+            for name in ('endpoint', 'autopilot', 'fanout',
+                         'adversarial', 'blank'):
+                r = await client.get(
+                    f'/api/v1/orchestrations/builtin/{name}',
+                    headers=self._hdr(),
+                )
+                self.assertEqual(r.status_code, 200, name)
+                body = await r.get_json()
+                self.assertTrue(body['ok'], name)
+                self.assertEqual(body['definition']['schema'],
+                                 'tofu.orchestration/v1')
+                self.assertTrue(body['inspection']['ok'], name)
+        _run(go())
+
     def test_builtin_unknown_is_404(self):
         async def go():
             r = await self._cli().get('/api/v1/orchestrations/builtin/nope',
@@ -308,9 +501,10 @@ class CrudTest(unittest.TestCase):
             self.assertEqual(r.status_code, 404)
         _run(go())
 
-    def test_role_schema_full_map(self):
+    def test_authoring_contract_full_map(self):
         async def go():
-            r = await self._cli().get('/api/v1/orchestrations/role-schema',
+            r = await self._cli().get(
+                                      '/api/v1/orchestrations/authoring-contract',
                                       headers=self._hdr())
             self.assertEqual(r.status_code, 200)
             body = await r.get_json()
@@ -319,6 +513,37 @@ class CrudTest(unittest.TestCase):
             self.assertIn('worker', body['roles'])
             self.assertTrue(body['generic'])
             self.assertIn('select', body['kinds'])
+            self.assertEqual(set(body['controlSchemas']), set(body['controls']))
+            self.assertEqual(body['executionOptions']['tiers'],
+                             ['light', 'standard', 'heavy'])
+            self.assertEqual(body['executionOptions']['scopes'],
+                             ['isolated', 'inline'])
+            loop_keys = [f['key'] for f in body['controlSchemas']['loop']]
+            self.assertEqual(loop_keys,
+                             ['max_iterations', 'stop_condition', 'verifier'])
+            self.assertEqual(body['controlSchemas']['parallel'], [])
+            io_contract = body['ioContract']
+            self.assertEqual(io_contract['maxPorts'], 12)
+            self.assertEqual(io_contract['defaultOutput'],
+                             {'name': 'text', 'type': 'text'})
+            self.assertEqual(io_contract['startRef'], 'start')
+            self.assertEqual(
+                io_contract['presets']['toolHeavyWorker']['outputs'],
+                [{'name': 'summary', 'type': 'text'},
+                 {'name': 'changes', 'type': 'artifact'}],
+            )
+            self.assertEqual(body['ioTypes'], io_contract['types'])
+            self.assertEqual(body['defaultOutput'], 'text')
+            node_defaults = body['nodeDefaults']
+            self.assertEqual(node_defaults['roles']['worker']['tier'],
+                             body['personas']['worker']['tier'])
+            self.assertEqual(node_defaults['controls']['loop']['max_iterations'],
+                             10)
+            self.assertEqual(node_defaults['controls']['human']['mode'],
+                             'approve')
+            self.assertEqual(node_defaults['subflow']['scope'], 'isolated')
+            self.assertEqual(node_defaults['blankSubflow']['schema'],
+                             'tofu.orchestration/v1')
             # Field labels are i18n keys, not user-facing strings.
             crit = body['roles']['critic']
             self.assertEqual(crit[0]['key'], 'objective')
@@ -331,6 +556,75 @@ class CrudTest(unittest.TestCase):
             self.assertIn('prompt', wp)
             self.assertTrue(wp['prompt'])              # non-empty system prompt
             self.assertEqual(wp['tier'], 'heavy')      # mirrors registry model_hint
+            self.assertEqual(body['replayContract']['format'],
+                             'tofu.task-replay/v1')
+            self.assertTrue(body['replayContract']['cursor'][
+                'producerOwned'])
+            self.assertTrue(body['replayContract']['cursor'][
+                'futureCursorReset'])
+            self.assertEqual(body['replayContract']['terminalSnapshot'], {
+                'field': 'run',
+                'when': {'field': 'done', 'equals': True},
+                'optional': True,
+            })
+            self.assertEqual(body['fieldValueContract']['format'],
+                             'tofu.orchestration.field-value/v1')
+            self.assertEqual(body['fieldValueContract']['kinds']['list'][
+                'wire'], 'array<string>')
+            self.assertEqual(body['definitionWriteContract']['format'],
+                             'tofu.orchestration.definition-write/v1')
+            self.assertEqual(
+                body['definitionWriteContract']['preconditionHeader'],
+                'If-Match')
+            self.assertEqual(body['definitionWriteContract']['conflictStatus'],
+                             409)
+            self.assertEqual(body['definitionWriteContract']['operations'],
+                             ['replace', 'delete'])
+            self.assertEqual(body['definitionListContract']['format'],
+                             'tofu.orchestration.definition-list/v1')
+            self.assertEqual(body['definitionListContract']['orderBy'][0], {
+                'field': 'updatedAt', 'direction': 'desc',
+            })
+            self.assertEqual(body['definitionEntryContract']['format'],
+                             'tofu.orchestration.definition-entry/v1')
+            self.assertEqual(body['definitionEntryContract']['versionField'],
+                             'updatedAt')
+            self.assertEqual(body['runtimeStartContract'], {
+                'format': 'tofu.orchestration.runtime-start/v1',
+                'kinds': ['ephemeral', 'durable'],
+                'idField': 'id',
+                'kindField': 'kind',
+                'legacyIdFields': {
+                    'ephemeral': 'task_id',
+                    'durable': 'run_id',
+                },
+                'successStatuses': {
+                    'ephemeral': 200,
+                    'durable': 201,
+                },
+            })
+            self.assertEqual(
+                body['durableRunContract']['format'],
+                'tofu.orchestration.durable-run/v1')
+            self.assertIn(
+                'definition', body['durableRunContract']['readFields'])
+        _run(go())
+
+    def test_role_schema_full_map_is_compatibility_alias(self):
+        async def go():
+            cli = self._cli()
+            primary = await cli.get(
+                '/api/v1/orchestrations/authoring-contract',
+                headers=self._hdr())
+            legacy = await cli.get('/api/v1/orchestrations/role-schema',
+                                   headers=self._hdr())
+            self.assertEqual(primary.status_code, 200)
+            self.assertEqual(legacy.status_code, 200)
+            primary_body = await primary.get_json()
+            legacy_body = await legacy.get_json()
+            primary_body.pop('request_id', None)
+            legacy_body.pop('request_id', None)
+            self.assertEqual(legacy_body, primary_body)
         _run(go())
 
     def test_role_schema_single_role(self):
@@ -363,20 +657,39 @@ class CrudTest(unittest.TestCase):
 
     def test_role_schema_requires_auth(self):
         async def go():
-            r = await self._cli().get('/api/v1/orchestrations/role-schema')
-            self.assertEqual(r.status_code, 401)
+            for path in ('/api/v1/orchestrations/authoring-contract',
+                         '/api/v1/orchestrations/role-schema'):
+                r = await self._cli().get(path)
+                self.assertEqual(r.status_code, 401)
         _run(go())
 
     def test_plan_returns_steps(self):
         async def go():
-            r = await self._cli().post('/api/v1/orchestrations/plan',
-                                       headers=self._hdr(),
-                                       json={'definition': self._def()})
+            cli = self._cli()
+            r = await cli.post('/api/v1/orchestrations/plan',
+                               headers=self._hdr(),
+                               json={'definition': self._def()})
             self.assertEqual(r.status_code, 200)
             body = await r.get_json()
             self.assertTrue(body['ok'])
+            self.assertEqual(body['definitionSource'], 'inline')
             actions = [s['action'] for s in body['steps']]
             self.assertIn('run-agent', actions)
+
+            created = await cli.post(
+                '/api/v1/orchestrations', headers=self._hdr(),
+                json=self._def('Stored plan'),
+            )
+            orchestration_id = (await created.get_json())['id']
+            stored = await cli.post(
+                '/api/v1/orchestrations/plan', headers=self._hdr(),
+                json={'id': orchestration_id},
+            )
+            stored_body = await stored.get_json()
+            self.assertEqual(
+                stored_body['definitionSource'],
+                f'stored:{orchestration_id}',
+            )
         _run(go())
 
     def test_run_invalid_definition_is_400(self):
@@ -481,95 +794,34 @@ class LayoutTest(unittest.TestCase):
         self.assertGreater(ys['b'], ys['w1'])
 
 
-class TemplateBakedCoordsTest(unittest.TestCase):
-    """Guard against drift between the template coords baked into
-    ``static/js/orchestration.js`` and what ``layout_definition`` produces.
+class TemplateBackendCoordsTest(unittest.TestCase):
+    """Server-owned builtins carry the exact canonical layout coordinates.
 
-    The templates ship FINAL layout coordinates so the studio renders them
-    on the first paint with no backend round-trip (no flash). That only
-    holds if the baked coords stay equal to the layout engine's output.
-    This test parses the real coords + topology out of the JS source (so
-    there is no second hand-maintained copy) and re-derives the layout,
-    asserting an exact match for every node in every template.
+    Templates used to be parsed out of a second catalogue baked into
+    ``orchestration.js``. They now come directly from the backend builders;
+    this guard strips their positions and re-runs the layout engine to ensure
+    each builder still returns the final first-paint coordinates.
     """
 
-    _JS_PATH = os.path.join(os.path.dirname(__file__), '..',
-                            'static', 'js', 'orchestration.js')
     _TEMPLATES = ('endpoint', 'autopilot', 'fanout', 'adversarial')
 
-    # var <name> = mk({ ptype: 'role', role: 'planner' }, 155, 180, ...);
-    _MK_RE = re.compile(
-        r"var\s+(\w+)\s*=\s*mk\(\{([^}]*)\},\s*(-?\d+),\s*(-?\d+)")
-    _LINK_RE = re.compile(r"link\((\w+),\s*(\w+)\)")
-    _PTYPE_RE = re.compile(r"ptype:\s*'(\w+)'")
-    _ROLE_RE = re.compile(r"role:\s*'([\w-]+)'")
-    _KIND_RE = re.compile(r"kind:\s*'([\w-]+)'")
-
-    @classmethod
-    def _load_template_function(cls):
-        with open(cls._JS_PATH, encoding='utf-8') as f:
-            src = f.read()
-        start = src.index('function _orchLoadTemplate')
-        # The function ends at the first column-0 close brace after start.
-        end = src.index('\n}\n', start)
-        return src[start:end]
-
-    @classmethod
-    def _parse_template(cls, body, which):
-        """Return (nodes, edges) for one ``which === '<which>'`` block.
-
-        Nodes are returned in declaration order (== insertion order the
-        layout engine relies on for seed selection + within-layer order),
-        each as ``{id, type, role, kind, baked_x, baked_y}``.
-        """
-        marker = f"which === '{which}'"
-        seg_start = body.index(marker)
-        # Block runs until the next ``which === '...'`` or end of function.
-        nxt = body.find("which === '", seg_start + len(marker))
-        segment = body[seg_start: nxt if nxt != -1 else len(body)]
-
-        nodes = []
-        for m in cls._MK_RE.finditer(segment):
-            var, payload, x, y = m.group(1), m.group(2), int(m.group(3)), int(m.group(4))
-            ptype = cls._PTYPE_RE.search(payload)
-            role = cls._ROLE_RE.search(payload)
-            kind = cls._KIND_RE.search(payload)
-            nodes.append({
-                'id': var,
-                'type': ptype.group(1) if ptype else '',
-                'role': role.group(1) if role else '',
-                'kind': kind.group(1) if kind else '',
-                'baked_x': x, 'baked_y': y,
-            })
-        edges = [{'from': a, 'to': b} for a, b in cls._LINK_RE.findall(segment)]
-        return nodes, edges
-
     def test_each_template_matches_layout_engine(self):
+        import copy
+
         from lib.orchestration import layout_definition
-        body = self._load_template_function()
+        from lib.orchestration.service import build_builtin_definition
+
         for which in self._TEMPLATES:
             with self.subTest(template=which):
-                nodes, edges = self._parse_template(body, which)
-                self.assertTrue(nodes, f'no nodes parsed for {which!r}')
-                self.assertTrue(edges, f'no edges parsed for {which!r}')
-                # Build a definition with NO positions, then lay it out.
-                defn = {
-                    'schema': 'tofu.orchestration/v1', 'name': which,
-                    'nodes': [{'id': n['id'], 'type': n['type'],
-                               'role': n['role'], 'kind': n['kind']}
-                              for n in nodes],
-                    'edges': edges,
-                }
-                layout_definition(defn)
-                computed = {n['id']: n['pos'] for n in defn['nodes']}
-                for n in nodes:
-                    pos = computed[n['id']]
-                    self.assertEqual(
-                        (pos['x'], pos['y']), (n['baked_x'], n['baked_y']),
-                        f"template {which!r} node {n['id']!r}: baked "
-                        f"({n['baked_x']},{n['baked_y']}) != layout "
-                        f"({pos['x']},{pos['y']}) — re-run layout_definition "
-                        f"and update the baked coords in orchestration.js")
+                built = build_builtin_definition(which)
+                self.assertTrue(built and built['nodes'])
+                expected = {node['id']: node['pos'] for node in built['nodes']}
+                unlaid = copy.deepcopy(built)
+                for node in unlaid['nodes']:
+                    node.pop('pos', None)
+                layout_definition(unlaid)
+                computed = {node['id']: node['pos'] for node in unlaid['nodes']}
+                self.assertEqual(computed, expected)
 
 
 # ── Durable run-instance persistence (Task Mode, Phase 2) ───────────
@@ -601,10 +853,12 @@ class RunInstanceTest(unittest.TestCase):
         from lib import orchestration_runs as r
         rid = r.new_run_id()
         self.assertTrue(rid.startswith('run_'))
-        r.create_run(rid, definition=self._defn(), input_text='go',
-                     orch_id='orch_x', name='Screener', created_by='k1')
+        self.assertTrue(r.create_run(
+            rid, definition=self._defn(), input_text='go',
+            orch_id='orch_x', name='Screener', created_by='k1'))
         run = r.get_run(rid)
         self.assertEqual(run['status'], 'pending')
+        self.assertFalse(run['terminal'])
         self.assertEqual(run['orch_id'], 'orch_x')
         self.assertEqual(run['definition']['name'], 'Screener')  # snapshot
         self.assertEqual(run['input'], 'go')
@@ -618,31 +872,95 @@ class RunInstanceTest(unittest.TestCase):
         from lib import orchestration_runs as r
         rid = r.new_run_id()
         r.create_run(rid, definition=self._defn())
-        r.append_event(rid, 0, {'type': 'flow_start', 'nodes': 2})
-        r.append_event(rid, 1, {'type': 'step_start', 'node_id': 'n1'})
-        r.append_event(rid, 2, {'type': 'step_complete', 'node_id': 'n1'})
-        # duplicate seq (replay race) must not raise and must not duplicate
-        r.append_event(rid, 2, {'type': 'dup'})
-        evs = r.get_events(rid, 0)
-        self.assertEqual([e['type'] for e in evs],
-                         ['flow_start', 'step_start', 'step_complete'])
-        self.assertTrue(all('seq' in e for e in evs))
-        # cursor replay from the middle
-        self.assertEqual([e['type'] for e in r.get_events(rid, 2)],
-                         ['step_complete'])
-        r.delete_run(rid)
+        completed = {'type': 'step_complete', 'node_id': 'n1'}
+        try:
+            self.assertTrue(r.append_event(
+                rid, 0, {'type': 'flow_start', 'nodes': 2}))
+            self.assertTrue(r.append_event(
+                rid, 1, {'type': 'step_start', 'node_id': 'n1'}))
+            self.assertTrue(r.append_event(rid, 2, completed))
+            # An identical retry is idempotent; a conflicting payload is fenced.
+            self.assertTrue(r.append_event(rid, 2, completed))
+            self.assertFalse(r.append_event(rid, 2, {'type': 'dup'}))
+            evs = r.get_events(rid, 0)
+            self.assertEqual([e['type'] for e in evs],
+                             ['flow_start', 'step_start', 'step_complete'])
+            self.assertTrue(all('seq' in e for e in evs))
+            # cursor replay from the middle
+            self.assertEqual([e['type'] for e in r.get_events(rid, 2)],
+                             ['step_complete'])
+
+            # A corrupt/future client cursor is reset to the durable boundary.
+            future_events, boundary, reset = r.get_event_page(rid, 999)
+            self.assertEqual(future_events, [])
+            self.assertEqual(boundary, 3)
+            self.assertTrue(reset)
+            self.assertTrue(r.append_event(
+                rid, boundary, {'type': 'flow_complete'}))
+            resumed, next_cursor, reset = r.get_event_page(rid, boundary)
+            self.assertEqual([e['type'] for e in resumed], ['flow_complete'])
+            self.assertEqual(next_cursor, 4)
+            self.assertFalse(reset)
+        finally:
+            r.delete_run(rid)
 
     def test_terminal_status_sets_finished_and_final(self):
         from lib import orchestration_runs as r
         rid = r.new_run_id()
         r.create_run(rid, definition=self._defn())
-        r.update_status(rid, 'done', final='12 shortlisted', error=None)
-        run = r.get_run(rid)
-        self.assertEqual(run['status'], 'done')
-        self.assertEqual(run['final'], '12 shortlisted')
-        self.assertGreater(run['finished_at'], 0)
-        self.assertIsNone(run['error'])
-        r.delete_run(rid)
+        try:
+            self.assertTrue(r.update_status(
+                rid, 'done', final='12 shortlisted', error=None))
+            run = r.get_run(rid)
+            self.assertEqual(run['status'], 'done')
+            self.assertTrue(run['terminal'])
+            self.assertEqual(run['final'], '12 shortlisted')
+            self.assertGreater(run['finished_at'], 0)
+            self.assertIsNone(run['error'])
+            first_finished_at = run['finished_at']
+
+            # Idempotent final enrichment is allowed, but the first terminal
+            # timestamp is stable and a terminal row cannot be resurrected.
+            self.assertTrue(r.update_status(rid, 'done', final='enriched'))
+            self.assertFalse(r.update_status(rid, 'running'))
+            fenced = r.get_run(rid)
+            self.assertEqual(fenced['status'], 'done')
+            self.assertEqual(fenced['final'], 'enriched')
+            self.assertEqual(fenced['finished_at'], first_finished_at)
+        finally:
+            r.delete_run(rid)
+
+    def test_startup_recovery_retires_active_headers_and_preserves_events(self):
+        from lib import orchestration_runs as r
+        active = []
+        for status in ('pending', 'running', 'paused'):
+            rid = r.new_run_id()
+            self.assertTrue(r.create_run(rid, definition=self._defn()))
+            if status != 'pending':
+                self.assertTrue(r.update_status(rid, status))
+            self.assertTrue(r.append_event(
+                rid, 0, {'type': 'flow_start', 'status': status}))
+            active.append(rid)
+        done = r.new_run_id()
+        self.assertTrue(r.create_run(done, definition=self._defn()))
+        self.assertTrue(r.update_status(done, 'done', final='kept'))
+        reason = {
+            'kind': 'worker_lost',
+            'message': 'Run interrupted by a server restart before completion.',
+        }
+        try:
+            self.assertEqual(r.retire_interrupted_runs(reason), 3)
+            for rid in active:
+                run = r.get_run(rid)
+                self.assertEqual(run['status'], 'error')
+                self.assertTrue(run['terminal'])
+                self.assertEqual(run['error'], reason)
+                self.assertEqual(r.get_events(rid, 0)[0]['type'], 'flow_start')
+            self.assertEqual(r.get_run(done)['status'], 'done')
+            self.assertEqual(r.get_run(done)['final'], 'kept')
+        finally:
+            for rid in active + [done]:
+                r.delete_run(rid)
 
     def test_status_filter_and_delete(self):
         from lib import orchestration_runs as r
@@ -655,6 +973,19 @@ class RunInstanceTest(unittest.TestCase):
         self.assertEqual(run['error'], 'boom')
         self.assertTrue(r.delete_run(rid))
         self.assertIsNone(r.get_run(rid))
+        self.assertFalse(r.delete_run(rid))
+
+    def test_unknown_status_is_rejected_by_storage_contract(self):
+        from lib import orchestration_runs as r
+        rid = r.new_run_id()
+        self.assertTrue(r.create_run(rid, definition=self._defn()))
+        try:
+            self.assertFalse(r.update_status(rid, 'dnne'))
+            self.assertEqual(r.get_run(rid)['status'], 'pending')
+            with self.assertRaises(r.OrchestrationRunStoreError):
+                r.list_runs(status='dnne')
+        finally:
+            r.delete_run(rid)
 
 
 class TaskRunHttpTest(unittest.TestCase):
@@ -719,37 +1050,272 @@ class TaskRunHttpTest(unittest.TestCase):
             'edges': [{'from': 's1', 'to': 'w1'}, {'from': 'w1', 'to': 'e1'}],
         }
 
+    def test_create_fails_closed_before_runtime_when_persistence_fails(self):
+        from unittest.mock import patch
+        import routes.api_v1.orchestrations as route_module
+
+        class FailedRuns:
+            def create_new(self, **_kwargs):
+                return ''
+
+        async def go():
+            cli = self.fix.app.test_client()
+            with patch.object(route_module, '_run_instances',
+                              return_value=FailedRuns()), \
+                    patch.object(
+                        route_module.orchestration_run_runtime,
+                        'create',
+                    ) as runtime_create:
+                response = await cli.post(
+                    '/api/v1/orchestrations/tasks',
+                    headers=self._hdr(),
+                    json={'definition': self._def(), 'input': 'go'},
+                )
+            self.assertEqual(response.status_code, 500)
+            runtime_create.assert_not_called()
+
+        _run(go())
+
+    def test_ephemeral_start_publishes_shared_runtime_identity(self):
+        async def go():
+            cli = self.fix.app.test_client()
+            response = await cli.post(
+                '/api/v1/orchestrations/run',
+                headers=self._hdr(),
+                json={'definition': self._def(), 'input': 'go'},
+            )
+            self.assertEqual(response.status_code, 200)
+            body = await response.get_json()
+            self.assertTrue(body['task_id'])
+            self.assertEqual(body['start'], {
+                'format': 'tofu.orchestration.runtime-start/v1',
+                'kind': 'ephemeral',
+                'id': body['task_id'],
+            })
+
+        _run(go())
+
+    def test_worker_start_failure_closes_durable_projection(self):
+        from unittest.mock import patch
+        import lib.orchestration.runtime_start_service as start_module
+        import routes.api_v1.orchestrations as route_module
+
+        class Runs:
+            def __init__(self):
+                self.transitions = []
+
+            def create_new(self, **_kwargs):
+                return 'run-start-failed'
+
+            def transition_status(self, run_id, status, **values):
+                self.transitions.append((run_id, status, values))
+                return type('Transition', (), {
+                    'ok': True,
+                    'reason': 'accepted',
+                    'run_status': status,
+                })()
+
+        runs = Runs()
+
+        async def go():
+            cli = self.fix.app.test_client()
+            with patch.object(route_module, '_run_instances',
+                              return_value=runs), \
+                    patch.object(
+                        start_module,
+                        'spawn_runtime_flow',
+                        side_effect=RuntimeError('worker unavailable'),
+                    ):
+                response = await cli.post(
+                    '/api/v1/orchestrations/tasks',
+                    headers=self._hdr(),
+                    json={'definition': self._def(), 'input': 'go'},
+                )
+            self.assertEqual(response.status_code, 500)
+            self.assertFalse((await response.get_json())['ok'])
+            self.assertEqual(runs.transitions[0][0:2], (
+                'run-start-failed', 'error'))
+            self.assertEqual(
+                runs.transitions[0][2]['error']['kind'],
+                'internal',
+            )
+
+        _run(go())
+
+    def test_ephemeral_abort_uses_the_same_mutation_contract(self):
+        from unittest.mock import patch
+        import routes.api_v1.orchestrations as route_module
+
+        task_id = 'mutation-contract-ephemeral'
+        runtime = route_module.orchestration_run_runtime
+        runtime.create(task_id=task_id)
+
+        async def go():
+            cli = self.fix.app.test_client()
+            response = await cli.post(
+                f'/api/v1/orchestrations/run/abort/{task_id}',
+                headers=self._hdr(),
+            )
+            self.assertEqual(response.status_code, 200)
+            accepted = await response.get_json()
+            self.assertEqual(accepted['status'], 'aborting')
+            self.assertEqual(accepted['mutation']['action'], 'abort_run')
+            self.assertEqual(accepted['mutation']['reason'], 'accepted')
+            self.assertFalse(accepted['mutation']['reconcile_required'])
+
+            runtime.finish(task_id)
+            response = await cli.post(
+                f'/api/v1/orchestrations/run/abort/{task_id}',
+                headers=self._hdr(),
+            )
+            self.assertEqual(response.status_code, 409)
+            terminal = await response.get_json()
+            self.assertEqual(terminal['status'], 'aborted')
+            self.assertEqual(terminal['note'], 'already finished')
+            self.assertEqual(terminal['mutation']['reason'], 'terminal')
+            self.assertTrue(terminal['mutation']['reconcile_required'])
+
+            response = await cli.post(
+                '/api/v1/orchestrations/run/abort/missing-ephemeral',
+                headers=self._hdr(),
+            )
+            self.assertEqual(response.status_code, 404)
+            missing = await response.get_json()
+            self.assertEqual(missing['mutation']['reason'], 'not_found')
+
+            with patch.object(
+                    runtime, 'abort', side_effect=OSError('registry offline')):
+                response = await cli.post(
+                    '/api/v1/orchestrations/run/abort/runtime-failure',
+                    headers=self._hdr(),
+                )
+            self.assertEqual(response.status_code, 500)
+            failure = await response.get_json()
+            self.assertFalse(failure['ok'])
+            self.assertEqual(failure['error']['kind'], 'internal')
+            self.assertEqual(
+                failure['error']['source'],
+                'orchestration:application-service',
+            )
+
+        _run(go())
+
+    def test_create_maps_service_exception_to_api_error(self):
+        from unittest.mock import patch
+        import routes.api_v1.orchestrations as route_module
+        from lib.orchestration.run_service import RunServiceError
+
+        class FailedRuns:
+            def create_new(self, **_kwargs):
+                raise RunServiceError('database offline')
+
+        async def go():
+            cli = self.fix.app.test_client()
+            with patch.object(route_module, '_run_instances',
+                              return_value=FailedRuns()), \
+                    patch.object(
+                        route_module.orchestration_run_runtime,
+                        'create',
+                    ) as runtime_create:
+                response = await cli.post(
+                    '/api/v1/orchestrations/tasks',
+                    headers=self._hdr(),
+                    json={'definition': self._def(), 'input': 'go'},
+                )
+            self.assertEqual(response.status_code, 500)
+            self.assertTrue((await response.get_json())['ok'] is False)
+            runtime_create.assert_not_called()
+
+        _run(go())
+
+    def test_read_failure_is_500_not_empty_or_missing(self):
+        from unittest.mock import patch
+        import routes.api_v1.orchestrations as route_module
+        from lib.orchestration.run_service import RunServiceError
+
+        class FailedReads:
+            def list(self, **_filters):
+                raise RunServiceError('database offline')
+
+            def get(self, _run_id):
+                raise RunServiceError('database offline')
+
+        async def go():
+            cli = self.fix.app.test_client()
+            with patch.object(route_module, '_run_instances',
+                              return_value=FailedReads()):
+                listed = await cli.get(
+                    '/api/v1/orchestrations/tasks', headers=self._hdr())
+                fetched = await cli.get(
+                    '/api/v1/orchestrations/tasks/run_any',
+                    headers=self._hdr())
+            self.assertEqual(listed.status_code, 500)
+            self.assertEqual(fetched.status_code, 500)
+
+        _run(go())
+
+    def test_list_rejects_unknown_status_filter(self):
+        async def go():
+            cli = self.fix.app.test_client()
+            response = await cli.get(
+                '/api/v1/orchestrations/tasks?status=dnne',
+                headers=self._hdr(),
+            )
+            self.assertEqual(response.status_code, 400)
+            body = await response.get_json()
+            self.assertIn('pending', body['statuses'])
+            self.assertIn('done', body['statuses'])
+
+        _run(go())
+
     def test_create_then_poll_events_to_completion(self):
         async def go():
             cli = self.fix.app.test_client()
             # 1. POST a durable run.
+            definition = self._def()
+            definition['nodes'][1]['params']['must_do'] = \
+                '  inspect inputs\n\n publish result '
             r = await cli.post('/api/v1/orchestrations/tasks',
                                headers=self._hdr(),
-                               json={'definition': self._def(), 'input': 'go'})
+                               json={'definition': definition, 'input': 'go'})
             self.assertEqual(r.status_code, 201)
             created = await r.get_json()
             self.assertTrue(created['ok'])
+            self.assertEqual(created['definitionSource'], 'inline')
             run_id = created['run_id']
             self.assertTrue(run_id.startswith('run_'))
+            self.assertEqual(created['start'], {
+                'format': 'tofu.orchestration.runtime-start/v1',
+                'kind': 'durable',
+                'id': run_id,
+            })
 
             # 2. Poll /events until done. The worker runs via
             # asyncio.ensure_future on THIS loop, so the awaits below both
             # advance it and consume the cursor stream.
             cursor, status, seen, deadline = 0, 'pending', [], 0
+            terminal_page = None
             while deadline < 100:   # ~10s cap
                 deadline += 1
+                requested_cursor = cursor
                 r = await cli.get(
                     f'/api/v1/orchestrations/tasks/{run_id}/events?cursor={cursor}',
                     headers=self._hdr())
                 self.assertEqual(r.status_code, 200)
                 body = await r.get_json()
                 self.assertTrue(body['ok'])
+                self.assertEqual(body['format'], 'tofu.task-replay/v1')
+                self.assertEqual(body['cursor']['requested'], requested_cursor)
+                self.assertEqual(body['cursor']['next'], body['next_cursor'])
+                self.assertFalse(body['cursor']['reset'])
                 for ev in body['events']:
                     seen.append(ev['type'])
                 cursor = body['next_cursor']
                 status = body['status']
                 if body['done']:
+                    terminal_page = body
                     break
+                self.assertNotIn('run', body)
                 await asyncio.sleep(0.1)
 
             # 3. The run completed and the durable event log replays the
@@ -758,6 +1324,10 @@ class TaskRunHttpTest(unittest.TestCase):
             self.assertIn('flow_start', seen)
             self.assertIn('step_complete', seen)
             self.assertIn('flow_complete', seen)
+            self.assertIsNotNone(terminal_page)
+            self.assertEqual(terminal_page['run']['id'], run_id)
+            self.assertTrue(terminal_page['run']['terminal'])
+            self.assertEqual(terminal_page['run']['status'], 'done')
 
             # 4. The header row persisted the terminal status + final.
             r = await cli.get(f'/api/v1/orchestrations/tasks/{run_id}',
@@ -766,6 +1336,8 @@ class TaskRunHttpTest(unittest.TestCase):
             run = (await r.get_json())['run']
             self.assertEqual(run['status'], 'done')
             self.assertEqual(run['definition']['name'], 'TaskFlow')  # snapshot
+            self.assertEqual(run['definition']['nodes'][1]['params'][
+                'must_do'], ['inspect inputs', 'publish result'])
 
             # 5. Durability: a SECOND poll from cursor 0 replays the SAME
             # events from the DB (not the in-memory runtime) — the dual-sink
@@ -779,6 +1351,36 @@ class TaskRunHttpTest(unittest.TestCase):
             self.assertIn('flow_complete', replay_types)
             self.assertTrue(replay['done'])
 
+            # An over-advanced browser cursor is corrected by the producer;
+            # keeping the caller's 1000+ value would strand future streams.
+            r = await cli.get(
+                f'/api/v1/orchestrations/tasks/{run_id}/events'
+                f'?cursor={cursor + 1000}', headers=self._hdr())
+            corrected = await r.get_json()
+            self.assertEqual(corrected['format'], 'tofu.task-replay/v1')
+            self.assertEqual(corrected['events'], [])
+            self.assertEqual(corrected['next_cursor'], cursor)
+            self.assertEqual(corrected['cursor'], {
+                'requested': cursor + 1000,
+                'next': cursor,
+                'reset': True,
+            })
+
+            # Terminal state is a persistence fence, not just a UI hint.
+            r = await cli.post(
+                f'/api/v1/orchestrations/tasks/{run_id}/abort',
+                headers=self._hdr(), json={})
+            self.assertEqual(r.status_code, 409)
+            conflict = await r.get_json()
+            self.assertEqual(conflict['run_status'], 'done')
+            self.assertEqual(
+                conflict['mutation']['format'],
+                'tofu.orchestration.mutation/v1',
+            )
+            self.assertEqual(conflict['mutation']['action'], 'abort_run')
+            self.assertEqual(conflict['mutation']['reason'], 'terminal')
+            self.assertFalse(conflict['mutation']['retryable'])
+
             # 6. The run shows up in the list, then deletes cleanly.
             r = await cli.get('/api/v1/orchestrations/tasks', headers=self._hdr())
             runs = (await r.get_json())['runs']
@@ -786,9 +1388,26 @@ class TaskRunHttpTest(unittest.TestCase):
             r = await cli.delete(f'/api/v1/orchestrations/tasks/{run_id}',
                                  headers=self._hdr())
             self.assertEqual(r.status_code, 200)
+            deleted = await r.get_json()
+            self.assertEqual(deleted['mutation']['action'], 'delete_run')
+            self.assertEqual(deleted['mutation']['reason'], 'accepted')
             r = await cli.get(f'/api/v1/orchestrations/tasks/{run_id}',
                               headers=self._hdr())
             self.assertEqual(r.status_code, 404)
+
+            r = await cli.get(
+                f'/api/v1/orchestrations/tasks/{run_id}/events?cursor=9',
+                headers=self._hdr())
+            self.assertEqual(r.status_code, 404)
+            missing = await r.get_json()
+            self.assertEqual(missing['format'], 'tofu.task-replay/v1')
+            self.assertFalse(missing['ok'])
+            self.assertEqual(missing['error'], 'not_found')
+            self.assertTrue(missing['done'])
+            self.assertEqual(missing['events'], [])
+            self.assertEqual(missing['cursor'], {
+                'requested': 9, 'next': 9, 'reset': False,
+            })
         _run(go())
 
     def test_durable_log_carries_step_trace_not_deltas(self):
@@ -899,11 +1518,27 @@ class TaskRunHttpTest(unittest.TestCase):
                               headers=self._hdr())
             self.assertEqual((await r.get_json())['run']['status'], 'paused')
 
+            # Active headers fence deletion so the still-running worker cannot
+            # append events into a run record that has disappeared.
+            r = await cli.delete(f'/api/v1/orchestrations/tasks/{run_id}',
+                                 headers=self._hdr())
+            self.assertEqual(r.status_code, 409)
+            active_delete = await r.get_json()
+            self.assertEqual(active_delete['run_status'], 'paused')
+            self.assertEqual(active_delete['mutation']['action'], 'delete_run')
+            self.assertEqual(active_delete['mutation']['reason'], 'active')
+            r = await cli.get(f'/api/v1/orchestrations/tasks/{run_id}',
+                              headers=self._hdr())
+            self.assertEqual(r.status_code, 200)
+
             # Resolve the gate (approve) via the existing endpoint.
             r = await cli.post('/api/v1/orchestrations/run/human-approve',
                                headers=self._hdr(),
                                json={'requestId': req_id, 'approved': True})
             self.assertEqual(r.status_code, 200)
+            gate_result = await r.get_json()
+            self.assertEqual(gate_result['mutation']['action'], 'approve_gate')
+            self.assertEqual(gate_result['mutation']['reason'], 'accepted')
 
             # The engine unblocks and the run drives to completion.
             status, seen, deadline = 'paused', [], 0
@@ -935,6 +1570,35 @@ class TaskRunHttpTest(unittest.TestCase):
                 '/api/v1/orchestrations/tasks', headers=self._hdr(),
                 json={'definition': bad})
             self.assertEqual(r.status_code, 400)
+        _run(go())
+
+    def test_expired_human_gate_uses_shared_mutation_contract(self):
+        async def go():
+            cli = self.fix.app.test_client()
+            r = await cli.post(
+                '/api/v1/orchestrations/run/human-input',
+                headers=self._hdr(),
+                json={'requestId': 'expired-gate', 'response': 'answer'},
+            )
+            self.assertEqual(r.status_code, 404)
+            body = await r.get_json()
+            self.assertFalse(body['ok'])
+            self.assertEqual(body['requestId'], 'expired-gate')
+            self.assertEqual(
+                body['mutation'],
+                {
+                    'format': 'tofu.orchestration.mutation/v1',
+                    'ok': False,
+                    'action': 'input_gate',
+                    'reason': 'not_found',
+                    'target_id': 'expired-gate',
+                    'resource_status': '',
+                    'resource_terminal': None,
+                    'target_exists': False,
+                    'retryable': False,
+                    'reconcile_required': True,
+                },
+            )
         _run(go())
 
     def test_tasks_require_auth(self):

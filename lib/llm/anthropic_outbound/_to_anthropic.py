@@ -6,11 +6,17 @@ Contains the block/tool/message converters and the top-level
 ``lib.llm.body`` image sniffer; no dependency on the inbound module.
 """
 
+import copy
 import json
 
 from lib.log import get_logger
 
 logger = get_logger(__name__)
+
+# Keep small native catalogs flat: discovery costs more than their schemas.
+# This mirrors the local gateway threshold without importing lib.tools on this
+# protocol hot path (which would initialize the full tool registry).
+_TOOL_SEARCH_MIN_FUNCTIONS = 12
 
 
 def _media_type_and_data(url: str):
@@ -169,6 +175,20 @@ def _assistant_blocks(msg: dict) -> list:
     signature is dropped: sending a thinking block without its signature
     returns HTTP 400, so a lossy "fresh reasoning" continuation is better.
     """
+    _opaque = msg.get('_anthropic_content_blocks')
+    if isinstance(_opaque, list) and _opaque:
+        # A hosted Anthropic server tool participated in this assistant turn.
+        # Replaying a regenerated text/tool_use projection is insufficient:
+        # server_tool_use + tool_search_tool_result and their original order
+        # are part of the Messages protocol continuation contract.
+        blocks = [copy.deepcopy(block) for block in _opaque
+                  if isinstance(block, dict)]
+        _cc = _block_cache_control(msg.get('content'))
+        if _cc and blocks:
+            blocks = _strip_cc(blocks)
+            blocks[-1] = {**blocks[-1], 'cache_control': _cc}
+        return blocks
+
     blocks = []
     th_text = msg.get('reasoning_content') or ''
     th_sig = msg.get('thinking_signature') or ''
@@ -225,6 +245,29 @@ def openai_body_to_anthropic(body: dict) -> dict:
             out[k] = body[k]
 
     tools = _convert_tools(body.get('tools'))
+    if tools and body.get('_anthropic_native_tool_search'):
+        policy = body.get('_tool_discovery_policy_by_name') or {}
+        pins = {str(name) for name in (
+            body.get('_frontend_selected_tool_names') or ())}
+        deferred_tools = []
+        for tool in tools:
+            name = str(tool.get('name') or '')
+            if (name not in pins
+                    and policy.get(name, 'eager') != 'eager'):
+                deferred_tools.append(tool)
+        # Anthropic's server-hosted BM25 tool must remain non-deferred.  It
+        # searches the deferred definitions without changing the prompt-cache
+        # prefix and returns ordinary tool_use blocks for our existing parser.
+        # For a small directory, or an all-eager one, the complete native
+        # schemas are cheaper and avoid an unnecessary discovery round.
+        if (len(tools) >= _TOOL_SEARCH_MIN_FUNCTIONS
+                and deferred_tools):
+            for tool in deferred_tools:
+                tool['defer_loading'] = True
+            tools.insert(0, {
+                'type': 'tool_search_tool_bm25_20251119',
+                'name': 'tool_search_tool_bm25',
+            })
     if tools:
         out['tools'] = tools
 

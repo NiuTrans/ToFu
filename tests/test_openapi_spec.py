@@ -37,6 +37,39 @@ class ApiMetaDecoratorTest(unittest.TestCase):
         self.assertFalse(m['deprecated'])
         self.assertFalse(m['public'])
 
+    def test_vendor_extensions_are_validated_and_published(self):
+        from lib.openapi import api_meta, build_spec
+
+        @api_meta(extensions={'x-tofu-contract': 'example/v1'})
+        def handler():
+            return None
+
+        app = BuildSpecTest()._stub_app([
+            ('/api/v1/example', 'example', {'GET'}),
+        ])
+        app.view_functions = {'example': handler}
+        operation = build_spec(app)['paths']['/api/v1/example']['get']
+        self.assertEqual(operation['x-tofu-contract'], 'example/v1')
+        with self.assertRaisesRegex(ValueError, 'must start with x-'):
+            api_meta(extensions={'contract': 'invalid'})
+
+    def test_explicit_bodyless_write_suppresses_default_request_body(self):
+        from lib.openapi import api_meta, build_spec
+
+        @api_meta(request_body=False)
+        def handler():
+            return None
+
+        app = BuildSpecTest()._stub_app([
+            ('/api/v1/example/abort', 'abort_example', {'POST'}),
+        ])
+        app.view_functions = {'abort_example': handler}
+        operation = build_spec(app)['paths'][
+            '/api/v1/example/abort']['post']
+        self.assertNotIn('requestBody', operation)
+        with self.assertRaisesRegex(TypeError, 'dict, False or None'):
+            api_meta(request_body=True)
+
 
 class BuildSpecTest(unittest.TestCase):
 
@@ -97,12 +130,48 @@ class BuildSpecTest(unittest.TestCase):
         self.assertNotIn('/static/foo', spec['paths'])
         # Components include the standard schemas.
         self.assertIn('ErrorEnvelope', spec['components']['schemas'])
+        self.assertIn('TypedErrorEnvelope', spec['components']['schemas'])
         self.assertIn('ChatCompletionRequest', spec['components']['schemas'])
         self.assertIn('TaskState', spec['components']['schemas'])
         self.assertIn('ApiKey', spec['components']['schemas'])
         # Security schemes wired.
         self.assertIn('bearerAuth', spec['components']['securitySchemes'])
         self.assertIn('tunnelTokenHeader', spec['components']['securitySchemes'])
+
+    def test_error_schemas_share_the_runtime_envelope_contract(self):
+        from lib.error_envelope import KINDS, make_envelope
+        from lib.openapi._schema import _components
+
+        schemas = _components()['schemas']
+        typed = schemas['TypedErrorEnvelope']
+        sample = make_envelope('timeout')
+
+        self.assertEqual(set(typed['required']), {
+            'kind', 'severity', 'retryable', 'message', 'hint', 'detail',
+            'model', 'context', 'source', 'raw',
+        })
+        self.assertEqual(set(typed['properties']['kind']['enum']), set(KINDS))
+        self.assertTrue(set(typed['required']).issubset(sample))
+        self.assertEqual(
+            schemas['ErrorEnvelope']['properties']['error']['anyOf'][1],
+            {'$ref': '#/components/schemas/TypedErrorEnvelope'},
+        )
+        self.assertEqual(
+            schemas['TaskState']['properties']['error']['oneOf'],
+            [
+                {'$ref': '#/components/schemas/TypedErrorEnvelope'},
+                {'type': 'null'},
+            ],
+        )
+
+    def test_typed_error_schema_is_fresh_per_components_build(self):
+        from lib.openapi._schema import _components
+
+        first = _components()
+        first['schemas']['TypedErrorEnvelope']['required'].append('mutated')
+        second = _components()
+        self.assertNotIn(
+            'mutated', second['schemas']['TypedErrorEnvelope']['required'])
 
     def test_path_parameter_extraction(self):
         from lib.openapi import _flask_to_openapi_path, _path_parameters

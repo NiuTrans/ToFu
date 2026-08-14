@@ -190,7 +190,9 @@ def _maybe_dump_cache_probe(body, task_id, log_prefix='', routing=None):
             'stable_ttls': _cache_probe_stable_ttls(body),
             'system': body.get('system'),
             'tools': body.get('tools'),
-            'messages': body.get('messages') or [],
+            'messages': body.get('messages') or body.get('input') or [],
+            'prompt_cache_key': body.get('prompt_cache_key'),
+            'context_management': body.get('context_management'),
         }
         path = os.path.join(base, f'round_{rnd:04d}.json')
         with open(path, 'w', encoding='utf-8') as fh:
@@ -211,6 +213,42 @@ class RequestPlan:
     raw_dumper: RawSSEDumper
     wire_translator: Any
     t0: float
+    # Optional public Responses WebSocket transport metadata.  Kept off the
+    # request body so generic providers never see Tofu control fields.
+    responses_transport: str = 'sse'
+    responses_state_key: str = ''
+    responses_profile: str = ''
+    tool_search_backend: str = ''
+
+
+def activate_native_tool_search_fallback(
+    status_code: int,
+    error_text: str,
+    *,
+    plan: RequestPlan,
+    canonical_body: dict,
+) -> bool:
+    """Switch a rejected native discovery request to local on its retry.
+
+    Returns ``True`` only for request-shape errors that explicitly mention
+    hosted Tool Search fields.  Unrelated 400/404/422 responses retain their
+    ordinary classification, so this cannot mask a bad prompt or model id.
+    """
+    if plan.tool_search_backend not in ('native_openai', 'native_anthropic'):
+        return False
+    if status_code not in (400, 404, 422):
+        return False
+    lower = str(error_text or '').casefold()
+    signals = (
+        'tool_search', 'tool search', 'defer_loading', 'deferred tool',
+        'tool_search_tool_bm25', 'tool namespace',
+    )
+    if not any(signal in lower for signal in signals):
+        return False
+    canonical_body['_force_local_tool_search'] = True
+    logger.warning('Native Tool Search rejected by provider (HTTP %d); '
+                   'retrying with local discovery', status_code)
+    return True
 
 
 def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
@@ -218,10 +256,16 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
                     api_protocol='openai', oauth='') -> RequestPlan:
     """Identical pre-flight for both transports.
 
-    Mutates ``body`` in place (cache breakpoints, ``_task_id`` pop,
+    Mutates ``body`` in place (cache breakpoints, internal-key stripping,
     wire-protocol translation) exactly as the inline code did, then returns
     the plan.
     """
+    # Keep the canonical task body intact across transport retries and
+    # provider failover.  The tool-search surface below is protocol-specific;
+    # reusing an already-trimmed wire body would silently lose the immutable
+    # executable catalog on the next attempt.
+    body = dict(body)
+
     # Read the latch key NON-destructively and keep it on the body for the
     # WHOLE task life. The streaming retry loop re-feeds the SAME body dict to
     # this function on every 429/503 attempt (see lib/llm/stream.py:62); popping
@@ -232,6 +276,88 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
     # is stripped at that serialization boundary instead (see below). The
     # Anthropic path rebuilds the body from an allowlist, so it never leaks.
     _task_id_for_latch = body.get('_task_id', '')
+    _responses_transport_requested = str(
+        body.get('_responses_transport') or 'sse').strip().lower()
+    _responses_feature_profile = str(
+        body.get('_responses_feature_profile')
+        or 'compatible').strip().lower()
+    _responses_state_key = str(body.get('_task_id') or '')
+
+    # Resolve discovery at the last common boundary before cache markers and
+    # protocol translation.  Authorization continues to use the task-owned
+    # executable catalog in the dispatch pipeline; this only controls what the
+    # model sees on the wire.
+    _enabled_catalog = body.get(
+        '_executable_tool_catalog', body.get('_enabled_tool_catalog'))
+    _tool_search_backend = ''
+    if isinstance(_enabled_catalog, list):
+        from lib.tools.gateway import (
+            full_wire_tools,
+            local_wire_tools,
+            resolve_tool_search_backend,
+        )
+        if body.get('_force_local_tool_search'):
+            _tool_search_backend = 'local'
+        elif body.get('_tool_search_fail_open'):
+            _tool_search_backend = 'full'
+        else:
+            _tool_search_backend = resolve_tool_search_backend(
+                body.get('_tool_search_mode') or 'auto',
+                protocol=api_protocol, model=body.get('model') or '',
+                responses_profile=_responses_feature_profile,
+                base_url=base_url or '', oauth=oauth or '',
+                capabilities=body.get('_tool_search_capabilities'))
+        body['_resolved_tool_search_backend'] = _tool_search_backend
+        _pins = list(body.get('_frontend_selected_tool_names') or ())
+        _pin_set = {str(name) for name in _pins}
+
+        def _wire_catalog_tool(tool):
+            if not isinstance(tool, dict):
+                return False
+            fn = tool.get('function')
+            name = str((fn.get('name') if isinstance(fn, dict) else '')
+                       or tool.get('name') or '')
+            # MCP has already been searched by ChatUI before this boundary.
+            # Only the task-sticky active MCP schemas go to any provider;
+            # inactive MCP tools remain in ``_executable_tool_catalog`` for
+            # authorization and direct-name compatibility.
+            return not name.startswith('mcp__') or name in _pin_set
+
+        # Execution authority and prompt visibility are intentionally distinct.
+        # The former remains live so an enabled tool can be called by name even
+        # when it was not searched; the latter is this round's model-visible
+        # projection and is the normal source for provider tool schemas.
+        _stable_wire_catalog = body.get('_tool_wire_catalog')
+        if isinstance(_stable_wire_catalog, list):
+            _wire_catalog = list(_stable_wire_catalog)
+        else:
+            # Compatibility for direct callers that predate the sidecar.
+            _wire_catalog = [tool for tool in _enabled_catalog
+                             if _wire_catalog_tool(tool)]
+        if _tool_search_backend == 'full' and body.get(
+                '_tool_search_fail_open'):
+            # A local retrieval failure is the one intentional exception: make
+            # the enabled directory visible so availability wins over cache.
+            _wire_catalog = [tool for tool in _enabled_catalog
+                             if _wire_catalog_tool(tool)]
+        if _tool_search_backend == 'local':
+            body['tools'] = local_wire_tools(
+                _wire_catalog,
+                discovery_policy_by_name=body.get(
+                    '_tool_discovery_policy_by_name'),
+                discovery_catalog_size=body.get(
+                    '_tool_search_catalog_size'),
+                searchable_count=body.get('_tool_searchable_count'),
+                include_search=True)
+        else:
+            # Native discovery receives the complete catalog and lets the
+            # provider defer searchable tools.  ``off`` also gets the full
+            # catalog, without a discovery primitive.
+            body['tools'] = full_wire_tools(_wire_catalog)
+        if _tool_search_backend == 'native_anthropic':
+            body['_anthropic_native_tool_search'] = True
+        body['_frontend_selected_tool_names'] = _pins
+
     add_cache_breakpoints(body, log_prefix, api_protocol=api_protocol)
 
     # Auto-inject extended cache TTL beta header for Claude
@@ -265,6 +391,8 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
     # Responses). The canonical OpenAI body is converted per protocol and
     # a stateful translator rides the plan to convert the SSE stream back.
     wire_translator = None
+    _responses_profile = ''
+    _responses_transport = 'sse'
     if api_protocol == 'responses':
         from lib.llm.responses_outbound import (
             ResponsesSSETranslator,
@@ -275,6 +403,7 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         # dropped sampling params); every other Responses provider gets
         # the generic profile.
         _profile = 'codex' if oauth == 'codex' else 'default'
+        _responses_profile = _profile
         body, _resp_reverse = openai_body_to_responses(
             body, profile=_profile, stream=True)
         wire_translator = ResponsesSSETranslator(model=body.get('model', ''))
@@ -282,6 +411,14 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         # per-request reverse map restores them before tool dispatch.
         wire_translator.tool_name_reverse = _resp_reverse
         url = responses_url(base_url)
+        _responses_model = str(body.get('model') or '').lower()
+        from lib.model_info._openai_gpt56 import is_official_gpt56_model
+        if (_profile == 'default'
+                and _responses_feature_profile == 'openai'
+                and is_official_gpt56_model(_responses_model)
+                and _responses_transport_requested == 'websocket'
+                and _responses_state_key):
+            _responses_transport = 'websocket'
         logger.debug('%s [Responses] Translated request for Responses API '
                      '(profile=%s)', log_prefix, _profile)
     elif api_protocol == 'anthropic':
@@ -307,15 +444,54 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         # the internal latch key must be removed HERE — the single serialization
         # boundary — rather than popped early (which broke the retry-stable
         # latch, see above). The Anthropic/Responses branches rebuild `body`
-        # from an allowlist that never included _task_id, so this only
+        # from an allowlist that never included internal underscore keys, so this only
         # matters here.
-        body.pop('_task_id', None)
+        # Build a wire-only top-level envelope instead of popping from the
+        # caller's canonical dict. ``stream_chat`` reuses that dict on a
+        # transport retry; destructive pops made attempt 2 lose the task TTL
+        # latch (and would also lose the Responses cache namespace if a caller
+        # switched protocol during failover). Nested messages/tools stay
+        # shared intentionally: add_cache_breakpoints has already normalized
+        # them and is idempotent on the next attempt.
+        _internal_keys = {
+            '_task_id', '_conv_id', '_working_set_tokens',
+            '_gpt56_breakpoint_mode', '_programmatic_tool_calling',
+            '_programmatic_stage',
+            '_tool_search_mode', '_frontend_selected_tool_names',
+            '_tool_namespace_by_name', '_responses_transport',
+            '_enabled_tool_catalog', '_executable_tool_catalog',
+            '_tool_wire_catalog',
+            '_tool_discovery_policy_by_name',
+            '_tool_search_catalog_size', '_tool_searchable_count',
+            '_tool_search_capabilities', '_resolved_tool_search_backend',
+            '_anthropic_native_tool_search',
+            '_force_local_tool_search', '_tool_search_fail_open',
+            '_reasoning_mode', '_text_verbosity', '_image_detail',
+            '_multi_agent_mode', '_multi_agent_stage',
+            '_multi_agent_max_concurrent_subagents', '_safety_identifier',
+            '_responses_feature_profile',
+        }
+        body = {key: value for key, value in body.items()
+                if key not in _internal_keys}
+        _message_sidecars = frozenset({
+            '_responses_items', '_anthropic_content_blocks',
+        })
+        if any(isinstance(msg, dict)
+               and any(key in msg for key in _message_sidecars)
+               for msg in body.get('messages') or ()):
+            body['messages'] = [
+                ({key: value for key, value in msg.items()
+                  if key not in _message_sidecars}
+                 if isinstance(msg, dict) else msg)
+                for msg in body.get('messages') or ()
+            ]
         url = f'{base_url.rstrip("/")}/chat/completions' if base_url else chat_url()
 
     attempt_tag = f' (attempt {attempt+1})' if attempt > 0 else ''
     if log_prefix:
+        _wire_item_count = len(body.get('messages') or body.get('input') or [])
         logger.debug('%s%s POST %s msgs=%d tools=%s', log_prefix, attempt_tag, url,
-                     len(body.get('messages', [])), 'yes' if body.get('tools') else 'no')
+                     _wire_item_count, 'yes' if body.get('tools') else 'no')
 
     trace_id = uuid.uuid4().hex
     if api_protocol == 'anthropic':
@@ -332,6 +508,15 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         if extra_headers:
             hdrs.update(extra_headers)
     hdrs['M-TraceId'] = trace_id
+    if (api_protocol == 'responses'
+            and isinstance(body.get('multi_agent'), dict)
+            and body['multi_agent'].get('enabled')):
+        beta_key = next((key for key in hdrs
+                         if key.lower() == 'openai-beta'), 'OpenAI-Beta')
+        beta = str(hdrs.get(beta_key) or '')
+        marker = 'responses_multi_agent=v1'
+        if marker not in beta:
+            hdrs[beta_key] = f'{beta},{marker}' if beta else marker
 
     if log_prefix:
         logger.debug('%s M-TraceId=%s', log_prefix, trace_id)
@@ -363,8 +548,9 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
             system_fingerprint, wire_byte_field_prefix, wire_byte_prefix,
             wire_byte_region,
         )
-        raw_dumper.wire_fp = canonical_messages(body.get('messages') or [])
-        raw_dumper.wire_static = static_prefix_hash(body.get('messages') or [])
+        _wire_items = body.get('messages') or body.get('input') or []
+        raw_dumper.wire_fp = canonical_messages(_wire_items)
+        raw_dumper.wire_static = static_prefix_hash(_wire_items)
         # TRUE-byte prefix: hash the ACTUAL serialized bytes per message (only
         # cache_control stripped). canonical_messages is lossy (drops
         # reasoning_details, collapses str↔block, canonicalises arg order), so
@@ -372,14 +558,14 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         # detect_cache_break REFUSE a false "byte-identical eviction" claim when
         # the real bytes diverged (reasoning_details rebuild / same-role merge /
         # protocol switch) — see wire_byte_prefix's docstring.
-        raw_dumper.wire_bytes = wire_byte_prefix(body.get('messages') or [])
+        raw_dumper.wire_bytes = wire_byte_prefix(_wire_items)
         # FIELD-GRANULAR true bytes: names the EXACT top-level field that
         # flipped on a canonical-invisible <bytes> divergence (reasoning_details
         # rebuild / tool_calls arg re-serialization / content / field-order),
         # so detect_cache_break can log the proven field instead of only the
         # message. See wire_byte_field_prefix.
         raw_dumper.wire_field_bytes = wire_byte_field_prefix(
-            body.get('messages') or [])
+            _wire_items)
         # TRUE-byte hash of the HOISTED system + tools region. system_fingerprint
         # is ITSELF lossy (runs _text_of + sort_keys on params), so a system
         # BLOCK REORDER / wrapping flip / per-turn re-serialization — the
@@ -469,7 +655,10 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
 
     return RequestPlan(url=url, hdrs=hdrs, body=body, trace_id=trace_id,
                        raw_dumper=raw_dumper, wire_translator=wire_translator,
-                       t0=t0)
+                       t0=t0, responses_transport=_responses_transport,
+                       responses_state_key=_responses_state_key,
+                       responses_profile=_responses_profile,
+                       tool_search_backend=_tool_search_backend)
 
 
 def classify_status_error(status_code, err_text, *, body, log_prefix, raw_dumper):
@@ -490,6 +679,32 @@ def classify_status_error(status_code, err_text, *, body, log_prefix, raw_dumper
         raw_dumper.line(f'[HTTP-{status_code}] {err_text[:_ERR_BODY_LIMIT]}')
     _classify_http_error(status_code, err_msg, body.get('model', ''),
                          log_prefix, max_tokens=body.get('max_tokens', 0))
+
+
+def _wire_tool_names(tools) -> set[str]:
+    """Extract callable names from every supported wire-tool shape.
+
+    Responses Tool Search nests deferred functions inside ``namespace.tools``;
+    treating only the namespace's own name as callable would falsely report a
+    successfully searched function as hallucinated.
+    """
+    names: set[str] = set()
+    for tool in tools or ():
+        if not isinstance(tool, dict):
+            continue
+        if tool.get('type') == 'namespace':
+            names.update(_wire_tool_names(tool.get('tools') or ()))
+            continue
+        func = tool.get('function')
+        if isinstance(func, dict) and func.get('name'):
+            names.add(str(func['name']))
+        elif tool.get('type') == 'function' and tool.get('name'):
+            names.add(str(tool['name']))
+        elif (tool.get('name') and tool.get('type') not in (
+                'tool_search', 'programmatic_tool_calling')):
+            # Anthropic-native function schema.
+            names.add(str(tool['name']))
+    return names
 
 
 class SSEAccumulator:
@@ -871,6 +1086,8 @@ class SSEAccumulator:
                     self.tool_calls_acc[idx]['id'] = tc['id']
                 if tc.get('extra_content'):
                     self.tool_calls_acc[idx]['extra_content'] = tc['extra_content']
+                if isinstance(tc.get('caller'), dict):
+                    self.tool_calls_acc[idx]['caller'] = dict(tc['caller'])
                 fn = tc.get('function', {})
                 if fn.get('name'):
                     _prev_name = self.tool_calls_acc[idx]['function']['name']
@@ -932,6 +1149,8 @@ class SSEAccumulator:
                         }
                         if tc.get('extra_content'):
                             self.tool_calls_acc[idx]['extra_content'] = tc['extra_content']
+                        if isinstance(tc.get('caller'), dict):
+                            self.tool_calls_acc[idx]['caller'] = dict(tc['caller'])
                 if fn.get('arguments') is not None:
                     self.tool_calls_acc[idx]['function']['arguments'] += fn.get('arguments', '')
 
@@ -954,15 +1173,7 @@ class SSEAccumulator:
             # cannot be part of its identifier.
             return False
         try:
-            _sent = set()
-            for t in (self.body.get('tools') or []):
-                if not isinstance(t, dict):
-                    continue
-                _fn = t.get('function')
-                if isinstance(_fn, dict) and _fn.get('name'):
-                    _sent.add(_fn['name'])
-                elif t.get('name'):
-                    _sent.add(t['name'])
+            _sent = _wire_tool_names(self.body.get('tools') or [])
         except Exception as _e:
             logger.debug('%s toolset read failed in fragment check: %s',
                          self.log_prefix, _e)
@@ -1125,15 +1336,7 @@ class SSEAccumulator:
                 # (see lib/llm/anthropic_outbound/_to_anthropic.py). Reading
                 # only the nested form yields an EMPTY whitelist on the
                 # Anthropic line, which would skip the loop entirely.
-                _sent_names = set()
-                for t in (self.body.get('tools') or []):
-                    if not isinstance(t, dict):
-                        continue
-                    _fn = t.get('function')
-                    if isinstance(_fn, dict) and _fn.get('name'):
-                        _sent_names.add(_fn['name'])
-                    elif t.get('name'):
-                        _sent_names.add(t['name'])
+                _sent_names = _wire_tool_names(self.body.get('tools') or [])
                 if _sent_names:
                     for _idx, _tc in self.tool_calls_acc.items():
                         _nm = _tc['function']['name']
@@ -1197,6 +1400,22 @@ class SSEAccumulator:
 
         # Build assistant message
         msg = {'role': 'assistant'}
+        _responses_items = getattr(
+            self.wire_translator, 'response_items', None)
+        if _responses_items:
+            # Private canonical sidecar: protocol converters replay it, while
+            # Chat-Completions/Anthropic allowlists never put it on their wire.
+            msg['_responses_items'] = [dict(item)
+                                       for item in _responses_items
+                                       if isinstance(item, dict)]
+        _anthropic_blocks = getattr(
+            self.wire_translator, 'anthropic_content_blocks', None)
+        if _anthropic_blocks:
+            # Same protocol-private replay sidecar pattern as Responses output
+            # items.  It never reaches an OpenAI-compatible message wire.
+            msg['_anthropic_content_blocks'] = [dict(block)
+                                                for block in _anthropic_blocks
+                                                if isinstance(block, dict)]
         if thinking_text:
             msg['reasoning_content'] = thinking_text
         if self.thinking_signature:

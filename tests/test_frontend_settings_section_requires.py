@@ -33,6 +33,8 @@ pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parent.parent
 MODULE = ROOT / "static" / "js" / "settings" / "section_requires.js"
+MODULE_TS = ROOT / "frontend" / "src" / "features" / "settings" / "section-requires.ts"
+ESBUILD = ROOT / "node_modules" / ".bin" / "esbuild"
 PANEL = ROOT / "static" / "settings_panels" / "general.html"
 STYLES = ROOT / "static" / "styles.css"
 
@@ -92,9 +94,10 @@ HARNESS = textwrap.dedent("""
 """)
 
 
-def _run(body: str, defines: str = "") -> dict:
+def _run(body: str, defines: str = "", source: str | None = None) -> dict:
     script = HARNESS.format(body=body, defines=defines,
-                            source=MODULE.read_text(encoding="utf-8"))
+                            source=(source if source is not None else
+                                    MODULE.read_text(encoding="utf-8")))
     proc = subprocess.run([_node(), "-e", script], cwd=ROOT,
                           capture_output=True, text=True)
     assert proc.returncode == 0, f"node failed: {proc.stderr}"
@@ -142,6 +145,36 @@ def test_contract_is_generic_not_a_logo_special_case():
     all_present = _run(body, defines=("global.window.someFn = function () {};"
                                       "global.window.otherFn = function () {};"))
     assert all_present["hasDegradedClass"] is False
+
+
+@pytest.mark.skipif(not _has_jsdom() or not ESBUILD.is_file(),
+                    reason="jsdom + esbuild not installed")
+def test_vite_section_requirements_match_classic_contract(tmp_path):
+    built = tmp_path / "section-requires.js"
+    compiled = subprocess.run(
+        [str(ESBUILD), str(MODULE_TS), "--bundle", "--format=iife",
+         "--platform=browser", f"--outfile={built}"],
+        cwd=ROOT, capture_output=True, text=True)
+    assert compiled.returncode == 0, compiled.stderr
+    source = built.read_text(encoding="utf-8")
+
+    missing = _run(_section_html(), source=source)
+    present = _run(
+        _section_html(),
+        defines="global.window.paintSomeTab = function () {};",
+        source=source,
+    )
+    multi = _run(
+        _section_html("paintSomeTab otherTab"),
+        defines=("global.window.paintSomeTab = function () {};"
+                 "global.window.otherTab = true;"),
+        source=source,
+    )
+    assert missing["degradedCount"] == 1
+    assert missing["hasDegradedClass"] is True
+    assert present["degradedCount"] == 0
+    assert present["hasDegradedClass"] is False
+    assert multi["hasDegradedClass"] is False
 
 
 def test_css_actually_hides_the_control_and_shows_the_notice():

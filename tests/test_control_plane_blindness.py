@@ -19,6 +19,7 @@ These guards pin:
 
 import json
 import time
+from contextlib import contextmanager
 
 import pytest
 
@@ -34,6 +35,11 @@ class _FakeRow(dict):
     pass
 
 
+@contextmanager
+def _lease(fake):
+    yield fake
+
+
 class _FakeDB:
     """Answers the handful of SQL shapes the tombstone/gate code issues."""
 
@@ -42,10 +48,11 @@ class _FakeDB:
         self.running_ids = running_ids or []   # conv scan result
         self.max_ts = max_ts
         self.updates = []
+        self.rowcount = 0
 
     def execute(self, sql, params=()):
         s = ' '.join(sql.split()).lower()
-        if 'max(ts_ms)' in s:
+        if 'select ts_ms as mx from task_events' in s:
             return self
         if 'select metadata, status from task_results' in s:
             self._pending = ('meta', params[0])
@@ -53,8 +60,11 @@ class _FakeDB:
         if 'select task_id from task_results' in s and "status='running'" in s:
             self._pending = ('convscan', None)
             return self
-        if s.startswith('update task_results set metadata'):
-            self.updates.append(params)
+        if s.startswith('update task_results set abort_requested_at'):
+            status = self.meta_rows.get(params[2], (None, None))[1]
+            self.rowcount = 1 if status == 'running' else 0
+            if self.rowcount:
+                self.updates.append(params)
             return self
         raise AssertionError(f'unexpected SQL: {sql}')
 
@@ -113,7 +123,7 @@ class TestPollLivenessGate:
 
     def test_latest_event_ts_accessor(self, monkeypatch):
         fake = _FakeDB(max_ts=1720000000000)
-        monkeypatch.setattr(evlog, 'get_thread_db', lambda domain: fake)
+        monkeypatch.setattr(evlog, 'pooled_db', lambda domain: _lease(fake))
         assert evlog.latest_event_ts('task-x') == 1720000000000
 
 
@@ -124,20 +134,23 @@ class TestAbortTombstone:
 
     def test_plant_requires_running_row(self, monkeypatch, clean_tombstones):
         fake = _FakeDB(meta_rows={'t-dead': ('{}', 'done')})
-        monkeypatch.setattr('lib.database.get_thread_db', lambda domain: fake)
+        monkeypatch.setattr('lib.database.pooled_db',
+                            lambda domain: _lease(fake))
         assert reg.plant_abort_tombstone('t-dead', source='test') is False
         assert not reg.has_abort_tombstone('t-dead')
 
-    def test_plant_writes_metadata_and_memory(self, monkeypatch,
-                                              clean_tombstones):
+    def test_plant_writes_dedicated_columns_and_memory(
+            self, monkeypatch, clean_tombstones):
         fake = _FakeDB(meta_rows={'t-live': ('{}', 'running')})
-        monkeypatch.setattr('lib.database.get_thread_db', lambda domain: fake)
+        monkeypatch.setattr('lib.database.pooled_db',
+                            lambda domain: _lease(fake))
         assert reg.plant_abort_tombstone('t-live', source='test') is True
         assert reg.has_abort_tombstone('t-live')
-        assert fake.updates, 'tombstone metadata was not written to the row'
-        meta = json.loads(fake.updates[0][0])
-        assert meta['_abort_requested'] > 0
-        assert meta['_abort_source'] == 'test'
+        assert fake.updates, 'tombstone columns were not written to the row'
+        requested_at, source, task_id = fake.updates[0]
+        assert requested_at > 0
+        assert source == 'test'
+        assert task_id == 't-live'
 
     def test_abort_check_consumes_memory_tombstone(self, clean_tombstones):
         task = {'id': 't-ghost', 'aborted': False}
@@ -162,7 +175,8 @@ class TestAbortTombstone:
     def test_end_to_end_vanished_task(self, monkeypatch, clean_tombstones):
         """create → vanish from registry → plant → worker's check sees it."""
         fake = _FakeDB(meta_rows={'t-vanished': ('{}', 'running')})
-        monkeypatch.setattr('lib.database.get_thread_db', lambda domain: fake)
+        monkeypatch.setattr('lib.database.pooled_db',
+                            lambda domain: _lease(fake))
         task = {'id': 't-vanished', 'aborted': False, 'convId': 'c1',
                 'status': 'running'}
         with reg.tasks_lock:
@@ -180,7 +194,8 @@ class TestAbortTombstone:
     def test_conv_sweep_only_tombstones_registry_lost(self, monkeypatch,
                                                       clean_tombstones):
         fake = _FakeDB(running_ids=['a', 'b'])
-        monkeypatch.setattr('lib.database.get_thread_db', lambda domain: fake)
+        monkeypatch.setattr('lib.database.pooled_db',
+                            lambda domain: _lease(fake))
         monkeypatch.setattr(reg, '_write_abort_tombstone_row',
                             lambda tid, src: True)
         with reg.tasks_lock:

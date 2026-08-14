@@ -3,21 +3,19 @@
 import json
 import time
 
-import sqlite3
-from flask import Response, request
+from quart import Response, request
 
 from lib.database import (
     DOMAIN_CHAT,
     async_execute,
     async_fetchall,
     async_fetchone,
-    json_dumps_pg,
     run_pooled,
 )
 from lib.log import audit_log, get_logger
 from lib.api_response import (
-    api_bad_request, api_error, api_internal_error, api_not_found, api_ok,
-    api_payload,
+    api_bad_request, api_conflict, api_error, api_internal_error, api_not_found,
+    api_ok, api_payload,
 )
 from lib.openapi import api_meta
 from lib.request_parser import async_parse_body, parse_body  # noqa: F401
@@ -27,13 +25,10 @@ from lib.conversations.segments_backfill import (
     collect_taskids_needing_segments,
     fill_messages_with_segments,
 )
-from lib.database._core_schema import CONVERSATIONS, upsert
 
 # Columns written by the conversation upserts in this module. Omits `search_tsv`
 # (PG-only; the conversations_search_tsv_trg BEFORE-trigger derives it from
 # search_text) — so the partial insert lets the trigger own that column.
-_CONV_INSERT_COLS = ['id', 'user_id', 'title', 'messages', 'created_at',
-                     'updated_at', 'settings', 'msg_count', 'search_text']
 from routes.common import DEFAULT_USER_ID, _db_safe, _invalidate_meta_cache, _notify_conv_changed, _refresh_meta_cache_if_stale, _request_user_id
 
 # Whitelisted keys for PATCH /messages/<idx> — only these fields can be mutated
@@ -47,6 +42,12 @@ _PATCH_MSG_WHITELIST = {
 }
 
 logger = get_logger(__name__)
+
+# A browser may override its normal 60-message first-paint window, but a query
+# parameter must never turn the bounded endpoint back into an accidental
+# multi-gigabyte response. ``window=0`` remains the explicit compatibility
+# escape hatch for callers that truly need the full legacy body.
+_MAX_CONV_WINDOW = 500
 
 from routes.api_v1 import api_v1_conversations_bp as conversations_bp  # noqa: E402
 # (alias kept for back-compat with `from routes.conversations import conversations_bp` callers)
@@ -130,16 +131,83 @@ def _prefetch_reconciled_dict(db, conv_id, r):
     return _reconcile_conv_on_get_blocking(db, conv_id, r)
 
 
+def _prefetch_windowed_dict(db, conv_id, window):
+    """Build the startup combo payload without loading the full JSONB blob.
+
+    This is the synchronous twin of ``get_conv(...?window=N)`` used inside the
+    metadata worker. It preserves the old full-body prefetch when no window is
+    requested, while the first-party UI opts into the same verified row-store
+    / authoritative projected-JSON fallback as a normal conversation open.
+    """
+    from lib.database import _BACKEND
+    from lib.database.messages_rows import rows_read_enabled
+    from lib.database.conversation_repository import (
+        conversation_rows_authoritative,
+    )
+
+    live = _conv_has_live_task(conv_id)
+    authority = conversation_rows_authoritative()
+    use_rows = bool(rows_read_enabled() and (authority or not live))
+    if authority and not use_rows:
+        raise RuntimeError('normalized transcript authority is unavailable')
+    r = None
+    if use_rows:
+        r = db.execute(
+            'SELECT id, title, created_at, updated_at, settings, rev, msg_count '
+            'FROM conversations WHERE id=? AND user_id=?',
+            (conv_id, DEFAULT_USER_ID)).fetchone()
+        if not r:
+            return None
+        from lib.conv_ref._detail import row_window_usable
+        use_rows = row_window_usable(db, conv_id, int(r['msg_count'] or 0))
+        if authority and not use_rows:
+            raise RuntimeError(
+                f'canonical message rows are not current for {conv_id}')
+
+    if use_rows:
+        served, changed, cleaned_full, settings_dict = _windowed_served_readonly(
+            db, conv_id, r, window, None)
+    else:
+        slice_sql, _ = _projected_blob_window_sql(_BACKEND, None)
+        r = db.execute(
+            slice_sql, (conv_id, DEFAULT_USER_ID, window)).fetchone()
+        if not r:
+            return None
+        served, changed, cleaned_full, settings_dict = \
+            _windowed_projected_blob_readonly(
+                db, conv_id, r, None, allow_reconcile=not live)
+
+    # Unlike the normal GET, the combo response makes the frontend skip its
+    # second GET. Preserve the historical prefetch guarantee by persisting a
+    # rare ghost-tail repair inline, guarded by the revision we inspected.
+    if changed and cleaned_full is not None:
+        new_rev = _persist_reconcile(
+            db, conv_id, cleaned_full, settings_dict,
+            expected_rev=_row_rev(r))
+        if new_rev >= 0:
+            served['rev'] = new_rev
+    return served
+
+
 def _conv_row_to_dict(r):
     """Convert a DB row (with messages column) to a conversation dict."""
     return {
         'id': r['id'], 'title': r['title'],
-        'messages': _safe_json(r['messages'], default=[], label='messages'),
+        'messages': _decode_json_value(
+            r['messages'], default=[], label='messages'),
         'createdAt': r['created_at'], 'created_at': r['created_at'],
         'updatedAt': r['updated_at'], 'updated_at': r['updated_at'],
-        'settings': _safe_json(r['settings'], default=None, label='settings'),
+        'settings': _decode_json_value(
+            r['settings'], default=None, label='settings'),
         'rev': _row_rev(r),
-    }
+}
+
+
+def _decode_json_value(raw, *, default, label):
+    """Accept both driver JSON text and repository-decoded JSON values."""
+    if isinstance(raw, (dict, list)):
+        return raw
+    return _safe_json(raw, default=default, label=label)
 
 
 def _row_rev(r):
@@ -172,7 +240,8 @@ def _conv_row_to_meta_dict(r):
         'msgCount': r['msg_count'], 'msg_count': r['msg_count'],
         'createdAt': r['created_at'], 'created_at': r['created_at'],
         'updatedAt': r['updated_at'], 'updated_at': r['updated_at'],
-        'settings': _safe_json(r['settings'], default=None, label='settings'),
+        'settings': _decode_json_value(
+            r['settings'], default=None, label='settings'),
         'rev': _row_rev(r),
     }
 
@@ -262,8 +331,6 @@ async def list_convs():
     The ``?meta=1`` path delegates to the sync meta-cache helper (which needs a
     real pooled connection) via ``asyncio.to_thread`` so it never blocks the loop.
     """
-    import asyncio
-
     # ── Folder-scoped / keyset-paginated metadata query ──────────────────
     # Evaluated FIRST so it can never be short-circuited by the ?meta=1 cached
     # branch below. This path is DELIBERATELY un-cached: the sidebar's 60s poll
@@ -326,35 +393,43 @@ async def list_convs():
 
     meta_only = request.args.get('meta') == '1'
     prefetch_id = request.args.get('prefetch', '').strip()
+    try:
+        prefetch_window = int(request.args.get('window', '') or 0)
+    except (TypeError, ValueError):
+        prefetch_window = 0
+    prefetch_window = max(0, min(prefetch_window, _MAX_CONV_WINDOW))
     if meta_only:
-        def _meta_branch():
+        def _meta_branch(db):
             # Runs off-loop: borrow a pooled conn, compute meta + optional
             # prefetch, return plain data for the async handler to serialize.
-            from lib.database._core import _pool_get, _pool_put
-            db = _pool_get()
-            try:
-                payload, etag = _refresh_meta_cache_if_stale(db)
-                # Authoritative global total (captured at cache rebuild, read
-                # from the cached entry — no extra query on a warm poll). Powers
-                # the sidebar "N earlier not loaded" affordance (C4).
-                from lib.conversations.meta_cache import get_cached_total
-                total = get_cached_total()
-                prefetch_data = None
-                if prefetch_id:
-                    try:
-                        r = db.execute(
-                            'SELECT id, title, messages, created_at, updated_at, settings, rev FROM conversations WHERE id=? AND user_id=?',
-                            (prefetch_id, DEFAULT_USER_ID)
-                        ).fetchone()
-                        if r:
-                            prefetch_data = _prefetch_reconciled_dict(db, prefetch_id, r)
-                    except Exception as e:
-                        logger.warning('[Common] prefetch conv %s failed: %s', prefetch_id[:12], e)
-                return payload, etag, prefetch_data, total
-            finally:
-                _pool_put(db)
+            payload, etag = _refresh_meta_cache_if_stale(db)
+            # Authoritative global total (captured at cache rebuild, read
+            # from the cached entry — no extra query on a warm poll). Powers
+            # the sidebar "N earlier not loaded" affordance (C4).
+            from lib.conversations.meta_cache import get_cached_total
+            total = get_cached_total()
+            prefetch_data = None
+            if prefetch_id:
+                try:
+                    if prefetch_window > 0:
+                        prefetch_data = _prefetch_windowed_dict(
+                            db, prefetch_id, prefetch_window)
+                    else:
+                        from lib.database.conversation_repository import load_conversation
+                        r = load_conversation(
+                            db, prefetch_id, user_id=DEFAULT_USER_ID,
+                            metadata_columns=(
+                                'title', 'created_at', 'updated_at',
+                                'settings'))
+                        if r is not None:
+                            prefetch_data = _prefetch_reconciled_dict(
+                                db, prefetch_id, r)
+                except Exception as e:
+                    logger.warning('[Common] prefetch conv %s failed: %s', prefetch_id[:12], e)
+            return payload, etag, prefetch_data, total
 
-        payload, etag, prefetch_data, total = await asyncio.to_thread(_meta_branch)
+        payload, etag, prefetch_data, total = await run_pooled(
+            _meta_branch, domain=DOMAIN_CHAT)
 
         if prefetch_id:
             combo = json.dumps({
@@ -383,10 +458,20 @@ async def list_convs():
     # legacy shape. This does NOT touch the cached ?meta=1 sidebar path above.
     full = request.args.get('full') == '1'
     if full:
-        rows = await async_fetchall(
-            'SELECT id, title, messages, created_at, updated_at, settings, rev FROM conversations WHERE user_id=? ORDER BY updated_at DESC',
-            (DEFAULT_USER_ID,), domain=DOMAIN_CHAT)
-        convs = [_conv_row_to_dict(r) for r in rows]
+        def _load_full_list(db):
+            from lib.database.conversation_repository import load_conversation
+            ids = db.execute(
+                'SELECT id FROM conversations WHERE user_id=? '
+                'ORDER BY updated_at DESC', (DEFAULT_USER_ID,)).fetchall()
+            snapshots = [
+                load_conversation(
+                    db, row['id'], user_id=DEFAULT_USER_ID,
+                    metadata_columns=(
+                        'title', 'created_at', 'updated_at', 'settings'))
+                for row in ids
+            ]
+            return [_conv_row_to_dict(s) for s in snapshots if s is not None]
+        convs = await run_pooled(_load_full_list)
         # Coordinated bare-array migration (contract §4, batch 9): the
         # array moves under ``items``. No first-party consumer (the UI
         # lists via ?meta=1 / ?before envelope); documented shape change.
@@ -495,7 +580,8 @@ def _compute_reconcile(conv_id, r):
     Cache-neutral: passes the LIVE ``get_cache_prefix_count`` so the sweep never
     removes an in-prefix message (which would bust the prompt cache).
     """
-    messages = _safe_json(r['messages'], default=[], label='messages')
+    messages = _decode_json_value(
+        r['messages'], default=[], label='messages')
     if not messages:
         return None, False, None
 
@@ -518,7 +604,8 @@ def _compute_reconcile(conv_id, r):
     if not changed:
         return cleaned, False, None
 
-    settings_dict = _safe_json(r['settings'], default={}, label='settings') or {}
+    settings_dict = _decode_json_value(
+        r['settings'], default={}, label='settings') or {}
     if not isinstance(settings_dict, dict):
         settings_dict = {}
     settings_dict['_reconciledAt'] = int(time.time() * 1000)
@@ -554,55 +641,28 @@ def _persist_reconcile(db, conv_id, cleaned, settings_dict, expected_rev=None):
     """
     from lib.tasks_pkg.cache_tracking import notify_history_rewrite
 
-    messages_json = json_dumps_pg(cleaned)
     settings_json = json.dumps(settings_dict, ensure_ascii=False)
     search_text = build_search_text(cleaned)
-    if expected_rev is None:
-        db.execute(
-            'UPDATE conversations SET messages=?, settings=?, msg_count=?, '
-            'search_text=? WHERE id=? AND user_id=?',
-            (messages_json, settings_json, len(cleaned), search_text,
-             conv_id, DEFAULT_USER_ID))
-        db.commit()
-    else:
-        cur = db.execute(
-            'UPDATE conversations SET messages=?, settings=?, msg_count=?, '
-            'search_text=? WHERE id=? AND user_id=? AND rev=?',
-            (messages_json, settings_json, len(cleaned), search_text,
-             conv_id, DEFAULT_USER_ID, int(expected_rev)))
-        db.commit()
-        # rowcount 0 == another writer advanced rev between the read that
-        # produced `cleaned` and this write. Standing down is the CORRECT
-        # outcome: writing would erase that writer's row. Reconcile is
-        # idempotent so the next GET recomputes against the fresher row.
-        affected = getattr(cur, 'rowcount', None)
-        if affected == 0:
-            logger.info(
-                '[get_conv] reconcile persist STOOD DOWN conv=%s expected_rev=%s '
-                '— a concurrent writer advanced the row; not overwriting with a '
-                'stale %d-message array (next GET will recompute)',
-                conv_id[:8], expected_rev, len(cleaned))
-            return -1
-    # Phase 5 dual-write (flag-gated, inert when off): reconcile re-sequences
-    # the array, so mirror with a full rebuild, not the tail heuristic.
-    from lib.database.messages_rows import mirror_write_and_commit
-    mirror_write_and_commit(db, conv_id, cleaned, full=True)
-
-    # The ``conversations_rev_bump_trg`` trigger advanced rev on the UPDATE;
-    # read it back so the push carries the NEW version the client can dedupe on.
-    new_rev = 0
-    try:
-        cur = db.execute('SELECT rev FROM conversations WHERE id=? AND user_id=?',
-                         (conv_id, DEFAULT_USER_ID))
-        row = cur.fetchone() if cur is not None else None
-        if row is not None:
-            try:
-                new_rev = int(row['rev'] if hasattr(row, 'keys') else row[0])
-            except (TypeError, ValueError, KeyError, IndexError):
-                new_rev = 0
-    except Exception as e:
-        logger.debug('[get_conv] read post-reconcile rev conv=%s: %s',
-                     conv_id[:8], e)
+    from lib.database.conversation_repository import replace_messages
+    result = replace_messages(
+        db, conv_id, cleaned, user_id=DEFAULT_USER_ID,
+        expected_rev=expected_rev,
+        metadata={
+            'settings': settings_json,
+            'msg_count': len(cleaned),
+            'search_text': search_text,
+        },
+        full=True)
+    if not result.applied:
+        # Another writer advanced rev after the reconcile read. Standing down
+        # preserves that writer and the next GET recomputes idempotently.
+        logger.info(
+            '[get_conv] reconcile persist STOOD DOWN conv=%s expected_rev=%s '
+            '— a concurrent writer advanced the row; not overwriting with a '
+            'stale %d-message array (next GET will recompute)',
+            conv_id[:8], expected_rev, len(cleaned))
+        return -1
+    new_rev = result.rev or 0
 
     try:
         notify_history_rewrite(conv_id)
@@ -725,7 +785,8 @@ def _reconcile_conv_on_get_blocking(db, conv_id, r):
                          'conv=%s: %s', conv_id[:8], _rse)
         return d
 
-    new_rev = _persist_reconcile(db, conv_id, cleaned, settings_dict)
+    new_rev = _persist_reconcile(
+        db, conv_id, cleaned, settings_dict, expected_rev=_row_rev(r))
     d = {
         'id': r['id'], 'title': r['title'],
         'messages': cleaned,
@@ -753,6 +814,8 @@ def _parse_window_args():
         window = 0
     if window < 0:
         window = 0
+    elif window > _MAX_CONV_WINDOW:
+        window = _MAX_CONV_WINDOW
     before_seq = None
     bs = request.args.get('before_seq', '')
     if bs:
@@ -761,6 +824,74 @@ def _parse_window_args():
         except (TypeError, ValueError):
             before_seq = None
     return window, before_seq
+
+
+def _projected_blob_window_sql(backend, before_seq=None):
+    """Build an authoritative JSON-array slice query for one conversation.
+
+    The previous "safe blob" path selected the complete ``messages`` value
+    into Python and sliced it there.  That bounded browser traffic but still
+    made PostgreSQL send and Python decode up to hundreds of MB per GET.  This
+    query computes the same absolute-index window inside the database and
+    returns only the selected JSON objects plus their pagination bounds.
+
+    Returns ``(sql, has_before_bind)``.  Bind order is always ``id, user_id``,
+    optional ``before_seq``, then ``window``.
+    """
+    from lib.database.messages_rows import _window_meta_expr
+
+    if backend == 'pg':
+        json_value = (
+            "CASE WHEN jsonb_typeof(messages)='array' THEN messages "
+            "ELSE '[]'::jsonb END"
+        )
+        length_expr = 'jsonb_array_length(all_messages)'
+        clamp_end = ('LEAST(total_count, GREATEST(0, ?))'
+                     if before_seq is not None else 'total_count')
+        clamp_start = 'GREATEST(0, slice_end - ?)'
+        # Materialize each selected element once. Without this fence PostgreSQL
+        # inlines ``all_messages -> g.i`` at every reference inside the light
+        # projection; a single 48 MB tool message was extracted repeatedly and
+        # made the supposedly bounded fallback slower than the legacy read.
+        projected_item = _window_meta_expr('pg', 'item')
+        aggregate = (
+            "COALESCE((WITH items AS MATERIALIZED ("
+            "SELECT g.i, all_messages -> g.i AS item "
+            "FROM generate_series(slice_start, slice_end - 1) AS g(i)) "
+            "SELECT jsonb_agg(" + projected_item + " ORDER BY i) FROM items), "
+            "'[]'::jsonb)"
+        )
+    else:
+        json_value = (
+            "CASE WHEN json_valid(messages) THEN messages ELSE '[]' END"
+        )
+        length_expr = 'json_array_length(all_messages)'
+        clamp_end = ('min(total_count, max(0, ?))'
+                     if before_seq is not None else 'total_count')
+        clamp_start = 'max(0, slice_end - ?)'
+        # json_each emits array keys in ascending order.  The key predicates
+        # select the exact absolute-index window; json(value) prevents JSON
+        # objects from being double-quoted by json_group_array.
+        projected_item = _window_meta_expr('sqlite', 'j.value')
+        aggregate = (
+            "COALESCE((SELECT json_group_array(json(" + projected_item + ")) "
+            "FROM json_each(all_messages) AS j "
+            "WHERE CAST(j.key AS INTEGER) >= slice_start "
+            "AND CAST(j.key AS INTEGER) < slice_end), '[]')"
+        )
+    sql = (
+        'WITH target AS ('
+        'SELECT id, title, created_at, updated_at, settings, rev, ' +
+        json_value + ' AS all_messages FROM conversations '
+        'WHERE id=? AND user_id=?), '
+        'sized AS (SELECT *, ' + length_expr + ' AS total_count FROM target), '
+        'bounded AS (SELECT *, ' + clamp_end + ' AS slice_end FROM sized), '
+        'windowed AS (SELECT *, ' + clamp_start + ' AS slice_start FROM bounded) '
+        'SELECT id, title, created_at, updated_at, settings, rev, '
+        'total_count, slice_start, slice_end, ' + aggregate + ' AS messages '
+        'FROM windowed'
+    )
+    return sql, before_seq is not None
 
 
 def _windowed_served_readonly(db, conv_id, r, window, before_seq):
@@ -786,17 +917,26 @@ def _windowed_served_readonly(db, conv_id, r, window, before_seq):
     """
     from lib.database.messages_rows import load_message_window
 
-    win = load_message_window(db, conv_id, limit=window, before_seq=before_seq)
+    win = load_message_window(
+        db, conv_id, limit=window, before_seq=before_seq,
+        project_heavy=True,
+        # Older internal callers/tests pass a legacy metadata row without the
+        # materialized count; retain the helper's self-contained COUNT fallback
+        # for that shape while production GETs reuse the already-verified value.
+        known_total=(r['msg_count'] if 'msg_count' in r.keys() else None),
+    )
     win_msgs = win['messages']
 
     base = {
         'id': r['id'], 'title': r['title'],
         'createdAt': r['created_at'], 'created_at': r['created_at'],
         'updatedAt': r['updated_at'], 'updated_at': r['updated_at'],
-        'settings': _safe_json(r['settings'], default={}, label='settings') or {},
+        'settings': _decode_json_value(
+            r['settings'], default={}, label='settings') or {},
         'rev': _row_rev(r),
         # pagination envelope the frontend uses for scroll-up loading
         'windowed': True,
+        'trimmed': True,
         'totalCount': win['totalCount'],
         'firstLoadedSeq': win['firstLoadedSeq'],
         'lastLoadedSeq': win['lastLoadedSeq'],
@@ -806,7 +946,7 @@ def _windowed_served_readonly(db, conv_id, r, window, before_seq):
     # A page-up request (before_seq set) is a pure slice — never reconcile it,
     # only the tail (before_seq=None) can carry a ghost/husk.
     if before_seq is not None:
-        base['messages'] = win_msgs
+        base['messages'] = _trim_heavy_for_window(win_msgs)
         return base, False, None, None
 
     # Tail window: run reconcile on the window only. reconcile is idempotent and
@@ -820,7 +960,11 @@ def _windowed_served_readonly(db, conv_id, r, window, before_seq):
                      conv_id[:8], e)
         cleaned_win, changed = win_msgs, False
 
-    base['messages'] = cleaned_win
+    # Match the authoritative JSON projection exactly: reconcile needs the
+    # complete round objects, but first paint does not. Serving the normalized
+    # mirror must never reintroduce the multi-MB tool/image payloads that the
+    # blob window path deliberately keeps off the wire.
+    base['messages'] = _trim_heavy_for_window(cleaned_win)
     if not changed:
         return base, False, None, None
 
@@ -835,7 +979,14 @@ def _windowed_served_readonly(db, conv_id, r, window, before_seq):
     # the only full-array deserialize on the windowed path, and only when the
     # tail actually changed (rare) — the common open stays O(window).
     cleaned_full, settings_for_persist = None, None
-    c_full, ch_full, sd_full = _compute_reconcile(conv_id, r)
+    # ``r`` may be metadata-only on the normalized-row fast path.  Fetch the
+    # authoritative blob only after a tail reconcile actually changed
+    # something (rare); the common windowed GET never transfers it.
+    from lib.database.conversation_repository import load_conversation
+    full_r = load_conversation(
+        db, conv_id, user_id=DEFAULT_USER_ID,
+        metadata_columns=('title', 'created_at', 'updated_at', 'settings'))
+    c_full, ch_full, sd_full = _compute_reconcile(conv_id, full_r or r)
     if ch_full:
         cleaned_full, settings_for_persist = c_full, sd_full
     return base, bool(cleaned_full is not None), cleaned_full, settings_for_persist
@@ -857,20 +1008,17 @@ def _windowed_served_readonly(db, conv_id, r, window, before_seq):
 # blob keeps every field, and the PUT path refills any trimmed field back from
 # the stored blob by _msgId (see _save_conv_blocking's heavy-field preservation).
 #
-# ★ apiRounds / _continueApiRounds are DELIBERATELY NOT trimmed: the cost
+# ★ apiRounds / _continueApiRounds are DELIBERATELY NOT removed: the cost
 #   popover's per-round breakdown table renders only when apiRounds.length > 1
 #   (finish_info.js), and it is NEVER refilled by hydrateFullConversation (only
 #   the tool-timeline button triggers that) — so trimming it made a reloaded
 #   long conversation silently lose its per-round token/cost table. Their bulk
 #   (usage._wire_fp, ~226 KB/round) is already stripped at persist time by
-#   _sanitize_api_rounds_for_persist, leaving only the tiny usage/toolCalls/
-#   writeBreakdown dicts (tens of KB even for many rounds); the MB-scale weight
-#   lives in toolRounds/segments, which stay trimmed. So keeping apiRounds costs
-#   almost nothing yet keeps the cost breakdown working on the windowed path.
-_TRIMMABLE_HEAVY_FIELDS = (
-    'segments', 'toolRounds',
-    '_continueToolRounds', 'toolSummary',
-)
+#   the shared storage projection. Historical rows can predate that cleanup,
+#   so the transport projection runs the same sanitizer again: the round/cost/
+#   token fields survive, while backend-only ``usage._wire_*`` diagnostics never
+#   cross into the browser. The exact field tuple lives beside the pure helper
+#   in ``lib.storage_projection`` so DB and HTTP projections cannot drift.
 
 
 def _trim_heavy_for_window(messages):
@@ -881,20 +1029,11 @@ def _trim_heavy_for_window(messages):
     Pure + read-only: never mutates the input dicts (shallow-copies only the
     messages it trims), so the caller's authoritative array is untouched.
     """
-    out = []
-    for m in messages:
-        if not isinstance(m, dict) or not any(k in m for k in _TRIMMABLE_HEAVY_FIELDS):
-            out.append(m)
-            continue
-        lite = {k: v for k, v in m.items() if k not in _TRIMMABLE_HEAVY_FIELDS}
-        lite['_trimmed'] = True
-        # Preserve just the SHAPE the renderer needs to show a tool-activity
-        # affordance without the payload: how many rounds existed.
-        _tr = m.get('toolRounds')
-        if isinstance(_tr, list) and _tr:
-            lite['_trimmedToolRoundCount'] = len(_tr)
-        out.append(lite)
-    return out
+    # One pure source is shared by row persistence, HTTP transport, and the
+    # offline projection compactor. It retains every UI-visible usage/cost
+    # field while stripping timeline bulk and all historical wire diagnostics.
+    from lib.storage_projection import project_message_for_window
+    return [project_message_for_window(message) for message in messages]
 
 
 def _windowed_blob_slice_readonly(conv_id, r, window, before_seq):
@@ -922,7 +1061,8 @@ def _windowed_blob_slice_readonly(conv_id, r, window, before_seq):
     :func:`_windowed_served_readonly`. Raises on a genuinely malformed blob so
     the caller fails open to the full-blob path.
     """
-    messages = _safe_json(r['messages'], default=[], label='messages')
+    messages = _decode_json_value(
+        r['messages'], default=[], label='messages')
     if not isinstance(messages, list):
         messages = []
     total = len(messages)
@@ -946,7 +1086,8 @@ def _windowed_blob_slice_readonly(conv_id, r, window, before_seq):
         'id': r['id'], 'title': r['title'],
         'createdAt': r['created_at'], 'created_at': r['created_at'],
         'updatedAt': r['updated_at'], 'updated_at': r['updated_at'],
-        'settings': _safe_json(r['settings'], default={}, label='settings') or {},
+        'settings': _decode_json_value(
+            r['settings'], default={}, label='settings') or {},
         'rev': _row_rev(r),
         'windowed': True,
         # Heavy per-message fields (toolRounds/segments/apiRounds/...) are
@@ -993,6 +1134,80 @@ def _windowed_blob_slice_readonly(conv_id, r, window, before_seq):
     if ch_full:
         cleaned_full, settings_for_persist = c_full, sd_full
     return base, bool(cleaned_full is not None), cleaned_full, settings_for_persist
+
+
+def _windowed_projected_blob_readonly(db, conv_id, r, before_seq,
+                                      allow_reconcile=True):
+    """Serve a database-projected authoritative message window.
+
+    ``r['messages']`` is already the exact absolute-index slice produced by
+    :func:`_projected_blob_window_sql`; unlike
+    :func:`_windowed_blob_slice_readonly`, this function never receives the
+    full JSON array.  Pagination and reconcile semantics stay identical.
+    """
+    messages = _decode_json_value(
+        r['messages'], default=[], label='messages-window')
+    if not isinstance(messages, list):
+        raise ValueError('projected messages window is not a list')
+    try:
+        total = int(r['total_count'] or 0)
+        start = int(r['slice_start'] or 0)
+        end = int(r['slice_end'] or 0)
+    except (TypeError, ValueError) as e:
+        raise ValueError('invalid projected window bounds') from e
+    if start < 0 or end < start or end > total or len(messages) != end - start:
+        raise ValueError(
+            'projected window bounds mismatch: total=%d start=%d end=%d rows=%d'
+            % (total, start, end, len(messages)))
+
+    base = {
+        'id': r['id'], 'title': r['title'],
+        'createdAt': r['created_at'], 'created_at': r['created_at'],
+        'updatedAt': r['updated_at'], 'updated_at': r['updated_at'],
+        'settings': _decode_json_value(
+            r['settings'], default={}, label='settings') or {},
+        'rev': _row_rev(r),
+        'windowed': True,
+        'trimmed': True,
+        'totalCount': total,
+        'firstLoadedSeq': start if messages else None,
+        'lastLoadedSeq': (end - 1) if messages else None,
+        'hasMore': bool(messages and start > 0),
+    }
+
+    # A page-up is always a pure slice.  A live-task window is also pure: its
+    # trailing placeholder must never be classified while the worker owns it,
+    # but serving the authoritative tail itself is safe and prevents every
+    # live sync probe from falling back to a hundreds-of-MB full GET.
+    if before_seq is not None or not allow_reconcile:
+        base['messages'] = _trim_heavy_for_window(messages)
+        return base, False, None, None
+
+    try:
+        from lib.conversations.reconcile import reconcile_conversation_messages
+        cleaned_win, changed = reconcile_conversation_messages(messages, 0)
+    except Exception as e:
+        logger.debug('[get_conv] projected-window reconcile skipped conv=%s: %s',
+                     conv_id[:8], e)
+        cleaned_win, changed = messages, False
+    base['messages'] = _trim_heavy_for_window(cleaned_win)
+    if not changed:
+        return base, False, None, None
+
+    # Reconcile changed the tail.  Fetch the full authoritative row only in
+    # this rare repair case so the deferred write can preserve the untouched
+    # prefix exactly.
+    from lib.database.conversation_repository import load_conversation
+    full_r = load_conversation(
+        db, conv_id, user_id=DEFAULT_USER_ID,
+        metadata_columns=('title', 'created_at', 'updated_at', 'settings'))
+    if not full_r:
+        return base, False, None, None
+    cleaned_full, changed_full, settings_for_persist = _compute_reconcile(
+        conv_id, full_r)
+    return (base, bool(changed_full),
+            cleaned_full if changed_full else None,
+            settings_for_persist if changed_full else None)
 
 
 def _maybe_backfill_narration_on_open(conv_id, conv_dict):
@@ -1052,65 +1267,104 @@ async def get_conv(conv_id):
     settled lifecycle state — GATED so it never touches a conv with a live task
     (see ``_conv_has_live_task`` / ``_reconcile_conv_on_get_blocking``).
 
-    Windowed read (gated on ``rows_read_enabled()`` + a ``window`` query param):
-    serve only the tail N messages from the normalized ``conversation_messages``
-    row store so first-open cost is O(window) not O(history). Fails open to the
-    single-blob path on any error; no param / flag off = byte-identical to the
-    legacy full-array behavior.
+    With a ``window`` query param, the conversation is sliced inside the
+    database before crossing into Python. During migration, a verified row
+    mirror is the O(window) fast path and the JSON archive remains fallback.
+    After row-authority cutover, even live streams use their transactionally
+    maintained rows and no path can fall back to the frozen archive.
     """
-    r = await async_fetchone(
-        'SELECT id, title, messages, created_at, updated_at, settings, rev FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
-    if not r:
-        return api_not_found('Not found')
+    _window, _before_seq = _parse_window_args()
+    _is_live = _conv_has_live_task(conv_id)
+    r = None
 
-    # ── Windowed read (fail-open). When the client asks for a window and the
-    #    conv is idle, serve only the tail N messages so the RESPONSE BODY is
-    #    bounded (the fix for slow first-open of long conversations over the
-    #    tunnel). Two backends, same envelope + before_seq cursor:
-    #      • row store (O(window)) — ONLY when rows_read_enabled() (migration
-    #        flag) AND the conv is backfilled; the fast path once proven.
-    #      • blob tail-slice — the SAFE DEFAULT, migration-flag-independent: it
-    #        slices the authoritative always-complete ``messages`` array, so it
-    #        is correct even for not-yet-backfilled convs (where the row store
-    #        would serve an empty window and risk a PUT truncating history).
-    #    Any failure falls open to the full-blob path below. ──
-    try:
-        _window, _before_seq = _parse_window_args()
-        if _window > 0 and not _conv_has_live_task(conv_id):
+    # ── Windowed read (fail-open). Select metadata only for a verified row
+    # store, or ask the authoritative JSON column to return only the requested
+    # absolute-index slice.  In both cases the full blob never crosses the
+    # DB/Python boundary on the common path. ──
+    if _window > 0:
+        try:
             try:
                 from lib.database.messages_rows import rows_read_enabled
+                from lib.database.conversation_repository import (
+                    conversation_rows_authoritative,
+                )
+                _authority = conversation_rows_authoritative()
                 _use_rows = rows_read_enabled()
             except Exception as e:
                 logger.debug('[get_conv] rows_read_enabled check failed conv=%s: %s',
                              conv_id[:8], e)
+                _authority = False
                 _use_rows = False
-            try:
-                if _use_rows:
-                    served, changed, cleaned_full, sd = await run_pooled(
-                        lambda db: _windowed_served_readonly(
-                            db, conv_id, r, _window, _before_seq))
-                else:
-                    served, changed, cleaned_full, sd = await run_pooled(
-                        lambda db: _windowed_blob_slice_readonly(
-                            conv_id, r, _window, _before_seq))
-                if changed and cleaned_full is not None:
-                    _schedule_reconcile_persist(conv_id, cleaned_full, sd,
-                                                expected_rev=_row_rev(r))
-                _maybe_backfill_narration_on_open(conv_id, served)
-                return api_ok(served)
-            except Exception as e:
-                logger.warning('[get_conv] windowed read failed conv=%s: %s — '
-                               'failing open to full-blob path', conv_id[:8], e)
-    except Exception as e:
-        logger.debug('[get_conv] window gate check failed conv=%s: %s',
-                     conv_id[:8], e)
+            # Transitional mirrors remain best-effort during a live task. In
+            # authority mode, row writes are part of the SAME transaction as
+            # the revision/metadata update, so live reads must use them too.
+            _use_rows = bool(_use_rows and (_authority or not _is_live))
+            if _authority and not _use_rows:
+                raise RuntimeError('normalized transcript authority is unavailable')
+            if _use_rows:
+                r = await async_fetchone(
+                    'SELECT id, title, created_at, updated_at, settings, rev, msg_count '
+                    'FROM conversations WHERE id=? AND user_id=?',
+                    (conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
+                if not r:
+                    return api_not_found('Not found')
+                # A global flag proves only operator intent, not that THIS
+                # conversation has a complete mirror.  Fail closed to the
+                # authoritative JSON projection on missing OR stale-extra rows.
+                from lib.conv_ref._detail import row_window_usable
+                _use_rows = await run_pooled(
+                    lambda db: row_window_usable(
+                        db, conv_id, int(r['msg_count'] or 0)))
+                if _authority and not _use_rows:
+                    raise RuntimeError(
+                        f'canonical message rows are not current for {conv_id}')
+            if _use_rows:
+                served, changed, cleaned_full, sd = await run_pooled(
+                    lambda db: _windowed_served_readonly(
+                        db, conv_id, r, _window, _before_seq))
+            else:
+                from lib.database import _BACKEND
+                slice_sql, has_before = _projected_blob_window_sql(
+                    _BACKEND, _before_seq)
+                slice_params = [conv_id, DEFAULT_USER_ID]
+                if has_before:
+                    slice_params.append(_before_seq)
+                slice_params.append(_window)
+                r = await async_fetchone(
+                    slice_sql, tuple(slice_params), domain=DOMAIN_CHAT)
+                if not r:
+                    return api_not_found('Not found')
+                served, changed, cleaned_full, sd = await run_pooled(
+                    lambda db: _windowed_projected_blob_readonly(
+                        db, conv_id, r, _before_seq,
+                        allow_reconcile=not _is_live))
+            if changed and cleaned_full is not None:
+                _schedule_reconcile_persist(conv_id, cleaned_full, sd,
+                                            expected_rev=_row_rev(r))
+            _maybe_backfill_narration_on_open(conv_id, served)
+            return api_ok(served)
+        except Exception as e:
+            logger.warning('[get_conv] windowed read failed conv=%s: %s — '
+                           'delegating to repository authority path',
+                           conv_id[:8], e)
+            r = None
+
+    # Full read is now reserved for explicit ``window=0``, live tasks (whose
+    # in-flight placeholder must stay intact), and the fail-open path above.
+    if r is None:
+        from lib.database.conversation_repository import load_conversation
+        r = await run_pooled(lambda db: load_conversation(
+            db, conv_id, user_id=DEFAULT_USER_ID,
+            metadata_columns=(
+                'title', 'created_at', 'updated_at', 'settings')))
+    if not r:
+        return api_not_found('Not found')
 
     # GATE 1 (live-task): reconcile ONLY when the conv is idle. A pending/running
     # task's empty placeholder is indistinguishable from a ghost tail; deleting
     # it would corrupt the live stream. Skip reconcile AND leave _reconciledAt
     # unstamped so the frontend keeps deferring rather than treating it as clean.
-    if _conv_has_live_task(conv_id):
+    if _is_live:
         _served = _conv_row_to_dict(r)
         _maybe_backfill_narration_on_open(conv_id, _served)
         return api_ok(_served)
@@ -1135,6 +1389,74 @@ async def get_conv(conv_id):
         return api_ok(_served)
 
 
+_MESSAGE_ACTIVITY_FIELDS = (
+    'segments', 'toolRounds', 'apiRounds',
+    '_continueToolRounds', '_continueApiRounds', 'toolSummary',
+)
+
+
+@conversations_bp.route(
+    '/api/v1/conversations/<conv_id>/messages/by-id/<msg_id>/activity',
+    methods=['GET'],
+)
+@_db_safe
+@api_meta(
+    summary='Load one message execution activity by stable id',
+    description=(
+        'Returns only the execution-history fields stripped from windowed '
+        'conversation reads. The stable `_msgId` must resolve exactly once; '
+        'missing and duplicate ids fail instead of falling back to an array '
+        'position.'),
+    tags=['conversations'], scope='conversations',
+)
+async def get_message_activity(conv_id, msg_id):
+    """Load one message's heavy execution fields without hydrating its chat."""
+    return _finish(await run_pooled(
+        lambda db: _get_message_activity_blocking(db, conv_id, msg_id)))
+
+
+def _get_message_activity_blocking(db, conv_id, msg_id):
+    from lib.database.conversation_repository import load_conversation
+
+    snapshot = load_conversation(
+        db, conv_id, user_id=DEFAULT_USER_ID)
+    if snapshot is None:
+        return _nf('Conversation not found')
+
+    messages = snapshot.messages
+    if not isinstance(messages, list):
+        logger.error('[message_activity] conv=%s messages is not an array',
+                     conv_id[:8])
+        return _ie('invalid_messages')
+
+    matches = [
+        (idx, message)
+        for idx, message in enumerate(messages)
+        if isinstance(message, dict) and message.get('_msgId') == msg_id
+    ]
+    if not matches:
+        logger.info('[message_activity] conv=%s msgId=%s not found in %d messages',
+                    conv_id[:8], msg_id[:12], len(messages))
+        return _nf('message_id_not_found')
+    if len(matches) != 1:
+        logger.error('[message_activity] conv=%s msgId=%s is ambiguous (%d matches)',
+                     conv_id[:8], msg_id[:12], len(matches))
+        return _Defer(
+            api_conflict, 'duplicate_message_id', matchCount=len(matches))
+
+    idx, message = matches[0]
+    activity = {
+        field: message[field]
+        for field in _MESSAGE_ACTIVITY_FIELDS
+        if field in message
+    }
+    return _ok({
+        'msgId': msg_id,
+        'idx': idx,
+        'activity': activity,
+    })
+
+
 @conversations_bp.route('/api/v1/conversations/<conv_id>/preview', methods=['GET'])
 @_db_safe
 async def conv_preview(conv_id):
@@ -1150,10 +1472,72 @@ async def conv_preview(conv_id):
     Native-async: the row read + first-user extraction run off-loop.
     """
     import asyncio
-    r = await async_fetchone(
-        'SELECT id, title, messages, msg_count FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
-    if not r:
+
+    # A hover preview needs ONE user message, not the whole conversation. On a
+    # verified row mirror, select metadata first and read exactly that row.
+    # A stale/missing mirror fails closed to the legacy blob path below.
+    row_candidate = None
+    try:
+        from lib.database.messages_rows import rows_read_enabled
+        use_rows = rows_read_enabled()
+    except Exception as exc:
+        logger.debug('[conv_preview] row-store flag probe failed: %s', exc)
+        use_rows = False
+
+    if use_rows:
+        row_candidate = await async_fetchone(
+            'SELECT id, title, msg_count, rev FROM conversations '
+            'WHERE id=? AND user_id=?',
+            (conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
+        if not row_candidate:
+            metadata_rows = await async_fetchall(
+                'SELECT id, title, msg_count, rev FROM conversations '
+                'WHERE id LIKE ? AND user_id=? LIMIT 2',
+                (conv_id + '%', DEFAULT_USER_ID), domain=DOMAIN_CHAT)
+            if len(metadata_rows) == 1:
+                row_candidate = metadata_rows[0]
+            elif len(metadata_rows) > 1:
+                logger.debug('[conv_preview] ambiguous row-store prefix=%s',
+                             conv_id[:12])
+                return api_not_found('Not found')
+        if row_candidate:
+            def _read_row_preview(db):
+                from lib.conversations import first_user_text
+                from lib.database.messages_rows import (
+                    mirror_is_current,
+                    row_to_message,
+                )
+                resolved_id = row_candidate['id']
+                if not mirror_is_current(
+                        db, resolved_id,
+                        expected_count=int(row_candidate['msg_count'] or 0),
+                        expected_rev=int(row_candidate['rev'] or 0)):
+                    return False, ''
+                first = db.execute(
+                    'SELECT meta FROM conversation_messages '
+                    "WHERE conv_id=? AND role='user' ORDER BY seq LIMIT 1",
+                    (resolved_id,)).fetchone()
+                message = row_to_message(first) if first else None
+                return True, first_user_text(
+                    [message] if message is not None else [])
+
+            usable, first_user = await run_pooled(_read_row_preview)
+            if usable:
+                return api_ok({
+                    'id': row_candidate['id'],
+                    'title': row_candidate['title'] or '',
+                    'firstUserMessage': first_user,
+                    'msgCount': row_candidate['msg_count'] or 0,
+                })
+
+    # Compatibility path: resolve the id/prefix, then let the repository choose
+    # rows vs the transitional archive from one consistent snapshot.
+    resolved_id = row_candidate['id'] if row_candidate else conv_id
+    from lib.database.conversation_repository import load_conversation
+    r = await run_pooled(lambda db: load_conversation(
+        db, resolved_id, user_id=DEFAULT_USER_ID,
+        metadata_columns=('title',)))
+    if not r and row_candidate is None:
         # The Project Brain panel — and the peer-message feed payload it renders
         # from — sometimes carries a TRUNCATED 8-char conversation id (the [:8]
         # display form) instead of the full 14-char id. A peer note's `toConv`,
@@ -1162,20 +1546,23 @@ async def conv_preview(conv_id):
         # hover falls back to "Untitled / no messages". Resolve the short id by
         # unique prefix; accept the match only when it is unambiguous.
         rows = await async_fetchall(
-            'SELECT id, title, messages, msg_count FROM conversations '
+            'SELECT id FROM conversations '
             'WHERE id LIKE ? AND user_id=? LIMIT 2',
             (conv_id + '%', DEFAULT_USER_ID), domain=DOMAIN_CHAT)
         if len(rows) == 1:
-            r = rows[0]
+            r = await run_pooled(lambda db: load_conversation(
+                db, rows[0]['id'], user_id=DEFAULT_USER_ID,
+                metadata_columns=('title',)))
         else:
             logger.debug('[conv_preview] no unique match for id/prefix=%s (%d rows)',
                          conv_id[:12], len(rows))
             return api_not_found('Not found')
+    elif not r:
+        return api_not_found('Not found')
 
     def _extract():
         from lib.conversations import first_user_text
-        msgs = _safe_json(r['messages'], default=[], label='messages')
-        return first_user_text(msgs)
+        return first_user_text(r.messages)
 
     try:
         first_user = await asyncio.to_thread(_extract)
@@ -1226,18 +1613,24 @@ async def debug_messages(conv_id):
         raw = _load_messages_from_db(conv_id)
         if raw is None:
             return None
-        return build_wire_messages(raw, config, mode='snapshot', conv_id=conv_id)
+        return build_wire_messages(
+            raw, config, mode='snapshot', conv_id=conv_id,
+            return_manifest=True)
 
     try:
-        messages = await asyncio.to_thread(_build)
-        if messages is None:
+        built = await asyncio.to_thread(_build)
+        if built is None:
             return api_not_found('Not found')
+        messages, manifest = built
         try:
             messages = _strip_base64_for_snapshot(messages)
         except Exception as e:
             logger.warning('[debug_messages] strip_base64 failed for conv=%s: %s — '
                            'returning raw messages', conv_id[:8], e)
-        return api_ok({'messages': messages, 'count': len(messages), 'approx': True})
+        return api_ok({
+            'messages': messages, 'count': len(messages), 'approx': True,
+            'contextManifest': manifest,
+        })
     except Exception as e:
         logger.error('[debug_messages] Failed for conv=%s: %s', conv_id[:8], e, exc_info=True)
         return api_internal_error('internal_error')
@@ -1318,7 +1711,6 @@ def _save_conv_blocking(db, conv_id, data):
         _amid(raw_messages)
     except Exception as _e:
         logger.debug('[save_conv] _assign_message_ids unavailable: %s', _e)
-    messages = json_dumps_pg(raw_messages)
     created = data.get('createdAt') or data.get('created_at') or int(time.time() * 1000)
     updated = data.get('updatedAt') or data.get('updated_at') or int(time.time() * 1000)
     # ★ Inject lastMsgRole/lastMsgTimestamp into settings for Case E orphan detection.
@@ -1346,12 +1738,29 @@ def _save_conv_blocking(db, conv_id, data):
     # Reject PUTs with fewer messages unless the client explicitly signals
     # truncation (e.g. regen/edit sends allowTruncate=true).
     allow_truncate = data.get('allowTruncate', False)
-    existing_row = db.execute(
-        'SELECT msg_count, updated_at, title, search_text, rev FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID)
-    ).fetchone()
+    from lib.database.conversation_repository import load_conversation
+    existing_row = load_conversation(
+        db, conv_id, user_id=DEFAULT_USER_ID,
+        metadata_columns=(
+            'updated_at', 'title', 'search_text', 'created_at', 'settings'))
     existing_count = existing_row['msg_count'] if existing_row else 0
     server_rev = _row_rev(existing_row) if existing_row else 0
+
+    # Several correctness guards below need the authoritative old message
+    # array.  They historically issued their own SELECT each, so one full PUT
+    # could detoast and transfer the same hundreds-of-MB JSONB value up to four
+    # times.  Load and parse it at most once per request.  The closure remains
+    # lazy so fresh conversations and paths that need metadata only pay zero
+    # blob I/O.
+    _existing_messages_loaded = existing_row is not None
+    _existing_messages_cache = (
+        existing_row.messages if existing_row is not None else [])
+
+    def _load_existing_messages_once():
+        nonlocal _existing_messages_loaded, _existing_messages_cache
+        if _existing_messages_loaded:
+            return _existing_messages_cache
+        return _existing_messages_cache
 
     # ── Backend-authoritative ghost-husk sweep on the WRITE seam ──
     # Mirror the GET-path reconcile (``_reconcile_conv_on_get_blocking``) HERE so
@@ -1395,7 +1804,6 @@ def _save_conv_blocking(db, conv_id, data):
                 _husk_swept = len(raw_messages) - len(_cleaned)
                 raw_messages = _cleaned
                 msg_count = len(raw_messages)
-                messages = json_dumps_pg(raw_messages)
                 # Re-derive lastMsgRole/lastMsgTimestamp (Case-E orphan detection)
                 # + the settled-turn sidebar facts from the POST-sweep tail so
                 # settings don't point at a removed husk.
@@ -1409,17 +1817,10 @@ def _save_conv_blocking(db, conv_id, data):
             # (b) Husk-free view of the EXISTING row for the guards below (only
             #     needed when the incoming is NOT a strict growth).
             if existing_row is not None and existing_count > 0 and msg_count <= existing_count:
-                _ex_row = db.execute(
-                    'SELECT messages FROM conversations WHERE id=? AND user_id=?',
-                    (conv_id, DEFAULT_USER_ID)).fetchone()
-                if _ex_row:
-                    try:
-                        _ex_msgs = json.loads(_ex_row[0] or '[]') or []
-                    except (json.JSONDecodeError, TypeError):
-                        _ex_msgs = []
-                    if _ex_msgs:
-                        _ex_clean, _ = reconcile_conversation_messages(_ex_msgs, _prefix_n)
-                        _existing_effective_count = len(_ex_clean)
+                _ex_msgs = _load_existing_messages_once()
+                if _ex_msgs:
+                    _ex_clean, _ = reconcile_conversation_messages(_ex_msgs, _prefix_n)
+                    _existing_effective_count = len(_ex_clean)
         except Exception as _sw:
             logger.warning('[save_conv] ghost-husk sweep failed conv=%s: %s '
                            '(continuing unswept)', conv_id[:12], _sw, exc_info=True)
@@ -1498,32 +1899,27 @@ def _save_conv_blocking(db, conv_id, data):
         #     connection loss — the backend has the complete content).
         if incoming_last.get('role') == 'assistant' and (not incoming_fr or incoming_fr == 'server_offline'):
             try:
-                existing_msgs_row = db.execute(
-                    'SELECT messages FROM conversations WHERE id=? AND user_id=?',
-                    (conv_id, DEFAULT_USER_ID)
-                ).fetchone()
-                if existing_msgs_row:
-                    existing_msgs = json.loads(existing_msgs_row[0] or '[]')
-                    if existing_msgs:
-                        existing_last = existing_msgs[-1]
-                        existing_fr = existing_last.get('finishReason')
-                        if (existing_last.get('role') == 'assistant'
-                                and existing_fr
-                                and existing_fr not in ('', 'interrupted')
-                                and len(existing_last.get('content') or '') > len(incoming_last.get('content') or '')):
-                            logger.warning(
-                                '[save_conv] ⚠️ BLOCKED stale-checkpoint overwrite of conv %s — '
-                                'server has completed assistant msg (finishReason=%s, content=%d chars) '
-                                'but client sent incomplete snapshot (no finishReason, content=%d chars). '
-                                'This is likely a stale IDB cache sync after page reload.',
-                                conv_id[:12], existing_fr,
-                                len(existing_last.get('content') or ''),
-                                len(incoming_last.get('content') or ''))
-                            return _json({
-                                'ok': False,
-                                'error': 'blocked_stale_checkpoint',
-                                'serverMsgCount': existing_count,
-                            }, status=409)
+                existing_msgs = _load_existing_messages_once()
+                if existing_msgs:
+                    existing_last = existing_msgs[-1]
+                    existing_fr = existing_last.get('finishReason')
+                    if (existing_last.get('role') == 'assistant'
+                            and existing_fr
+                            and existing_fr not in ('', 'interrupted')
+                            and len(existing_last.get('content') or '') > len(incoming_last.get('content') or '')):
+                        logger.warning(
+                            '[save_conv] ⚠️ BLOCKED stale-checkpoint overwrite of conv %s — '
+                            'server has completed assistant msg (finishReason=%s, content=%d chars) '
+                            'but client sent incomplete snapshot (no finishReason, content=%d chars). '
+                            'This is likely a stale IDB cache sync after page reload.',
+                            conv_id[:12], existing_fr,
+                            len(existing_last.get('content') or ''),
+                            len(incoming_last.get('content') or ''))
+                        return _json({
+                            'ok': False,
+                            'error': 'blocked_stale_checkpoint',
+                            'serverMsgCount': existing_count,
+                        }, status=409)
             except (json.JSONDecodeError, TypeError) as e:
                 logger.debug('[save_conv] Content regression check parse error: %s', e)
 
@@ -1555,18 +1951,8 @@ def _save_conv_blocking(db, conv_id, data):
     _lost_total = 0
     if msg_count > 0 and not allow_truncate:
         try:
-            _merge_row = db.execute(
-                'SELECT messages FROM conversations WHERE id=? AND user_id=?',
-                (conv_id, DEFAULT_USER_ID)
-            ).fetchone()
-            if _merge_row:
-                try:
-                    _db_msgs = json.loads(_merge_row[0] or '[]') or []
-                except (json.JSONDecodeError, TypeError) as _je:
-                    logger.warning('[save_conv] Failed to parse existing messages '
-                                   'for translation merge conv=%s: %s',
-                                   conv_id[:12], _je)
-                    _db_msgs = []
+            _db_msgs = _load_existing_messages_once()
+            if _db_msgs:
 
                 # Iterate up to the overlap; messages BEYOND the incoming
                 # length are naturally dropped (caller intent: regen/edit
@@ -1632,9 +2018,6 @@ def _save_conv_blocking(db, conv_id, data):
                             _lost_total += 1
 
                 if _preserved_total > 0:
-                    # Re-materialize the messages payload so the INSERT below
-                    # actually writes the merged translations.
-                    messages = json_dumps_pg(raw_messages)
                     logger.info(
                         '[save_conv] 🈯 Preserved %d translatedContent entries '
                         'from DB into incoming payload conv=%s (by role=%s)',
@@ -1685,18 +2068,8 @@ def _save_conv_blocking(db, conv_id, data):
     _seg_preserved = 0
     if msg_count > 0 and not allow_truncate:
         try:
-            _seg_row = db.execute(
-                'SELECT messages FROM conversations WHERE id=? AND user_id=?',
-                (conv_id, DEFAULT_USER_ID)
-            ).fetchone()
-            if _seg_row:
-                try:
-                    _seg_db_msgs = json.loads(_seg_row[0] or '[]') or []
-                except (json.JSONDecodeError, TypeError) as _sje:
-                    logger.warning('[save_conv] Failed to parse existing messages '
-                                   'for heavy-field merge conv=%s: %s',
-                                   conv_id[:12], _sje)
-                    _seg_db_msgs = []
+            _seg_db_msgs = _load_existing_messages_once()
+            if _seg_db_msgs:
 
                 # Index DB messages that carry ANY heavy field, by stable id, so
                 # we can refill regardless of positional shift. Value is a dict
@@ -1742,9 +2115,6 @@ def _save_conv_blocking(db, conv_id, data):
                         _dst.pop('_trimmedToolRoundCount', None)
 
                 if _seg_preserved > 0:
-                    # Re-materialize the payload so the write below carries the
-                    # merged heavy fields back into the messages column.
-                    messages = json_dumps_pg(raw_messages)
                     logger.info(
                         '[save_conv] 🧩 Preserved %d heavy field(s) from DB into '
                         'incoming payload conv=%s (windowed/trimmed-read guard)',
@@ -1786,22 +2156,59 @@ def _save_conv_blocking(db, conv_id, data):
                          conv_id[:12], _existing_updated, updated)
             updated = _existing_updated
 
-    upsert(db, CONVERSATIONS, {
-        'id': conv_id, 'user_id': DEFAULT_USER_ID, 'title': title,
-        'messages': messages, 'created_at': created, 'updated_at': updated,
-        'settings': settings, 'msg_count': msg_count, 'search_text': search_text,
-    }, insert_cols=_CONV_INSERT_COLS, retry=True)
-    update_conversation_fts(db, conv_id, search_text)
-    # Phase 5 dual-write (flag-gated, best-effort): mirror the full-array PUT
-    # into conversation_messages rows. No-op unless TOFU_MESSAGES_ROWS.
-    from lib.database.messages_rows import dual_write_conv
-    dual_write_conv(db, conv_id, raw_messages, now_ms=updated)
+    # When the optional row mirror is engaged, derive its exact dirty set from
+    # old authoritative truth BEFORE replacing the blob.  This closes the
+    # same-count/non-tail hole in the old count heuristic without paying a
+    # full mirror rebuild: O(message-count) comparisons in memory, then only
+    # the genuinely changed rows are upserted.  The old array is already needed
+    # by the preservation guards on normal PUTs, so this usually adds no DB I/O.
+    _mirror_changed_seqs = None
+    try:
+        from lib.database.messages_rows import (
+            changed_message_seqs, rows_write_enabled,
+        )
+        if rows_write_enabled():
+            _mirror_old = _load_existing_messages_once()
+            _mirror_changed_seqs = changed_message_seqs(
+                _mirror_old, raw_messages)
+    except Exception as _mirror_diff_err:
+        logger.warning('[save_conv] mirror dirty-set derivation failed conv=%s: %s '
+                       '(falling back to tail heuristic)',
+                       conv_id[:12], _mirror_diff_err)
+
+    from lib.database.conversation_repository import (
+        replace_messages,
+        upsert_conversation,
+    )
+    if existing_row is None:
+        write_result = upsert_conversation(
+            db, conv_id, raw_messages, user_id=DEFAULT_USER_ID, title=title,
+            created_at=created, updated_at=updated, settings=settings,
+            search_text=search_text, changed_seqs=_mirror_changed_seqs,
+            full=False)
+    else:
+        write_result = replace_messages(
+            db, conv_id, raw_messages, user_id=DEFAULT_USER_ID,
+            expected_rev=server_rev,
+            metadata={
+                'title': title,
+                'created_at': existing_row.get('created_at') or created,
+                'updated_at': updated,
+                'settings': settings,
+            },
+            changed_seqs=_mirror_changed_seqs,
+            full=False)
+        if not write_result.applied:
+            logger.info('[save_conv] conv=%s repository CAS lost after guards; '
+                        'refusing stale full-array overwrite', conv_id[:12])
+            return _json({
+                'ok': False, 'error': 'blocked_rev_conflict',
+                'serverRev': server_rev,
+            }, status=409)
     # Return the post-write rev (the trigger bumped it iff messages changed) so
     # a CAS-aware client advances its baseRev in lockstep and its NEXT PUT
     # carries a fresh base. A client that ignores `rev` is unaffected.
-    new_row = db.execute('SELECT rev FROM conversations WHERE id=? AND user_id=?',
-                         (conv_id, DEFAULT_USER_ID)).fetchone()
-    new_rev = _row_rev(new_row) if new_row else server_rev
+    new_rev = write_result.rev if write_result.rev is not None else server_rev
     # Event-driven cross-device sync: push the change (carrying the new rev) so
     # a sibling device reconciles this conv without a manual refresh. Rev-gated
     # on the client → self-echo is a cheap no-op.
@@ -1817,59 +2224,41 @@ async def patch_conv_settings(conv_id):
     Unlike PUT (which requires full messages), this only touches the settings
     column — safe to call for shell conversations that haven't loaded messages.
 
-    Body: { folderId?: str|null, pinned?: bool, touchUpdatedAt?: bool, ... }
-    All keys in the body are merged into the existing settings dict, EXCEPT the
-    reserved control flag ``touchUpdatedAt``: when true, the row's ``updated_at``
-    is also bumped to now so the conversation floats to the top of the
-    recency-first sidebar (durably, across reloads) — used by the "open an old
-    conversation → float to top" behaviour. It is popped out and never written
-    into the settings JSON.
+    Body: { folderId?: str|null, pinned?: bool, ... }
+    All keys in the body are merged into the existing settings dict. This write
+    is settings-only: it deliberately never touches ``updated_at`` — opening /
+    browsing a conversation must not rewrite its recency (owner directive
+    2026-08-14; the old ``touchUpdatedAt`` open-bump was removed).
 
     Native-async: request body is awaited; the serialized read-merge-write
     (settings_store, which guards against clobbering a concurrent settings
     write) runs off-loop on a pooled connection via asyncio.to_thread.
     """
-    import asyncio
     data = await async_parse_body()
     if not data:
         return api_bad_request('No settings provided')
 
-    # ★ Control flag (NOT a settings key): when set, ALSO bump the row's
-    #   ``updated_at`` so the conversation floats to the top of the recency-first
-    #   sidebar and the new order SURVIVES a reload. Used by the "click an old
-    #   conversation → float to top" open-bump. Popped out here so it never
-    #   pollutes the settings JSON blob. Everything else is merged as normal.
-    _touch_updated = bool(data.pop('touchUpdatedAt', False))
-    _touch_ms = int(time.time() * 1000)
+    # A stale bundle may still send the removed ``touchUpdatedAt`` control
+    # flag; pop it so it cannot pollute the settings JSON (it no longer bumps
+    # ``updated_at`` — browsing must not rewrite recency).
+    data.pop('touchUpdatedAt', None)
 
-    def _work():
+    def _work(db):
         # Serialized read-merge-write (see settings_store) so a settings PATCH
         # doesn't clobber a concurrent activeTaskId / autopilot / tool-state
         # write on the same row.
         from lib.conversations import set_conversation_settings
-        from lib.database._core import _pool_get, _pool_put
-        db = _pool_get()
-        try:
-            # A settings-only PATCH may carry ONLY the touch flag (no settings
-            # keys left after the pop). set_conversation_settings with an empty
-            # dict is a row-existence check that skips the UPDATE — exactly what
-            # we want when the caller's sole intent is the updated_at bump.
-            res = set_conversation_settings(
-                conv_id, data, user_id=DEFAULT_USER_ID, db=db)
-            return True if res is not None else None
-        finally:
-            _pool_put(db)
+        # A settings-only PATCH may carry ONLY the touch flag (no settings
+        # keys left after the pop). set_conversation_settings with an empty
+        # dict is a row-existence check that skips the UPDATE — exactly what
+        # we want when the caller's sole intent is the updated_at bump.
+        res = set_conversation_settings(
+            conv_id, data, user_id=DEFAULT_USER_ID, db=db)
+        return True if res is not None else None
 
-    ok = await asyncio.to_thread(_work)
+    ok = await run_pooled(_work, domain=DOMAIN_CHAT)
     if ok is None:
         return api_not_found('Not found')
-    if _touch_updated:
-        # Recency bump — separate from the settings write so it works even when
-        # `data` had no settings keys. Mirrors the sidebar's `updated_at DESC`
-        # sort so the reordering is durable across a reload.
-        await async_execute(
-            'UPDATE conversations SET updated_at=? WHERE id=? AND user_id=?',
-            (_touch_ms, conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
     # Metadata-only change (folder move / pin / activeTaskId): rev unchanged →
     # client does a debounced sidebar refresh, not a body refetch.
     _notify_conv_changed(conv_id, rev=None, user_id=_request_user_id())
@@ -1930,12 +2319,12 @@ async def generate_conv_title(conv_id):
     data = await async_parse_body()
     lang = (data.get('lang') or '').strip() or None
 
-    row = await async_fetchone(
-        'SELECT messages FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
-    if not row:
+    from lib.database.conversation_repository import load_conversation
+    snapshot = await run_pooled(lambda db: load_conversation(
+        db, conv_id, user_id=DEFAULT_USER_ID))
+    if snapshot is None:
         return api_not_found('Not found')
-    messages = _safe_json(row['messages'], default=[], label='messages')
+    messages = snapshot.messages
     if not messages:
         return api_bad_request('Conversation has no messages')
 
@@ -1978,18 +2367,13 @@ async def delete_message(conv_id, msg_idx):
 
 
 def _delete_message_blocking(db, conv_id, msg_idx, mode, msg_id=None):
-    row = db.execute(
-        'SELECT messages, title, settings FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID)
-    ).fetchone()
-    if not row:
+    from lib.database.conversation_repository import load_conversation
+    row = load_conversation(
+        db, conv_id, user_id=DEFAULT_USER_ID,
+        metadata_columns=('title', 'settings', 'created_at'))
+    if row is None:
         return _nf('Not found')
-
-    try:
-        messages = json.loads(row['messages'] or '[]')
-    except (json.JSONDecodeError, TypeError) as e:
-        logger.warning('[delete_message] Failed to parse messages for conv=%s: %s', conv_id[:8], e)
-        return _ie('Failed to parse conversation messages')
+    messages = row.messages
 
     # ── Stable-id resolution: msgId is authoritative, index is the fallback ──
     if msg_id:
@@ -2026,10 +2410,7 @@ def _delete_message_blocking(db, conv_id, msg_idx, mode, msg_id=None):
         messages.pop(i)
 
     # Persist
-    title = row['title']
     now_ms = int(time.time() * 1000)
-    messages_json = json_dumps_pg(messages)
-    search_text = build_search_text(messages)
 
     # Merge settings — preserve existing, update lastMsg metadata
     try:
@@ -2047,27 +2428,19 @@ def _delete_message_blocking(db, conv_id, msg_idx, mode, msg_id=None):
     settings_json = json.dumps(settings, ensure_ascii=False)
 
     # Preserve original created_at
-    existing = db.execute(
-        'SELECT created_at FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID)
-    ).fetchone()
-    created_at = existing['created_at'] if existing else now_ms
+    created_at = row.get('created_at') or now_ms
 
-    upsert(db, CONVERSATIONS, {
-        'id': conv_id, 'user_id': DEFAULT_USER_ID, 'title': title,
-        'messages': messages_json, 'created_at': created_at, 'updated_at': now_ms,
-        'settings': settings_json, 'msg_count': len(messages), 'search_text': search_text,
-    }, insert_cols=_CONV_INSERT_COLS, retry=True)
+    from lib.database.conversation_repository import replace_messages
+    write_result = replace_messages(
+        db, conv_id, messages, user_id=DEFAULT_USER_ID,
+        expected_rev=row['rev'],
+        metadata={'updated_at': now_ms, 'settings': settings_json},
+        full=True)
+    if not write_result.applied:
+        return _json({'ok': False, 'error': 'blocked_rev_conflict'}, status=409)
 
-    update_conversation_fts(db, conv_id, search_text)
-    # Phase 5 dual-write (flag-gated, inert when off): arbitrary-index
-    # deletion re-sequences the array — full rebuild mirror.
-    from lib.database.messages_rows import mirror_write_and_commit
-    mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms, full=True)
-
-    _dm_rev_row = db.execute('SELECT rev FROM conversations WHERE id=? AND user_id=?',
-                             (conv_id, DEFAULT_USER_ID)).fetchone()
-    _notify_conv_changed(conv_id, rev=(_row_rev(_dm_rev_row) if _dm_rev_row else None), user_id=_request_user_id())
+    _notify_conv_changed(conv_id, rev=write_result.rev,
+                         user_id=_request_user_id())
     # Invalidate persisted per-day cost cache — but ONLY for the day(s) the
     # deleted messages actually contributed cost to.  A whole-table wipe
     # would force the next calendar open to live-rescan the entire month.
@@ -2121,18 +2494,13 @@ async def patch_message(conv_id, msg_idx):
 
 
 def _patch_message_blocking(db, conv_id, msg_idx, data):
-    row = db.execute(
-        'SELECT messages, title, settings FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID)
-    ).fetchone()
-    if not row:
+    from lib.database.conversation_repository import load_conversation
+    row = load_conversation(
+        db, conv_id, user_id=DEFAULT_USER_ID,
+        metadata_columns=('settings',))
+    if row is None:
         return _nf('Not found')
-
-    try:
-        messages = json.loads(row['messages'] or '[]')
-    except (json.JSONDecodeError, TypeError) as e:
-        logger.warning('[patch_msg] conv=%s failed to parse messages: %s', conv_id[:8], e)
-        return _ie('Failed to parse conversation messages')
+    messages = row.messages
 
     if msg_idx < 0 or msg_idx >= len(messages):
         logger.warning('[patch_msg] conv=%s idx=%d OUT OF RANGE (len=%d)',
@@ -2192,9 +2560,6 @@ def _patch_message_blocking(db, conv_id, msg_idx, data):
 
     # Persist — reuse the same pattern as delete_message/save_conv.
     now_ms = int(time.time() * 1000)
-    messages_json = json_dumps_pg(messages)
-    search_text = build_search_text(messages)
-
     try:
         settings = json.loads(row['settings'] or '{}')
     except (json.JSONDecodeError, TypeError) as _e_audit:
@@ -2207,28 +2572,17 @@ def _patch_message_blocking(db, conv_id, msg_idx, data):
         settings['lastMsgTimestamp'] = last.get('timestamp')
     settings_json = json.dumps(settings, ensure_ascii=False)
 
-    existing = db.execute(
-        'SELECT created_at FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID)
-    ).fetchone()
-    created_at = existing['created_at'] if existing else now_ms
-    title = row['title']
+    from lib.database.conversation_repository import replace_messages
+    write_result = replace_messages(
+        db, conv_id, messages, user_id=DEFAULT_USER_ID,
+        expected_rev=row['rev'],
+        metadata={'updated_at': now_ms, 'settings': settings_json},
+        changed_seqs=[msg_idx], full=False)
+    if not write_result.applied:
+        return _json({'ok': False, 'error': 'blocked_rev_conflict'}, status=409)
 
-    upsert(db, CONVERSATIONS, {
-        'id': conv_id, 'user_id': DEFAULT_USER_ID, 'title': title,
-        'messages': messages_json, 'created_at': created_at, 'updated_at': now_ms,
-        'settings': settings_json, 'msg_count': len(messages), 'search_text': search_text,
-    }, insert_cols=_CONV_INSERT_COLS, retry=True)
-
-    update_conversation_fts(db, conv_id, search_text)
-    # Phase 5 dual-write (flag-gated, inert when off): single-message edit.
-    from lib.database.messages_rows import mirror_write_and_commit
-    mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms,
-                            changed_seqs=[msg_idx])
-
-    _pm_rev_row = db.execute('SELECT rev FROM conversations WHERE id=? AND user_id=?',
-                             (conv_id, DEFAULT_USER_ID)).fetchone()
-    _notify_conv_changed(conv_id, rev=(_row_rev(_pm_rev_row) if _pm_rev_row else None), user_id=_request_user_id())
+    _notify_conv_changed(conv_id, rev=write_result.rev,
+                         user_id=_request_user_id())
     logger.info('[patch_msg] conv=%s idx=%d keys=%s preview=%.50s',
                 conv_id[:8], msg_idx, applied_keys, _preview)
     try:
@@ -2268,18 +2622,13 @@ async def patch_message_by_id(conv_id, msg_id):
 
 
 def _patch_message_by_id_blocking(db, conv_id, msg_id, data):
-    row = db.execute(
-        'SELECT messages, title, settings FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID)
-    ).fetchone()
-    if not row:
+    from lib.database.conversation_repository import load_conversation
+    row = load_conversation(
+        db, conv_id, user_id=DEFAULT_USER_ID,
+        metadata_columns=('settings',))
+    if row is None:
         return _nf('Not found')
-
-    try:
-        messages = json.loads(row['messages'] or '[]')
-    except (json.JSONDecodeError, TypeError) as e:
-        logger.warning('[patch_msg_id] conv=%s failed to parse messages: %s', conv_id[:8], e)
-        return _ie('Failed to parse conversation messages')
+    messages = row.messages
 
     target_idx = None
     for i, m in enumerate(messages):
@@ -2310,9 +2659,6 @@ def _patch_message_by_id_blocking(db, conv_id, msg_id, data):
         _preview = data['content'][:50]
 
     now_ms = int(time.time() * 1000)
-    messages_json = json_dumps_pg(messages)
-    search_text = build_search_text(messages)
-
     try:
         settings = json.loads(row['settings'] or '{}')
     except (json.JSONDecodeError, TypeError) as _e_audit:
@@ -2324,29 +2670,17 @@ def _patch_message_by_id_blocking(db, conv_id, msg_id, data):
         settings['lastMsgTimestamp'] = last.get('timestamp')
     settings_json = json.dumps(settings, ensure_ascii=False)
 
-    existing = db.execute(
-        'SELECT created_at FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID)
-    ).fetchone()
-    created_at = existing['created_at'] if existing else now_ms
-    title = row['title']
+    from lib.database.conversation_repository import replace_messages
+    write_result = replace_messages(
+        db, conv_id, messages, user_id=DEFAULT_USER_ID,
+        expected_rev=row['rev'],
+        metadata={'updated_at': now_ms, 'settings': settings_json},
+        changed_seqs=[target_idx], full=False)
+    if not write_result.applied:
+        return _json({'ok': False, 'error': 'blocked_rev_conflict'}, status=409)
 
-    upsert(db, CONVERSATIONS, {
-        'id': conv_id, 'user_id': DEFAULT_USER_ID, 'title': title,
-        'messages': messages_json, 'created_at': created_at, 'updated_at': now_ms,
-        'settings': settings_json, 'msg_count': len(messages), 'search_text': search_text,
-    }, insert_cols=_CONV_INSERT_COLS, retry=True)
-
-    update_conversation_fts(db, conv_id, search_text)
-    # Phase 5 dual-write (flag-gated, inert when off): single-message edit,
-    # mirror just that row via the seq hint.
-    from lib.database.messages_rows import mirror_write_and_commit
-    mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms,
-                            changed_seqs=[target_idx])
-
-    _pmi_rev_row = db.execute('SELECT rev FROM conversations WHERE id=? AND user_id=?',
-                              (conv_id, DEFAULT_USER_ID)).fetchone()
-    _notify_conv_changed(conv_id, rev=(_row_rev(_pmi_rev_row) if _pmi_rev_row else None), user_id=_request_user_id())
+    _notify_conv_changed(conv_id, rev=write_result.rev,
+                         user_id=_request_user_id())
     logger.info('[patch_msg_id] conv=%s id=%s idx=%d keys=%s preview=%.50s',
                 conv_id[:8], msg_id[:8], target_idx, applied_keys, _preview)
     try:
@@ -2391,18 +2725,13 @@ async def delete_branch(conv_id, msg_idx, branch_idx):
 
 
 def _delete_branch_blocking(db, conv_id, msg_idx, branch_idx, msg_id=None):
-    row = db.execute(
-        'SELECT messages, title, settings FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID)
-    ).fetchone()
-    if not row:
+    from lib.database.conversation_repository import load_conversation
+    row = load_conversation(
+        db, conv_id, user_id=DEFAULT_USER_ID,
+        metadata_columns=('settings',))
+    if row is None:
         return _nf('Not found')
-
-    try:
-        messages = json.loads(row['messages'] or '[]')
-    except (json.JSONDecodeError, TypeError) as e:
-        logger.warning('[delete_branch] conv=%s failed to parse messages: %s', conv_id[:8], e)
-        return _ie('Failed to parse conversation messages')
+    messages = row.messages
 
     # ── Stable-id resolution: msgId is authoritative, index is the fallback
     #    (mirrors delete_message). Drift-proof under windowed reads. ──
@@ -2439,9 +2768,6 @@ def _delete_branch_blocking(db, conv_id, msg_idx, branch_idx, msg_id=None):
 
     # Persist
     now_ms = int(time.time() * 1000)
-    messages_json = json_dumps_pg(messages)
-    search_text = build_search_text(messages)
-
     try:
         settings = json.loads(row['settings'] or '{}')
     except (json.JSONDecodeError, TypeError) as _e_audit:
@@ -2449,32 +2775,21 @@ def _delete_branch_blocking(db, conv_id, msg_idx, branch_idx, msg_id=None):
         settings = {}
     settings_json = json.dumps(settings, ensure_ascii=False)
 
-    existing = db.execute(
-        'SELECT created_at FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID)
-    ).fetchone()
-    created_at = existing['created_at'] if existing else now_ms
-    title = row['title']
-
-    upsert(db, CONVERSATIONS, {
-        'id': conv_id, 'user_id': DEFAULT_USER_ID, 'title': title,
-        'messages': messages_json, 'created_at': created_at, 'updated_at': now_ms,
-        'settings': settings_json, 'msg_count': len(messages), 'search_text': search_text,
-    }, insert_cols=_CONV_INSERT_COLS, retry=True)
-
-    update_conversation_fts(db, conv_id, search_text)
-    # Phase 5 dual-write (flag-gated, inert when off): branches edit one message.
-    from lib.database.messages_rows import mirror_write_and_commit
-    mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms,
-                            changed_seqs=[msg_idx])
+    from lib.database.conversation_repository import replace_messages
+    write_result = replace_messages(
+        db, conv_id, messages, user_id=DEFAULT_USER_ID,
+        expected_rev=row['rev'],
+        metadata={'updated_at': now_ms, 'settings': settings_json},
+        changed_seqs=[msg_idx], full=False)
+    if not write_result.applied:
+        return _json({'ok': False, 'error': 'blocked_rev_conflict'}, status=409)
 
     # Event-driven cross-device sync: a branch delete changes the conversation
     # body, so carry the post-write rev → a sibling tab with this conv open
     # refetches without a manual refresh. notify_conv_changed also invalidates
     # the sidebar meta cache, so it replaces the bare _invalidate_meta_cache().
-    _db_rev_row = db.execute('SELECT rev FROM conversations WHERE id=? AND user_id=?',
-                             (conv_id, DEFAULT_USER_ID)).fetchone()
-    _notify_conv_changed(conv_id, rev=(_row_rev(_db_rev_row) if _db_rev_row else None), user_id=_request_user_id())
+    _notify_conv_changed(conv_id, rev=write_result.rev,
+                         user_id=_request_user_id())
     logger.info('[delete_branch] conv=%s msg_idx=%d branch_idx=%d remaining=%d',
                 conv_id[:8], msg_idx, branch_idx, branch_count)
     try:
@@ -2558,38 +2873,20 @@ def _delete_conv_blocking(db, conv_id):
     # the cost-cache invalidation to only the day(s) it contributed cost to.
     _conv_msgs, _conv_created, _conv_updated = [], 0, 0
     try:
-        _row = db.execute(
-            'SELECT messages, created_at, updated_at FROM conversations '
-            'WHERE id=? AND user_id=?', (conv_id, DEFAULT_USER_ID)
-        ).fetchone()
-        if _row:
-            _conv_msgs = _safe_json(_row['messages'], default=[], label='del-conv-cost')
+        from lib.database.conversation_repository import load_conversation
+        _row = load_conversation(
+            db, conv_id, user_id=DEFAULT_USER_ID,
+            metadata_columns=('created_at', 'updated_at'))
+        if _row is not None:
+            _conv_msgs = _row.messages
             _conv_created = _row['created_at'] or 0
             _conv_updated = _row['updated_at'] or 0
     except Exception as _e:
         logger.debug('[delete_conv] cost-day capture skipped: %s', _e)
 
-    c1 = db.execute('DELETE FROM conversations WHERE id=? AND user_id=?', (conv_id, DEFAULT_USER_ID))
-    c2 = db.execute('DELETE FROM task_results WHERE conv_id=?', (conv_id,))
-    c3 = db.execute('DELETE FROM transcript_archive WHERE conv_id=?', (conv_id,))
-    _deleted_committed = False
-    try:
-        db.commit()
-        _deleted_committed = True
-    except Exception as exc:
-        _is_db_err = isinstance(exc, sqlite3.OperationalError)
-        if not _is_db_err:
-            raise
-        try:
-            db.rollback()
-        except Exception as _rb_err:
-            logger.debug('[Conversations] Rollback after delete retry failed: %s', _rb_err)
-        time.sleep(1)
-        c1 = db.execute('DELETE FROM conversations WHERE id=? AND user_id=?', (conv_id, DEFAULT_USER_ID))
-        c2 = db.execute('DELETE FROM task_results WHERE conv_id=?', (conv_id,))
-        c3 = db.execute('DELETE FROM transcript_archive WHERE conv_id=?', (conv_id,))
-        db.commit()
-        _deleted_committed = True
+    from lib.database.conversation_repository import delete_conversation
+    deleted = delete_conversation(db, conv_id, user_id=DEFAULT_USER_ID)
+    _deleted_committed = True
     # Event-driven cross-device sync: tell siblings this conv is gone so they
     # drop it from the sidebar (+ IDB cache) without a manual refresh.
     if _deleted_committed:
@@ -2605,8 +2902,10 @@ def _delete_conv_blocking(db, conv_id):
             _conv_msgs, conv_start=_conv_created, conv_end=_conv_updated)
     except Exception as e:
         logger.debug('[delete_conv] day-cost cache invalidation skipped: %s', e)
-    logger.info('[delete_conv] Deleted conv %s (rows: conv=%d, tasks=%d, transcripts=%d)',
-                conv_id[:12], c1.rowcount, c2.rowcount, c3.rowcount)
+    logger.info('[delete_conv] Deleted conv %s '
+                '(rows: conv=%d, messages=%d, tasks=%d, transcripts=%d)',
+                conv_id[:12], deleted.conversation_rows, deleted.message_rows,
+                deleted.task_rows, deleted.archive_rows)
     return _ok()
 
 

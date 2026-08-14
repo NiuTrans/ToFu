@@ -46,6 +46,7 @@ def settle_stream_accumulator(
     rs: Any,
     *,
     tid: str,
+    round_num: int = 0,
 ) -> None:
     """Reconcile orphan rounds + read back round counter + inject cache.
 
@@ -87,3 +88,10 @@ def settle_stream_accumulator(
         if _prefetch_hits:
             logger.info('[%s] Streaming tool exec: %d results pre-computed '
                         'and injected into cache', tid, _prefetch_hits)
+
+    # Responses PTC state is opaque to the generic stream accumulator. Join
+    # its parent items to nested tool calls before decision/dispatch.
+    from lib.tasks_pkg.orchestrator._programmatic import (
+        reconcile_programmatic_items,
+    )
+    reconcile_programmatic_items(task, rs.assistant_msg, llm_round=round_num)

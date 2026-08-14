@@ -66,7 +66,7 @@ def _emit_round_usage(*args, **kwargs):
 
 
 def _attempt_pool_rescue(task, body, round_num, max_tokens, tool_list,
-                         max_tool_rounds, accumulated_usage, api_rounds,
+                         accumulated_usage, api_rounds,
                          *, failed_models, original_model, cause_exc,
                          preset, thinking_enabled, on_tool_call_ready=None):
     """Last-resort pool-wide dispatch before a turn is allowed to die.
@@ -122,7 +122,7 @@ def _attempt_pool_rescue(task, body, round_num, max_tokens, tool_list,
                 f'正在尝试池中其它可用模型…'),
     ))
 
-    _tools_this = tool_list if (tool_list and round_num < max_tool_rounds) else None
+    _tools_this = tool_list
     _rescue_body = dict(body)
     if _tools_this is not None:
         _rescue_body['tools'] = _tools_this
@@ -200,7 +200,7 @@ def _attempt_pool_rescue(task, body, round_num, max_tokens, tool_list,
 
 
 def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
-                             tool_call_happened, tool_list, max_tool_rounds,
+                             tool_call_happened, tool_list,
                              messages, preset, thinking_enabled,
                              accumulated_usage, api_rounds,
                              on_tool_call_ready=None):
@@ -227,8 +227,6 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
         Whether any tool call executed in prior rounds.
     tool_list : list | None
         Tool definitions list (needed if fallback must rebuild body).
-    max_tool_rounds : int
-        Max tool round ceiling.
     messages : list
         Conversation messages (needed if fallback rebuilds body).
     preset : str
@@ -428,7 +426,7 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                 reactive_compact(messages, task=task, error_text=str(e))
 
                 # Rebuild body with compressed messages
-                _tools_this_round = tool_list if (tool_list and round_num < max_tool_rounds) else None
+                _tools_this_round = tool_list
                 body = build_body(
                     model, messages,
                     max_tokens=task.get('config', {}).get('maxTokens', 128000),
@@ -579,7 +577,7 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
             if not _fb_disabled_by_request:
                 _rescue = _attempt_pool_rescue(
                     task, body, round_num, max_tokens, tool_list,
-                    max_tool_rounds, accumulated_usage, api_rounds,
+                    accumulated_usage, api_rounds,
                     failed_models={model}, original_model=original_model,
                     cause_exc=e, preset=preset,
                     thinking_enabled=thinking_enabled,
@@ -678,7 +676,7 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
             thinking_enabled=True,
             preset='opus',
             thinking_depth='medium',
-            tools=tool_list if (tool_list and round_num < max_tool_rounds) else None,
+            tools=tool_list,
             response_format=body.get('response_format'),
             stream=True,
         )
@@ -767,7 +765,7 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
             if not _fb_disabled_by_request:
                 _rescue = _attempt_pool_rescue(
                     task, fallback_body, round_num, max_tokens, tool_list,
-                    max_tool_rounds, accumulated_usage, api_rounds,
+                    accumulated_usage, api_rounds,
                     failed_models={original_model, _FALLBACK_MODEL},
                     original_model=original_model,
                     cause_exc=e2, preset='medium',

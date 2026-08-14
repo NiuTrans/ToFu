@@ -11,11 +11,18 @@ A mock agent_runner keeps it LLM-free: it echoes the context it received so a
 test can assert exactly what a downstream node saw.
 """
 
+import inspect
 import threading
 import unittest
 
+import lib.orchestration._io as io_facade
+from lib.orchestration import io_contract as io_contract_owner
+from lib.orchestration import io_validation as io_validation_owner
+from lib.orchestration import io_values as io_values_owner
 from lib.orchestration import (
-    DEFAULT_OUTPUT_NAME, node_output_names, parse_io_ref, validate_definition,
+    DEFAULT_OUTPUT_NAME, IO_AUTHORING_PRESETS, IO_PORT_NAME_CONTRACT,
+    MAX_IO_PORTS,
+    io_contract_schema, node_output_names, parse_io_ref, validate_definition,
 )
 from lib.orchestration_engine import FlowExecutor
 
@@ -31,6 +38,41 @@ def _ctrl(nid, kind, **params):
 # ── Pure helpers ────────────────────────────────────────────────────
 
 class IoHelpersTest(unittest.TestCase):
+    def test_compatibility_facade_reexports_split_owner_identities(self):
+        self.assertNotIn('\ndef ', inspect.getsource(io_facade))
+        self.assertIs(
+            io_facade.io_contract_schema,
+            io_contract_owner.io_contract_schema,
+        )
+        self.assertIs(
+            io_facade.node_output_names,
+            io_values_owner.node_output_names,
+        )
+        self.assertIs(
+            io_facade.parse_io_ref,
+            io_values_owner.parse_io_ref,
+        )
+        self.assertIs(
+            io_facade._validate_node_io,
+            io_validation_owner._validate_node_io,
+        )
+
+    def test_serializable_authoring_contract_is_derived_from_backend_constants(self):
+        contract = io_contract_schema()
+        self.assertEqual(contract['maxPorts'], MAX_IO_PORTS)
+        self.assertEqual(contract['portName'], IO_PORT_NAME_CONTRACT)
+        self.assertEqual(contract['defaultOutput']['name'], DEFAULT_OUTPUT_NAME)
+        self.assertEqual(contract['presets']['toolHeavyWorker']['outputs'],
+                         IO_AUTHORING_PRESETS['toolHeavyWorker']['outputs'])
+        # Accessors return detached lists/dicts safe for JSON callers.
+        contract['presets']['toolHeavyWorker']['outputs'][0]['name'] = 'mutated'
+        contract['portName']['required'] = False
+        self.assertEqual(
+            IO_AUTHORING_PRESETS['toolHeavyWorker']['outputs'][0]['name'],
+            'summary',
+        )
+        self.assertTrue(IO_PORT_NAME_CONTRACT['required'])
+
     def test_default_output_name_when_no_io(self):
         self.assertEqual(node_output_names(_role('w', 'worker')),
                          [DEFAULT_OUTPUT_NAME])
@@ -94,6 +136,13 @@ class IoValidatorTest(unittest.TestCase):
         v = validate_definition(d)
         self.assertFalse(v['ok'])
         self.assertTrue(any('duplicate port name' in e for e in v['errors']))
+
+    def test_whitespace_port_name_is_error(self):
+        d = self._base({'io': {'outputs': [
+            {'name': '   ', 'type': 'text'}]}})
+        v = validate_definition(d)
+        self.assertFalse(v['ok'])
+        self.assertTrue(any('missing string name' in e for e in v['errors']))
 
     def test_input_from_unknown_node_is_error(self):
         d = self._base({'io': {'inputs': [

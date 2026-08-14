@@ -1,9 +1,9 @@
 """lib/agent_loop.py — Shared multi-round tool-calling loop + abort seam.
 
-Several engines run the SAME agentic shell: a bounded ``for round`` loop that
+Several engines run the SAME agentic shell: an open-ended tool loop that
 dispatches an LLM turn, and — if the turn asked for tools — executes each tool
 and feeds the result back for another turn, until the model stops calling
-tools (or a round cap is hit). Each engine hand-rolled that shell together
+tools. Each engine hand-rolled that shell together
 with its own abort/stop plumbing, and the abort *signal* itself was spelled
 three different ways across the codebase:
 
@@ -37,7 +37,7 @@ own handler unchanged.
 
 Generic per-round machinery extensions (all opt-in, all owned HERE so no
 engine re-implements them): ``before_round`` halt hook (timeouts),
-``retry_bonus`` (premature-close ceiling expansion), ``execute_tools`` batch
+``retry_bonus`` (bounded premature-close retry), ``execute_tools`` batch
 hook (parallel pools), ``max_consecutive_tool_timeouts`` (timeout circuit
 breaker) and ``on_round_end`` (crash-checkpoint placement).
 """
@@ -150,12 +150,12 @@ class LoopOutcome:
         exit_reason: WHY the loop stopped, for the orchestrator's diagnostic
             parity — one of ``completed``, ``aborted_before_round``,
             ``aborted_post_stream``, ``aborted_between_tools``,
-            ``max_rounds_exhausted``, ``no_progress``, or the custom reason
+            ``no_progress``, or the custom reason
             string returned by a ``before_round`` halt hook (e.g.
             ``'timeout'``).
-        halted: a ``before_round`` hook stopped the loop (exit_reason carries
-            the hook's reason) — distinct from both abort and the round cap.
-        retry_bonus_used: how many premature-close bonus rounds were granted.
+        halted: a semantic breaker or ``before_round`` hook stopped the loop
+            (``exit_reason`` carries the reason), distinct from abort.
+        retry_bonus_used: how many premature-close retries were consumed.
     """
 
     __slots__ = ('aborted', 'completed', 'rounds', 'exit_reason',
@@ -163,7 +163,7 @@ class LoopOutcome:
                  'consecutive_no_progress_rounds')
 
     def __init__(self, aborted: bool = False, completed: bool = False,
-                 rounds: int = 0, exit_reason: str = 'max_rounds_exhausted',
+                 rounds: int = 0, exit_reason: str = 'running',
                  retry_bonus_used: int = 0, halted: bool = False,
                  consecutive_tool_timeouts: int = 0,
                  consecutive_no_progress_rounds: int = 0):
@@ -180,7 +180,6 @@ class LoopOutcome:
 def run_agent_loop(
     *,
     abort: AbortSignal,
-    max_tool_rounds: int,
     round_tools: Any,
     dispatch: Callable[[int, Any], tuple],
     execute_tool: Callable[[int, dict], None] | None = None,
@@ -189,13 +188,12 @@ def run_agent_loop(
     retry_bonus: Callable[[int, dict, Any, Any], bool] | None = None,
     max_retry_bonus: int = 2,
     before_round: Callable[[int], str | None] | None = None,
-    tools_terminal_round: bool = True,
     execute_tools: Callable[[int, list], dict | None] | None = None,
     max_consecutive_tool_timeouts: int = 0,
     max_consecutive_no_progress_rounds: int = 0,
     on_round_end: Callable[[int], None] | None = None,
 ) -> LoopOutcome:
-    """Drive a bounded LLM tool-calling loop with the triple abort check.
+    """Drive an LLM tool-calling loop until the model naturally completes.
 
     The loop owns control flow + the three abort-check placements; all
     engine-specific I/O is delegated to the hooks below. It never catches
@@ -204,12 +202,7 @@ def run_agent_loop(
 
     Args:
         abort: the unified abort signal (checked at all three points).
-        max_tool_rounds: number of tool-eligible rounds. Rounds ``0 ..
-            max_tool_rounds-1`` are offered ``round_tools``; the final round
-            (index ``max_tool_rounds``) is offered ``None`` so the model must
-            produce its answer without more tools.
-        round_tools: tool schema list passed to ``dispatch`` on tool-eligible
-            rounds (``None`` on the final round).
+        round_tools: tool schema list passed unchanged to every dispatch.
         dispatch: ``dispatch(rnd, tools) -> (msg, finish, usage)``. Performs
             the LLM turn (typically wrapping ``dispatch_stream`` with the
             engine's callbacks). ``msg`` must be a dict; a truthy
@@ -224,16 +217,11 @@ def run_agent_loop(
             round HAS tool calls, before executing them (e.g. interim-draft
             discard + appending the assistant message to the history).
         retry_bonus: optional ``(rnd, msg, finish, usage) -> bool`` hook fired
-            after ``on_round_result``. Returning True means "this turn ended
-            prematurely (e.g. a premature stream close) — grant ONE extra
-            round". It dynamically expands the round ceiling exactly like the
-            chat orchestrator's ``_premature_retry_count`` (so even a
-            no-tools turn can be retried), capped at ``max_retry_bonus``. When
-            it fires, the round is NOT treated as a natural completion. Default
-            ``None`` → the loop is byte-equivalent to the original for-range.
-        max_retry_bonus: ceiling on total bonus rounds ``retry_bonus`` may
-            grant, so a stuck premature-close can't loop forever (default 2,
-            matching orchestrator's ``_PREMATURE_RETRY_MAX``).
+            after ``on_round_result``. Returning True means the stream ended
+            prematurely and the same logical round should be retried. The
+            retry is capped by ``max_retry_bonus`` and is not treated as a
+            natural completion.
+        max_retry_bonus: maximum premature-close retries (default 2).
         before_round: optional ``(rnd) -> str | None`` halt hook checked at
             the TOP of every round (after the abort check). Returning a
             non-empty reason string stops the loop with
@@ -241,13 +229,6 @@ def run_agent_loop(
             seam for per-round guards the chassis does not own (swarm's
             wall-clock timeout is the first adopter). Returning None lets
             the round proceed.
-        tools_terminal_round: when True (default), the final round (index
-            ``max_tool_rounds``) is offered ``tools=None`` so the model must
-            answer without more tools. When False, EVERY round is offered
-            ``round_tools`` and the cap is a pure safety ceiling — the
-            contract swarm's loop always had (its max-rounds exit extracts
-            a partial answer from history instead of forcing a tool-less
-            final turn).
         execute_tools: optional BATCH hook ``(rnd, tool_calls) ->
             dict | None``. When provided it replaces the per-tool
             ``execute_tool`` loop ENTIRELY (including the between-tools
@@ -281,8 +262,7 @@ def run_agent_loop(
 
             This is the guard the 2026-07-27 runaway needed: one sub-agent
             re-issued the same tool call for 26.7M rounds (3.5h, 9.1 GB of
-            log) because ``max_rounds=0`` collapses to the ``2**30`` ceiling
-            and ``timeout_seconds=0`` disabled the only wall-clock net.
+            log) while making no semantic progress.
 
             The criterion is REPETITION, not empty content: measured across
             the 07-24..07-26 logs, 866/1723 (50.3%) of legitimate rounds have
@@ -302,19 +282,14 @@ def run_agent_loop(
     """
     outcome = LoopOutcome()
 
-    # Dynamic ceiling (mirrors the orchestrator's while-loop): the base cap is
-    # ``max_tool_rounds`` tool-eligible rounds + 1 final tools=None round; a
-    # premature-close retry_bonus grows ``bonus`` so the ceiling expands
-    # mid-loop. rnd runs 0.. and the loop continues while rnd <= cap + bonus.
+    # There is deliberately no round ceiling. A productive model keeps its
+    # tools until it returns a natural no-tool response; only explicit aborts,
+    # semantic breakers, or caller-supplied guards may stop it earlier.
     bonus = 0
     rnd = -1
     prev_tool_fingerprint = None
     while True:
         rnd += 1
-        if rnd > max_tool_rounds + bonus:
-            outcome.exit_reason = 'max_rounds_exhausted'
-            break
-
         # (1) BEFORE-ROUND — don't start a turn after Stop.
         if abort.aborted:
             outcome.aborted = True
@@ -330,15 +305,13 @@ def run_agent_loop(
                 outcome.exit_reason = reason
                 break
 
-        tools = round_tools \
-            if (rnd < max_tool_rounds or not tools_terminal_round) else None
-        msg, finish, usage = dispatch(rnd, tools)
+        msg, finish, usage = dispatch(rnd, round_tools)
         outcome.rounds += 1
         if on_round_result is not None:
             on_round_result(rnd, msg, finish, usage)
 
-        # Premature-close retry: grant one bonus round (capped) and DON'T treat
-        # this turn as a natural completion.
+        # Premature-close retry (capped); do not treat this poisoned stream as
+        # a natural completion.
         if retry_bonus is not None and bonus < max_retry_bonus \
                 and retry_bonus(rnd, msg, finish, usage):
             bonus += 1

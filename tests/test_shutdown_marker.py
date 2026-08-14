@@ -13,9 +13,27 @@ import importlib
 import os
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
 
 # Ensure repo root on path for standalone runs.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+@pytest.fixture(autouse=True)
+def _restore_data_root_after_test():
+    """Do not leak this module's import-time path override to later tests."""
+    original = os.environ.get('TOFU_DATA_DIR')
+    yield
+    if original is None:
+        os.environ.pop('TOFU_DATA_DIR', None)
+    else:
+        os.environ['TOFU_DATA_DIR'] = original
+    import lib.runtime_paths as rp
+    importlib.reload(rp)
+    import lib.shutdown_marker as sm
+    importlib.reload(sm)
 
 
 def _fresh_marker_module(data_dir):
@@ -131,6 +149,20 @@ def test_boot_ring_records_and_bounds():
             boots = sm.record_boot()
         assert len(boots) == sm._BOOTS_KEEP, len(boots)
         print('OK boot ring bounded at %d' % sm._BOOTS_KEEP)
+
+
+def test_concurrent_boot_records_preserve_the_bounded_newest_ring():
+    with tempfile.TemporaryDirectory() as d:
+        sm = _fresh_marker_module(d)
+        stamps = [1000.0 + index for index in range(sm._BOOTS_KEEP)]
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            results = list(pool.map(sm.record_boot, stamps))
+
+        assert all(results)
+        persisted = sm.read_json(sm._boots_path())
+        assert len(persisted) == sm._BOOTS_KEEP
+        assert set(persisted) == set(stamps)
+        assert not os.path.exists(sm._boots_path() + '.tmp')
 
 
 def test_restart_storm_detection():

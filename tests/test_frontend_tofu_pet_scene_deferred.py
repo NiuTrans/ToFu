@@ -1,5 +1,5 @@
 """Guards for pt_3879f00e sub-part 3 slice C — defer tofu-pet.js (65KB)
-+ tofu-scene.js (96KB) from the CORE boot bundle into _DEFERRED_FILES.
++ tofu-scene.js (96KB) from the CORE boot bundle into _CLASSIC_ASSET_FILES.
 
 The pair is the ~160KB decorative family (project-bar pet mascot +
 procedural canvas backdrop) — zero first-paint necessity.
@@ -42,7 +42,7 @@ BUNDLER_PY = ROOT / 'lib' / 'js_bundler.py'
 INDEX_HTML = ROOT / 'index.html'
 PET_JS = ROOT / 'static' / 'js' / 'tofu-pet.js'
 SCENE_JS = ROOT / 'static' / 'js' / 'tofu-scene.js'
-FEATURE_LOADER = ROOT / 'static' / 'js' / 'feature-loader.js'
+FEATURE_LOADER = ROOT / 'static' / 'js' / 'feature-bridge.js'
 
 
 def _manifest():
@@ -56,7 +56,7 @@ def _manifest():
 def test_tofu_pet_in_deferred_files():
     _bf, deferred_files, _entry, _crit = _manifest()
     assert 'tofu-pet.js' in deferred_files, (
-        "'tofu-pet.js' must be in _DEFERRED_FILES — 65KB of decorative "
+        "'tofu-pet.js' must be in _CLASSIC_ASSET_FILES — 65KB of decorative "
         'pet out of the render-blocking core')
 
 
@@ -71,7 +71,7 @@ def test_tofu_pet_not_in_core_bundle_files():
 def test_tofu_scene_in_deferred_files():
     _bf, deferred_files, _entry, _crit = _manifest()
     assert 'tofu-scene.js' in deferred_files, (
-        "'tofu-scene.js' must be in _DEFERRED_FILES — 96KB of decorative "
+        "'tofu-scene.js' must be in _CLASSIC_ASSET_FILES — 96KB of decorative "
         'canvas backdrop out of the render-blocking core')
 
 
@@ -94,15 +94,11 @@ def test_scene_switch_onclick_absence_safe():
         'ReferenceError')
 
 
-def test_dev_fallback_script_tags_kept():
-    """The dev-fallback path (bundle build failed) loads every module via
-    individual <script> tags — both files must keep theirs, same as
-    cross_tab_sync.js / health_stream_timer.js kept theirs."""
+def test_index_has_no_raw_decorative_scripts():
     src = INDEX_HTML.read_text()
-    assert 'static/js/tofu-pet.js' in src, (
-        'index.html lost the tofu-pet.js dev-fallback script tag')
-    assert 'static/js/tofu-scene.js' in src, (
-        'index.html lost the tofu-scene.js dev-fallback script tag')
+    assert 'static/js/tofu-pet.js' not in src
+    assert 'static/js/tofu-scene.js' not in src
+    assert '<!-- TOFU_APP_ASSETS -->' in src
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +117,7 @@ def test_no_tofu_stub_entries_in_either_list():
     loader = FEATURE_LOADER.read_text()
     for name in ('TofuPet', 'TofuScene', 'cycleDecor', 'setDecor'):
         assert f"'{name}'" not in loader, (
-            f'{name} must NOT be in feature-loader.js stub list either')
+            f'{name} must NOT be in feature-bridge.js stub list either')
 
 
 # ---------------------------------------------------------------------------

@@ -26,10 +26,10 @@ import json
 import time
 import zlib
 
-from flask import request
+from quart import request
 
 from lib.api_response import api_not_found, api_ok
-from lib.database import DOMAIN_CHAT, get_db
+from lib.database import DOMAIN_CHAT, db_execute_with_retry, get_db
 from lib.log import audit_log, get_logger
 from lib.tasks_pkg import tasks, tasks_lock
 from routes.api_v1.auth import current_auth, require_scope
@@ -255,8 +255,8 @@ def chat_interrupt_command(task_id):
 # next response carries the full section again — no server-side versioning,
 # no bookkeeping, one-cycle worst case. crc32 catches the same-length
 # mutation (an in-flight round's elapsed tick) that a length check cannot.
-def _incr_poll_fps(task: dict) -> dict:
-    """Per-section fingerprints of the CURRENT shippable poll sections."""
+def _incr_poll_fps(payload: dict) -> dict:
+    """Per-section fingerprints of the exact poll payload being shipped."""
     def _crc(s: str) -> int:
         return zlib.crc32(s.encode('utf-8')) if s else 0
 
@@ -271,14 +271,27 @@ def _incr_poll_fps(task: dict) -> dict:
             logger.debug('[Chat] incr poll fp crc failed: %s', e)
             return -1
 
-    _rounds = task.get('toolRounds') or []
-    _ep_turns = task.get('_endpoint_turns') or []
+    _rounds = payload.get('toolRounds') or []
+    _ep_turns = payload.get('endpointTurns') or []
+    _content = payload.get('content') or ''
+    _thinking = payload.get('thinking') or ''
+    _epoch = int(payload.get('contentEpoch') or 0)
     return {
-        'c': _crc(task.get('content') or ''),
-        't': _crc(task.get('thinking') or ''),
+        'c': [_epoch, _crc(_content)],
+        't': [_epoch, _crc(_thinking)],
         'r': [len(_rounds), _last_crc(_rounds)],
         'e': [len(_ep_turns), _last_crc(_ep_turns)],
     }
+
+
+def _incr_row_crc(row) -> int:
+    """Stable fingerprint for one poll row; ``-1`` forces a full snapshot."""
+    try:
+        return zlib.crc32(
+            json.dumps(row, ensure_ascii=False, default=str).encode('utf-8'))
+    except Exception as e:
+        logger.debug('[Chat] incr poll row crc failed: %s', e)
+        return -1
 
 
 def _maybe_trim_incr_poll(r: dict, task: dict) -> dict:
@@ -299,7 +312,7 @@ def _maybe_trim_incr_poll(r: dict, task: dict) -> dict:
         except (ValueError, TypeError) as _ifp_err:
             logger.debug('[Chat] incr poll — bad ifp ignored: %s', _ifp_err)
             _ifp = None
-    _fp = _incr_poll_fps(task)
+    _fp = _incr_poll_fps(r)
     r['fp'] = _fp
 
     def _same(tag) -> bool:
@@ -314,6 +327,46 @@ def _maybe_trim_incr_poll(r: dict, task: dict) -> dict:
     if _same('r') and 'toolRounds' in r:
         del r['toolRounds']
         r['roundsSame'] = True
+    elif _ifp and 'toolRounds' in r:
+        # Tool rounds have an immutable, closed prefix and at most one mutable
+        # tail.  The old protocol noticed a tail mutation but then re-sent the
+        # ENTIRE history (1.7 MB every ~2 s in the incident log).  Prove the
+        # echoed boundary still belongs to this prefix, then ship only the
+        # append/replacement.  Any malformed echo, truncation, or prefix
+        # mismatch falls through to the full snapshot and self-heals.
+        _prev_r = _ifp.get('r')
+        _rounds = r.get('toolRounds')
+        if (isinstance(_prev_r, list) and len(_prev_r) >= 2
+                and isinstance(_rounds, list)):
+            try:
+                _prev_count = int(_prev_r[0])
+                _prev_tail_crc = int(_prev_r[1])
+            except (TypeError, ValueError) as _round_fp_err:
+                logger.debug(
+                    '[Chat] incr poll — malformed round fingerprint ignored: %s',
+                    _round_fp_err)
+                _prev_count = -1
+                _prev_tail_crc = -2
+            _delta_start = None
+            if _prev_count == 0 and _rounds:
+                _delta_start = 0
+            elif 0 < _prev_count < len(_rounds):
+                # Append is safe only when the old tail is still exactly at
+                # the echoed boundary.  If it changed while a new row was
+                # appended, return full rather than manufacture a gap.
+                if _incr_row_crc(_rounds[_prev_count - 1]) == _prev_tail_crc:
+                    _delta_start = _prev_count
+            elif _prev_count == len(_rounds) and _prev_count > 0:
+                # Same count + different fingerprint is the sole mutable tail
+                # changing (partial output/status/elapsed). Closed rounds never
+                # mutate; replace just that row.
+                _delta_start = _prev_count - 1
+            if _delta_start is not None:
+                r['toolRoundsDelta'] = {
+                    'start': _delta_start,
+                    'rows': _rounds[_delta_start:],
+                }
+                del r['toolRounds']
     if _same('e') and 'endpointTurns' in r:
         del r['endpointTurns']
         r['endpointTurnsSame'] = True
@@ -371,9 +424,12 @@ def chat_poll(task_id):
         # pt_8dc03017 cutover: the `_autopilot_deciding` withhold is gone —
         # a done task is terminal; the VU runs as an independent task.
         _reported_status = task['status']
+        from lib.tasks_pkg.manager import snapshot_task_text
+        _content, _thinking, _content_epoch = snapshot_task_text(task)
         r = {
             'id': task['id'], 'status': _reported_status,
-            'content': task['content'], 'thinking': task['thinking'],
+            'content': _content, 'thinking': _thinking,
+            'contentEpoch': _content_epoch,
         }
         # ★ Server-authoritative task start (ms). Lets the frontend seed its
         #   elapsed timer from the REAL start on a reconnect/refresh instead of
@@ -392,11 +448,16 @@ def chat_poll(task_id):
         for key in ('error', 'toolRounds', 'finishReason', 'usage', 'preset',
                      'toolSummary', 'phase', 'modifiedFiles', 'modifiedFileList',
                      'model', 'provider_id', 'thinkingDepth', 'apiRounds',
-                     'compactionUsage'):
+                     'compactionUsage', 'costExperiment'):
             if key in _TERMINAL_ONLY_KEYS and not _terminal_ok:
                 continue
             if task.get(key):
                 r[key] = task[key]
+        if task.get('_todoState'):
+            from lib.tools.todo import public_todo_state
+            r['todoState'] = public_todo_state(task['_todoState'])
+        if task.get('_todo_blocked'):
+            r['todoBlocked'] = task['_todo_blocked']
         if task.get('id'):
             r['taskId'] = task['id']
         if task.get('_fallback_model'):
@@ -440,10 +501,15 @@ def chat_poll(task_id):
         #   STOP exactly like the SSE state handler does.
         if task.get('endpoint_mode'):
             r['endpointMode'] = True
+            if task.get('flow_mode'):
+                r['flowMode'] = True
+                r['flowProjection'] = task.get('_flow_projection', 'flow')
             if task.get('_endpoint_turns'):
                 r['endpointTurns'] = task['_endpoint_turns']
             r['endpointPhase'] = task.get('_endpoint_phase', 'planning')
             r['endpointIteration'] = task.get('_endpoint_iteration', 0)
+            for _key, _value in (task.get('_flow_current_turn') or {}).items():
+                r[_key] = _value
             if task.get('_endpoint_stop_reason'):
                 r['endpointStopReason'] = task['_endpoint_stop_reason']
         return api_ok(_maybe_trim_incr_poll(r, task))
@@ -515,8 +581,10 @@ def chat_poll(task_id):
                     # effective_status already 'interrupted' from the verdict.
                     # ★ Update DB so future polls don't re-trigger this warning
                     try:
-                        db.execute("UPDATE task_results SET status='interrupted' WHERE task_id=?", (task_id,))
-                        db.commit()
+                        db_execute_with_retry(
+                            db,
+                            "UPDATE task_results SET status='interrupted' "
+                            "WHERE task_id=? AND status='running'", (task_id,))
                     except Exception as e:
                         logger.warning('[Chat] Failed to update stale task %s to interrupted: %s', task_id[:8], e)
                     # ★ P0 observability: surface the activeTaskId ↔ msg _taskId
@@ -534,12 +602,14 @@ def chat_poll(task_id):
         #   SSE cold emits above — so a poll-fallback reconnect mid-stream sees
         #   the full buffer, not a short checkpoint. Falls back to the row pair
         #   on an empty/failed log.
-        from lib.tasks_pkg.event_fold import fold_cold_state_text
-        _poll_c, _poll_t = fold_cold_state_text(
-            task_id, row['content'] or '', row['thinking'] or '')
+        from lib.tasks_pkg.event_fold import fold_cold_state
+        _poll_c, _poll_t, _poll_epoch = fold_cold_state(
+            task_id, row['content'] or '', row['thinking'] or '',
+            checkpoint_epoch=_db_meta.get('contentEpoch') or 0)
         r = {
             'id': row['task_id'], 'status': effective_status,
             'content': _poll_c, 'thinking': _poll_t,
+            'contentEpoch': _poll_epoch,
         }
         if _reconnect_hint:
             # Tell the client to re-open the stream (it will land on the
@@ -571,7 +641,8 @@ def chat_poll(task_id):
         _db_terminal_ok = _is_terminal_status(effective_status)
         for key in ('finishReason', 'usage', 'preset', 'toolSummary',
                      'model', 'provider_id', 'thinkingDepth', 'apiRounds',
-                     'modifiedFiles', 'modifiedFileList'):
+                     'modifiedFiles', 'modifiedFileList', 'costExperiment',
+                     'todoState', 'todoBlocked'):
             if key in _TERMINAL_ONLY_KEYS and not _db_terminal_ok:
                 continue
             if _db_meta.get(key):
@@ -588,6 +659,15 @@ def chat_poll(task_id):
         #   path is exactly when this reconstruction matters most).
         if _db_meta.get('endpointMode'):
             r['endpointMode'] = True
+            r['endpointPhase'] = _db_meta.get('endpointPhase', 'done')
+            r['endpointIteration'] = _db_meta.get('endpointIteration', 0)
+            if _db_meta.get('flowMode'):
+                r['flowMode'] = True
+                r['flowProjection'] = _db_meta.get('flowProjection', 'flow')
+                for _key in ('turnRole', 'emits', 'vuMsgId',
+                             'autopilotRunId'):
+                    if _db_meta.get(_key) is not None:
+                        r[_key] = _db_meta[_key]
             from lib.tasks_pkg import load_endpoint_turns_from_conversation
             _ep_turns = load_endpoint_turns_from_conversation(row['conv_id'])
             if _ep_turns:
@@ -652,5 +732,3 @@ def chat_flow_trace(task_id):
             'trace': meta.get('flowTrace') or [],
         })
     return api_not_found('Task not found')
-
-

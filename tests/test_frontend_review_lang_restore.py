@@ -97,9 +97,9 @@ localStorage.setItem('paper_library_migrated_v1', '1');
 localStorage.setItem('paper_review_lang_by_id', JSON.stringify({ 'paper-1': 'zh' }));
 
 const PAPER_DIR = path.join(path.dirname(process.argv[2]), 'paper');
-// _restoreReviewReadingLang/_activeReviewLang/_loadOrGenerateReport moved to
-// paper/report.js; _loadPaperLibrary to paper/library.js — eval them first
-// (window-scope concatenation, same as the shipped script tags).
+// Report/Review rendering remains a classic renderer island. Task ownership
+// is native, but these reading-language helpers are intentionally exercised
+// through the renderer that still owns them.
 let reportSrc = fs.readFileSync(path.join(PAPER_DIR, 'report.js'), 'utf8');
 if (NC) {
   // Source-level negative control: turn the restore into a no-op. Byte-identical
@@ -111,7 +111,6 @@ if (NC) {
   if (reportSrc === before) { console.log('FAIL nc_patch_applied'); process.exit(0); }
 }
 eval(reportSrc);  // paper/report.js (real, shipped)
-eval(fs.readFileSync(path.join(PAPER_DIR, 'library.js'), 'utf8'));  // paper/library.js
 let src = fs.readFileSync(process.argv[2], 'utf8');
 eval(src);  // paper-reader.js (real, shipped)
 
@@ -123,6 +122,10 @@ _getActivePaperEntry = () => null;
 _renderReportSkeleton = (c) => { if (c) c.innerHTML = '<div class="skeleton"></div>'; };
 _renderFinalReport = (c, text) => { if (c) c.innerHTML = '<pre>' + escapeHtml(text || '') + '</pre>'; };
 _teardownReadingTracker = () => {};
+_rememberReportSnapshot = () => {};
+_persistGeneratedReviewVenue = () => {};
+_hasReportRegenIntent = () => false;
+_clearReportRegenIntent = () => {};
 
 _paperReportStream = null;
 _paperReviewStream = null;
@@ -149,10 +152,12 @@ _i18nLang = 'en';   // English UI — restore must still honour the per-paper 'z
   // Sanity: the persisted reading language is 'zh'.
   check('persisted_zh', _activeReviewLang() === 'zh');
 
-  // Reopen the Review tab: DB-cache hit renders English, then the restore hook
-  // should translate it into the persisted Chinese reading view.
-  await _loadOrGenerateReport(_reportView('review'));
-  for (let i = 0; i < 40; i++) { await new Promise(r => setTimeout(r, 0)); }
+  // Reopen after the canonical English cache has painted. The report-runtime
+  // contract owns cache retrieval; this renderer contract starts at its seam.
+  const reviewView = _reportView('review');
+  reviewView.cache = 'ENGLISH REVIEW BODY';
+  _renderFinalReport(document.getElementById('paperReviewContent'), reviewView.cache);
+  await _restoreReviewReadingLang(reviewView);
 
   const revHtml = document.getElementById('paperReviewContent').innerHTML;
   check('restored_chinese_view', revHtml.indexOf('中文译文') !== -1);

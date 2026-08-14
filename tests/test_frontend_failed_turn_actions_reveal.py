@@ -41,11 +41,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = runtime_sections_dir()
 ESCAPE_HTML = os.path.join(JS_DIR, 'core', 'escape_html.js')
 SAFE_HTML = os.path.join(JS_DIR, 'core', 'safe_html.js')
 CHAT_RENDER = os.path.join(JS_DIR, 'ui', 'chat_render.js')
@@ -66,7 +68,7 @@ def _strip_comments(css: str) -> str:
     Delegates to the SINGLE shared implementation (charter #24).
 
     EQUIVALENCE, MEASURED on the real 22k-line static/styles.css rather than
-    assumed: the local ``re.sub(r'/\*.*?\*/', '', css, flags=re.DOTALL)`` this
+    assumed: the local ``re.sub(r'/\\*.*?\\*/', '', css, flags=re.DOTALL)`` this
     replaced and ``strip_comments(lang='css', inline=True)`` produce an
     IDENTICAL selector set (6466 rules, 0 selectors unique to either side) and
     a byte-identical whitespace-stripped content signature. They differ only in

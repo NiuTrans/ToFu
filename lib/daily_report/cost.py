@@ -8,6 +8,7 @@ always live-computed; the calendar endpoint wraps the whole thing in a
 import datetime as _dt
 import re
 import time
+import uuid
 
 from lib.cost import normalize_usage
 from lib.log import get_logger
@@ -143,6 +144,197 @@ def _calc_msg_cost_cny(usage, model_or_preset='', provider_id='', at=None):
     return round(cost_usd * rate, 4)
 
 
+def _normalized_usage_projection_sql(backend, id_count):
+    """Project billing fields from verified per-message light rows."""
+    placeholders = ','.join('?' for _ in range(id_count))
+    if backend == 'pg':
+        return (
+            'SELECT conv_id, seq AS msg_index, billing_meta->\'usage\' AS usage, '
+            "COALESCE(CAST(message_ts AS TEXT), billing_meta->>'timestamp') "
+            'AS msg_timestamp, '
+            "COALESCE(billing_meta->>'model', billing_meta->>'preset', "
+            "billing_meta->>'effort', '') AS msg_model, "
+            "COALESCE(billing_meta->>'provider_id', "
+            "billing_meta->>'providerId', '') AS msg_provider "
+            'FROM conversation_messages '
+            f'WHERE conv_id IN ({placeholders}) '
+            "AND jsonb_typeof(billing_meta->'usage')='object' "
+            'ORDER BY conv_id, seq')
+    return (
+        'SELECT conv_id, seq AS msg_index, '
+        "json_extract(billing_meta,'$.usage') AS usage, "
+        "COALESCE(CAST(message_ts AS TEXT), "
+        "json_extract(billing_meta,'$.timestamp')) AS msg_timestamp, "
+        "COALESCE(json_extract(billing_meta,'$.model'), "
+        "json_extract(billing_meta,'$.preset'), "
+        "json_extract(billing_meta,'$.effort'), '') AS msg_model, "
+        "COALESCE(json_extract(billing_meta,'$.provider_id'), "
+        "json_extract(billing_meta,'$.providerId'), '') AS msg_provider "
+        'FROM conversation_messages '
+        f'WHERE conv_id IN ({placeholders}) '
+        "AND json_type(billing_meta,'$.usage')='object' "
+        'ORDER BY conv_id, seq')
+
+
+def _first_content_projection_sql(backend, id_count):
+    """Return the legacy title fallback without reading full transcripts."""
+    placeholders = ','.join('?' for _ in range(id_count))
+    content = ('left(content, 30)' if backend == 'pg'
+               else 'substr(content,1,30)')
+    return (
+        f'SELECT conv_id, {content} AS first_content '
+        'FROM conversation_messages WHERE seq=0 '
+        f'AND conv_id IN ({placeholders})')
+
+
+def _usage_rows_from_snapshots(snapshots):
+    """Build billing projections from authority-aware repository snapshots."""
+    from lib.utils import safe_json
+
+    projected = []
+    for snapshot in snapshots:
+        raw_settings = snapshot.get('settings') or {}
+        settings = (safe_json(raw_settings, default={}, label='cost-settings')
+                    if isinstance(raw_settings, str) else raw_settings)
+        settings = settings if isinstance(settings, dict) else {}
+        messages = snapshot.messages if isinstance(snapshot.messages, list) else []
+        first = messages[0] if messages and isinstance(messages[0], dict) else {}
+        first_content = first.get('content', '')
+        first_content = first_content[:30] if isinstance(first_content, str) else ''
+        for index, message in enumerate(messages):
+            if not isinstance(message, dict) or not isinstance(
+                    message.get('usage'), dict):
+                continue
+            projected.append({
+                'id': snapshot['id'],
+                'title': snapshot.get('title') or '',
+                'created_at': snapshot.get('created_at') or 0,
+                'updated_at': snapshot.get('updated_at') or 0,
+                'conv_model': (settings.get('model') or settings.get('preset')
+                               or settings.get('effort') or ''),
+                'first_content': first_content,
+                'msg_index': index,
+                'total_msgs': len(messages),
+                'usage': message['usage'],
+                'msg_timestamp': message.get('timestamp', 0),
+                'msg_model': (message.get('model') or message.get('preset')
+                              or message.get('effort') or ''),
+                'msg_provider': (message.get('provider_id')
+                                 or message.get('providerId') or ''),
+            })
+    return projected
+
+
+def _normalized_usage_rows(db, candidates, ms_start, ms_end, backend):
+    """Return exact billing projections from current row mirrors.
+
+    Every conversation is gated on authority/mirror revision, exact row count,
+    and complete ``meta_light`` coverage. Exceptional stale conversations use
+    the old server-side JSON projection individually; a failure returns None
+    so the caller can fail open to the fleet-wide authority query.
+    """
+    from lib.daily_report.conversations import (
+        _chunks,
+        _row_value,
+        _verified_normalized_candidates,
+    )
+    from lib.utils import safe_json
+
+    try:
+        verified = _verified_normalized_candidates(db, candidates)
+        if verified is None:
+            return None
+        by_id, eligible = verified
+        if not by_id:
+            return []
+
+        # ``billing_meta=NULL`` is the rolling-upgrade marker. A legitimate
+        # message with no usage stores ``{}``, so COUNT(billing_meta) is an
+        # exact completeness test without conflating "not billable" with
+        # "not backfilled".
+        billing_eligible = []
+        billing_eligible.extend(
+            cid for cid in eligible
+            if int(_row_value(by_id[cid], 'msg_count', 5, 0) or 0) == 0)
+        for ids in _chunks(eligible):
+            ph = ','.join('?' for _ in ids)
+            readiness = db.execute(
+                'SELECT conv_id, COUNT(*) AS row_count, '
+                'COUNT(billing_meta) AS billing_count '
+                'FROM conversation_messages '
+                f'WHERE conv_id IN ({ph}) GROUP BY conv_id',
+                tuple(ids)).fetchall()
+            for row in readiness:
+                cid = str(_row_value(row, 'conv_id', 0, '') or '')
+                candidate = by_id.get(cid)
+                expected = int(
+                    _row_value(candidate, 'msg_count', 5, 0) or 0
+                ) if candidate is not None else -1
+                row_count = int(_row_value(row, 'row_count', 1, 0) or 0)
+                billing_count = int(
+                    _row_value(row, 'billing_count', 2, 0) or 0)
+                if row_count == expected and billing_count == expected:
+                    billing_eligible.append(cid)
+
+        first_content = {}
+        for ids in _chunks(billing_eligible):
+            for row in db.execute(
+                    _first_content_projection_sql(backend, len(ids)),
+                    tuple(ids)).fetchall():
+                first_content[str(_row_value(row, 'conv_id', 0, '') or '')] = (
+                    _row_value(row, 'first_content', 1, '') or '')
+
+        projected = []
+        for ids in _chunks(billing_eligible):
+            rows = db.execute(
+                _normalized_usage_projection_sql(backend, len(ids)),
+                tuple(ids)).fetchall()
+            for row in rows:
+                cid = str(_row_value(row, 'conv_id', 0, '') or '')
+                candidate = by_id.get(cid)
+                if candidate is None:
+                    continue
+                raw_settings = _row_value(candidate, 'settings', 4, {})
+                settings = (safe_json(raw_settings, default={},
+                                      label='cost-conv-settings')
+                            if isinstance(raw_settings, str)
+                            else raw_settings)
+                settings = settings if isinstance(settings, dict) else {}
+                projected.append({
+                    'id': cid,
+                    'title': _row_value(candidate, 'title', 1, '') or '',
+                    'created_at': _row_value(candidate, 'created_at', 2, 0),
+                    'updated_at': _row_value(candidate, 'updated_at', 3, 0),
+                    'conv_model': (settings.get('model')
+                                   or settings.get('preset')
+                                   or settings.get('effort') or ''),
+                    'first_content': first_content.get(cid, ''),
+                    'msg_index': _row_value(row, 'msg_index', 1, 0),
+                    'total_msgs': _row_value(candidate, 'msg_count', 5, 0),
+                    'usage': _row_value(row, 'usage', 2, {}),
+                    'msg_timestamp': _row_value(row, 'msg_timestamp', 3, 0),
+                    'msg_model': _row_value(row, 'msg_model', 4, '') or '',
+                    'msg_provider': _row_value(row, 'msg_provider', 5, '') or '',
+                })
+
+        eligible_set = set(billing_eligible)
+        stale = [cid for cid in by_id if cid not in eligible_set]
+        for ids in _chunks(stale):
+            from lib.database.conversation_repository import (
+                list_conversation_snapshots,
+            )
+            snapshots = list_conversation_snapshots(
+                db, user_id=DEFAULT_USER_ID, ids=ids,
+                metadata_columns=(
+                    'title', 'created_at', 'updated_at', 'settings'))
+            projected.extend(_usage_rows_from_snapshots(snapshots))
+        return projected
+    except Exception as e:
+        logger.warning('[DailyReport] normalized cost read failed; falling '
+                       'back to repository snapshots: %s', e)
+        return None
+
+
 def _scan_costs_in_range(ms_start, ms_end, year=None, month=None):
     """Scan the conversations table and build per-day cost breakdowns in a range.
 
@@ -157,7 +349,7 @@ def _scan_costs_in_range(ms_start, ms_end, year=None, month=None):
         dict mapping day-of-month (int) → {'cost': float,
             'conversations': {conv_id: {'name', 'cost', 'tokens'}}}.
     """
-    from lib.database import DOMAIN_CHAT, get_thread_db
+    from lib.database import DOMAIN_CHAT, _BACKEND, get_thread_db
     from lib.utils import safe_json
 
     # _safe_int_ts lives in conversations.py to keep it close to its
@@ -167,17 +359,34 @@ def _scan_costs_in_range(ms_start, ms_end, year=None, month=None):
 
     try:
         db = get_thread_db(DOMAIN_CHAT)
-        # Bound on both ends so only the target window is scanned
-        # (previous version omitted the upper bound, causing full-history scans
-        #  for any month-open).
-        rows = db.execute(
-            'SELECT id, title, messages, created_at, updated_at, settings '
-            'FROM conversations WHERE user_id=? AND '
-            'COALESCE(updated_at, created_at, 0) >= ? AND '
-            'COALESCE(created_at, updated_at, 0) < ? '
-            'ORDER BY updated_at DESC',
-            (DEFAULT_USER_ID, ms_start, ms_end)
-        ).fetchall()
+        from lib.database.messages_rows import rows_read_enabled
+
+        rows = None
+        if rows_read_enabled():
+            # Metadata first, then exact per-conversation mirror gates. On the
+            # normal personal-server path PostgreSQL never expands the giant
+            # conversations.messages JSONB merely to recover a few usage keys.
+            candidates = db.execute(
+                'SELECT id, title, created_at, updated_at, settings, msg_count '
+                'FROM conversations WHERE user_id=? AND updated_at >= ? '
+                'AND created_at < ? ORDER BY updated_at DESC',
+                (DEFAULT_USER_ID, ms_start, ms_end)).fetchall()
+            rows = _normalized_usage_rows(
+                db, candidates, ms_start, ms_end, _BACKEND)
+        if rows is None:
+            # Kill-switch / rolling-upgrade / verification failure still goes
+            # through the repository's authority decision. In rows-authority
+            # mode an incomplete transcript fails loud; the retired archive is
+            # never resurrected merely to keep a report endpoint alive.
+            from lib.database.conversation_repository import (
+                list_conversation_snapshots,
+            )
+            snapshots = list_conversation_snapshots(
+                db, user_id=DEFAULT_USER_ID, updated_at_gte=ms_start,
+                created_at_lt=ms_end,
+                metadata_columns=(
+                    'title', 'created_at', 'updated_at', 'settings'))
+            rows = _usage_rows_from_snapshots(snapshots)
     except Exception as e:
         logger.error('[DailyReport] Cost DB query failed range=[%d,%d): %s',
                      ms_start, ms_end, e, exc_info=True)
@@ -186,75 +395,62 @@ def _scan_costs_in_range(ms_start, ms_end, year=None, month=None):
     days = {}   # day_num → {cost, conversations}
 
     for r in rows:
-        msgs = safe_json(r['messages'], default=[], label='cost-messages')
-        if not isinstance(msgs, list) or not msgs:
+        # psycopg decodes JSONB to dict; SQLite's json_extract returns text.
+        # Accept both without feeding an already-decoded dict back through
+        # json.loads (which logs a false "corrupt JSON" warning).
+        usage_raw = r['usage']
+        usage = (usage_raw if isinstance(usage_raw, dict) else
+                 safe_json(usage_raw, default={}, label='cost-usage'))
+        if not isinstance(usage, dict) or not usage:
             continue
-
-        settings = safe_json(r.get('settings'), default={}, label='cost-settings')
-        if not isinstance(settings, dict):
-            settings = {}
-        conv_model = (settings.get('model') or settings.get('preset')
-                      or settings.get('effort') or '')
 
         conv_start = _safe_int_ts(r['created_at'] or r['updated_at'] or 0)
         conv_end = _safe_int_ts(r['updated_at'] or r['created_at'] or 0)
-        total_msgs = len(msgs)
-        conv_title = r['title'] or ''
-        if not conv_title and msgs:
-            first_content = msgs[0].get('content', '')
-            if isinstance(first_content, str):
-                conv_title = first_content[:30]
+        total_msgs = int(r.get('total_msgs') or 0)
+        msg_index = int(r.get('msg_index') or 0)
+        conv_title = r['title'] or r.get('first_content') or ''
         conv_title = conv_title or 'Untitled'
         conv_id = r['id']
 
-        for mi, msg in enumerate(msgs):
-            usage = msg.get('usage')
-            if not usage:
+        ts = _safe_int_ts(r.get('msg_timestamp', 0))
+        if not ts:
+            if (conv_start and conv_end and conv_start != conv_end
+                    and total_msgs > 1):
+                ts = conv_start + int(
+                    (conv_end - conv_start) * msg_index / (total_msgs - 1))
+            else:
+                ts = conv_start
+        if not ts or ts < ms_start or ts >= ms_end:
+            continue
+
+        d = _dt.datetime.fromtimestamp(ts / 1000)
+        if year is not None and month is not None:
+            if d.year != year or d.month != month:
                 continue
+        day_num = d.day
 
-            ts = _safe_int_ts(msg.get('timestamp', 0))
-            if not ts:
-                if (conv_start and conv_end and conv_start != conv_end
-                        and total_msgs > 1):
-                    ts = conv_start + int(
-                        (conv_end - conv_start) * mi / (total_msgs - 1))
-                else:
-                    ts = conv_start
-            if not ts:
-                continue
+        msg_model = r.get('msg_model') or r.get('conv_model') or ''
+        msg_provider = r.get('msg_provider') or ''
 
-            if ts < ms_start or ts >= ms_end:
-                continue
+        cost_cny = _calc_msg_cost_cny(usage, msg_model, msg_provider,
+                                      at=ts / 1000 if ts else None)
+        if cost_cny <= 0:
+            continue
 
-            d = _dt.datetime.fromtimestamp(ts / 1000)
-            if year is not None and month is not None:
-                if d.year != year or d.month != month:
-                    continue
-            day_num = d.day
+        if day_num not in days:
+            days[day_num] = {'cost': 0.0, 'conversations': {}}
+        days[day_num]['cost'] += cost_cny
 
-            msg_model = (msg.get('model') or msg.get('preset')
-                         or msg.get('effort') or conv_model)
-            msg_provider = msg.get('provider_id') or msg.get('providerId') or ''
-
-            cost_cny = _calc_msg_cost_cny(usage, msg_model, msg_provider,
-                                          at=ts / 1000 if ts else None)
-            if cost_cny <= 0:
-                continue
-
-            if day_num not in days:
-                days[day_num] = {'cost': 0.0, 'conversations': {}}
-            days[day_num]['cost'] += cost_cny
-
-            if conv_id not in days[day_num]['conversations']:
-                days[day_num]['conversations'][conv_id] = {
-                    'name': conv_title,
-                    'cost': 0.0,
-                    'tokens': 0,
-                }
-            entry = days[day_num]['conversations'][conv_id]
-            entry['cost'] += cost_cny
-            _tok = normalize_usage(usage)
-            entry['tokens'] += _tok['input'] + _tok['output']
+        if conv_id not in days[day_num]['conversations']:
+            days[day_num]['conversations'][conv_id] = {
+                'name': conv_title,
+                'cost': 0.0,
+                'tokens': 0,
+            }
+        entry = days[day_num]['conversations'][conv_id]
+        entry['cost'] += cost_cny
+        _tok = normalize_usage(usage)
+        entry['tokens'] += _tok['input'] + _tok['output']
 
     for day_data in days.values():
         day_data['cost'] = round(day_data['cost'], 4)
@@ -271,18 +467,11 @@ def _load_cached_day_costs(year, month):
         dict mapping day-of-month (int) → {'cost': float, 'conversations': {...}}
         for days that have cached entries.  Days without entries are absent.
     """
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    from lib.utils import safe_json
-
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        prefix = f'{year:04d}-{month:02d}-'
-        # LIKE 'YYYY-MM-%' matches all days in the month
-        rows = db.execute(
-            'SELECT date, cost, conversations_json FROM daily_cost_cache '
-            'WHERE user_id=? AND date LIKE ?',
-            (DEFAULT_USER_ID, prefix + '%')
-        ).fetchall()
+        from lib.storage import get_storage_client
+        rows = get_storage_client().query('daily_cost.month', {
+            'user_id': DEFAULT_USER_ID, 'year': year, 'month': month,
+        })
     except Exception as e:
         logger.warning('[DailyReport] Load cached costs %d-%02d failed: %s',
                        year, month, e)
@@ -298,10 +487,7 @@ def _load_cached_day_costs(year, month):
                          date_str, e)
             continue
         cost_val = float(r['cost'])
-        # conversations_json is TEXT (SQLite) or JSONB rendered as string (PG,
-        # see _jsonb_as_string in _core.py).  Either way, safe_json parses it.
-        convs = safe_json(r['conversations_json'], default={},
-                          label='cached-day-convs')
+        convs = r.get('conversations') or {}
         if not isinstance(convs, dict):
             convs = {}
         out[day_num] = {'cost': round(cost_val, 4), 'conversations': convs}
@@ -315,25 +501,15 @@ def _persist_day_cost(date_str, day_data):
         date_str: 'YYYY-MM-DD'.
         day_data: {'cost': float, 'conversations': {conv_id: {...}}}.
     """
-    from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
-    from lib.database._core_schema import DAILY_COST_CACHE, upsert
-
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        # Use json_dumps_pg so that PG's JSONB column accepts the payload
-        # (strips \u0000 / lone surrogates that would otherwise be rejected).
-        # SQLite treats this as plain TEXT, so behavior is identical.
-        convs_json = json_dumps_pg(day_data.get('conversations', {}))
-        # Backend-agnostic composite-PK (user_id, date) UPSERT. retry=True
-        # preserves the contention/connection-loss retry of the former
-        # db_execute_with_retry call (it commits internally too).
-        upsert(db, DAILY_COST_CACHE, {
+        from lib.storage import get_storage_client
+        get_storage_client(write=True).command('daily_cost.upsert', {
             'user_id': DEFAULT_USER_ID,
             'date': date_str,
             'cost': float(day_data.get('cost', 0.0)),
-            'conversations_json': convs_json,
+            'conversations': day_data.get('conversations', {}),
             'computed_at': int(time.time() * 1000),
-        }, retry=True, commit=True)
+        }, f'daily-cost-upsert:{uuid.uuid4().hex}')
     except Exception as e:
         logger.warning('[DailyReport] Persist day cost %s failed: %s',
                        date_str, e)
@@ -346,21 +522,18 @@ def invalidate_day_cost_cache(date_str=None):
         date_str: If given, remove only that day ('YYYY-MM-DD').
                   If None, clear all entries (e.g. on bulk delete).
     """
-    from lib.database import DOMAIN_CHAT, get_thread_db
-
     try:
-        db = get_thread_db(DOMAIN_CHAT)
+        from lib.storage import get_storage_client
+        payload = {'user_id': DEFAULT_USER_ID}
+        if date_str is not None:
+            payload['date'] = date_str
+        get_storage_client(write=True).command(
+            'daily_cost.delete', payload,
+            f'daily-cost-delete:{uuid.uuid4().hex}')
         if date_str:
-            db.execute(
-                'DELETE FROM daily_cost_cache WHERE user_id=? AND date=?',
-                (DEFAULT_USER_ID, date_str)
-            )
             logger.debug('[DailyReport] Invalidated day-cost cache for %s', date_str)
         else:
-            db.execute('DELETE FROM daily_cost_cache WHERE user_id=?',
-                       (DEFAULT_USER_ID,))
             logger.info('[DailyReport] Invalidated ALL day-cost cache entries')
-        db.commit()
         # Also drop the in-process calendar TTL cache so the next request
         # picks up the change.
         _calendar_cache.clear()
@@ -423,20 +596,15 @@ def _persisted_cost_dates(date_strs):
     dates = [d for d in date_strs if d]
     if not dates:
         return set()
-    from lib.database import DOMAIN_CHAT, get_thread_db
-
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        placeholders = ','.join('?' for _ in dates)
-        rows = db.execute(
-            'SELECT date FROM daily_cost_cache '
-            f'WHERE user_id=? AND date IN ({placeholders})',
-            (DEFAULT_USER_ID, *dates)
-        ).fetchall()
+        from lib.storage import get_storage_client
+        result = get_storage_client().query('daily_cost.persisted_dates', {
+            'user_id': DEFAULT_USER_ID, 'dates': dates,
+        })
     except Exception as e:
         logger.warning('[DailyReport] Persisted-date lookup failed: %s', e)
         return set()
-    return {r['date'] for r in rows}
+    return set(result['dates'])
 
 
 def _should_pin_day(date_str, today_str, persisted_dates):

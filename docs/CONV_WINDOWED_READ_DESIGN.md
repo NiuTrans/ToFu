@@ -1,6 +1,10 @@
 # Windowed conversation read — root-cause fix for slow first-open of long conversations
 
-Status: DESIGN (awaiting owner sign-off before landing steps 3–5)
+Status: LANDED — guarded default-ON row reads, tail pagination, preview/ref
+projection and daily-report activity/billing projections are active as of
+2026-08-08.
+The historical design below is retained for rationale; statements saying the
+read side is missing describe the pre-cutover state, not current code.
 Owner epic: conversation-messages read cutover + tail-windowed load
 Related landed work: `tofu/integration @ db55328` (no-refresh history_rewrite
 push + write-free GET; removed the read-path FUSE fsync — 94% of the old read
@@ -44,8 +48,9 @@ READY:
   `dual_write_conv` (flag-gated, best-effort, never raises).
 - Idempotent `backfill_conv`; lossless `message_to_row`/`row_to_message`;
   `test_messages_rows.py` 8/8 green.
-- Read cutover flag `rows_read_enabled()` = `TOFU_MESSAGES_ROWS` AND
-  `TOFU_MESSAGES_ROWS_READ` (both default OFF, decoupled).
+- Read gate `rows_read_enabled()` = `TOFU_MESSAGES_ROWS` AND
+  `TOFU_MESSAGES_ROWS_READ` (both default ON for the personal server after the
+  fleet parity gate converged; decoupled `=0` kill switches remain).
 - Verification gate `verify_conv_parity` / `verify_search_text_parity`
   (byte-identical `build_search_text` before any read flip).
 

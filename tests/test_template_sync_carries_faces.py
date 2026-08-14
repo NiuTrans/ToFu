@@ -40,10 +40,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_TA = os.path.join(_ROOT, 'static', 'js', 'settings', 'template_actions.js')
+_TA = runtime_section_path('settings/template_actions.js')
 
 _HARNESS = r'''
 const fs = require('fs');

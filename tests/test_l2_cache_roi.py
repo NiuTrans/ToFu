@@ -28,10 +28,6 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import quart as _quart  # noqa: E402
-sys.modules['flask'] = _quart
-
-
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
 def _ok(msg): print(' ', _color('✓', '32'), msg)
 def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
@@ -106,10 +102,10 @@ def test_l2_roi_emits_both_halves():
 
 
 def test_execute_compact_tool_fires_recorder():
-    """★ WIRING (not just the primitive). The REAL execute_compact_tool must
-    CALL record_l2_compaction at its successful-mutation point — otherwise the
-    recorder is dead scaffolding with no production caller. Drive the real
-    compaction with the LLM summary stubbed (no network) and spy the recorder."""
+    """★ WIRING (not just the primitive). The REAL force-compact wrapper must
+    CALL record_l2_compaction after injecting the synthetic summary pair, so
+    the saved-half measurement describes the actual next request. Drive the
+    real wrapper with the LLM summary stubbed (no network) and spy it."""
     import lib.tasks_pkg.compaction._layer2 as _l2
     fired = []
     _orig_rec = None
@@ -128,12 +124,13 @@ def test_execute_compact_tool_fires_recorder():
         msgs.append({'role': 'assistant', 'content': f'answer {i} ' + 'y' * 200})
     task = {'id': 'tk-l2wire', 'convId': 'cv-l2wire', 'config': {}}
     try:
-        # force=True path is via execute_compact_tool directly (bypasses the
-        # threshold gate — we're testing the recorder wiring, not the trigger).
-        _l2.execute_compact_tool(msgs, task=task, keep_recent_pairs=1)
+        # force=True bypasses the threshold gate; this test covers recorder
+        # wiring and final request accounting, not the trigger policy.
+        _l2.force_compact_if_needed(
+            msgs, task=task, force=True, keep_recent_pairs=1)
         assert fired, (
-            'execute_compact_tool did NOT fire record_l2_compaction — the ROI '
-            'recorder has no production caller (dead scaffolding).')
+            'force_compact_if_needed did NOT fire record_l2_compaction — the '
+            'ROI recorder has no production caller (dead scaffolding).')
         conv_id, kw = fired[0]
         assert conv_id == 'cv-l2wire'
         # The saved-half args must be real numbers from the mutation.
@@ -144,8 +141,8 @@ def test_execute_compact_tool_fires_recorder():
     finally:
         _l2._generate_query_aware_summary = _orig_summary
         _ct.record_l2_compaction = _orig_rec
-    _ok('real execute_compact_tool fires record_l2_compaction (wiring, not '
-        'just the primitive)')
+    _ok('real force_compact_if_needed fires record_l2_compaction (wiring, '
+        'not just the primitive)')
 
 
 def test_l2_roi_no_emit_without_event():

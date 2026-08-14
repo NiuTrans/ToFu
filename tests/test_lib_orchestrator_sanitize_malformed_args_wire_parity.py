@@ -291,9 +291,11 @@ def test_helper_is_no_op_when_no_messages():
         sanitize_malformed_tool_call_args)
     parsed = [_make_parsed_tc(
         tc_id='tc_x', fn_name='y', args_parse_err='bad')]
-    # Must not raise IndexError.
-    sanitize_malformed_tool_call_args(
-        parsed, [], tid='abcd1234', conv_id='conv-x', model='claude-x')
+    messages = []
+    result = sanitize_malformed_tool_call_args(
+        parsed, messages, tid='abcd1234', conv_id='conv-x', model='claude-x')
+    assert result is None
+    assert messages == []
 
 
 def test_helper_emits_info_log_with_raw_args(caplog):

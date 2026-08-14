@@ -13,10 +13,15 @@ those module globals works regardless of when the writer thread started.
 """
 
 import json
+import queue
 import threading
 import time
 
+import pytest
+
 import lib.log as log_mod
+
+pytestmark = pytest.mark.unit
 
 
 def _force_queue_path(monkeypatch, tmp_path):
@@ -90,3 +95,32 @@ def test_audit_log_write_failure_falls_back_without_raising(
         _drain()
     assert any('Failed to write audit log' in r.message
                and 'doomed_event' in r.message for r in caplog.records)
+
+
+def test_audit_queue_is_bounded_and_keeps_newest(monkeypatch, caplog):
+    """A stalled audit sink must not become an unbounded-memory/OOM path."""
+    q = queue.Queue(maxsize=2)
+    q.put_nowait('oldest\n')
+    q.put_nowait('middle\n')
+    monkeypatch.setattr(log_mod, '_audit_last_drop_report_mono', 0.0)
+    monkeypatch.setattr(log_mod, '_audit_dropped', 0)
+
+    with caplog.at_level('WARNING', logger='audit'):
+        log_mod._enqueue_audit_line(q, 'newest\n')
+
+    assert q.maxsize == 2
+    assert q.get_nowait() == 'middle\n'
+    q.task_done()
+    assert q.get_nowait() == 'newest\n'
+    q.task_done()
+    assert q.unfinished_tasks == 0
+    assert any('queue saturated' in record.message for record in caplog.records)
+
+
+def test_audit_queue_capacity_is_clamped(monkeypatch):
+    monkeypatch.setenv('TOFU_AUDIT_LOG_QUEUE_MAX', '1')
+    assert log_mod._audit_queue_capacity() == 128
+    monkeypatch.setenv('TOFU_AUDIT_LOG_QUEUE_MAX', '999999')
+    assert log_mod._audit_queue_capacity() == 100_000
+    monkeypatch.setenv('TOFU_AUDIT_LOG_QUEUE_MAX', 'invalid')
+    assert log_mod._audit_queue_capacity() == 4096

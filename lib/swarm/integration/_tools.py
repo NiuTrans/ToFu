@@ -146,7 +146,8 @@ def _handle_spawn_agents(fn_args: dict, *,
             # cause independent of the parallel-tool one.
             id=agent_def.get('id') or str(uuid.uuid4())[:8],
             max_retries=agent_def.get('max_retries', 1),
-            model_override=agent_def.get('model_override', ''),
+            model_override=(agent_def.get('model_override')
+                            or agent_def.get('model') or ''),
         )
         specs.append(spec)
 

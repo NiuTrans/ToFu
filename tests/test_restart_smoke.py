@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""Server-restart smoke test — covers the surface that the
-Flask→Quart+Hypercorn migration touched.
+"""Server-restart smoke test for the native Quart + Hypercorn stack.
 
 What this guarantees on every fresh `python server.py` boot:
   1. Critical async-stack deps import (`quart`, `hypercorn`, `httpx`).
-  2. The Flask→Quart import shim is still in place (`from flask import …`
-     resolves to Quart classes) and Quart's async ``Request`` accessors
-     are sync-safe for thread-pool routes.
+  2. The process-global Flask module is untouched, while Quart's async
+     ``Request`` accessors remain sync-safe for legacy thread-pool routes.
   3. ``server.app`` constructs and registers the full blueprint set,
      including the ``push`` and ``api_v1`` headless surface.
   4. The unified push channel route ``/api/push`` is registered as a
@@ -19,9 +17,9 @@ What this guarantees on every fresh `python server.py` boot:
      (Last-Event-ID resume across server restarts).
   7. JSON error handlers go through the unified ``api_response``
      helpers so their shape is ``{ok: False, error: ...}``.
-  8. The JS bundle builds at startup (so the bundler regression
-     described in CLAUDE.md §3.2.1 doesn't ship a silent no-op).
-  9. Sync Flask-style routes still work under the Quart thread-pool
+  8. Server startup never invokes the retired classic JS bundler; release
+     artifacts are validated separately before packaging.
+  9. Sync legacy routes still work under the Quart thread-pool
      dispatcher (the migration's main compatibility promise).
 
 Run:
@@ -35,6 +33,7 @@ import asyncio
 import importlib
 import importlib.util
 import os
+from pathlib import Path
 import sys
 
 import pytest
@@ -112,25 +111,21 @@ def _auth_headers():
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def test_quart_shim_in_place(server_module):
-    """`from flask import …` must resolve to Quart classes."""
-    import flask
-    import quart
-    assert flask.Blueprint is quart.Blueprint
-    assert flask.request is quart.request
-    assert flask.jsonify is quart.jsonify
+def test_application_no_longer_installs_flask_module_alias(server_module):
+    """The production entry must not mutate Python's global Flask imports."""
+    source = Path(server_module.__file__).read_text(encoding='utf-8')
+    assert "sys.modules['flask']" not in source
+    assert 'sys.modules["flask"]' not in source
 
 
-def test_quart_request_sync_safe_get_json(server_module):
-    """The shim patches Quart's async ``Request.get_json`` to be sync-safe.
-
-    Routes still written sync would otherwise receive a coroutine when
-    they call ``request.get_json()``.
-    """
+def test_quart_request_remains_native_async(server_module):
+    """Importing the app must not monkey-patch Quart's Request class."""
     from quart.wrappers import Request as _QReq
-    # The shim assigns a plain function (not a coroutine) over the method.
-    assert not asyncio.iscoroutinefunction(_QReq.get_json), (
-        'Quart Request.get_json must be wrapped as sync-safe by server.py')
+    assert asyncio.iscoroutinefunction(_QReq.get_json)
+    source = Path(server_module.__file__).read_text(encoding='utf-8')
+    assert '_QuartRequest.get_json =' not in source
+    assert 'quart.make_response =' not in source
+    assert 'Quart.default_config =' not in source
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -350,46 +345,16 @@ def test_405_uses_unified_envelope(client):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  7. Static + JS bundle
+#  7. Prebuilt frontend boundary
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def test_js_bundle_built_at_startup(server_module):
-    """build_bundle() runs on import — the bundle file should exist."""
-    from lib.js_bundler import get_bundle_filename
-    name = get_bundle_filename()
-    assert name and name.startswith('bundle-') and name.endswith('.js'), name
-    bundle_path = os.path.join(
-        os.path.dirname(os.path.dirname(__file__)),
-        'static', 'js', name,
-    )
-    assert os.path.exists(bundle_path), f'bundle file missing at {bundle_path}'
-
-
-def test_static_js_mime(client):
-    async def go():
-        resp = await client.get('/static/js/core.js')  # static is public
-        if resp.status_code != 200:
-            pytest.skip('core.js missing in this checkout')
-        ct = (resp.content_type or '').lower()
-        assert 'javascript' in ct, ct
-    _run_async(go())
-
-
-def test_static_bundle_cache_immutable(client):
-    """bundle-*.js must be served with immutable caching headers."""
-    from lib.js_bundler import get_bundle_filename
-    name = get_bundle_filename()
-    if not name:
-        pytest.skip('bundle not built')
-
-    async def go():
-        resp = await client.get(f'/static/js/{name}')
-        if resp.status_code != 200:
-            pytest.skip(f'bundle {name} not served in this env')
-        cache = (resp.headers.get('Cache-Control') or '').lower()
-        assert 'immutable' in cache, cache
-    _run_async(go())
+def test_server_never_builds_or_imports_the_retired_classic_graph(server_module):
+    root = os.path.dirname(os.path.dirname(__file__))
+    with open(os.path.join(root, 'server.py'), encoding='utf-8') as handle:
+        source = handle.read()
+    assert 'js_bundler' not in source
+    assert not os.path.exists(os.path.join(root, 'lib', 'js_bundler.py'))
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -493,10 +458,9 @@ def _standalone():
     asyncio.run(_check_routes())
     print('✓ Sync routes serve under Quart (200/404/405 envelopes verified)')
 
-    from lib.js_bundler import get_bundle_filename
-    name = get_bundle_filename()
-    assert name, 'bundle not built'
-    print(f'✓ JS bundle built: {name}')
+    from lib.vite_assets import validate_vite_artifact
+    manifest = validate_vite_artifact()
+    print(f'✓ Prebuilt Vite graph valid: {len(manifest)} manifest rows')
 
     print('\n=== restart smoke test PASSED ===')
     return 0

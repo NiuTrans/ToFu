@@ -40,6 +40,56 @@ from lib.log import get_logger
 logger = get_logger(__name__)
 
 
+# A source checkout is currently well below these ceilings.  Keeping the
+# limits here (rather than relying on Content-Length alone) protects both
+# chunked downloads and extraction from filling the single-user host.
+_MAX_TARBALL_DOWNLOAD_BYTES = 512 * 1024 * 1024
+_MAX_TARBALL_MEMBERS = 50_000
+_MAX_TARBALL_EXTRACT_BYTES = 2 * 1024 * 1024 * 1024
+
+
+def _validated_tar_members(tf):
+    """Return extractable release members, rejecting archive escape tricks.
+
+    Python 3.10/3.11 do not provide ``tarfile``'s newer ``data`` extraction
+    filter, so perform the equivalent checks explicitly.  Release archives do
+    not need links or special files: accepting them would allow a safe-looking
+    member name to redirect a later write outside the temporary extraction
+    directory.
+    """
+    import ntpath
+    import posixpath
+
+    safe = []
+    unpacked = 0
+    for index, member in enumerate(tf, start=1):
+        if index > _MAX_TARBALL_MEMBERS:
+            raise ValueError(
+                f'release archive has more than {_MAX_TARBALL_MEMBERS} members')
+
+        name = member.name
+        portable_name = name.replace('\\', '/')
+        parts = portable_name.split('/')
+        if (not name or posixpath.isabs(portable_name) or ntpath.isabs(name)
+                or '..' in parts):
+            raise ValueError(f'unsafe release archive path: {name!r}')
+
+        # Only ordinary files and directories are needed by a source release.
+        # In particular, reject symlinks/hardlinks instead of trying to reason
+        # about their targets and extraction order.
+        if not (member.isfile() or member.isdir()):
+            raise ValueError(
+                f'unsupported release archive member type: {name!r}')
+
+        if member.isfile():
+            unpacked += max(0, member.size)
+            if unpacked > _MAX_TARBALL_EXTRACT_BYTES:
+                raise ValueError(
+                    'release archive expands beyond the safe size limit')
+        safe.append(member)
+    return safe
+
+
 def _facade(name, default):
     """Resolve ``name`` from the ``lib.self_update`` package namespace so tests
     that monkeypatch the facade (e.g. ``su.http_stream = ...``, ``su._ROOT =
@@ -426,6 +476,9 @@ def _apply_via_tarball(tag: str, progress=None) -> dict:
                         content_len = int(resp.headers.get('Content-Length') or 0)
                     except (TypeError, ValueError):
                         content_len = 0
+                    if content_len > _MAX_TARBALL_DOWNLOAD_BYTES:
+                        raise ValueError(
+                            'release archive exceeds the 512 MiB download limit')
                     total = 0
                     t0 = time.monotonic()
                     last_emit = 0.0
@@ -433,8 +486,11 @@ def _apply_via_tarball(tag: str, progress=None) -> dict:
                         for chunk in resp.iter_content(64 * 1024):
                             if not chunk:
                                 continue
-                            fh.write(chunk)
                             total += len(chunk)
+                            if total > _MAX_TARBALL_DOWNLOAD_BYTES:
+                                raise ValueError(
+                                    'release archive exceeds the 512 MiB download limit')
+                            fh.write(chunk)
                             # Throttle frames to ~4/s so a fast download does
                             # not flood the push channel.
                             now = time.monotonic()
@@ -477,17 +533,11 @@ def _apply_via_tarball(tag: str, progress=None) -> dict:
         os.makedirs(extract_dir, exist_ok=True)
         try:
             with tarfile.open(tar_path, 'r:gz') as tf:
-                members = tf.getmembers()
                 # GitHub wraps everything in a single top-level dir
-                # (``<owner>-<repo>-<sha>/``); strip it. Guard against path
-                # traversal (``..`` / absolute) before extracting anything.
-                safe = []
-                for m in members:
-                    name = m.name
-                    if name.startswith('/') or '..' in name.split('/'):
-                        logger.warning('[Update] skipping unsafe tar member: %s', name)
-                        continue
-                    safe.append(m)
+                # (``<owner>-<repo>-<sha>/``).  Validate the complete member
+                # set before extracting anything so a bad archive leaves no
+                # partially materialised tree.
+                safe = _validated_tar_members(tf)
                 tf.extractall(extract_dir, members=safe)
         except Exception as e:
             result['error'] = 'Could not extract the release archive (corrupt download?).'

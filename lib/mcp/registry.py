@@ -848,7 +848,10 @@ CATALOG: list[CatalogEntry] = [
         'icon': '<img src="static/icons/mcp/overleaf.svg" alt="Overleaf">',
         'category': CAT_RESEARCH,
         'command': 'uvx',
-        'args': ['--from', 'overleaf-mcp-plus[compile]>=0.1.3', 'overleaf-mcp'],
+        'args': [
+            '--exclude-newer', '2026-08-14T00:00:00Z',
+            '--from', 'overleaf-mcp-plus[compile]==0.3.1', 'overleaf-mcp',
+        ],
         'env_specs': [
             {
                 'key': 'OVERLEAF_SESSION',

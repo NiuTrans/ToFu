@@ -22,11 +22,13 @@ import tempfile
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_SRC = os.path.join(ROOT, 'static', 'js', 'conv_window.js')
+JS_SRC = runtime_section_path('conv_window.js')
 
 
 def _node():
@@ -143,7 +145,8 @@ def _repaint_collaborator(js_src: str) -> str:
     elsewhere in the codebase but is not what this module calls.) Derive the name
     from the shipped source so a future rename is REPORTED, not mis-stubbed.
     """
-    names = set(re.findall(r'window\.(\w+)\.\w+\(convId', js_src))
+    names = set(re.findall(
+        r'(?:window|runtimeScope)\.(\w+)\.\w+\(convId', js_src))
     if not names:
         raise AssertionError(
             'conv_window.js no longer calls any window.<X>.<m>(convId) repaint '

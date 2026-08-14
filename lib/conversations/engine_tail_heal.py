@@ -74,29 +74,26 @@ def heal_engine_tail_adjacencies(*, dry_run: bool = True,
     Returns a stats dict: {scanned, rows_with_pairs, pairs, written,
     skipped_errors, notified}.
     """
-    from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
+    from lib.database import DOMAIN_CHAT, get_thread_db
 
     db = get_thread_db(DOMAIN_CHAT)
-    if updated_since_ms is None:
-        rows = db.execute(
-            'SELECT id, messages, rev FROM conversations').fetchall()
-    else:
-        rows = db.execute(
-            'SELECT id, messages, rev FROM conversations WHERE updated_at > ?',
-            (updated_since_ms,)).fetchall()
+    from lib.database.conversation_repository import list_conversation_snapshots
+    invalid_rows = []
+    rows = list_conversation_snapshots(
+        db, user_id=None, updated_at_gt=updated_since_ms,
+        metadata_columns=('updated_at',),
+        on_invalid=lambda conv_id, exc: invalid_rows.append((conv_id, exc)))
 
-    stats = {'scanned': len(rows), 'rows_with_pairs': 0, 'pairs': 0,
-             'written': 0, 'skipped_errors': 0, 'notified': 0}
+    for conv_id, exc in invalid_rows:
+        logger.warning('[EngineTailHeal] conv=%s invalid transcript — skipped: %s',
+                       str(conv_id)[:8], exc)
+    stats = {'scanned': len(rows) + len(invalid_rows), 'rows_with_pairs': 0,
+             'pairs': 0, 'written': 0,
+             'skipped_errors': len(invalid_rows), 'notified': 0}
     for row in rows:
         conv_id = row['id']
         try:
-            try:
-                messages = json.loads(row['messages'] or '[]')
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.warning('[EngineTailHeal] conv=%s messages parse failed '
-                               '(%s) — skipped', conv_id[:8], e)
-                stats['skipped_errors'] += 1
-                continue
+            messages = row.messages
             healed, n = heal_messages(messages)
             if not n:
                 continue
@@ -107,12 +104,12 @@ def heal_engine_tail_adjacencies(*, dry_run: bool = True,
             if dry_run:
                 continue
             now_ms = int(time.time() * 1000)
-            cur = db.execute(
-                'UPDATE conversations SET messages=?, updated_at=?, msg_count=? '
-                'WHERE id=? AND user_id=1 AND rev=?',
-                (json_dumps_pg(healed), now_ms, len(healed), conv_id, row['rev']))
-            db.commit()
-            if getattr(cur, 'rowcount', None) == 0:
+            from lib.database.conversation_repository import replace_messages
+            result = replace_messages(
+                db, conv_id, healed, expected_rev=row['rev'],
+                metadata={'updated_at': now_ms, 'msg_count': len(healed)},
+                full=True)
+            if not result.applied:
                 # A concurrent writer bumped rev mid-heal — skip (a rerun
                 # heals it); never clobber.
                 logger.warning('[EngineTailHeal] conv=%s CAS miss — skipped '
@@ -121,22 +118,8 @@ def heal_engine_tail_adjacencies(*, dry_run: bool = True,
                 continue
             stats['written'] += 1
             try:
-                # Dual-write hook (pt_59140ecd ②): the heal INSERTS tombstones
-                # mid-array, re-sequencing every later message — the count
-                # heuristic cannot express that, so mirror full. Flag-off is a
-                # byte-identical no-op; the blob write above stays truth.
-                from lib.database.messages_rows import mirror_write_and_commit
-                mirror_write_and_commit(db, conv_id, healed,
-                                        now_ms=now_ms, full=True)
-            except Exception as e:
-                logger.warning('[EngineTailHeal] conv=%s row mirror failed '
-                               '(blob authoritative): %s', conv_id[:8], e)
-            try:
-                new_rev = db.execute(
-                    'SELECT rev FROM conversations WHERE id=?',
-                    (conv_id,)).fetchone()['rev']
                 from lib.conversations import notify_conv_changed
-                notify_conv_changed(conv_id, rev=new_rev)
+                notify_conv_changed(conv_id, rev=result.rev)
                 stats['notified'] += 1
             except Exception as e:
                 logger.warning('[EngineTailHeal] conv=%s notify failed '

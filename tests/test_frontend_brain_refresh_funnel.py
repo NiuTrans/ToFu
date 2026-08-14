@@ -36,6 +36,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -43,13 +44,15 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
+sys.path.insert(0, HERE)
+from _runtime_sections import runtime_section_path  # noqa: E402
 # Epic-E sub-7 (2026-08-01) split project.js: the STATE subset
 # (_updateProjectUI / _clearProjectStateLocal / …) lives in
 # project_state.js (core); the PANEL stayed in project.js (deferred).
 # Extract state-first with a panel fallback — loud when in neither.
-PROJECT_STATE_JS = os.path.join(ROOT, 'static', 'js', 'project_state.js')
-PROJECT_JS = os.path.join(ROOT, 'static', 'js', 'project.js')
-LIFECYCLE_JS = os.path.join(ROOT, 'static', 'js', 'main', 'main_conv_lifecycle.js')
+PROJECT_STATE_JS = runtime_section_path('project_state.js')
+PROJECT_JS = runtime_section_path('project.js')
+LIFECYCLE_JS = runtime_section_path('main/main_conv_lifecycle.js')
 
 REFRESH_CALLS = ("if (typeof presenceRefresh === 'function') presenceRefresh();\n"
                  "  if (typeof projectBrainRefresh === 'function') projectBrainRefresh();")

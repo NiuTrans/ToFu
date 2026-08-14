@@ -159,6 +159,11 @@ def _server_command(port: int):
     env['BIND_HOST'] = '127.0.0.1'
     # Plain HTTP on loopback — no self-signed cert warnings for a local app.
     env['TOFU_TLS'] = '0'
+    # The desktop launcher deliberately owns and monitors this child. Bypass
+    # the project-local manager handoff so the tray retains a real process
+    # handle and Quit can stop exactly the server it launched.
+    env['TOFU_SERVER_WORKER'] = '1'
+    env['TOFU_MANAGED_BY'] = 'desktop'
 
     if getattr(sys, 'frozen', False):
         env['TOFU_RUN_SERVER'] = '1'
@@ -303,9 +308,9 @@ def _start_computer_control(port: int, state: dict) -> None:
         state['perms'] = safe_default()
     permissions = state['perms']
 
-    # Where to poll. A remote attachment (tray → "Connect to remote Tofu…")
-    # wins; with none configured we poll the server this app just started,
-    # which is the packaged-app default and must stay untouched.
+    # Where to poll. An installer-provisioned remote attachment wins; with
+    # none configured we poll the server this app just started, which is the
+    # packaged-app default and must stay untouched.
     server_url = f'http://127.0.0.1:{port}'
     bridge_secret = (os.environ.get('TOFU_BRIDGE_SECRET') or '').strip()
     try:
@@ -333,18 +338,6 @@ def _start_computer_control(port: int, state: dict) -> None:
     t.start()
     _log('Computer control ENABLED (read-only; perms=%s, agent polling %s)'
          % (permissions, server_url))
-
-
-def _prompt_connect_line(current_url: str = ''):
-    """Ask for ONE pasted connect line; return (url, secret) or None.
-
-    The implementation lives in desktop/connect_ui.py (shared with the
-    agent-only build — ONE authoring, never two copies). This wrapper
-    keeps the historical name: tray call sites and the connect-line
-    contract suite reference it here.
-    """
-    from desktop.connect_ui import prompt_connect_line
-    return prompt_connect_line(current_url, log=_log)
 
 
 def _stop_computer_control(state: dict) -> None:
@@ -477,33 +470,6 @@ def _run_tray(port: int, proc: subprocess.Popen):
             _log('Could not read remote attachment: %s' % e)
             return ''
 
-    def on_connect_remote(icon, item):
-        """Paste a connect line to attach this computer to a remote Tofu."""
-        # Only the DIALOG rides the tk host thread; the save/restart/menu
-        # refresh stay here on the tray thread.
-        from desktop import _tk_host
-        parsed = _tk_host.call(lambda: _prompt_connect_line(_attached_url()))
-        if parsed is None:
-            return
-        url, secret = parsed
-        try:
-            from lib.desktop_agent.config import save_remote_server
-            save_remote_server(url, secret)
-        except Exception as e:
-            _log('Could not save remote attachment: %s' % e)
-            return
-        _log('Attached to remote Tofu at %s' % url)
-        # Re-point a RUNNING agent: it captured the old address when it
-        # started, so without this the user would have to toggle it off and on
-        # (and would get no hint that they must).
-        if _cc_state.get('enabled'):
-            _stop_computer_control(_cc_state)
-            _start_computer_control(port, _cc_state)
-        try:
-            icon.update_menu()
-        except Exception as e:
-            _log('Could not refresh tray menu after connect: %s' % e)
-
     def on_toggle_computer_control(icon, item):
         """Enable/disable the in-process desktop-control agent."""
         if _cc_state.get('enabled'):
@@ -579,7 +545,6 @@ def _run_tray(port: int, proc: subprocess.Popen):
         'open': lambda: webbrowser.open(url),
         'toggle_cc': lambda: on_toggle_computer_control(_NULL_ICON, None),
         'toggle_perm': lambda key: _toggle_perm(key)(_NULL_ICON, None),
-        'connect': lambda: on_connect_remote(_NULL_ICON, None),
     }
 
     def on_control_panel(icon, item):
@@ -607,10 +572,9 @@ def _run_tray(port: int, proc: subprocess.Popen):
             MenuItem(_tt('desktop.tray.permGui'), _toggle_perm('allow_gui'),
                      checked=_perm_checked('allow_gui'), enabled=_perm_enabled),
         )),
-        MenuItem(_tt('desktop.tray.connectRemote'), on_connect_remote),
         MenuItem(_tt('desktop.tray.installComponents'), on_components),
-        # Which server the agent talks to. Silence here was a real gap: after
-        # pasting a connect line the user had no way to tell it took effect.
+        # Which server the agent talks to. Keep attachment state observable
+        # even though the installer configures it without user input.
         MenuItem(lambda item: _tt('desktop.tray.serverLabel',
                                   url=_attached_url() or
                                   _tt('desktop.tray.serverLocal', port=port)),

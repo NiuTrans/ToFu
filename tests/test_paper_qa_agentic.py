@@ -229,8 +229,6 @@ def test_engine_discards_interim_draft_with_tool_call():
 
 def test_qa_http_endpoints_wired():
     """/api/v1/paper/qa/{start,poll,abort} are registered and behave."""
-    import quart as _quart
-    sys.modules['flask'] = _quart  # Flask→Quart shim before importing server
     import importlib.util
     spec = importlib.util.spec_from_file_location(
         'server', os.path.join(os.path.dirname(os.path.dirname(__file__)), 'server.py'))

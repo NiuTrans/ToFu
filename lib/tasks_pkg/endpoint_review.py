@@ -20,8 +20,8 @@ Anti-analysis-spiral (2026-04-26 rewrite):
   ❌ is almost always a worker-execution problem, not a structural plan
   problem.
 - ``_count_state_changing_rounds`` inspects ``task['toolRounds']`` and
-  returns the number of *deliverable* tool calls (write_file / apply_diff
-  / insert_content / run_command / create_project / image gen).  The
+  returns the number of *deliverable* tool calls (write_file / edit_file /
+  run_command / create_project / image gen).  The
   critic invocation prompt carries a "Deliverables Snapshot" so the
   LLM-Critic can make the right call, and endpoint.py uses the same
   counter for its orchestrator-side zero-deliverable guard.
@@ -133,71 +133,21 @@ def _run_planner_turn(task, messages, *, planner_tag: str = 'initial'):
     """
     tid = task['id'][:8]
 
-    # Copy the conversation verbatim — same objects in the same order so
-    # that [system, ...history] forms an identical prefix across calls.
+    # Copy the conversation verbatim. The role is a round-scoped Composer
+    # block, so the user's actual request stays byte-identical and keeps its
+    # real authority instead of being rewritten into synthetic user text.
     planner_messages = [dict(m) for m in messages]
-
-    # Shared planner-directive prefix — identical byte-for-byte whether the
-    # underlying user content is a plain string or a multimodal list of
-    # blocks.  Keeping this as one constant preserves the LLM provider's
-    # prefix-cache discipline (see the docstring above).
-    _PLANNER_WRAPPER_PREFIX = (
+    planner_role = (
         '=== Your role for THIS turn: Planner ===\n'
         f'{PLANNER_SYSTEM_PROMPT}\n'
         '=== End planner role ===\n\n'
         'Based on the system prompt and conversation history above, '
-        'and the user request below, produce your structured execution '
+        'and the latest user request, produce your structured execution '
         'brief for the worker per the format in your planner role.  '
         'You MAY use read-only tools (list_dir, read_files, grep_search) '
         'to explore the codebase, but DO NOT edit files or execute the '
-        'task itself — planning only.\n\n'
-        '───── User request ─────\n\n'
+        'task itself — planning only.'
     )
-
-    # Locate the last user message (= the current turn's request) and
-    # wrap ONLY its content with the planner role + directive.
-    wrapped = False
-    for i in range(len(planner_messages) - 1, -1, -1):
-        if planner_messages[i].get('role') == 'user':
-            raw_content = planner_messages[i].get('content', '')
-            if isinstance(raw_content, list):
-                # Multimodal: prepend the planner wrapper as a fresh text block.
-                original_blocks = list(raw_content)
-                if not original_blocks:
-                    new_content = _PLANNER_WRAPPER_PREFIX
-                else:
-                    logger.info(
-                        '[Planner] Task %s (%s) — multimodal user content '
-                        'detected (%d blocks); prepending planner wrapper '
-                        'as text block',
-                        tid, planner_tag, len(original_blocks),
-                    )
-                    new_content = [
-                        {'type': 'text', 'text': _PLANNER_WRAPPER_PREFIX}
-                    ] + original_blocks
-            else:
-                original_content = raw_content or ''
-                new_content = _PLANNER_WRAPPER_PREFIX + original_content
-            planner_messages[i] = {
-                'role': 'user',
-                'content': new_content,
-            }
-            wrapped = True
-            break
-
-    if not wrapped:
-        logger.warning('[Planner] No user message found for task %s (%s); '
-                       'appending a synthetic one', tid, planner_tag)
-        planner_messages.append({
-            'role': 'user',
-            'content': (
-                '=== Your role for THIS turn: Planner ===\n'
-                f'{PLANNER_SYSTEM_PROMPT}\n'
-                '=== End planner role ===\n\n'
-                'Produce a structured execution brief for the '
-                'conversation above.'
-            ),
-        })
 
     logger.info(
         '[Planner] Starting planner turn for task %s (%s), %d messages '
@@ -205,7 +155,15 @@ def _run_planner_turn(task, messages, *, planner_tag: str = 'initial'):
         tid, planner_tag, len(planner_messages),
     )
 
-    result = _run_single_turn(task, messages_override=planner_messages)
+    previous_role = task.get('_contextRoleBlock')
+    task['_contextRoleBlock'] = {'name': 'planner', 'content': planner_role}
+    try:
+        result = _run_single_turn(task, messages_override=planner_messages)
+    finally:
+        if previous_role is None:
+            task.pop('_contextRoleBlock', None)
+        else:
+            task['_contextRoleBlock'] = previous_role
 
     content = result.get('content', '')
     error = result.get('error')
@@ -325,18 +283,11 @@ def _run_critic_turn(
         iteration=iteration,
     )
 
-    # **Prefix-cache-friendly construction**.  The critic sees the entire
-    # worker conversation byte-for-byte identical.  The only delta is ONE
-    # freshly appended user message at the end that (a) declares "your
-    # role for this turn is Critic" by embedding CRITIC_SYSTEM_PROMPT,
-    # (b) asks for the review, and (c) includes the Deliverables Snapshot.
-    # The caller discards this ephemeral user turn after parsing the
-    # verdict — it never leaks back into worker_messages.
+    # The critic sees worker history byte-for-byte. Its round-scoped role and
+    # deliverables snapshot enter through Context Composer, not a fabricated
+    # user turn.
     critic_messages = [dict(m) for m in worker_messages]
-
-    critic_messages.append({
-        'role': 'user',
-        'content': (
+    critic_role = (
             '=== Your role for THIS turn: Critic ===\n'
             f'{CRITIC_SYSTEM_PROMPT}\n'
             '=== End critic role ===\n\n'
@@ -367,8 +318,7 @@ def _run_critic_turn(
             '  [VERDICT: CONTINUE_PLANNER] — plan itself is structurally '
             'wrong.  REQUIRES the PLAN_DEFECT tag above; without it, '
             'the orchestrator will downgrade to CONTINUE_WORKER.'
-        ),
-    })
+    )
 
     logger.debug('[Critic] Starting critic turn for task %s, %d messages, '
                  'latest_sc=%d, cumulative_sc=%d',
@@ -376,7 +326,15 @@ def _run_critic_turn(
                  cumulative_state_changing)
 
     # Run through _run_single_turn — full tools, full thinking
-    result = _run_single_turn(task, messages_override=critic_messages)
+    previous_role = task.get('_contextRoleBlock')
+    task['_contextRoleBlock'] = {'name': 'critic', 'content': critic_role}
+    try:
+        result = _run_single_turn(task, messages_override=critic_messages)
+    finally:
+        if previous_role is None:
+            task.pop('_contextRoleBlock', None)
+        else:
+            task['_contextRoleBlock'] = previous_role
 
     raw_content = result.get('content', '')
     error = result.get('error')

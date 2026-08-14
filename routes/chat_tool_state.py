@@ -40,14 +40,11 @@ async def chat_tool_state(conv_id):
             # pooled checkout→use→return cycle. Returns True when the conv row
             # exists, False when it's not persisted yet.
             from lib.conversations import set_conversation_settings
-            from lib.database._core import _pool_get, _pool_put
-            db = _pool_get()
-            try:
+            from lib.database import DOMAIN_CHAT, pooled_db
+            with pooled_db(DOMAIN_CHAT) as db:
                 res = set_conversation_settings(
                     conv_id, data, user_id=DEFAULT_USER_ID, db=db)
                 return res is not None
-            finally:
-                _pool_put(db)
 
         existed = await asyncio.to_thread(_write)
         if not existed:

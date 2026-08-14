@@ -272,7 +272,8 @@ class SeededRunTest(unittest.TestCase):
                          'progress counts only this run — not the 2 seeds')
         self.assertEqual(len(task['cells']), 4, 'merged: 2 seeds + 2 probed')
         self.assertEqual(task['summary'],
-                         {'ok': 3, 'disable': 1, 'skipped': 0},
+                         {'ok': 3, 'disable': 1, 'skipped': 0,
+                          'neutral': 0, 'failed': 1},
                          'summary reflects the merged grid incl. seeded flag')
         self.assertEqual(task['status'], 'done')
 
@@ -292,7 +293,9 @@ class SeededRunTest(unittest.TestCase):
                                return_value=('rate_limited', 'HTTP 429')):
             pp.run_cell_probe_task(task, work, timeout=5)
         self.assertEqual(task['done_count'], 2)
-        self.assertEqual(task['summary'], {'ok': 0, 'disable': 2, 'skipped': 0})
+        self.assertEqual(task['summary'],
+                         {'ok': 0, 'disable': 2, 'skipped': 0,
+                          'neutral': 0, 'failed': 2})
 
 
 if __name__ == '__main__':

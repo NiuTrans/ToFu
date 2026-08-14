@@ -79,11 +79,13 @@ import time
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+STREAM_REDUCER_JS = runtime_section_path('ui/stream_reducer.js')
 
 
 def _node_available() -> bool:
@@ -257,9 +259,12 @@ def test_every_skip_lane_is_accounted_for():
                 break
         lanes.append(guard)
 
-    assert len(lanes) == 7, (
+    # Two of these are receipt-rehydration pre-pass filters; the remaining
+    # branches are active call lanes. They deliberately do not settle a round
+    # because no new call has been admitted yet.
+    assert len(lanes) == 13, (
         'the skip-lane inventory changed (found %d `continue` branches, '
-        'expected 7). Classify the new one: does it settle its round, or does '
+        'expected 13). Classify the new one: does it settle its round, or does '
         'it have a documented reason not to?\nGuards: %r' % (len(lanes), lanes))
 
     # ★ The screenshot branch deliberately has NO `continue` any more. It used
@@ -284,6 +289,9 @@ def test_every_skip_lane_is_accounted_for():
         "aborted",                    # abort short-circuit (x2: pre + serial)
         '_serial_cfg',                # long-blocking serial dispatch
         'action ==',                  # pre-hook BLOCK
+        '_receipt',                   # completed call-id replay / conflict
+        'tc_id in _claimed_call_ids', # duplicate ID inside one model turn
+        '_row',                       # receipt rehydration filters only
     ]
     joined = ' | '.join(lanes)
     for tok in expected_tokens:
@@ -496,7 +504,7 @@ def test_client_never_overwrites_a_terminal_verdict():
     const out = [];
     function check(n, c, d) { out.push((c ? 'PASS ' : 'FAIL ') + n + (c ? '' : '  :: ' + (d || ''))); }
 
-    (0, eval)(fs.readFileSync(path.join(process.argv[1], 'ui/stream_reducer.js'), 'utf8'));
+    (0, eval)(fs.readFileSync(process.argv[1], 'utf8'));
 
     // Every terminal verdict must survive a later tool_complete.
     for (const verdict of ['rejected', 'aborted', 'error', 'unanswerable']) {
@@ -547,7 +555,7 @@ def test_client_never_overwrites_a_terminal_verdict():
 
     console.log(out.join('\n'));
     """
-    proc = subprocess.run(['node', '-e', harness, JS_DIR],
+    proc = subprocess.run(['node', '-e', harness, STREAM_REDUCER_JS],
                           capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, (
         'harness crashed (rc=%s)\nstdout:\n%s\nstderr:\n%s'

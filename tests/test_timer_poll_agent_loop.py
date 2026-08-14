@@ -10,9 +10,8 @@ must survive that refactor:
     ``tool_trace`` (one entry per tool), ``total_tokens`` (summed across
     rounds), ``poll_model`` (captured from ``usage['_dispatch']``), and
     parsed ``(ready, reason)`` decision;
-  * the loop still runs at most ``_MAX_POLL_AGENT_ROUNDS`` LLM dispatches when
-    the model never stops calling tools (the timer wants tools on EVERY round,
-    no final tools-off round);
+  * tools remain available beyond the former poll cap until the model returns
+    a natural decision;
   * a dispatch exception is caught and reported as an ``LLM error`` parse_error
     tuple, preserving tokens accrued so far.
 
@@ -110,12 +109,13 @@ def test_multi_round_tool_then_decision(monkeypatch):
     assert raw_content == json.dumps({'ready': True, 'reason': 'all green'})
 
 
-def test_round_cap_when_model_never_stops(monkeypatch):
-    """If every round emits a tool call, the loop dispatches exactly
-    _MAX_POLL_AGENT_ROUNDS times (tools carried on every round)."""
+def test_tools_continue_until_natural_decision(monkeypatch):
+    """Tools stay available beyond the retired five-round poll cap."""
     always_tool = (None, {'total_tokens': 1,
                           '_tool_calls': [_tc('grep_search', '{"pattern":"x"}')]})
-    calls = _install_smart_chat(monkeypatch, [always_tool])
+    final = (json.dumps({'ready': False, 'reason': 'not yet'}),
+             {'total_tokens': 1})
+    calls = _install_smart_chat(monkeypatch, [always_tool] * 8 + [final])
 
     monkeypatch.setattr(timer_mod, '_execute_poll_tool',
                         lambda tc, tid, pp: ('r', 0.01, False))
@@ -123,10 +123,8 @@ def test_round_cap_when_model_never_stops(monkeypatch):
     result = timer_mod.poll_timer('tmr_test')
     tool_trace = result[7]
 
-    assert calls['n'] == timer_mod._MAX_POLL_AGENT_ROUNDS, (
-        f'expected {timer_mod._MAX_POLL_AGENT_ROUNDS} dispatches, got {calls["n"]}')
-    # One tool executed per round.
-    assert len(tool_trace) == timer_mod._MAX_POLL_AGENT_ROUNDS
+    assert calls['n'] == 9
+    assert len(tool_trace) == 8
 
 
 def test_dispatch_exception_reported(monkeypatch):

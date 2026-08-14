@@ -22,11 +22,13 @@ logger = get_logger(__name__)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _reinject_system_contexts_after_compact(messages: list, task: dict | None = None):
-    """Re-inject system contexts after compaction.
+    """Recompose all managed context after compaction.
 
-    After force_compact replaces old messages, the system message may have
-    been rebuilt from only the archived system messages.  This ensures
-    project context, memory, and swarm prompts are still present.
+    A compactor may retain the static system block while dropping a managed
+    head/tail block. Marker probing therefore cannot prove that context is
+    complete. The Context Composer is idempotent: it removes every previous
+    managed render, recollects the current providers, and writes one fresh
+    manifest. Run it after every successful compaction.
 
     Only runs if the task has the necessary config to re-inject.
     """
@@ -40,40 +42,21 @@ def _reinject_system_contexts_after_compact(messages: list, task: dict | None = 
     search_enabled = cfg.get('searchMode', '') in ('single', 'multi')
     swarm_enabled = cfg.get('swarmEnabled', False)
 
-    # Check if system contexts are already present (avoid double-injection)
-    if messages and messages[0].get('role') == 'system':
-        sys_content = messages[0].get('content', '')
-        if isinstance(sys_content, list):
-            sys_text = ''.join(
-                b.get('text', '') for b in sys_content
-                if isinstance(b, dict) and b.get('type') == 'text'
-            )
-        else:
-            sys_text = sys_content or ''
-
-        # The CC static block lives IN the system message; CLAUDE.md lives
-        # in a separate user _isMeta msg. Use the static-block marker as
-        # the trigger — if it's gone, compaction stripped the system msg
-        # and we need to rebuild everything.  (Do NOT use
-        # '[PROJECT CO-PILOT MODE]' here — that string is in the user
-        # _isMeta msg, not in sys_text, so it would fire every compaction.)
-        from lib.tasks_pkg.system_context import _CC_STATIC_MARKER
-        if _CC_STATIC_MARKER not in sys_text:
-            from lib.tasks_pkg.system_context import (
-                _inject_system_contexts, _disabled_prompt_blocks,
-            )
-            # Re-inject from scratch — the system_context module handles dedup
-            _inject_system_contexts(
-                messages, project_path, project_enabled,
-                memory_enabled, search_enabled, swarm_enabled,
-                has_real_tools=True,
-                conv_id=task.get('convId', ''),
-                task=task,
-                model=cfg.get('model', ''),
-                system_prompt_mode=cfg.get('systemPromptMode', 'append'),
-                disabled_blocks=_disabled_prompt_blocks(cfg),
-            )
-            logger.info('[PostCompact] Re-injected system contexts after compaction')
+    from lib.tasks_pkg.system_context import (
+        _inject_system_contexts, _disabled_prompt_blocks,
+    )
+    _inject_system_contexts(
+        messages, project_path, project_enabled,
+        memory_enabled, search_enabled, swarm_enabled,
+        has_real_tools=bool(task.get('_contextHasRealTools', True)),
+        conv_id=task.get('convId', ''),
+        task=task,
+        model=cfg.get('model', ''),
+        system_prompt_mode=cfg.get('systemPromptMode', 'append'),
+        tool_names=set(task.get('_contextToolNames') or ()),
+        disabled_blocks=_disabled_prompt_blocks(cfg),
+    )
+    logger.info('[PostCompact] Re-composed managed context after compaction')
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -183,7 +166,8 @@ def run_compaction_pipeline(messages: list, current_round: int,
     # this; reactive_compact keeps its own Phase-4 head-truncate and must NOT
     # double-truncate, so it does not set the flag.
     compacted = False if _disable_force else force_compact_if_needed(
-        messages, task=task, _allow_head_truncate_fallback=True)
+        messages, task=task, _allow_head_truncate_fallback=True,
+        _compaction_round=current_round)
 
     # Post-compact: re-inject system contexts if compaction dropped them
     if compacted:
@@ -211,6 +195,17 @@ def run_compaction_pipeline(messages: list, current_round: int,
                 except Exception as e:
                     logger.error('[Pipeline] advanced_compact failed: %s',
                                  e, exc_info=True)
+
+    # Experiment-only mutation counter. This observes actual context changes
+    # (L1/L2/advanced), not merely summary-model calls, and stays absent for
+    # every non-enrolled request so the default execution path is unchanged.
+    _assignment = task.get('_costExperiment') if task else None
+    if (isinstance(_assignment, dict)
+            and _assignment.get('status') == 'assigned'):
+        _mutations = int(saved > 0) + int(bool(compacted)) + int(adv_saved > 0)
+        if _mutations:
+            task['_costExperimentCompactions'] = (
+                int(task.get('_costExperimentCompactions') or 0) + _mutations)
 
     # Notify cache tracker ONLY for mutations that actually touch the cached
     # PREFIX, so the expected cache_read drop isn't flagged as a break.

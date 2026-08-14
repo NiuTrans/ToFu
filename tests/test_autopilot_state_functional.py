@@ -430,10 +430,15 @@ def test_get_or_persist_run_id_mints_are_unique(store):
 # ══════════════════════════════════════════════════════════
 
 @pytest.mark.unit
-def test_clear_run_id_empty_conv_id_noop():
+def test_clear_run_id_empty_conv_id_noop(monkeypatch):
     """Empty conv_id → silent no-op (no raise)."""
+    import lib.conversations as conv_pkg
+    calls = []
+    monkeypatch.setattr(conv_pkg, 'update_conversation_settings',
+                        lambda *a, **k: calls.append((a, k)))
     ap_state._clear_run_id('')
     ap_state._clear_run_id(None)  # type: ignore[arg-type]
+    assert calls == [], 'empty ids must return before touching persistence'
 
 
 @pytest.mark.unit
@@ -473,9 +478,12 @@ def test_clear_run_id_nothing_to_clear_skips_write(store):
 def test_clear_run_id_conv_row_absent_silent(monkeypatch):
     """conv row missing → silent (best-effort)."""
     import lib.conversations as conv_pkg
+    calls = []
     monkeypatch.setattr(conv_pkg, 'update_conversation_settings',
-                        lambda *a, **k: None)
-    ap_state._clear_run_id('ghost-C')  # no raise
+                        lambda *a, **k: calls.append((a, k)))
+    result = ap_state._clear_run_id('ghost-C')
+    assert result is None
+    assert len(calls) == 1 and calls[0][0][0] == 'ghost-C'
 
 
 @pytest.mark.unit
@@ -510,18 +518,46 @@ class _FakeDB:
 
 @pytest.fixture
 def fake_db(monkeypatch):
-    """Install a get_thread_db that returns a _FakeDB seeded per-test.
+    """Install the conversation-repository boundary with a canned snapshot.
 
-    Returns a callable that installs a canned row → the tests hand in
-    whatever tuple/dict shape the SUT expects.
+    Resolver tests are about run-id policy, not the repository's SQL projection
+    order.  The production helper now reads ``ConversationSnapshot`` objects;
+    keeping the old two-column SQL fake made every settings test fail inside
+    repository compatibility parsing before the resolver ran at all.
     """
-    installed = {'db': None}
+    import json
+    import lib.database
+    import lib.database.conversation_repository as repository
+    from lib.database.conversation_repository import (
+        ConversationIntegrityError,
+        ConversationSnapshot,
+    )
+
+    installed = {'row': None}
 
     def _install(row):
-        installed['db'] = _FakeDB(row)
-        import lib.database
-        monkeypatch.setattr(
-            lib.database, 'get_thread_db', lambda _dom: installed['db'])
+        installed['row'] = row
+
+    def _load(_db, _conv_id, **_kwargs):
+        row = installed['row']
+        if row is None:
+            return None
+        if len(row) == 1:
+            raw_settings, raw_messages = '{}', row[0]
+        else:
+            raw_settings, raw_messages = row[0], row[1]
+        try:
+            messages = json.loads(raw_messages or '[]')
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise ConversationIntegrityError('invalid test transcript') from exc
+        return ConversationSnapshot(
+            metadata={'settings': raw_settings},
+            messages=messages,
+            source='test',
+        )
+
+    monkeypatch.setattr(lib.database, 'get_thread_db', lambda _dom: object())
+    monkeypatch.setattr(repository, 'load_conversation', _load)
 
     return _install
 

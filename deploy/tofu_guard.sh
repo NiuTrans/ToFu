@@ -72,6 +72,20 @@ set -u
 # server until the storm brake kills it. Pin a complete PATH for cron.
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
+# This platform injects a userspace DolphinFS preload into interactive shells,
+# while the cron guard historically starts without it.  Passing that preload
+# through to Python made a measured recovery boot jump from ~13s to 191s and
+# added another FUSE client in the process that serves FUSE-backed data.  Make
+# guard launches deterministic without disturbing arbitrary user preloads;
+# operators who explicitly require this exact preload can opt back in.
+case "${LD_PRELOAD:-}" in
+  *dolphinfs_client_preload.so*)
+    if [ "${TOFU_GUARD_KEEP_DOLPHIN_PRELOAD:-0}" != "1" ]; then
+      unset LD_PRELOAD
+    fi
+    ;;
+esac
+
 SCRIPT="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 PROJ="$(cd "$(dirname "${SCRIPT}")/.." && pwd)"
 PORT="${PORT:-15000}"
@@ -113,6 +127,7 @@ detect_python() {
   command -v python3 || command -v python
 }
 PY="$(detect_python)"
+PY_ENV_LIB="$(dirname "$(dirname "${PY}")")/lib"
 
 listener_pids() {
   "${SS_CMD}" -ltnp 2>/dev/null \
@@ -177,12 +192,24 @@ record_death_evidence() {
   {
     echo "──────────────── $(date '+%F %T') — :${PORT} listener GONE"
     echo "  cgroup usage/limit : $(cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null) / $(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null) bytes"
-    echo "  cgroup oom_kill    : $(grep '^oom_kill' /sys/fs/cgroup/memory/memory.oom_control 2>/dev/null | awk '{print $2}')"
+    echo "  cgroup oom_kill    : $(awk '$1 == "oom_kill" { print $2; exit }' /sys/fs/cgroup/memory/memory.oom_control 2>/dev/null)"
     echo "  pressure tail      :"
     tail -n 4 "${PROJ}/logs/cgroup_pressure.log" 2>/dev/null | sed 's/^/    /'
     echo "  server log tail    :"
     tail -n 5 "${SLOG}" 2>/dev/null | sed 's/^/    /'
   } >> "${WLOG}" 2>/dev/null
+}
+
+record_death_evidence_async() {
+  # Evidence reads/tails and the watchdog log live on the project FUSE mount.
+  # Those best-effort diagnostics have intermittently taken 60-110 seconds;
+  # never put them in front of the service relaunch.  The child must close the
+  # singleton-lock fd or a wedged evidence write could outlive the main guard
+  # and prevent cron/--ensure from replacing it.
+  (
+    exec 9>&-
+    record_death_evidence
+  ) &
 }
 
 _heartbeat_file() {
@@ -249,7 +276,7 @@ _wedge_act() {
   done
   sleep 1
   _wedge_clear
-  record_death_evidence
+  record_death_evidence_async
   if ! storm_check "$(date +%s)"; then
     log "[guard] CRASH STORM: >${MAX_CONSECUTIVE_DEATHS} deaths in ${STORM_WINDOW}s —" \
         "NOT relaunching. Fix the build, then: rm ${STATE}"
@@ -290,8 +317,9 @@ relaunch() {
   # instantly (2026-08-06 outage: 11 dead relaunches during an OOM crash).
   # env(1) applies the optional VAR=VAL instead; empty stays absent.
   PORT="${PORT}" BIND_HOST="${BIND_HOST:-0.0.0.0}" \
+    LD_LIBRARY_PATH="${PY_ENV_LIB}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
     env ${tls_env:+"${tls_env}"} \
-    setsid nohup "${PY}" server.py >> "${SLOG}" 2>&1 &
+    setsid nohup "${PY}" server.py >> "${SLOG}" 2>&1 9>&- &
   local newpid=$!
   # persist launch epoch (state line 3) for check_once's boot grace
   { sed -n '1,2p' "${STATE}" 2>/dev/null; echo "$(date +%s)"; } > "${STATE}.tmp" \
@@ -445,7 +473,7 @@ check_once() {
     return 0
   fi
   # Only NOW is death credible: no socket, no HTTP, no young process.
-  record_death_evidence
+  record_death_evidence_async
   if ! storm_check "$(date +%s)"; then
     log "[guard] CRASH STORM: >${MAX_CONSECUTIVE_DEATHS} deaths in ${STORM_WINDOW}s —" \
         "NOT relaunching. Fix the build, then: rm ${STATE}"
@@ -463,7 +491,9 @@ loop() {
   log "[guard] watchdog loop started (interval=${INTERVAL}s, pid $$)"
   while true; do
     check_once
-    sleep "${INTERVAL}"
+    # Do not let the transient sleep child retain the singleton lock if the
+    # guard itself is killed/upgraded mid-sleep.
+    sleep "${INTERVAL}" 9>&-
   done
 }
 
@@ -502,6 +532,27 @@ uninstall_cron() {
 # Sourcing seam for unit tests: with TOFU_GUARD_SOURCE_ONLY=1 the
 # functions load but nothing runs (no --ensure side effects).
 if [ -z "${TOFU_GUARD_SOURCE_ONLY:-}" ]; then
+# Once the project-local manager is healthy this legacy watchdog must never
+# become a second worker owner. Old cron entries can safely keep calling --ensure
+#during migration: they observe the manager and stand down.
+if [ -f "${PROJ}/serverctl.py" ] \
+   && curl -fsS --max-time 1 "http://127.0.0.1:${TOFU_SUPERVISOR_PORT:-15001}/health" \
+      >/dev/null 2>&1; then
+  case "${1:---ensure}" in
+    --ensure|--loop|--once)
+      exit 0 ;;
+    --status)
+      exec "${PY}" "${PROJ}/serverctl.py" status ;;
+    --start)
+      echo "[guard] legacy watchdog retired; ensuring the Tofu manager instead"
+      exec "${PY}" "${PROJ}/serverctl.py" ensure ;;
+    --stop)
+      echo "[guard] legacy watchdog retired; use: python serverctl.py stop" >&2
+      exit 2 ;;
+    --install)
+      exec "${PY}" "${PROJ}/serverctl.py" install ;;
+  esac
+fi
 case "${1:---ensure}" in
   --install)   install_cron ;;
   --uninstall) uninstall_cron ;;

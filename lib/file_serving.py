@@ -25,13 +25,10 @@ calls instead of send_file directly. Behaviour:
 The catch is narrowed to the werkzeug message so no OTHER assertion
 silently turns into a 200.
 
-Sync-shaped and call-time-imported ON PURPOSE: ``server.py``'s Flask→Quart
-shim replaces ``quart.send_file`` with a sync-safe adapter at app
-construction, so every route in this codebase calls a SYNC send_file
-from thread-pool handlers and gets a real Response back. Resolving the
-name at call time means this seam always lands on whatever binding the
-running app installed — never on a module-import-time snapshot of the
-pre-shim async original.
+Sync-shaped and call-time-imported ON PURPOSE: :mod:`lib.quart_sync` is the
+explicit boundary that resolves Quart's async ``send_file`` from executor
+threads. Quart itself remains untouched, while legacy synchronous routes still
+receive a concrete Response rather than a coroutine object.
 """
 
 from lib.log import get_logger
@@ -42,10 +39,10 @@ logger = get_logger(__name__)
 def send_file_conditional(path, **kwargs):
     """``send_file(path, conditional=True, **kwargs)`` without the 500.
 
-    Drop-in for the routes' current ``send_file(..., conditional=True)``
-    calls (sync or async handlers alike — see module docstring).
+    Drop-in for synchronous routes' current
+    ``send_file(..., conditional=True)`` calls (see module docstring).
     """
-    from quart import send_file as _send_file
+    from lib.quart_sync import send_file as _send_file
     kwargs['conditional'] = True
     try:
         return _send_file(path, **kwargs)

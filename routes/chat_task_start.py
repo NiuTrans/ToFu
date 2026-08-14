@@ -86,7 +86,6 @@ def _start_task_for_conv(conv_id: str, config: dict[str, Any],
     overwrites regeneration" bug where an old task's _sync_result_to_conversation
     races with the new task and corrupts the conversation DB.
     """
-    from lib.tasks_pkg.conv_message_builder import build_api_messages_from_db
     from lib.tasks_pkg import abort_running_tasks_for_conv
 
     # ★ CRITICAL: abort any stale running tasks for this conversation BEFORE
@@ -97,7 +96,11 @@ def _start_task_for_conv(conv_id: str, config: dict[str, Any],
     #   doubled-context bug). Aborting first stamps `_abort_reason` so the
     #   freshness guard in _sync_result_to_conversation rejects those late
     #   writes; building messages afterwards reads a settled DB state.
-    _aborted_count = abort_running_tasks_for_conv(conv_id)
+    # v2 projection CAS fences stale attempts by turn identity, and distinct
+    # lanes/visible role turns may legitimately execute concurrently. Legacy
+    # tasks still retain their conversation-wide supersede discipline.
+    _aborted_count = (0 if config.get('_turnProtocolV2')
+                      else abort_running_tasks_for_conv(conv_id))
     if _aborted_count:
         logger.info('[Chat] conv=%s Auto-aborted %d stale task(s) before new task',
                     conv_id[:8], _aborted_count)
@@ -107,13 +110,22 @@ def _start_task_for_conv(conv_id: str, config: dict[str, Any],
     # ``excludeLast`` is honored so /api/chat/continue can rebuild messages
     # without the assistant message that is about to be regenerated.
     _exclude_last = bool(config.get('excludeLast', False))
-    api_messages = build_api_messages_from_db(conv_id, config, exclude_last=_exclude_last)
+    if config.get('_turnProtocolV2'):
+        from lib.turn_lifecycle import build_api_messages
+        api_messages = build_api_messages(
+            conv_id, config.get('_turnId') or '', config)
+    else:
+        from lib.tasks_pkg.conv_message_builder import build_api_messages_from_db
+        api_messages = build_api_messages_from_db(
+            conv_id, config, exclude_last=_exclude_last)
     if api_messages is None:
         return None, api_error('Conversation not found after save', status=500)
     if not api_messages:
         return None, api_error('No messages to process', status=400)
 
-    task = create_task(conv_id, api_messages, config)
+    task = create_task(
+        conv_id, api_messages, config,
+        supersede=not bool(config.get('_turnProtocolV2')))
     task['_attended'] = True
     if user_msg_id:
         task['_userMsgId'] = user_msg_id
@@ -187,21 +199,15 @@ def _start_task_for_conv(conv_id: str, config: dict[str, Any],
             from lib.tasks_pkg.endpoint import run_endpoint_task
             _flow_entry = run_endpoint_task
         task['endpoint_mode'] = True
-        # Seed the phase that the FIRST SSE `state` snapshot will report. A
-        # user-selected flow may open on a worker / verifier rather than a
-        # planner; advertising 'planning' for a plannerless flow makes the
-        # frontend stand up a Planner bubble that never streams (hangs at
-        # "Waiting…"). Live endpoint mode (no flow def) keeps 'planning'.
-        _initial_phase = 'planning'
-        try:
-            from lib.orchestration_endpoint_runner import resolve_chat_flow_definition
-            _sel_defn, _ = resolve_chat_flow_definition(config)
-            if _sel_defn is not None:
-                from lib.orchestration import initial_phase_for_flow
-                _initial_phase = initial_phase_for_flow(_sel_defn)
-        except Exception as _phase_err:
-            logger.debug('[Chat] initial-phase derivation failed, defaulting to '
-                         'planning: %s', _phase_err)
+        # Seed the FIRST SSE state without reading a stored definition twice.
+        # A selected flow starts in the neutral working lane so a plannerless
+        # graph cannot create a phantom Planner bubble. The worker resolves
+        # the definition exactly once, then LaunchSpec atomically replaces
+        # these provisional facts with its canonical projection and phase.
+        _initial_phase = 'working' if _flow_selected else 'planning'
+        if _flow_selected:
+            task['flow_mode'] = True
+            task['_flow_projection'] = 'flow'
         task['_endpoint_phase'] = _initial_phase
         task['_endpoint_iteration'] = 0
         logger.info('[Chat] Starting FLOW task %s for conv %s model=%s via=%s',

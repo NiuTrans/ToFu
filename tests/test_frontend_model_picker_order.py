@@ -53,6 +53,7 @@ import re
 import pytest
 
 from tests._jsdom import JS_DIR, ROOT, run_harness
+from tests._runtime_sections import runtime_section_names
 
 pytestmark = pytest.mark.unit
 
@@ -614,16 +615,13 @@ def test_bundler_loads_branding_before_consumers():
     """branding.js defines the comparator; both consumers are plain window-scope
     concatenation, so the bundler must place it FIRST or the comparator is in
     the TDZ when core_panel/main_toolbar_ui run their sorts at call time."""
-    bundler = open(os.path.join(ROOT, 'lib', 'js_bundler.py'), encoding='utf-8').read()
-    order = {}
+    order = runtime_section_names()
     for name in ('settings/branding.js', 'settings/core_panel.js',
                  'main/main_toolbar_ui.js'):
-        m = re.search(r"'" + re.escape(name) + r"'", bundler)
-        assert m, f'{name} missing from the bundler manifest'
-        order[name] = m.start()
-    assert order['settings/branding.js'] < order['settings/core_panel.js'], \
+        assert order.count(name) == 1, f'{name} missing from the Vite runtime'
+    assert order.index('settings/branding.js') < order.index('settings/core_panel.js'), \
         'branding.js must be bundled before core_panel.js'
-    assert order['settings/branding.js'] < order['main/main_toolbar_ui.js'], \
+    assert order.index('settings/branding.js') < order.index('main/main_toolbar_ui.js'), \
         'branding.js must be bundled before main_toolbar_ui.js'
 
 

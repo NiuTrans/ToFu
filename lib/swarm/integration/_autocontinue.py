@@ -134,26 +134,20 @@ def _start_autocontinue_turn(conv_id: str) -> bool:
     try:
         import json as _json
 
-        from lib.database import (DOMAIN_CHAT, db_execute_with_retry,
-                                  get_thread_db, json_dumps_pg)
+        from lib.database import DOMAIN_CHAT, get_thread_db
         from lib.tasks_pkg import spawn_task
         from lib.tasks_pkg.manager import create_task as _create_task
 
         db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT messages, settings FROM conversations WHERE id=? AND user_id=1',
-            (conv_id,)).fetchone()
-        if not row:
+        from lib.database.conversation_repository import load_conversation
+        snapshot = load_conversation(
+            db, conv_id, metadata_columns=('settings',))
+        if snapshot is None:
             logger.warning('[Swarm:%s] autocontinue: conversation not found', conv_id)
             return False
-
+        messages = snapshot.messages
         try:
-            messages = _json.loads(row['messages'] or '[]')
-        except (ValueError, TypeError) as e:
-            logger.debug('[Swarm:%s] autocontinue: bad messages json: %s', conv_id, e)
-            messages = []
-        try:
-            settings = _json.loads(row['settings'] or '{}')
+            settings = _json.loads(snapshot.get('settings') or '{}')
         except (ValueError, TypeError) as e:
             logger.debug('[Swarm:%s] autocontinue: bad settings json: %s', conv_id, e)
             settings = {}
@@ -173,40 +167,24 @@ def _start_autocontinue_turn(conv_id: str) -> bool:
         stamp_initiator(assistant_msg, INITIATOR_SWARM)
         messages.append(assistant_msg)
 
-        from lib.conversations import build_search_text, update_conversation_fts
-        messages_json = json_dumps_pg(messages)
+        from lib.conversations import build_search_text
         search_text = build_search_text(messages)
         now_ms = int(time.time() * 1000)
-        db_execute_with_retry(db,
-            'UPDATE conversations SET messages=?, updated_at=?, msg_count=?, '
-            'search_text=? WHERE id=? AND user_id=1',
-            (messages_json, now_ms, len(messages), search_text, conv_id))
-        # Phase 5 dual-write (flag-gated, inert when off): tail append.
-        # Guarded separately: the placeholder assistant turn is already
-        # committed, so a mirror failure must not reach this function's
-        # `except` and return False — that would strand the placeholder on
-        # disk with no continuation task ever spawned.
-        try:
-            from lib.database.messages_rows import mirror_write_and_commit
-            mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms)
-        except Exception as _mirror_err:
-            logger.warning('[Swarm:%s] autocontinue row mirror failed '
-                           '(non-fatal, turn already durable): %s',
-                           conv_id, _mirror_err, exc_info=True)
-        try:
-            update_conversation_fts(db, conv_id, search_text)
-        except Exception as e:
-            logger.debug('[Swarm:%s] autocontinue fts update failed: %s', conv_id, e)
+        from lib.database.conversation_repository import replace_messages
+        write_result = replace_messages(
+            db, conv_id, messages,
+            metadata={
+                'updated_at': now_ms,
+                'msg_count': len(messages),
+                'search_text': search_text,
+            })
 
         # Event-driven cross-device sync: a brand-new assistant turn was
         # appended, so push the post-write rev → a sibling tab with this conv
         # open shows the new (streaming) bubble without a manual refresh.
         try:
             from lib.conversations import notify_conv_changed
-            _ac_rev_row = db.execute(
-                'SELECT rev FROM conversations WHERE id=? AND user_id=1',
-                (conv_id,)).fetchone()
-            notify_conv_changed(conv_id, rev=(_ac_rev_row[0] if _ac_rev_row else None))
+            notify_conv_changed(conv_id, rev=write_result.rev)
         except Exception as _ne:
             logger.debug('[Swarm:%s] autocontinue conv-changed notify skipped: %s',
                          conv_id, _ne)

@@ -276,6 +276,106 @@ def cmd_project_apply_diff(params):
     return _guarded(_go, params)
 
 
+def cmd_project_edit_file(params):
+    """Apply the unified mixed edit batch inside a declared remote root."""
+    def _go(p):
+        edits = p.get('edits')
+        if not isinstance(edits, list) or not edits:
+            raise ProjectError('edits must be a non-empty array')
+        edits = edits[:30]
+        lines = []
+        ok_count = 0
+        fail_count = 0
+        for i, edit in enumerate(edits, 1):
+            try:
+                if not isinstance(edit, dict):
+                    raise ProjectError('edit must be an object')
+                operation = edit.get('operation')
+                anchor = edit.get('anchor')
+                content = edit.get('content')
+                if operation not in ('insert_after', 'insert_before', 'replace'):
+                    raise ProjectError(f'invalid operation: {operation!r}')
+                if not isinstance(anchor, str) or not anchor:
+                    raise ProjectError('anchor must be a non-empty string')
+                if not isinstance(content, str):
+                    raise ProjectError('content must be a string')
+                if operation != 'replace' and 'replace_all' in edit:
+                    raise ProjectError(
+                        'replace_all is valid only for operation=replace')
+
+                root_real, target = _resolve(
+                    p.get('root', ''), edit.get('path', ''))
+                if not os.path.isfile(target):
+                    raise ProjectError(
+                        f'edit_file edits an existing file — not found: '
+                        f'{edit.get("path")!r}')
+                _check_write_allowed(target)
+                # Parity with the server-side tool_edit_file wrap gate
+                # (TOFU_EDIT_WRAP_GATE=0 disables both): a replace whose
+                # content keeps the anchor verbatim at a boundary is a pure
+                # insertion — refuse it pre-execution so the model re-issues
+                # with the insert vocabulary instead of learning nothing.
+                if (operation == 'replace' and not edit.get('replace_all')
+                        and os.environ.get('TOFU_EDIT_WRAP_GATE', '1') != '0'):
+                    from lib.project_mod.write_tools._ops import (
+                        _pure_wrap_insert)
+                    wrap = _pure_wrap_insert(anchor, content)
+                    if wrap:
+                        op_name, trimmed = wrap
+                        raise ProjectError(
+                            f'pure insertion rejected — re-issue as '
+                            f"operation='{op_name}' with ONLY the new text "
+                            f'({len(trimmed)} chars — do not repeat the '
+                            f'anchor)')
+                with open(target, 'r', encoding='utf-8', errors='replace') as f:
+                    text = f.read()
+                matches = text.count(anchor)
+                replace_all = bool(edit.get('replace_all'))
+                if matches == 0:
+                    raise ProjectError('anchor text not found')
+                if matches > 1 and not (operation == 'replace' and replace_all):
+                    raise ProjectError(
+                        f'anchor text matches {matches} locations — narrow it')
+
+                if operation == 'replace':
+                    new_text = (text.replace(anchor, content) if replace_all
+                                else text.replace(anchor, content, 1))
+                else:
+                    anchor_idx = text.index(anchor)
+                    if operation == 'insert_before':
+                        inserted = content
+                        if not inserted.endswith('\n'):
+                            inserted += '\n'
+                        new_text = text[:anchor_idx] + inserted + text[anchor_idx:]
+                    else:
+                        after_idx = anchor_idx + len(anchor)
+                        inserted = content
+                        if after_idx < len(text) and text[after_idx] != '\n':
+                            inserted = '\n' + inserted
+                        elif after_idx < len(text):
+                            after_idx += 1
+                        if not inserted.endswith('\n'):
+                            inserted += '\n'
+                        new_text = text[:after_idx] + inserted + text[after_idx:]
+
+                _snapshot(root_real, target)
+                _atomic_write(target, new_text)
+                _stamp_read(target)
+                ok_count += 1
+                lines.append(
+                    f'[{i}] OK {edit.get("path")} [{operation}]')
+            except (ProjectError, OSError, UnicodeError) as exc:
+                fail_count += 1
+                path = edit.get('path', '?') if isinstance(edit, dict) else '?'
+                lines.append(f'[{i}] FAIL {path}: {exc}')
+
+        header = f'Applied {ok_count}/{ok_count + fail_count} edits'
+        if fail_count:
+            header += f' ({fail_count} failed)'
+        return header + '\n' + '\n'.join(lines)
+    return _guarded(_go, params)
+
+
 def cmd_project_grep_search(params):
     def _go(p):
         pattern = p.get('pattern', '')

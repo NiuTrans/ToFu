@@ -82,7 +82,7 @@ transcription.srt
 
 ### 3.2 与 tofu 现有子系统的契合点
 
-- **技能系统**(`lib/skills`,Anthropic AgentSkills 格式):hyperframes 六包直接做成 tofu 技能包(zip → installer),模型通道只读 `activate_skill`,用户可在 Settings → Skills 开关;
+- **技能系统**(`lib/skills`,Anthropic AgentSkills 格式):hyperframes 六包直接做成 tofu 技能包(zip → installer),模型通道只读 `load_skill`,用户可在 Settings → Skills 开关;
 - **TTS**(`lib/tts`,播客链刚落地):同一字幕稿 = 分镜依据 + 配音文本,**SRT 时间轴 = 镜头时间轴 = 配音时间轴,音画天然对齐**;
 - **任务/运行时**(播客 `podcast_runtime` 范式):视频生成注册为新的 TaskRuntime,dedup、事件流、abort 全套复用;
 - **浏览器子系统**(`lib/browser` playwright 池):网页捕捉类镜头(webpage/news/tweet 品类)直接复用;
@@ -90,6 +90,80 @@ transcription.srt
 - **artifacts 面板**:成品 MP4 进 artifacts,版本化;
 - **push/SSE**:逐镜头进度实时推送;
 - **endpoint 模式**(Planner→Worker→Critic):Planner 分镜、Worker 单镜、Critic 验收(lint/inspect 零 LLM 闸 + snapshot 抽帧目检)。
+
+### 3.3 与 PPT 共用的 production 内容内核（2026-08-10 补记）
+
+主题出片不再维护自己的简化搜索器。`lib/production/research.py` 同时服务视频与 PPT：
+视频以 `week` 为当前态 profile（不足三卡时为常青主题回退不限时），PPT 以 `month` 为
+profile；两边都得到 `S# + URL + published_at + query_lanes + as_of`，并由同一个事实
+gate 拒绝遗漏/矛盾的发布、预售和价格状态。脚本每个事实 beat 输出 `source_ids`，该字段
+一直保留到 scenes.json，片尾来源卡只是署名，不再代替逐镜证据关系。
+
+`lib/production/contracts.py` 还统一叙事职责/存在理由、素材 brief 与 VLM finding 的
+最小形状。这里**不**统一 PPTD 与 HyperFrames：前者是静态空间与 OOXML，后者是时间轴、
+TTS 和逐帧渲染；它们是同一内容内核上的两个媒介 adapter。
+
+### 3.4 video-shotcraft / Remotion 复盘与镜头 IR（2026-08-10）
+
+本轮按 2026-08-09 的 `video-shotcraft` 上游提交 `41ee360d` 重新逐文件核对：其真正值得
+吸收的不是“再装一套视频工具”，而是把审美经验做成可检索、可执行、可验收的 **shot
+recipe card**。当前库有 152 张镜头卡、209 个风格词；每张卡把使用时机、时长/能量、
+参数、常见陷阱、精确实现和预览放在一起。来源：
+<https://github.com/Vincentwei1021/video-shotcraft>。
+
+Remotion 的启发指向同一层：`<Sequence>` / `<Series>` 显式表达局部时间，
+`<TransitionSeries>` 明确“转场会重叠并缩短总时长”的代数，composition schema 与
+`calculateMetadata()` 把输入、时长和尺寸作为可验证元数据，`delayRender()` 把字体/图片/
+远端数据是否就绪从偶然时序变成渲染合同，`random(seed)` 则把随机动效变成可复现帧。
+官方文档：<https://www.remotion.dev/docs/sequence>、
+<https://www.remotion.dev/docs/transitions/transitionseries>、
+<https://www.remotion.dev/docs/schemas>、
+<https://www.remotion.dev/docs/delay-render>、
+<https://www.remotion.dev/docs/random>。
+
+落地决策是**吸收模型，不替换底盘**：
+
+- 新增 `lib/motion_video/_shot_recipes.py`，把现有 13 个 HyperFrames 蓝图完整升级为
+  renderer-neutral `motion-shot-v1`：role / craft_role / motion_family / energy /
+  duration range / phases / QA progresses / resolved hold / rule / constraints。
+- topic 入口和 legacy / 上传 storyboard 都在写入 `scenes.json` 前标准化同一合同；无效
+  recipe、角色漂移、blueprint alias 漂移、非法 QA 锚点由结构闸拒绝。自动规划按镜头语义
+  选配方，并在语义允许时避开相邻同 motion family；显式选择保持原样，但重复与三镜能量
+  平线会进入 advisory finding，而不是被静默抹掉。
+- 视觉 QA 从固定三帧改成配方自己的四个 setup / peak / settle / resolved-hold 锚点；
+  Chromium 必须先等 `document.fonts.ready`、每张图片 decode 且尺寸有效，失败即拒绝“假
+  截图”。VLM 同时收到 recipe、motion family、最低停留和具体约束。
+- 场景 API/UI 暴露 recipe、family、energy、QA 锚点与规划 finding；
+  `GET /api/v1/motion/shot-recipes` 提供 JSON-safe 目录，后续 Studio 或另一 renderer 可以
+  复用同一 IR，不接触 HyperFrames 私有实现。
+
+保留 HyperFrames 是经过能力对账的主动决策：它已经提供按帧确定性 GSAP 时间轴、逐镜
+checkpoint/重渲、并行 Chrome 渲染、ffprobe/concat、素材预检和 temporal QA。此时引入
+Remotion runtime 会同时维护两套 renderer、浏览器依赖和成品等价性，却不会自动补上我们
+真正缺的镜头语义层；Remotion 自动化/商业使用还需要单独核对当前许可与定价。
+
+P10 已继续完成这两层，而不是停在字符串意图：
+
+- `motion-timeline-v1` 把口播/字幕的 **program time** 与渲染时长分开。进入镜头的 overlap
+  会成为前一镜的 outgoing visual handle；FFmpeg `xfade` 消耗该 handle，因此成片总时长
+  仍等于所有 content duration 之和，SRT 与 narration clock 不漂移。push / wipe /
+  dissolve 是真实转场；match-cut 仍是镜头内部编舞的零时长剪辑，避免假叠化。
+- `motion-audio-v1` 在整片层集中表达 BGM、SFX cue、action/peak 对齐、scene-relative 或
+  absolute/beat target、sidechain ducking 与 -14 LUFS 输出。所有音频必须是本地文件，
+  入 job 前做 SHA-256 内容寻址 staging；license 必填，非自有素材必须保留 source URL，
+  CC-BY 还必须有 attribution，成片同时交付 `audio_plan.json` 和
+  `audio_attribution.txt`。
+- `verified` beat grid 不能只是布尔自报：必须提交逐拍 seconds/null 观测，系统重新计算
+  max residual ≤15ms、match ≥98%、mean absolute error <10ms、drift <5ms，且首拍有效
+  才被接受；`required` 模式下，转场离最近节拍超过
+  3 帧直接拒绝。当前只消费外部/人工测得的 grid，不声称已经内置自动 beat detector；
+  项目也不捆绑授权不明的 BGM/SFX 库。
+
+实现与入口分别在 `_timeline.py`、`_concat.py`、`_audio_cues.py`、topic engine、
+`motion_video_concat` / `motion_video_mux` 和 `/api/v1/motion/audio-contract`。参考模型来自
+<https://github.com/Vincentwei1021/video-shotcraft/blob/main/references/sound-design.md>、
+<https://github.com/Vincentwei1021/video-shotcraft/blob/main/references/music-beat-sync.md> 与
+<https://www.remotion.dev/docs/transitions/transitionseries>。
 
 ---
 
@@ -160,7 +234,7 @@ transcription.srt
 
 已交付:
 
-- **`lib/motion_video/_audio.py`**:`synthesize_scene_narrations`(句号边界分块/逐块重试×2/AbortSignal/无文本镜头两段式补静音且**继承 provider WAV 参数**防脱轨/无槽位降级不死)、`concat_narrations`(镜头间 250ms 停顿)、`mux_audio_video`(视频流 copy+AAC+loudnorm 单遍+原子写+后验音轨存在与时长漂移);
+- **`lib/motion_video/_audio.py`**:`synthesize_scene_narrations`(句号边界分块/逐块重试×2/AbortSignal/无文本镜头两段式补静音且**继承 provider WAV 参数**防脱轨/无槽位降级不死)、`concat_narrations`(逐镜 WAV 已补齐 target duration，默认零额外缝隙；显式 pause 仍支持)、`mux_audio_video`(视频流 copy+AAC+loudnorm 单遍+原子写+后验音轨存在与时长漂移);
 - **2 个新工具**:`motion_video_narrate`(对齐清单:逐镜 audio/target/overflow)、`motion_video_mux`;
 - **测试 +13**(48 全绿):分块边界、loose 短音补静音/长音扩镜、strict overflow、无槽位降级、Abort、**NEUTER**(剥补静音→loose 对齐崩)、无文本镜头静音、mux 命令构造+后验双支;
 - **剩余 P2b**:专用 `motion_runtime` + engine + api_v1(headless 编排/分镜零 LLM 兜底),与 P3 UI 面板同期落地更经济(面板的进度推送本来就要走 runtime 事件流);字幕烧录/侧车 .srt 也留 P2b。

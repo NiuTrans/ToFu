@@ -27,6 +27,8 @@ Run::
 """
 from __future__ import annotations
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {'lib/turn_builder.py'}
+
 import os
 import tempfile
 
@@ -83,6 +85,26 @@ def _simulate_tofu_net_zero_write(base_path: str, rel: str, *,
     with open(os.path.join(base_path, rel), encoding='utf-8') as f:
         cur = f.read()
     fh.track_edit(base_path, rel, pre_content=cur, task_id=task_id)
+
+
+def test_restore_write_failure_preserves_last_good_file(base, monkeypatch):
+    target = os.path.join(base, 'document.txt')
+    with open(target, 'wb') as handle:
+        handle.write(b'last-good')
+    monkeypatch.setattr(fh_api, 'read_blob',
+                        lambda _base, _rel, _version: b'restored')
+    monkeypatch.setattr(
+        'lib.json_store.os.replace',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError('injected replace failure')))
+
+    ok, detail = fh_api._restore_one(base, 'document.txt', 1)
+
+    assert ok is False and 'injected replace failure' in detail
+    with open(target, 'rb') as handle:
+        assert handle.read() == b'last-good'
+    assert not [name for name in os.listdir(base)
+                if name.startswith('.binstore-')]
 
 
 # ═══════════════════════════════════════════════════════════════════

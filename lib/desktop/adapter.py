@@ -25,9 +25,11 @@ This module owns:
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 import uuid
+from urllib.parse import urlencode
 
 from lib.config_dir import config_path
 from lib.json_store import read_json, update_json_atomic
@@ -43,6 +45,12 @@ __all__ = [
     'relay_http',
     'relay_stream',
     'adapter_status',
+    'adapter_accounts',
+    'start_adapter_oauth',
+    'adapter_oauth_status',
+    'submit_adapter_oauth_callback',
+    'delete_adapter_account',
+    'sync_provider',
     'ensure_adapter',
     'stop_adapter',
     'ensure_task_state',
@@ -60,6 +68,8 @@ _ensure_tasks: dict = {}
 _ensure_lock = threading.Lock()
 _status_cache: dict = {}
 _status_lock = threading.Lock()
+_accounts_cache: dict = {}
+_accounts_lock = threading.Lock()
 
 
 # ══════════════════════════════════════════════════════════
@@ -142,10 +152,219 @@ def relay_stream(agent_id: str, port: int, path: str, *, method: str = 'POST',
 
 
 # ══════════════════════════════════════════════════════════
+#  CLIProxyAPI Management API (credentials never leave the agent)
+# ══════════════════════════════════════════════════════════
+
+def _management_request(agent_id: str, path: str, *, method: str = 'GET',
+                        payload: dict = None, user_id: str = '') -> dict:
+    if not path.startswith('/v0/management/'):
+        raise ValueError('adapter management path is not allowed')
+    policy = policy_for(agent_id)
+    if not policy or not policy.get('mgmt_secret'):
+        raise RuntimeError('subscription adapter is not configured for this agent')
+    body = (json.dumps(payload, separators=(',', ':')).encode()
+            if payload is not None else b'')
+    headers = {'Authorization': f"Bearer {policy['mgmt_secret']}"}
+    if payload is not None:
+        headers['Content-Type'] = 'application/json'
+    response = relay_http(
+        agent_id, int(policy.get('port') or DEFAULT_PORT), path,
+        method=method, headers=headers, body=body, timeout=30,
+        user_id=user_id)
+    if response.status_code < 200 or response.status_code >= 300:
+        detail = response.text[:300]
+        try:
+            parsed = response.json()
+            detail = parsed.get('error') or parsed.get('message') or detail
+        except (ValueError, TypeError, AttributeError) as e:
+            logger.debug('[Adapter] management error body is not structured '
+                         'JSON (HTTP %s): %s', response.status_code, e)
+        raise RuntimeError(
+            f'adapter management API answered HTTP {response.status_code}: '
+            f'{detail}')
+    if not response.content:
+        return {}
+    try:
+        data = response.json()
+    except (ValueError, TypeError) as e:
+        raise RuntimeError('adapter management API returned invalid JSON') from e
+    return data if isinstance(data, dict) else {}
+
+
+def _account_provider(item: dict) -> str:
+    raw = str(item.get('provider') or item.get('type') or '').strip().lower()
+    if raw in ('anthropic', 'claude') or raw.startswith('claude'):
+        return 'claude'
+    if raw in ('codex', 'openai', 'chatgpt') or raw.startswith('codex'):
+        return 'codex'
+    return raw or 'other'
+
+
+def _invalidate_adapter_caches(agent_id: str) -> None:
+    with _status_lock:
+        _status_cache.pop(agent_id, None)
+    with _accounts_lock:
+        _accounts_cache.pop(agent_id, None)
+
+
+def adapter_accounts(agent_id: str, user_id: str = '',
+                     force: bool = False) -> list:
+    """Return a sanitized account inventory from ``/auth-files``."""
+    now = time.monotonic()
+    with _accounts_lock:
+        cached = _accounts_cache.get(agent_id)
+        if not force and cached and now - cached[0] < _STATUS_CACHE_TTL_S:
+            return [dict(a) for a in cached[1]]
+    data = _management_request(agent_id, '/v0/management/auth-files',
+                               user_id=user_id)
+    out = []
+    for item in data.get('files') or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get('name') or item.get('id') or '').strip()
+        if not name:
+            continue
+        out.append({
+            'name': name,
+            'auth_index': item.get('auth_index'),
+            'provider': _account_provider(item),
+            'email': str(item.get('email') or '').strip(),
+            'label': str(item.get('label') or '').strip(),
+            'status': str(item.get('status') or '').strip(),
+            'status_message': str(item.get('status_message') or '').strip(),
+            'disabled': bool(item.get('disabled', False)),
+            'unavailable': bool(item.get('unavailable', False)),
+        })
+    with _accounts_lock:
+        _accounts_cache[agent_id] = (now, out)
+    return [dict(a) for a in out]
+
+
+_ADAPTER_OAUTH_PATHS = {
+    'claude': '/v0/management/anthropic-auth-url?is_webui=true',
+    'codex': '/v0/management/codex-auth-url?is_webui=true',
+}
+
+
+def start_adapter_oauth(agent_id: str, provider: str,
+                        user_id: str = '') -> dict:
+    path = _ADAPTER_OAUTH_PATHS.get(provider)
+    if not path:
+        raise ValueError('unsupported adapter OAuth provider')
+    data = _management_request(agent_id, path, user_id=user_id)
+    if data.get('status') != 'ok' or not data.get('url') or not data.get('state'):
+        raise RuntimeError(data.get('error') or 'adapter returned an invalid OAuth flow')
+    return {'provider': provider, 'status': 'started',
+            'auth_url': data['url'], 'state': data['state']}
+
+
+def sync_provider(agent_id: str, agent_name: str = '',
+                  user_id: str = '') -> dict:
+    """Refresh the managed adapter provider after account changes."""
+    policy = policy_for(agent_id)
+    if not policy:
+        raise RuntimeError('subscription adapter is not configured for this agent')
+    port = int(policy.get('port') or DEFAULT_PORT)
+    try:
+        models = fetch_models(agent_id, port, policy['api_key'], user_id=user_id)
+    except RuntimeError as e:
+        if 'empty list' in str(e):
+            deprovision_provider(agent_id)
+            return {'provider_id': f'adapter_{agent_id[:8]}', 'models': 0}
+        raise
+    provision_provider(agent_id, agent_name, port, policy['api_key'], models)
+    return {'provider_id': f'adapter_{agent_id[:8]}', 'models': len(models)}
+
+
+def _adapter_provider_status(agent_id: str) -> dict:
+    from lib import _SERVER_CONFIG_PATH
+    pid = f'adapter_{agent_id[:8]}'
+    cfg = read_json(_SERVER_CONFIG_PATH, default={}) or {}
+    entry = next((p for p in (cfg.get('providers') or [])
+                  if p.get('id') == pid), None)
+    model_count = len((entry or {}).get('models') or [])
+    return {'provider_id': pid,
+            'provider_ready': bool(entry and entry.get('enabled', True)
+                                   and model_count),
+            'model_count': model_count}
+
+
+def adapter_oauth_status(agent_id: str, state: str, agent_name: str = '',
+                         user_id: str = '') -> dict:
+    query = urlencode({'state': state})
+    data = _management_request(
+        agent_id, f'/v0/management/get-auth-status?{query}', user_id=user_id)
+    status = str(data.get('status') or 'wait').lower()
+    out = {'status': status, 'error': str(data.get('error') or '')[:300]}
+    if status == 'ok':
+        _invalidate_adapter_caches(agent_id)
+        try:
+            synced = sync_provider(agent_id, agent_name, user_id=user_id)
+            out.update(synced)
+            out['provider_ready'] = bool(synced.get('models'))
+        except Exception as e:
+            logger.debug('[Adapter] OAuth provider sync unavailable for %s: %s',
+                         agent_id[:8], e)
+            out['provider_ready'] = False
+            out['catalog_error'] = str(e)[:300]
+        try:
+            out['accounts'] = adapter_accounts(agent_id, user_id=user_id,
+                                               force=True)
+        except Exception as e:
+            logger.debug('[Adapter] OAuth account refresh unavailable for %s: %s',
+                         agent_id[:8], e)
+            out['accounts'] = []
+            out['accounts_error'] = str(e)[:300]
+    return out
+
+
+def submit_adapter_oauth_callback(agent_id: str, provider: str, state: str,
+                                  *, code: str = '', redirect_url: str = '',
+                                  error: str = '', user_id: str = '') -> dict:
+    canonical = {'claude': 'anthropic', 'codex': 'codex'}.get(provider)
+    if not canonical:
+        raise ValueError('unsupported adapter OAuth provider')
+    payload = {'provider': canonical, 'state': state}
+    if code:
+        payload['code'] = code
+    if redirect_url:
+        payload['redirect_url'] = redirect_url
+    if error:
+        payload['error'] = error
+    return _management_request(agent_id, '/v0/management/oauth-callback',
+                               method='POST', payload=payload,
+                               user_id=user_id)
+
+
+def delete_adapter_account(agent_id: str, name: str, auth_index=None,
+                           agent_name: str = '', user_id: str = '') -> dict:
+    accounts = adapter_accounts(agent_id, user_id=user_id, force=True)
+    match = next((a for a in accounts if a.get('name') == name and
+                  (auth_index is None or a.get('auth_index') == auth_index)), None)
+    if not match:
+        raise ValueError('unknown adapter account')
+    query_data = {'name': name}
+    if auth_index is not None:
+        query_data['auth_index'] = auth_index
+    _management_request(agent_id,
+                        '/v0/management/auth-files?' + urlencode(query_data),
+                        method='DELETE', user_id=user_id)
+    _invalidate_adapter_caches(agent_id)
+    remaining = adapter_accounts(agent_id, user_id=user_id, force=True)
+    if not remaining:
+        deprovision_provider(agent_id)
+        return {'deleted': True,
+                'provider_id': f'adapter_{agent_id[:8]}', 'models': 0}
+    synced = sync_provider(agent_id, agent_name, user_id=user_id)
+    return {'deleted': True, **synced}
+
+
+# ══════════════════════════════════════════════════════════
 #  Status + ensure orchestration
 # ══════════════════════════════════════════════════════════
 
-def adapter_status(agent_id: str, user_id: str = '') -> dict:
+def adapter_status(agent_id: str, agent_name: str = '',
+                   user_id: str = '') -> dict:
     """Live adapter state from the agent (10s cache — status polls must
     not stampede the bridge). ``{'ok': False, 'error': …}`` when the
     agent is unreachable; the agent's own status dict otherwise."""
@@ -164,6 +383,35 @@ def adapter_status(agent_id: str, user_id: str = '') -> dict:
         out = {'ok': False, 'error': result['error']}
     else:
         out = {'ok': True, **(result or {})}
+        if out.get('running'):
+            try:
+                out['accounts'] = adapter_accounts(agent_id, user_id=user_id)
+                counts = {'claude': 0, 'codex': 0, 'other': 0}
+                for account in out['accounts']:
+                    key = account.get('provider')
+                    counts[key if key in counts else 'other'] += 1
+                out['provider_counts'] = counts
+                try:
+                    provider_state = _adapter_provider_status(agent_id)
+                    usable_accounts = [a for a in out['accounts']
+                                       if not a.get('disabled')
+                                       and not a.get('unavailable')]
+                    if usable_accounts and not provider_state['provider_ready']:
+                        sync_provider(agent_id, agent_name, user_id=user_id)
+                        provider_state = _adapter_provider_status(agent_id)
+                    out.update(provider_state)
+                except Exception as e:
+                    logger.debug('[Adapter] provider status unavailable for %s: %s',
+                                 agent_id[:8], e)
+                    out.update({'provider_id': f'adapter_{agent_id[:8]}',
+                                'provider_ready': False, 'model_count': 0})
+                    out['catalog_error'] = str(e)[:300]
+            except Exception as e:
+                logger.debug('[Adapter] account inventory unavailable for %s: %s',
+                             agent_id[:8], e)
+                out['accounts'] = []
+                out['provider_counts'] = {'claude': 0, 'codex': 0, 'other': 0}
+                out['accounts_error'] = str(e)[:300]
     with _status_lock:
         _status_cache[agent_id] = (now, out)
     return dict(out)
@@ -210,13 +458,23 @@ def ensure_adapter(agent_id: str, agent_name: str = '', user_id: str = '') -> di
                 outcome['detail'] = result['error']
             else:
                 port = int(result.get('port') or policy['port'])
-                models = fetch_models(agent_id, port, policy['api_key'],
-                                      user_id=user_id)
-                provision_provider(agent_id, agent_name, port,
-                                   policy['api_key'], models)
+                try:
+                    models = fetch_models(agent_id, port, policy['api_key'],
+                                          user_id=user_id)
+                except RuntimeError as e:
+                    # A brand-new adapter has no accounts yet. Starting it is
+                    # still success: Settings must expose the login buttons.
+                    if 'empty list' not in str(e):
+                        raise
+                    models = []
+                    deprovision_provider(agent_id)
+                if models:
+                    provision_provider(agent_id, agent_name, port,
+                                       policy['api_key'], models)
                 outcome = {'state': 'ready', 'detail': '',
                            'version': result.get('version', ''),
                            'port': port, 'models': len(models),
+                           'accounts_needed': not bool(models),
                            'provider_id': f'adapter_{agent_id[:8]}'}
         except Exception as e:
             logger.error('[Adapter] ensure failed for %s: %s',
@@ -226,6 +484,10 @@ def ensure_adapter(agent_id: str, agent_name: str = '', user_id: str = '') -> di
             _ensure_tasks[agent_id] = {**outcome, 'started_at':
                                        _ensure_tasks[agent_id]['started_at'],
                                        'finished_at': time.time()}
+        # A pre-start status poll may have cached ``running: false``. Drop it
+        # as soon as bring-up finishes so the next UI poll reflects the agent
+        # and its newly created account/catalog state immediately.
+        _invalidate_adapter_caches(agent_id)
         logger.info('[Adapter] ensure %s → %s %s', agent_id[:8],
                     outcome['state'], outcome.get('detail') or '')
 
@@ -242,6 +504,7 @@ def stop_adapter(agent_id: str, user_id: str = '') -> dict:
         'adapter_stop', {}, timeout=15, target_agent_id=agent_id,
         user_id=user_id, ttl=30)
     deprovision_provider(agent_id)
+    _invalidate_adapter_caches(agent_id)
     if error:
         return {'ok': False, 'error': error}
     return {'ok': True, **(result or {})}
@@ -296,19 +559,38 @@ def provision_provider(agent_id: str, agent_name: str, port: int,
                    for mid in model_ids],
     }
 
+    changed = {'yes': False}
+
     def _mutate(cfg):
-        providers = [p for p in (cfg.get('providers') or [])
-                     if p.get('id') != entry['id']]
-        providers.append(entry)
-        cfg['providers'] = providers
+        providers = list(cfg.get('providers') or [])
+        out = []
+        found = False
+        for current in providers:
+            if current.get('id') != entry['id']:
+                out.append(current)
+                continue
+            if not found:
+                out.append(entry)
+                found = True
+                if current != entry:
+                    changed['yes'] = True
+            else:
+                changed['yes'] = True
+        if not found:
+            out.append(entry)
+            changed['yes'] = True
+        if not changed['yes']:
+            return None
+        cfg['providers'] = out
         return cfg
 
     update_json_atomic(_SERVER_CONFIG_PATH, _mutate, default={})
-    reload_config()
-    reset_dispatcher()
-    logger.info('[Adapter] provisioned provider %s (%d models)',
-                entry['id'], len(model_ids))
-    return True
+    if changed['yes']:
+        reload_config()
+        reset_dispatcher()
+        logger.info('[Adapter] provisioned provider %s (%d models)',
+                    entry['id'], len(model_ids))
+    return changed['yes']
 
 
 def deprovision_provider(agent_id: str) -> bool:
@@ -323,6 +605,8 @@ def deprovision_provider(agent_id: str) -> bool:
         before = cfg.get('providers') or []
         after = [p for p in before if p.get('id') != pid]
         removed['n'] = len(before) - len(after)
+        if not removed['n']:
+            return None
         cfg['providers'] = after
         return cfg
 

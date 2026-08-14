@@ -51,11 +51,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+CONV_STATE_REDUCER = runtime_section_path('core/conv_state_reducer.js')
 
 
 def _node_available() -> bool:
@@ -79,7 +81,7 @@ function check(name, cond) {
 //             convIsBusy(conv), and reads/writes conv._authoritativeActiveTaskIds +
 //             conv._authoritativeActiveTaskIdsRev.
 function loadModule(rel) {
-  const p = path.join(process.argv[2], rel);
+  const p = process.argv[2];
   const src = fs.readFileSync(p, 'utf8');
   (0, eval)(src);
 }
@@ -151,6 +153,29 @@ check('reducer_exposes_pickAuthoritativeTaskIdForReconnect',
   check('reducer_never_writes_activeTaskId_optimistic',
         c.activeTaskId === undefined);
   check('reducer_no_settings_save', saveCalls === 0);
+}
+
+// A terminal event can beat a delayed running projection. Its tombstone must
+// suppress only the completed task while preserving unrelated live work.
+{
+  const c = {
+    id: 'c-terminal',
+    _terminalTaskIds: new Set(['tid-finished']),
+  };
+  applyRunningTaskIdsFrame([c], {
+    convId: 'c-terminal',
+    runningTaskIds: ['tid-finished', 'tid-other', 'tid-vu#vu'],
+    runningTaskIdsRev: [7000, 'r1'],
+  });
+  check('terminal_tombstone_blocks_busy_resurrection',
+        !c._authoritativeActiveTaskIds.has('tid-finished'));
+  check('terminal_tombstone_blocks_reconnect_resurrection',
+        !c._authoritativeAttachableTaskIds.has('tid-finished'));
+  check('terminal_tombstone_preserves_other_live_task',
+        c._authoritativeActiveTaskIds.has('tid-other') &&
+        c._authoritativeAttachableTaskIds.has('tid-other'));
+  check('terminal_tombstone_preserves_vu_carrier',
+        c._vuCarrierTaskIds.has('tid-vu'));
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -323,7 +348,7 @@ def test_conv_state_reducer_frontend():
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, JS_DIR],
+            ['node', harness, CONV_STATE_REDUCER],
             capture_output=True, text=True, timeout=60,
         )
     finally:

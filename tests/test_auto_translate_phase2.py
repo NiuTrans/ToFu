@@ -42,8 +42,13 @@ class _FakeDB:
 
     def fetchone(self):
         s = self._last_sql
-        if 'SELECT messages, settings' in s:
-            return (json.dumps(self._messages), json.dumps(self._settings))
+        if 'SELECT messages,' in s:
+            return {
+                'messages': json.dumps(self._messages),
+                'settings': json.dumps(self._settings),
+                'id': 'c1', 'user_id': 1, 'rev': 0,
+                'msg_count': len(self._messages),
+            }
         if 'SELECT updated_at' in s:
             return (123456,)
         return None

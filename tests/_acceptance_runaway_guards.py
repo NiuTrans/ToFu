@@ -4,8 +4,8 @@
 WHY THIS EXISTS
 ---------------
 "Merged" is not "live". On 2026-07-27 one swarm sub-agent ran 26,683,114
-rounds in 3.5h and wrote 9.1 GB into logs/app.log. The fix (chassis
-no-progress breaker + bounded SubTaskSpec defaults) is committed, but a
+rounds in 3.5h and wrote 9.1 GB into logs/app.log. The fix (a semantic
+no-progress breaker, with no numeric tool-round ceiling) is committed, but a
 long-lived server keeps running the code it was STARTED with — the running
 processes predated the commit and were still emitting the unbounded
 ``Round N/∞`` shape hours later.
@@ -127,15 +127,14 @@ def _result(name, ok, detail):
 
 
 def check_spec_defaults():
-    """SubTaskSpec must not be constructible as unlimited + untimed."""
+    """SubTaskSpec must not expose a numeric tool-round ceiling."""
     from lib.swarm.types import SubTaskSpec
     spec = SubTaskSpec(role='researcher', objective='probe')
-    ok = spec.timeout_seconds == 1800
-    unbounded = (spec.max_rounds == 0 and spec.timeout_seconds == 0)
+    ok = not hasattr(spec, 'max_rounds')
     return _result(
-        'spec_defaults_bounded', ok and not unbounded,
-        f'max_rounds={spec.max_rounds} timeout_seconds={spec.timeout_seconds} '
-        f'(expected timeout_seconds=1800, never 0+0)')
+        'spec_has_no_round_ceiling', ok,
+        f'has_max_rounds={hasattr(spec, "max_rounds")} '
+        f'timeout_seconds={spec.timeout_seconds}')
 
 
 def check_breaker_wired():
@@ -151,16 +150,15 @@ def check_breaker_wired():
 
 
 def check_round_line_states_bounds():
-    """The per-round log line must show real bounds, never a bare ∞."""
+    """The log must show the semantic breaker beside the unbounded loop."""
     from lib.swarm.agent import SubAgent
     from lib.swarm.types import SubTaskSpec
     agent = SubAgent.__new__(SubAgent)
-    agent.max_rounds = 0
     agent.spec = SubTaskSpec(role='r', objective='o')
-    label = SubAgent._round_budget_label(agent)
+    label = SubAgent._round_safety_label(agent)
     ok = label != '\u221e' and 'np=' in label
-    return _result('round_line_shows_bounds', ok,
-                   f'unlimited label renders as {label!r}')
+    return _result('round_line_shows_semantic_breaker', ok,
+                   f'unbounded loop label renders as {label!r}')
 
 
 def _cutover_anchor(text, truncated):

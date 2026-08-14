@@ -51,9 +51,11 @@ import tempfile
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = runtime_sections_dir()
 _SHARED_HARNESS = os.path.join(HERE, '_jsdom_harness.js')
 
 

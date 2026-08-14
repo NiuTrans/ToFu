@@ -61,6 +61,8 @@ def _peer_key(conv_id: str, agent_id: str = '') -> str:
     return f'{conv_id}#{agent_id}' if agent_id else conv_id
 
 _sweeper_started = False
+_sweeper_thread = None
+_sweeper_stop = threading.Event()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -442,24 +444,51 @@ def sweep() -> int:
 
 
 def _sweep_loop(interval: float) -> None:
-    while True:
-        time.sleep(interval)
+    while not _sweeper_stop.wait(interval):
         try:
             sweep()
         except Exception as e:
             logger.debug('[presence] sweep loop error: %s', e)
 
 
-def start_sweeper(interval: float = 10.0) -> None:
+def start_sweeper(interval: float = 10.0) -> bool:
     """Start the background sweep timer (idempotent)."""
-    global _sweeper_started
+    global _sweeper_started, _sweeper_thread
     with _lock:
-        if _sweeper_started:
-            return
+        if _sweeper_thread is not None and _sweeper_thread.is_alive():
+            return False
         _sweeper_started = True
-    threading.Thread(target=_sweep_loop, args=(interval,),
-                     name='presence-sweeper', daemon=True).start()
+        _sweeper_stop.clear()
+        _sweeper_thread = threading.Thread(
+            target=_sweep_loop, args=(interval,),
+            name='presence-sweeper', daemon=True)
+        _sweeper_thread.start()
     logger.info('[presence] sweeper started (interval=%.0fs)', interval)
+    return True
+
+
+def stop_sweeper(timeout: float = 2.0) -> bool:
+    """Signal and bounded-join the presence sweeper."""
+    global _sweeper_started, _sweeper_thread
+    _sweeper_stop.set()
+    with _lock:
+        thread = _sweeper_thread
+    if thread is None:
+        return True
+    try:
+        wait_seconds = max(0.0, float(timeout))
+    except (TypeError, ValueError, OverflowError) as exc:
+        logger.debug('[presence] invalid stop timeout; using 2.0: %s', exc)
+        wait_seconds = 2.0
+    if thread is not threading.current_thread():
+        thread.join(timeout=wait_seconds)
+    if thread.is_alive():
+        return False
+    with _lock:
+        if _sweeper_thread is thread:
+            _sweeper_thread = None
+            _sweeper_started = False
+    return True
 
 
 def _start_sweeper_once() -> None:

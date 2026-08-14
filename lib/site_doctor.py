@@ -39,8 +39,7 @@ logger = get_logger(__name__)
 
 __all__ = ['on_site_drift', 'run_doctor', 'DOCTOR_TOOLS']
 
-#: Bounded rounds (tool-eligible) and the cumulative token ceiling per run.
-_MAX_ROUNDS = 6
+#: Cumulative token ceiling per run. Tool use itself ends naturally.
 _TOKEN_BUDGET = 60000
 _MAX_TOKENS_PER_ROUND = 4096
 #: Bound on selector/JS arguments the model may hand us.
@@ -468,7 +467,7 @@ def run_doctor(site: str, url: str, evidence: dict | None = None,
     rounds = 0
     try:
         outcome = run_agent_loop(
-            abort=combined, max_tool_rounds=_MAX_ROUNDS,
+            abort=combined,
             round_tools=DOCTOR_TOOLS, dispatch=_dispatch,
             execute_tool=_execute, on_round_result=_on_round,
             on_tool_round=_on_tool_round)

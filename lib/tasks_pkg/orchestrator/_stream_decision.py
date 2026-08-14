@@ -20,15 +20,13 @@ and returns ``(action, new_premature_retry_count)`` where action is
 one of:
 
 * ``'break'`` — caller must break out of the stream loop.
-* ``'continue'`` — caller must continue (premature-close retry: the
-  round is re-run; the premature_retry_count ceiling expansion lives
-  in the returned count).
+* ``'continue'`` — caller must continue (bounded premature-close retry).
+* ``'program_continue'`` — caller must apply round budget gates, then
+  continue to obtain the final message after a Responses program output.
 * ``'proceed'`` — normal exit, fall through to the per-round gates.
 
-The premature-close retry counter is returned (not mutated on rs)
-because it is a chassis-owned plain local in run_task — the
-WHILE-loop ceiling ``max_tool_rounds + _premature_retry_count`` reads
-it directly.
+The premature-close retry counter is returned (not mutated on ``rs``) because
+the stream analyser uses it to enforce its failure-specific retry budget.
 """
 
 from __future__ import annotations
@@ -71,8 +69,8 @@ def apply_stream_decision(
     Returns
     -------
     tuple[str, int]
-        ``(action, new_premature_retry_count)`` — action is 'break' /
-        'continue' / 'proceed'.
+        ``(action, new_premature_retry_count)`` — action is 'break',
+        'continue', 'program_continue', or 'proceed'.
     """
     # ★ Post-stream analysis: premature close, abort, normal exit
     stream_decision = analyse_stream_result(
@@ -89,4 +87,6 @@ def apply_stream_decision(
         return 'break', new_count
     if stream_decision['action'] == 'continue':
         return 'continue', new_count
+    if stream_decision['action'] == 'program_continue':
+        return 'program_continue', new_count
     return 'proceed', new_count

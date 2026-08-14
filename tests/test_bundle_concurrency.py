@@ -1,287 +1,81 @@
-"""Regression test for the JS-bundler CONCURRENT-BUILD race (2026-07-10 incident).
+"""Atomic publication contracts for concurrent Vite builds."""
 
-Production symptom (root-caused from logs): ~96 pytest-xdist workers all imported
-``server.py`` at once, and ``server.py`` called ``build_bundle()`` at MODULE
-IMPORT time. The bundler wrote the content-hash-named ``bundle-<hash>.js``
-NON-atomically (``open(path,'w')`` → separate ``node --check`` → ``os.remove`` on
-failure) with NO lock, so the concurrent builders clobbered the SAME path. Two
-failure signatures appeared in the same window:
-
-  * ``FAILED syntax check`` — ``node --check`` read a file another worker was
-    still writing (truncated mid-string → SyntaxError).
-  * ``MODULE_NOT_FOUND`` — ``node --check`` ran after a DIFFERENT worker's
-    failure branch had already ``os.remove()``'d the file.
-
-Both refused to serve the bundle → the frontend "wouldn't start".
-
-The fix (two independent defenses, both asserted here):
-
-  1. ``_assemble_bundle`` publishes ATOMICALLY: write a unique temp file in the
-     same dir → gate the temp → ``os.rename`` into the hash path only on
-     success, and short-circuit when the hash path already exists. A reader
-     never sees a partial/absent hash path; a failed gate deletes only the
-     private temp.
-  2. ``build_bundle`` runs under a cross-process ``flock`` so simultaneous
-     builders serialize, then adopt the just-published artifact.
-
-  3. Importing ``server`` no longer builds the bundle (the build moved into the
-     server startup path), so a mere ``import server`` has no side effect on the
-     live ``static/js/`` tree.
-
-These tests bite: revert the temp+rename to a direct in-place write, or remove
-the flock, and the concurrency assertions fail; restore the import-time
-``build_bundle()`` call and the no-side-effect test fails.
-"""
 from __future__ import annotations
 
-import logging
-import os
-import subprocess
-import sys
-import threading
+import inspect
+import json
+from pathlib import Path
 
 import pytest
 
+from lib.vite_assets import VITE_MANIFEST, validate_vite_artifact
+
+
 pytestmark = pytest.mark.unit
-
-# ── Shared temp-tree helpers (mirror test_bundle_corruption_guard.py) ──────
-
-
-def _make_js_tree(tmp_path, files: dict):
-    js_dir = tmp_path / 'js'
-    js_dir.mkdir()
-    for name, content in files.items():
-        p = js_dir / name
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding='utf-8')
-    return str(js_dir)
+ROOT = Path(__file__).resolve().parents[1]
+BUILD = ROOT / 'scripts/build_frontend.mjs'
 
 
-def _point_bundler_at(monkeypatch, js_dir, files):
-    """Repoint the bundler module globals at a throwaway JS dir."""
-    from lib import js_bundler
-    monkeypatch.setattr(js_bundler, 'JS_DIR', js_dir)
-    monkeypatch.setattr(js_bundler, '_BUNDLE_FILES', list(files.keys()))
-    monkeypatch.setattr(js_bundler, '_DEFERRED_FILES', [])
-    monkeypatch.setattr(js_bundler, '_bundle_filename', None)
-    monkeypatch.setattr(js_bundler, '_feature_filename', None)
-    monkeypatch.setattr(js_bundler, '_bundle_mtime', 0)
-    monkeypatch.setattr(js_bundler, '_CRITICAL_FILES', frozenset())
-    # Keep output deterministic regardless of whether esbuild is installed.
-    monkeypatch.setattr(js_bundler, '_resolve_esbuild', lambda: None)
-    # The build lock must live in the throwaway dir, not the real static/js.
-    monkeypatch.setattr(js_bundler, '_BUILD_LOCK_PATH',
-                        os.path.join(js_dir, '.bundle-build.lock'))
+def _source() -> str:
+    return BUILD.read_text(encoding='utf-8')
 
 
-# ── 1. Atomic publish: a failed node gate never deletes/creates a hash path
-#      another builder is using; only a private temp is dropped. ────────────
-
-def test_failed_gate_only_removes_private_temp(tmp_path, monkeypatch):
-    from lib import js_bundler
-
-    files = {'a.js': 'window.A = 1;\n'}
-    js_dir = _make_js_tree(tmp_path, files)
-    _point_bundler_at(monkeypatch, js_dir, files)
-
-    # Force the syntax gate to fail for THIS build.
-    monkeypatch.setattr(js_bundler, '_node_syntax_ok', lambda path: (False, 'forced'))
-
-    name, size = js_bundler._assemble_bundle(list(files.keys()), 'bundle-', critical=False)
-    assert name is None, 'a failed gate must not publish a bundle'
-
-    # No hash-named bundle and no leftover temp should remain. The private
-    # temp is named ".bundle-<hash>.<rand>.js" (leading dot keeps it out of the
-    # served set); it must be cleaned up on failure.
-    leftovers = os.listdir(js_dir)
-    assert not any(f.startswith('bundle-') for f in leftovers), (
-        'failed build must not leave a bundle-<hash>.js: %s' % leftovers
-    )
-    assert not any(f.startswith('.bundle-') and f.endswith('.js') for f in leftovers), (
-        'failed build must clean up its private temp file: %s' % leftovers
-    )
+def test_build_uses_a_private_staging_directory_and_always_cleans_it():
+    source = _source()
+    assert "mkdtemp(join(dirname(liveDir), '.vite-build-'))" in source
+    assert 'process.env.TOFU_VITE_OUT_DIR = temporaryDir' in source
+    assert 'await rm(temporaryDir, { recursive: true, force: true })' in source
 
 
-def test_second_build_short_circuits_on_existing_hash(tmp_path, monkeypatch):
-    """A second build of identical content adopts the on-disk file without
-    re-writing it — the node gate is not even invoked the second time."""
-    from lib import js_bundler
-
-    files = {'a.js': 'window.A = 1;\n'}
-    js_dir = _make_js_tree(tmp_path, files)
-    _point_bundler_at(monkeypatch, js_dir, files)
-
-    name1, _ = js_bundler._assemble_bundle(list(files.keys()), 'bundle-', critical=False)
-    assert name1 and name1.startswith('bundle-')
-
-    calls = {'n': 0}
-    real_gate = js_bundler._node_syntax_ok
-
-    def _counting_gate(path):
-        calls['n'] += 1
-        return real_gate(path)
-
-    monkeypatch.setattr(js_bundler, '_node_syntax_ok', _counting_gate)
-    name2, _ = js_bundler._assemble_bundle(list(files.keys()), 'bundle-', critical=False)
-    assert name2 == name1, 'identical content must resolve to the same hash file'
-    assert calls['n'] == 0, (
-        'the second build must short-circuit on the existing hash path, not '
-        're-gate/re-write it'
-    )
+def test_each_content_hashed_asset_is_published_by_atomic_rename():
+    source = _source()
+    assert 'async function atomicCopy(source, destination)' in source
+    assert "const temporary = `${destination}.publish-${process.pid}-" in source
+    assert 'await copyFile(source, temporary)' in source
+    assert 'await rename(temporary, destination)' in source
 
 
-# ── 2. Concurrency: N threads building the SAME tree at once must produce one
-#      valid bundle and log NO "FAILED syntax check". ────────────────────────
-
-def test_concurrent_builds_produce_one_valid_bundle(tmp_path, monkeypatch, caplog):
-    from lib import js_bundler
-
-    # A realistic-ish payload so writing takes non-zero time (widens the race
-    # window the old in-place write lost).
-    big = 'window.X = "' + ('a' * 40000) + '";\n'
-    files = {'a.js': 'window.A = 1;\n', 'big.js': big, 'c.js': 'window.C = 3;\n'}
-    js_dir = _make_js_tree(tmp_path, files)
-    _point_bundler_at(monkeypatch, js_dir, files)
-
-    results: list = []
-    errors: list = []
-
-    def _worker():
-        try:
-            results.append(js_bundler.build_bundle())
-        except Exception as e:  # noqa: BLE001 - surface any thread crash
-            errors.append(e)
-
-    caplog.set_level(logging.CRITICAL, logger='lib.js_bundler')
-
-    threads = [threading.Thread(target=_worker) for _ in range(24)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    assert not errors, 'no builder thread may raise: %s' % errors
-    assert all(r and r.startswith('bundle-') for r in results), (
-        'every concurrent builder must return a valid bundle name: %s' % results
-    )
-    assert len(set(results)) == 1, (
-        'all builders must converge on ONE content-hash: %s' % set(results)
-    )
-
-    # The incident signature: a refused bundle.
-    assert not any('FAILED syntax check' in r.getMessage() for r in caplog.records), (
-        'no build may log "FAILED syntax check" under concurrency'
-    )
-
-    # Exactly one bundle survives; no temp files linger.
-    survivors = [f for f in os.listdir(js_dir) if f.startswith('bundle-')]
-    assert len(survivors) == 1, 'exactly one bundle must survive: %s' % survivors
-    assert not any(f.startswith('.bundle-') and f.endswith('.js') for f in os.listdir(js_dir)), (
-        'no temp files may linger after concurrent builds'
-    )
-
-    # The surviving bundle is complete (contains all sources, no truncation).
-    text = (tmp_path / 'js' / survivors[0]).read_text(encoding='utf-8')
-    assert 'window.A = 1;' in text and 'window.C = 3;' in text
-    assert text.count('a' * 40000) == 1, 'big payload must be present and intact'
+def test_existing_hash_short_circuits_without_overwrite():
+    source = _source()
+    start = source.index('async function atomicCopy(')
+    end = source.index('async function publishManifest(', start)
+    block = source[start:end]
+    assert "await open(destination, 'r')" in block
+    assert 'return;' in block
+    assert block.index("await open(destination, 'r')") < block.index('copyFile(')
 
 
-# ── 4. Cleanup age grace: a FOREIGN keep-set (another process) can never
-#      delete a YOUNG artifact (xdist / supervisor-restart overlap), while
-#      genuinely-old artifacts are still reaped. ────────────────────────────
-
-def _plant_built(js_dir, name, age_s=0):
-    p = os.path.join(js_dir, name)
-    with open(p, 'w', encoding='utf-8') as f:
-        f.write('// built artifact\n')
-    if age_s:
-        import time as _t
-        old = _t.time() - age_s
-        os.utime(p, (old, old))
-    return p
+def test_manifest_is_the_commit_point_after_assets_and_previous_graph():
+    source = _source()
+    assets_at = source.index('for (const asset of nextAssets)')
+    previous_at = source.index("'previous-manifest.json'")
+    manifest_at = source.index("'manifest.json'), nextManifest")
+    cleanup_at = source.index('const retained = new Set(')
+    assert assets_at < previous_at < manifest_at < cleanup_at
 
 
-def test_cleanup_never_deletes_young_artifact_across_keep_sets(tmp_path, monkeypatch):
-    """The production hazard: process B's cleanup (keep-set = ITS OWN build)
-    must NOT delete the bundle/pack process A just published and is serving —
-    a stale index references the bundle (self-healed), but an i18n pack 404
-    blanks the whole UI via t()'s silent fallback. The mtime grace is the
-    only process-independent clock (the build lock never covers readers)."""
-    from lib import js_bundler
-    js_dir = str(tmp_path)
-    monkeypatch.setattr(js_bundler, 'JS_DIR', js_dir)
-    young_bundle = _plant_built(js_dir, 'bundle-aaaaaaaa.js')
-    young_pack = _plant_built(js_dir, 'i18n-zh-bbbbbbbb.js')
-    # A FOREIGN keep-set: what a second process would keep (its own artifacts
-    # only — A's files are not in it).
-    js_bundler._clean_old_bundles('bundle-cccccccc.js', 'feature-dddddddd.js',
-                                  keep_packs=('i18n-en-eeeeeeee.js',))
-    assert os.path.exists(young_bundle), 'a young bundle must survive a foreign cleanup'
-    assert os.path.exists(young_pack), 'a young i18n pack must survive a foreign cleanup'
+def test_live_and_previous_manifests_reference_present_files():
+    current = validate_vite_artifact()
+    assert current
+    previous_path = Path(VITE_MANIFEST).with_name('previous-manifest.json')
+    if previous_path.exists():
+        previous = json.loads(previous_path.read_text(encoding='utf-8'))
+        for row in previous.values():
+            for relative in (row.get('file'), *(row.get('css') or ()),
+                             *(row.get('assets') or ())):
+                assert (previous_path.parent / relative).is_file(), relative
 
 
-def test_cleanup_reaps_artifact_older_than_grace(tmp_path, monkeypatch):
-    """The grace is a TTL, not a leak: artifacts older than the window are
-    reaped as before (disk stays bounded)."""
-    from lib import js_bundler
-    js_dir = str(tmp_path)
-    monkeypatch.setattr(js_bundler, 'JS_DIR', js_dir)
-    ancient = _plant_built(js_dir, 'bundle-ffffffff.js',
-                           age_s=js_bundler._BUILT_ARTIFACT_GRACE_S + 60)
-    js_bundler._clean_old_bundles('bundle-cccccccc.js', None)
-    assert not os.path.exists(ancient), 'an artifact past the grace must be reaped'
+def test_cleanup_retains_the_current_and_previous_graphs():
+    source = _source()
+    assert 'new Set([...nextAssets, ...previousAssets]' in source
+    assert "if (!retained.has(file)) await rm(" in source
 
 
-def test_grace_zero_restores_keep_set_only_behaviour(tmp_path, monkeypatch):
-    """NEUTER: grace=0 removes the protection entirely — a foreign keep-set
-    cleanup deletes the young artifact again (proves the mtime grace is what
-    protects the young files above, not some other filter)."""
-    from lib import js_bundler
-    js_dir = str(tmp_path)
-    monkeypatch.setattr(js_bundler, 'JS_DIR', js_dir)
-    monkeypatch.setattr(js_bundler, '_BUILT_ARTIFACT_GRACE_S', 0)
-    young = _plant_built(js_dir, 'bundle-aaaaaaaa.js')
-    js_bundler._clean_old_bundles('bundle-cccccccc.js', None)
-    assert not os.path.exists(young), (
-        'with grace=0 the foreign cleanup must delete — the grace is load-bearing')
+def test_server_import_and_request_paths_never_build_frontend_code():
+    import server
 
-
-# ── 3. No import-time side effect: importing `server` must NOT build a bundle
-#      into the live static/js/ tree. ─────────────────────────────────────────
-# ── 3. No import-time side effect: importing `server` must NOT build a bundle
-#      into the live static/js/ tree. ─────────────────────────────────────────
-
-def test_importing_server_does_not_build_bundle():
-    """`import server` must be side-effect-free w.r.t. the JS bundle.
-
-    Run in a SUBPROCESS (importing server in-process would boot half the app).
-    The child monkeypatches ``lib.js_bundler.build_bundle`` to a tripwire BEFORE
-    importing server; if import calls it, the child exits non-zero.
-    """
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    child = (
-        "import sys\n"
-        "import lib.js_bundler as jb\n"
-        "_calls = []\n"
-        "jb.build_bundle = lambda *a, **k: _calls.append(1)\n"
-        "import server  # noqa: F401 — importing must not build the bundle\n"
-        "sys.exit(3 if _calls else 0)\n"
-    )
-    env = dict(os.environ)
-    # Keep the import cheap/quiet and off the real DB/network.
-    env.setdefault('TOFU_DB_BACKEND', 'sqlite')
-    env.setdefault('PYTEST_DISABLE_PLUGIN_AUTOLOAD', '1')
-    proc = subprocess.run(
-        [sys.executable, '-c', child],
-        cwd=repo_root, env=env, capture_output=True, text=True, timeout=180,
-    )
-    assert proc.returncode != 3, (
-        'importing server must NOT call build_bundle() (import-time side effect '
-        'reintroduced).\nstdout:\n%s\nstderr:\n%s' % (proc.stdout[-2000:], proc.stderr[-2000:])
-    )
-    # returncode 0 = clean; any other non-3 failure means the import itself
-    # broke — surface it so we don't silently pass on a broken import.
-    assert proc.returncode == 0, (
-        'server import failed (rc=%s):\nstdout:\n%s\nstderr:\n%s'
-        % (proc.returncode, proc.stdout[-2000:], proc.stderr[-2000:])
-    )
+    source = inspect.getsource(server._check_frontend_artifact)
+    assert 'validate_vite_artifact' in source
+    assert 'subprocess' not in source
+    assert 'build' not in source.lower()

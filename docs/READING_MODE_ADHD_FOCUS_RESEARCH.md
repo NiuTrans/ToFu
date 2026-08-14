@@ -1,10 +1,11 @@
 # Reading Surfaces (Reading Mode + chatinner) — ADHD / Focus Research
 
-> **Status:** Research deliverable, awaiting owner sign-off. **No feature code written.**
+> **Status:** Research deliverable; measure fix landed 2026-08-10. Focus/Quick View
+> were separately retired by owner decision and must not be restored implicitly.
 > Captured 2026-07-08 (extended same day: warm-background lever, BeeLine rejection,
 > chatinner analysis). Two reading surfaces:
 > - **Reading Mode** = `static/js/paper-reader.js` (DEFERRED bundle) + `.paper-report-*`
->   in `static/styles.css`. Comfort controls: `--reader-measure` (640/720/860) +
+>   in `static/styles.css`. Comfort controls: `--reader-measure` (60/68/78ch) +
 >   `--reader-font-scale` (0.85–1.3), all-theme inheriting (styles.css:1227-1228).
 > - **chatinner** = `.chat-inner` / `.md-content` chat message column
 >   (styles.css:317 + :344). Fixed 14.5px body, NO measure/scale control today.
@@ -31,14 +32,13 @@ project-wide measure defect.
   it as an opt-in toggle explicitly labeled experimental.
 - Our reader is already ~70% aligned with the *strong* evidence (measure cap,
   1.75 line-height, left-aligned, per-theme environments, glossary, WPM bar).
-- **Verified finding:** the "Wide" 860px measure exceeds the 90-CPL return-sweep
-  failure threshold at **every** font scale; and the **default** (720 @ scale 1.0)
-  is already ~99 CPL, above the 60–80 comfort band. This is the single concrete,
-  computed defect surfaced by this research.
-- Highest-value evidence-backed additions: a **Focus mode** (dim non-active
-  paragraph + optional active-line guide), an **optional high-legibility font**
-  (Atkinson Hyperlegible / Lexend), and **re-tuning the measure presets** so the
-  common case sits in-band.
+- **Verified finding (pre-fix):** the old "Wide" 860px measure exceeded the
+  90-CPL return-sweep threshold at **every** font scale; the old default
+  (720 @ scale 1.0) was ~99 CPL. **Fixed 2026-08-10:** presets are now
+  font-relative 60/68/78ch, so changing A−/A+ no longer changes CPL.
+- Remaining evidence-backed option: an **optional high-legibility font**
+  (Atkinson Hyperlegible / Lexend). Focus mode remains research context, not an
+  active proposal, because the owner deliberately removed that control.
 
 ---
 
@@ -157,7 +157,7 @@ evidence is mixed-to-negative.
 
 ---
 
-## 3. Verified CPL calculation
+## 3. Verified CPL calculation (old pixel presets; defect baseline)
 
 **Method:** `CPL = measure_px / (0.5em × font_px)` with average proportional-sans
 glyph advance ≈ 0.5em (Bringhurst/Tinker heuristic; real sans avg ~0.48–0.50em).
@@ -197,19 +197,15 @@ tofu worst case; **CJK is different** — full-width glyphs advance ~1em, so 720
 
 ## 4. Prioritized reader-mode gaps (mapped to existing seams)
 
-Ordered by evidence strength × cost. **No code written yet — proposals only.**
+Ordered by evidence strength × cost. **Implementation status updated 2026-08-10.**
 
-1. **Re-tune measure presets so the common case is in-band.** The cheapest, most
-   evidence-backed fix. Options: (a) drop "Wide" or cap it ~760px; (b) lower the
-   Comfortable default toward ~640–680px so scale 1.0 lands ≤~90 CPL; (c) tie the
-   effective measure to font-scale. Pure `--reader-measure` change at
-   styles.css:1227 + `_READER_WIDTHS` in paper-reader.js. **Verify against the CPL
-   table above.**
-2. **Focus mode toggle: dim non-active paragraphs + optional active-line guide.**
-   Best mechanism-to-cost ratio for the two documented ADHD bottlenecks (overwhelm
-   + line-tracking/regression). Pure CSS/JS on existing `#paperReportContent` /
-   `#paperReviewContent` containers, driven by a new `--reader-*` var + a body
-   class, same pattern as the comfort controls.
+1. ✅ **Re-tune measure presets so the common case is in-band.** Landed as
+   60/68/78ch with 68ch default. Font-relative measure preserves CPL across all
+   six scale steps; A+ now also disables visibly at its maximum.
+2. **Focus mode is retired by product decision.** It was previously prototyped,
+   then deliberately removed with Quick View to keep the reader toolbar and
+   mental model small. The evidence remains useful, but it is not a request to
+   restore those controls; future focus work needs a new explicit owner decision.
 3. **Optional high-legibility reader font (Atkinson Hyperlegible or Lexend).**
    Real evidence, free/OFL, slots into the existing per-theme font-var system (the
    `calc(<base>px * var(--reader-font-scale))` chain). Self-hosted static like the

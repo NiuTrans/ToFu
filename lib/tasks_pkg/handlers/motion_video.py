@@ -119,6 +119,7 @@ def _handle_motion_video_tool(task, tc, fn_name, tc_id, fn_args, rn,
             output = _resolve(fn_args.get('output', ''), proj)
             timeout = int(fn_args.get('timeout') or 1800)
             result = mv.concat_mp4s(inputs, output, timeout=timeout,
+                                    transitions=fn_args.get('transitions'),
                                     abort_event=abort_event)
             badge = ('concatenated' if result.get('ok')
                      else (result.get('category') or 'failed'))
@@ -158,9 +159,46 @@ def _handle_motion_video_tool(task, tc, fn_name, tc_id, fn_args, rn,
             audio = _resolve(fn_args.get('audio', ''), proj)
             output = _resolve(fn_args.get('output', ''), proj)
             loudnorm = fn_args.get('loudnorm', True)
-            result = mv.mux_audio_video(video, audio, output,
-                                        loudnorm=bool(loudnorm),
-                                        abort_event=abort_event)
+            plan_path = _resolve(fn_args.get('audio_plan_path', ''), proj)
+            if plan_path:
+                scenes_path = _resolve(fn_args.get('scenes_path', ''), proj)
+                with open(plan_path, encoding='utf-8') as handle:
+                    raw_plan = json.load(handle)
+                scenes = []
+                if scenes_path:
+                    with open(scenes_path, encoding='utf-8') as handle:
+                        scenes = json.load(handle)
+                    if not all(
+                            scene.get('timeline_contract_version')
+                            == mv.TIMELINE_CONTRACT_VERSION
+                            for scene in scenes):
+                        # Keep the direct tool on the same program-time clock
+                        # as the topic engine.  Legacy storyboards do not yet
+                        # carry timeline_start_s, so scene-relative cues would
+                        # otherwise all resolve against t=0.
+                        mv.normalise_timeline_contract(scenes)
+                probe = mv.probe_video(video) or {}
+                duration = float(probe.get('duration') or 0)
+                out_dir = os.path.dirname(os.path.abspath(output)) or '.'
+                plan = mv.normalise_audio_plan(
+                    raw_plan, scenes,
+                    base_dir=os.path.dirname(os.path.abspath(plan_path)),
+                    stage_dir=os.path.join(out_dir, 'audio', 'assets'),
+                    program_duration=duration)
+                from lib.json_store import write_json_atomic
+                normalized_path = os.path.join(out_dir, 'audio_plan.json')
+                attribution_path = os.path.join(
+                    out_dir, 'audio_attribution.txt')
+                write_json_atomic(normalized_path, plan)
+                mv.write_audio_attribution(plan, attribution_path)
+                result = mv.mix_audio_timeline(
+                    video, audio, plan, output, abort_event=abort_event)
+                result['audio_plan_path'] = normalized_path
+                result['audio_attribution_path'] = attribution_path
+            else:
+                result = mv.mux_audio_video(video, audio, output,
+                                            loudnorm=bool(loudnorm),
+                                            abort_event=abort_event)
             badge = ('muxed' if result.get('ok')
                      else (result.get('category') or 'failed'))
 
@@ -223,6 +261,7 @@ def _handle_produce_video(task, tc, fn_name, tc_id, fn_args, rn,
                 max_scenes = 8
             max_scenes = max(3, min(max_scenes, 12))
             narration = bool(fn_args.get('narration', True))
+            model = str(fn_args.get('model') or '').strip()
 
             job_id = _motion_task_id()
             workdir = _os.path.join(motion_root(), 'jobs', job_id)
@@ -235,6 +274,9 @@ def _handle_produce_video(task, tc, fn_name, tc_id, fn_args, rn,
             job['lang'] = lang
             job['max_scenes'] = max_scenes
             job['kind'] = 'topic'
+            if model:
+                job['model'] = model
+                job['qa_model'] = model
             # 默认精品 (owner 2026-07-27): the template path cannot pass the
             # renderer's own lint, so it must not be what a user gets by
             # default. 'template' stays reachable for explicit speed-over-looks.
@@ -360,6 +402,7 @@ def _handle_produce_slides(task, tc, fn_name, tc_id, fn_args, rn,
             lang = 'en' if str(fn_args.get('lang') or 'zh').strip() == 'en' \
                 else 'zh'
             style = str(fn_args.get('style') or '').strip()
+            model = str(fn_args.get('model') or '').strip()
             try:
                 max_pages = int(fn_args.get('max_pages') or 12)
             except (TypeError, ValueError) as _e:
@@ -375,10 +418,11 @@ def _handle_produce_slides(task, tc, fn_name, tc_id, fn_args, rn,
                 conv_id = task.get('conv_id') or task.get('convId') or ''
             started = start_slides_job(topic, lang=lang, style=style,
                                        max_pages=max_pages, size=size,
-                                       conv_id=conv_id)
+                                       conv_id=conv_id, model=model)
             tid = started['task_id']
             result = {'ok': True, 'task_id': tid, 'topic': topic,
                       'lang': lang, 'style': style, 'max_pages': max_pages,
+                      'model': model,
                       'deduped': started.get('deduped', False),
                       'poll': f'/api/v1/tasks/{tid}',
                       'download': f'/api/v1/slides/{tid}/file',

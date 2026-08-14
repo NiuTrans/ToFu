@@ -62,11 +62,13 @@ _EXPECTED_CAPS = {
     'claude-fable-5':        {'text', 'vision', 'thinking'},
 }
 
-# Expected USD pricing (per 1M) — CNY list prices converted at 7.24.
+# Expected global USD pricing (per 1M). GPT-5.6 rows follow the canonical
+# public OpenAI contract; provider-specific marketplace cards cannot redefine
+# a model id's process-global cost row.
 _EXPECTED_PRICING = {
-    'gpt-5.6-sol':           (4.97, 29.83),    # ¥36/¥216
-    'gpt-5.6-terra':         (2.49, 14.92),    # ¥18/¥108
-    'gpt-5.6-luna':          (0.99, 5.97),     # ¥7.2/¥43.2
+    'gpt-5.6-sol':           (5.00, 30.00),
+    'gpt-5.6-terra':         (2.00, 12.00),
+    'gpt-5.6-luna':          (0.20, 1.20),
     'gemini-3.6-flash':      (1.49, 7.46),     # ¥10.80/¥54.00
     'gemini-3.5-flash-lite': (0.30, 2.49),     # ¥2.16/¥18
     'claude-fable-5':        (9.94, 49.72),    # ¥72/¥360
@@ -170,17 +172,17 @@ def test_alias_group_interchangeable_with_fable_5():
 
 def test_gpt56_sub_skus_inherit_the_56_wire_shape():
     """terra/luna/sol are GPT-5.6-generation models: is_gpt_56 must hold (the
-    ``ultra`` reasoning tier applies) and build_body must emit the
+    legacy ``ultra`` maps to the public top rung ``max``) and build_body must emit the
     OpenAI-native ``reasoning_effort`` string, never a thinking block."""
     from lib.llm import build_body
     from lib.model_info._family import is_gpt5, is_gpt_56
     for mid in ('gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'):
         assert is_gpt5(mid), mid
-        assert is_gpt_56(mid), '%s must detect as GPT-5.6+ (ultra tier)' % mid
+        assert is_gpt_56(mid), '%s must detect as GPT-5.6+ (max tier)' % mid
         body = build_body(mid, _DUMMY_MSGS, max_tokens=4096,
                           thinking_enabled=True, thinking_depth='ultra',
                           stream=False)
-        assert body.get('reasoning_effort') == 'ultra', (mid, body)
+        assert body.get('reasoning_effort') == 'max', (mid, body)
         assert 'thinking' not in body
         assert 'enable_thinking' not in body
 
@@ -246,16 +248,14 @@ def test_neuter_pricing_tier_thresholds_discriminate():
 
 
 def test_neuter_ultra_tier_discriminates_pre_56():
-    """The ultra assertions above are only meaningful if an older GPT-5.x
-    really clamps — gpt-5.4 must downgrade ultra→high (mirror of the
-    pre-existing ladder guard, kept here as this file's neuter face)."""
+    """GPT-5.4 clamps Tofu's ultra alias to its live top xhigh rung."""
     from lib.llm import build_body
     from lib.model_info._family import is_gpt_56
     assert not is_gpt_56('gpt-5.4')
     body = build_body('gpt-5.4', _DUMMY_MSGS, max_tokens=4096,
                       thinking_enabled=True, thinking_depth='ultra',
                       stream=False)
-    assert body.get('reasoning_effort') == 'high'
+    assert body.get('reasoning_effort') == 'xhigh'
 
 
 if __name__ == '__main__':

@@ -53,11 +53,23 @@ import re
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-JS_DIR = os.path.normpath(os.path.join(HERE, '..', 'static', 'js'))
-API_JS = os.path.join(JS_DIR, 'api.js')
+JS_DIR = os.path.normpath(os.path.join(HERE, '..', 'frontend', 'src'))
+API_JS = runtime_section_path('api.js')
+ORCHESTRATION_API_JS = runtime_section_path('api/orchestrations.js')
+ORCHESTRATION_ENDPOINTS_JS = runtime_section_path(
+    'api/orchestration-endpoints.js')
+API_SURFACE_FILES = (
+    API_JS, ORCHESTRATION_ENDPOINTS_JS, ORCHESTRATION_API_JS,
+)
+API_SURFACE_RELPATHS = {
+    os.path.relpath(path, JS_DIR).replace(os.sep, '/')
+    for path in API_SURFACE_FILES
+}
 
 
 # ── Shared helpers ────────────────────────────────────────────────────
@@ -67,7 +79,7 @@ def _strip_comments(src: str) -> str:
     appears inside an already-open ``//`` line comment — as real syntax.
 
     WHY that rule matters (the incident this guard was born from): the naive
-    ``re.sub(r'/\*.*?\*/', …, DOTALL)`` pass ran FIRST and matched the ``/*``
+    ``re.sub(r'/\\*.*?\\*/', …, DOTALL)`` pass ran FIRST and matched the ``/*``
     inside the *line* comment ``// … /api/paper/* (multipart …)`` — that ``*``
     is a path wildcard, not a comment closer. It then ate forward to the next
     real ``*/``, deleting the live ``upload:`` / ``fetchArxivStream:`` entries
@@ -114,6 +126,11 @@ def _read(path: str) -> str:
         return f.read()
 
 
+def _api_surface_source() -> str:
+    """Return the core client plus focused domain transports as one surface."""
+    return '\n'.join(_read(path) for path in API_SURFACE_FILES)
+
+
 # ── api.js parsing ────────────────────────────────────────────────────
 # Verb wrapper name → HTTP method. These wrappers encode the method in their
 # NAME (see api.js ``function get/post/put/patch/del/stream``), so the method
@@ -158,27 +175,57 @@ def _api_js_path_verbs():
     plus a list of unresolved-method call sites.
 
     Resolution strategy (see module docstring, Direction 1):
-      1. Verb wrappers ``get/post/put/patch/del/stream('/api/…')`` → method
+      1. Canonical generated orchestration HTTP contracts → route and method
+         from ``lib.orchestration.http_endpoint_contract``.
+      2. Verb wrappers ``get/post/put/patch/del/stream('/api/…')`` → method
          from the wrapper NAME.
-      2. ``request('/api/…', {method:'X'})`` → literal method (default GET).
-      3. Two-pass indirection ``const url = <literal> … request(url,{method})``:
+      3. ``request('/api/…', {method:'X'})`` → literal method (default GET).
+      4. Two-pass indirection ``const url = <literal> … request(url,{method})``:
          a path literal NOT directly preceded by an opener is matched to the
          nearest following ``request(<var>, {method:'X'})`` in a bounded window.
-      4. ``_resolve('/api/…')`` URL builders (href / asset / exportUrl) → GET.
-      5. ``_*_BASE`` plugin-prefix constants → excluded (plugin owns routes).
+      5. ``_resolve('/api/…')`` URL builders (href / asset / exportUrl) → GET.
+      6. ``_*_BASE`` plugin-prefix constants → excluded (plugin owns routes).
 
     Returns ``(pairs, unresolved)`` where ``pairs`` is a set of
     ``(path, METHOD)`` and ``unresolved`` is a list of ``(path, reason)`` whose
     method could not be statically determined — the caller FAILS on any.
     """
-    s = _strip_comments(_read(API_JS))
+    s = _strip_comments(_api_surface_source())
     bases = _base_literals(s)
     opener = re.compile(r'(get|post|put|patch|del|stream|request|_resolve)\(\s*$')
 
     pairs: set[tuple[str, str]] = set()
     unresolved: list[tuple[str, str]] = []
 
+    # The browser's orchestration route/verb file is generated from this
+    # Python registry and guarded separately by its --check test. Seed those
+    # pairs directly so this live-url-map guard keeps proving every generated
+    # operation resolves to the method the server actually registered.
+    from lib.orchestration.http_endpoint_contract import (
+        orchestration_http_endpoint_dicts,
+    )
+    pairs.update(
+        (_norm_path(contract['route']), contract['method'])
+        for contract in orchestration_http_endpoint_dicts().values()
+    )
+
+    # Focused transports keep their route and method as adjacent literals in
+    # the canonical endpoint registry, then dispatch dynamically at runtime.
+    # Record those pairs first and exclude their path literals from the legacy
+    # call-opener scanner below so dynamic dispatch is still statically proven.
+    descriptor_path_starts: set[int] = set()
+    descriptor_re = re.compile(
+        r"""_endpoint\(\s*(['"])(/api/[^'"]*)\1\s*,\s*
+            (['"])([A-Z]+)\3""",
+        re.VERBOSE,
+    )
+    for descriptor in descriptor_re.finditer(s):
+        descriptor_path_starts.add(descriptor.start(2) - 1)
+        pairs.add((_norm_path(descriptor.group(2)), descriptor.group(4)))
+
     for m in re.finditer(r"""[`'"](/api/[^`'"]*)[`'"]""", s):
+        if m.start() in descriptor_path_starts:
+            continue
         raw = m.group(1)
         if raw in bases:
             continue
@@ -245,7 +292,7 @@ def _api_js_domain_methods() -> dict[str, set[str]]:
     we collect top-level ``key:`` identifiers (method names). Nested object
     literals are skipped by only taking keys at brace-depth 1 of the block.
     """
-    s = _strip_comments(_read(API_JS))
+    s = _strip_comments(_api_surface_source())
     domains: dict[str, set[str]] = {}
     for m in re.finditer(r'\bconst\s+([a-zA-Z_]\w*)\s*=\s*\{', s):
         name = m.group(1)
@@ -282,13 +329,16 @@ def _api_call_sites() -> set[tuple[str, str, str]]:
         for name in sorted(files):
             if not name.endswith('.js'):
                 continue
-            if name == 'api.js' or name.startswith('bundle-') or name.startswith('feature-'):
+            rel = os.path.relpath(
+                os.path.join(root, name), JS_DIR).replace(os.sep, '/')
+            if rel in API_SURFACE_RELPATHS \
+                    or name.startswith('bundle-') \
+                    or name.startswith('feature-'):
                 continue
             path = os.path.join(root, name)
             if not os.path.isfile(path):
                 continue
             s = _strip_comments(_read(path))
-            rel = os.path.relpath(path, JS_DIR).replace(os.sep, '/')
             for m in call_re.finditer(s):
                 out.add((m.group(1), m.group(2), rel))
     return out

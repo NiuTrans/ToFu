@@ -30,7 +30,7 @@ Stays on legacy ``common_bp`` (carve-outs):
 
 from __future__ import annotations
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.log import get_logger
 

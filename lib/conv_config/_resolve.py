@@ -215,6 +215,15 @@ def resolve_conv_config(
     # browserClientId is gated on the resolved browserEnabled flag.
     if out['browserEnabled']:
         out['browserClientId'] = ov.get('browserClientId') or None
+    # Global, request-local Responses experiments. They are not conversation
+    # content and therefore do not persist into settings; the live toolbar
+    # snapshot applies equally to active and background conversations.
+    for block in ('cache', 'tools', 'responses', 'compaction'):
+        value = ov.get(block)
+        if not isinstance(value, Mapping):
+            value = defaults.get(block)
+        if isinstance(value, Mapping):
+            out[block] = dict(value)
     # ── RWA remote-worktree pseudo-path (总闸 TOFU_REMOTE_WORKTREE) ──
     # conv.projectPath = 'remote:<agent_id>:<root>' rides the existing
     # per-conv persistence untouched; HERE it becomes the binding contract

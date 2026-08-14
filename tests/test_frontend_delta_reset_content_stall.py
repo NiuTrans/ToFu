@@ -85,6 +85,8 @@ for (const n of ['_stampFreshness','_buildSwarmInboxChipsHTML','renderTurnProven
   '_renderSoloRoundTag','scrollToBottom','_setBubbleLiveness']) {
   win[n] = global[n] = () => '';
 }
+win._isProgramRound = global._isProgramRound =
+  (round) => !!(round && round._programSynthetic);
 win._fcFingerprint = global._fcFingerprint = () => 0;
 win._extractFileChangesFromRoundsAsync = global._extractFileChangesFromRoundsAsync = async () => [];
 win.isNearBottom = global.isNearBottom = () => false;

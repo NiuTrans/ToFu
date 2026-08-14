@@ -189,6 +189,24 @@ def test_idempotent_when_stream_already_live():
 
 
 @pytest.mark.skipif(not _node_available(), reason="node not installed")
+def test_running_push_does_not_preempt_send_owned_attachment():
+    """A runningTaskIds push may expose the task id before /chat/send returns.
+    The send pipeline still owns the canonical placeholder and SSE attachment
+    during that lease, so reconnect must be suppressed.  ``True`` tells callers
+    to suppress their static-render fallback too."""
+    convs = _running_conv()
+    convs[0]["_sendInFlight"] = True
+    r = _run(_fn(), convs, "c1", behaviour="running")
+    assert r["ret"] is True, r
+    assert r["calls"]["connectToTask"] == [], (
+        f"running-state push stole stream ownership from sendMessage: {r}")
+    assert r["calls"]["showStreaming"] == [], r
+    assert r["calls"]["twStart"] == [], r
+    assert r["streamLive"] is False, r
+    assert r["assistantCount"] == 1, r
+
+
+@pytest.mark.skipif(not _node_available(), reason="node not installed")
 def test_no_reconnect_without_active_task_id():
     """No persisted activeTaskId → static-render path preserved (reconnect is a
     no-op). Gates strictly on the server-authoritative field, never a guess."""

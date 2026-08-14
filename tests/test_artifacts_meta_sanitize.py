@@ -16,16 +16,14 @@ import sys
 
 import pytest
 
+pytest_plugins = ('tests._artifact_sidecar',)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 @pytest.fixture(scope='module', autouse=True)
 def _ensure_schema(flask_app):
-    """Bootstrap the SQLite schema so chat_artifacts exists regardless of
-    test-run ordering (the route tests touch the table directly). Without
-    this the file passes only when an earlier test happened to trigger
-    init_db — the same latent ordering dependency test_artifacts_api.py has.
-    """
+    """Bootstrap the legacy schema used by the Flask test application."""
     from lib.database import init_db
     with flask_app.app_context():
         init_db()

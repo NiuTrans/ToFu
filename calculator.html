@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Calculator</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: #1a1b26; font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .calculator {
+    width: 320px; padding: 16px; border-radius: 16px; background: #24283b;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  }
+  #display {
+    min-height: 72px; padding: 12px 16px; margin-bottom: 12px; border-radius: 10px;
+    background: #1a1b26; color: #c0caf5; font-size: 2.4rem; text-align: right;
+    overflow-wrap: anywhere; display: flex; align-items: center; justify-content: flex-end;
+    user-select: none;
+  }
+  #display.error { color: #f7768e; font-size: 1.4rem; }
+  .keys { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  button {
+    padding: 18px 0; font-size: 1.25rem; border: none; border-radius: 10px;
+    background: #414868; color: #c0caf5; cursor: pointer; transition: filter 0.1s;
+  }
+  button:hover { filter: brightness(1.2); }
+  button:active { filter: brightness(1.45); }
+  button.op { background: #7aa2f7; color: #1a1b26; font-weight: 700; }
+  button.equals { background: #9ece6a; color: #1a1b26; font-weight: 700; }
+  button.utility { background: #565f89; }
+  .span2 { grid-column: span 2; }
+</style>
+</head>
+<body>
+  <main class="calculator" aria-label="Calculator">
+    <div id="display" role="status" aria-live="polite">0</div>
+    <div class="keys">
+      <button class="utility span2" data-action="clear" aria-label="Clear all">C</button>
+      <button class="utility" data-action="backspace" aria-label="Backspace">&#9003;</button>
+      <button class="op" data-op="/" aria-label="Divide">&divide;</button>
+
+      <button data-digit="7">7</button>
+      <button data-digit="8">8</button>
+      <button data-digit="9">9</button>
+      <button class="op" data-op="*" aria-label="Multiply">&times;</button>
+
+      <button data-digit="4">4</button>
+      <button data-digit="5">5</button>
+      <button data-digit="6">6</button>
+      <button class="op" data-op="-" aria-label="Subtract">&minus;</button>
+
+      <button data-digit="1">1</button>
+      <button data-digit="2">2</button>
+      <button data-digit="3">3</button>
+      <button class="op" data-op="+" aria-label="Add">+</button>
+
+      <button class="span2" data-digit="0">0</button>
+      <button data-dot aria-label="Decimal point">.</button>
+      <button class="equals" data-action="equals" aria-label="Equals">=</button>
+    </div>
+  </main>
+<script>
+function createCalculator() {
+  var display = '0';
+  var accumulator = null;
+  var operator = null;
+  var waitingForOperand = false;
+  var hasError = false;
+
+  function clearAll() {
+    display = '0';
+    accumulator = null;
+    operator = null;
+    waitingForOperand = false;
+    hasError = false;
+  }
+
+  function compute(a, op, b) {
+    switch (op) {
+      case '+': return a + b;
+      case '-': return a - b;
+      case '*': return a * b;
+      case '/':
+        if (b === 0) { throw new Error('Division by zero'); }
+        return a / b;
+      default: throw new Error('Unknown operator: ' + op);
+    }
+  }
+
+  function formatResult(n) {
+    if (!isFinite(n)) { throw new Error('Overflow'); }
+    var abs = Math.abs(n);
+    if (abs !== 0 && (abs >= 1e13 || abs < 1e-9)) {
+      return n.toExponential(6).replace(/\.?0+e/, 'e');
+    }
+    return String(Math.round(n * 1e10) / 1e10);
+  }
+
+  function showError(kind) {
+    hasError = true;
+    display = kind === 'Division by zero' ? 'Cannot divide by 0' : 'Error';
+    accumulator = null;
+    operator = null;
+    waitingForOperand = true;
+  }
+
+  function inputDigit(d) {
+    if (hasError) { clearAll(); }
+    if (waitingForOperand) { display = d; waitingForOperand = false; }
+    else if (display === '0') { display = d; }
+    else if (display.replace('-', '').replace('.', '').length < 12) { display += d; }
+  }
+
+  function inputDot() {
+    if (hasError) { clearAll(); }
+    if (waitingForOperand) { display = '0.'; waitingForOperand = false; }
+    else if (display.indexOf('.') === -1) { display += '.'; }
+  }
+
+  function inputOperator(nextOp) {
+    if (hasError) { return; }
+    if (operator !== null && !waitingForOperand) {
+      try {
+        accumulator = compute(accumulator, operator, parseFloat(display));
+        display = formatResult(accumulator);
+      } catch (err) {
+        showError(err.message);
+        return;
+      }
+    } else if (operator === null) {
+      accumulator = parseFloat(display);
+    }
+    operator = nextOp;
+    waitingForOperand = true;
+  }
+
+  function inputEquals() {
+    if (hasError || operator === null) { return; }
+    try {
+      display = formatResult(compute(accumulator, operator, parseFloat(display)));
+    } catch (err) {
+      showError(err.message);
+      return;
+    }
+    accumulator = null;
+    operator = null;
+    waitingForOperand = true;
+  }
+
+  function backspace() {
+    if (hasError) { clearAll(); return; }
+    if (waitingForOperand) { return; }
+    display = display.length > 1 ? display.slice(0, -1) : '0';
+  }
+
+  function getDisplay() { return display; }
+  function isError() { return hasError; }
+
+  return {
+    inputDigit: inputDigit,
+    inputDot: inputDot,
+    inputOperator: inputOperator,
+    inputEquals: inputEquals,
+    backspace: backspace,
+    clearAll: clearAll,
+    getDisplay: getDisplay,
+    isError: isError
+  };
+}
+
+if (typeof document !== 'undefined') {
+  (function () {
+    var calc = createCalculator();
+    var displayEl = document.getElementById('display');
+    var keysEl = document.querySelector('.keys');
+
+    function render() {
+      displayEl.textContent = calc.getDisplay();
+      displayEl.classList.toggle('error', calc.isError());
+    }
+
+    function handleButton(btn) {
+      if (btn.hasAttribute('data-digit')) { calc.inputDigit(btn.getAttribute('data-digit')); }
+      else if (btn.hasAttribute('data-dot')) { calc.inputDot(); }
+      else if (btn.hasAttribute('data-op')) { calc.inputOperator(btn.getAttribute('data-op')); }
+      else {
+        var action = btn.getAttribute('data-action');
+        if (action === 'clear') { calc.clearAll(); }
+        else if (action === 'backspace') { calc.backspace(); }
+        else if (action === 'equals') { calc.inputEquals(); }
+      }
+    }
+
+    keysEl.addEventListener('click', function (e) {
+      var btn = e.target.closest('button');
+      if (!btn || !keysEl.contains(btn)) { return; }
+      handleButton(btn);
+      render();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      var k = e.key;
+      var handled = true;
+      if (/^[0-9]$/.test(k)) { calc.inputDigit(k); }
+      else if (k === '.' || k === ',') { calc.inputDot(); }
+      else if (k === '+' || k === '-' || k === '*' || k === '/') { calc.inputOperator(k); }
+      else if (k === 'Enter' || k === '=') { calc.inputEquals(); }
+      else if (k === 'Backspace') { calc.backspace(); }
+      else if (k === 'Escape' || k === 'c' || k === 'C') { calc.clearAll(); }
+      else { handled = false; }
+      if (handled) { e.preventDefault(); render(); }
+    });
+
+    render();
+  })();
+}
+</script>
+</body>
+</html>

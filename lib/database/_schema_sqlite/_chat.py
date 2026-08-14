@@ -12,6 +12,69 @@ from lib.database._schema_sqlite._selfheal import _backfill_search_fts
 logger = get_logger(__name__)
 
 
+def _apply_chat_runtime_tuning(conn):
+    """Converge performance indexes skipped by the version fast path.
+
+    Index policy is mutable operational metadata, not user data.  Keeping this
+    tiny idempotent pass outside the schema-version branch lets an existing
+    SQLite authority gain a measured query fix without forcing every domain's
+    DDL/backfill to rerun. Failure is fail-soft: correctness still uses the
+    ordinary timestamp index, only the steady-state absence proof is slower.
+    """
+    statements = (
+        'DROP INDEX IF EXISTS idx_conv_msgs_conv',
+        # Financial idempotency must be a database invariant, not a
+        # check-then-insert convention in Python. These partial unique indexes
+        # leave intentionally unkeyed/manual rows alone while making webhook
+        # and ledger retries race-proof across processes.
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_billing_payments_provider_id "
+        "ON billing_payments(provider, provider_id) WHERE provider_id <> ''",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_billing_ledger_idempotency "
+        "ON billing_ledger(user_id, kind, ref_type, ref_id) "
+        "WHERE ref_type <> '' AND ref_id <> ''",
+        # SQLite's terminal-event retention selector deliberately starts from
+        # the much smaller terminal-result tier, then performs one covering
+        # lookup per task.  Production's former time-first index scanned
+        # 297k historical/orphan event rows for 14.4s merely to return zero.
+        "CREATE INDEX IF NOT EXISTS idx_task_terminal_retention "
+        "ON task_results(completed_at, task_id, conv_id) "
+        "WHERE completed_at IS NOT NULL AND status IN ("
+        "'done','error','aborted','interrupted')",
+        "CREATE INDEX IF NOT EXISTS idx_task_events_stream_task_ts "
+        "ON task_events(task_id, ts_ms, event_id) "
+        "WHERE type NOT IN ("
+        "'messages_snapshot','round_usage','round_start','round_end')",
+        # Create the replacement before dropping the old index so a failed
+        # tuning transaction never leaves the retention path unindexed.
+        'DROP INDEX IF EXISTS idx_task_events_stream_ts',
+        # Refresh planner statistics opportunistically after index-policy
+        # convergence. SQLite bounds PRAGMA optimize itself and normally does
+        # nothing, unlike an unconditional whole-database ANALYZE.
+        'PRAGMA optimize',
+    )
+    cur = None
+    try:
+        cur = conn._conn.cursor()
+        for statement in statements:
+            cur.execute(statement)
+        conn.commit()
+        return True
+    except Exception as exc:
+        logger.warning('[DB] Runtime SQLite chat tuning deferred: %s', exc)
+        try:
+            conn.rollback()
+        except Exception as rollback_error:
+            logger.debug('[DB] SQLite tuning rollback failed: %s', rollback_error)
+        return False
+    finally:
+        if cur is not None:
+            try:
+                cur.close()
+            except Exception as close_error:
+                logger.debug('[DB] SQLite tuning cursor close failed: %s',
+                             close_error)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  Chat Schema
 # ═══════════════════════════════════════════════════════════════════════
@@ -37,6 +100,26 @@ def _init_chat_schema(conn):
     create_if_absent(conn, CONVERSATIONS, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_conv_user ON conversations(user_id, updated_at DESC)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_conv_meta ON conversations(user_id, updated_at DESC, id, title, msg_count, created_at)')
+    duplicate_conv_id = cur.execute(
+        'SELECT id FROM conversations GROUP BY id HAVING COUNT(*)>1 LIMIT 1'
+    ).fetchone()
+    if duplicate_conv_id is not None:
+        raise RuntimeError(
+            'conversation id is not globally unique; normalized message rows '
+            'cannot safely identify their owner')
+    # conversation_messages is intentionally keyed by conv_id. Make the
+    # corresponding parent invariant executable instead of relying on random
+    # id generation to avoid cross-user aliasing.
+    cur.execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS uq_conversations_global_id '
+        'ON conversations(id)')
+    # Keep the rows-authority startup proof off the 20 GB legacy message blob.
+    cur.execute(
+        'CREATE INDEX IF NOT EXISTS idx_conv_rows_authority '
+        'ON conversations(id, user_id, rev, messages_rows_rev, msg_count)')
+    from lib.database._core_schema import CONVERSATION_MESSAGE_ARCHIVES
+    create_if_absent(
+        conn, CONVERSATION_MESSAGE_ARCHIVES, table_exists=_table_exists)
 
     # task_results + task_events: migrated onto Core (lib/database/_core_schema.py).
     # _table_exists guard REQUIRED on SQLite (bare execute, Core DDL has no
@@ -47,6 +130,21 @@ def _init_chat_schema(conn):
     create_if_absent(conn, TASK_RESULTS, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_task_conv ON task_results(conv_id)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_task_created ON task_results(created_at)')
+    # Exact partial/range index for find_orphan_running_results(). Without it,
+    # SQLite scans every large content/thinking row and sorts the matches on
+    # each watchdog pass; production measured 18.6s on the FUSE authority.
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_task_running_completed "
+                "ON task_results(completed_at) "
+                "WHERE status='running' AND completed_at IS NOT NULL")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_task_terminal_completed "
+                "ON task_results(completed_at) WHERE completed_at IS NOT NULL "
+                "AND status IN ('done', 'error', 'aborted', 'interrupted')")
+    # Cover both terminal-event discovery (completed_at → task_id) and result
+    # retention's conversation relation gate without reading wide result rows.
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_task_terminal_retention "
+                "ON task_results(completed_at, task_id, conv_id) "
+                "WHERE completed_at IS NOT NULL AND status IN "
+                "('done', 'error', 'aborted', 'interrupted')")
 
     # ── task_events: persisted SSE event log (durable Last-Event-ID resumption) ──
     # Replaces in-memory task['events'] for cross-restart and post-cleanup
@@ -57,6 +155,11 @@ def _init_chat_schema(conn):
     # measured rationale (Request Inspector reads are always task-scoped and
     # usually type-scoped).
     cur.execute('CREATE INDEX IF NOT EXISTS idx_task_events_task_type ON task_events(task_id, type)')
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_task_events_stream_task_ts "
+                "ON task_events(task_id, ts_ms, event_id) "
+                "WHERE type NOT IN ("
+                "'messages_snapshot','round_usage','round_start','round_end')")
+    cur.execute('DROP INDEX IF EXISTS idx_task_events_stream_ts')
 
     # ── conversation_messages: Phase 5 messages-as-rows (migrator-first) ──
     # Empty on existing installs until the TOFU_MESSAGES_ROWS-gated backfill /
@@ -64,11 +167,50 @@ def _init_chat_schema(conn):
     # on it until reads are flipped (a separate, verification-gated step).
     from lib.database._core_schema import CONVERSATION_MESSAGES
     create_if_absent(conn, CONVERSATION_MESSAGES, table_exists=_table_exists)
-    cur.execute('CREATE INDEX IF NOT EXISTS idx_conv_msgs_conv ON conversation_messages(conv_id, seq)')
+    if not _column_exists(conn, 'conversation_messages', 'meta_light'):
+        cur.execute('ALTER TABLE conversation_messages ADD COLUMN meta_light TEXT')
+        logger.info('[DB] Migration: added nullable meta_light to conversation_messages')
+    if not _column_exists(conn, 'conversation_messages', 'translation_state'):
+        cur.execute('ALTER TABLE conversation_messages ADD COLUMN translation_state TEXT')
+        logger.info('[DB] Migration: added nullable translation_state to conversation_messages')
+    if not _column_exists(conn, 'conversation_messages', 'message_ts'):
+        cur.execute('ALTER TABLE conversation_messages ADD COLUMN message_ts INTEGER')
+        logger.info('[DB] Migration: added nullable message_ts to conversation_messages')
+    if not _column_exists(conn, 'conversation_messages', 'billing_meta'):
+        cur.execute('ALTER TABLE conversation_messages ADD COLUMN billing_meta TEXT')
+        logger.info('[DB] Migration: added nullable billing_meta to conversation_messages')
+    # Healthy rows never enter this partial index. An empty index proves all
+    # canonical read projections are complete without scanning message bodies.
+    cur.execute(
+        'CREATE INDEX IF NOT EXISTS idx_conv_msgs_incomplete_projection '
+        'ON conversation_messages(conv_id) WHERE meta_light IS NULL '
+        'OR message_ts IS NULL OR billing_meta IS NULL')
+    # Redundant with the composite PRIMARY KEY's (conv_id, seq) index.  Drop
+    # the legacy copy on upgrade and avoid paying duplicate write/cache cost on
+    # new single-file installs.
+    cur.execute('DROP INDEX IF EXISTS idx_conv_msgs_conv')
     # Partial UNIQUE: _msgId is the per-conv addressing key WHEN PRESENT, but
     # legacy/un-backfilled messages carry msg_id='' and several may coexist in
     # one conversation, so empty ids are excluded from the uniqueness guarantee.
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_msgs_msgid ON conversation_messages(conv_id, msg_id) WHERE msg_id <> ''")
+
+    # ── Turn / attempt v2 authority ───────────────────────────────────
+    from lib.database._core_schema import (
+        CONVERSATION_TURNS, GENERATION_ATTEMPTS, ATTEMPT_EVENTS,
+    )
+    create_if_absent(conn, CONVERSATION_TURNS, table_exists=_table_exists)
+    create_if_absent(conn, GENERATION_ATTEMPTS, table_exists=_table_exists)
+    create_if_absent(conn, ATTEMPT_EVENTS, table_exists=_table_exists)
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_turns_conversation_order '
+                'ON conversation_turns(conversation_id, lane_id, ordinal)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_turns_current_attempt '
+                'ON conversation_turns(current_attempt_id)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_attempts_turn_created '
+                'ON generation_attempts(turn_id, created_at DESC)')
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_attempts_task_id "
+                "ON generation_attempts(task_id) WHERE task_id <> ''")
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_attempt_events_created '
+                'ON attempt_events(created_at)')
 
     # ── chat_artifacts: renderable reports promoted out of chat (md/html/svg) ──
     # First-class storage for "report-shaped" outputs so they survive
@@ -114,6 +256,8 @@ def _init_chat_schema(conn):
     for col, sql in {
         'search_results': "ALTER TABLE task_results ADD COLUMN search_results TEXT",
         'metadata':       "ALTER TABLE task_results ADD COLUMN metadata TEXT",
+        'abort_requested_at': "ALTER TABLE task_results ADD COLUMN abort_requested_at INTEGER NOT NULL DEFAULT 0",
+        'abort_source': "ALTER TABLE task_results ADD COLUMN abort_source TEXT NOT NULL DEFAULT ''",
         # segments (v36): the typed-segment timeline. Nullable TEXT/JSON — a
         # pre-existing row stays NULL until its task is re-persisted, and every
         # reader treats absent segments as "derive from the legacy channels".
@@ -132,18 +276,26 @@ def _init_chat_schema(conn):
         logger.info('[DB] Migration: added column tool_rounds to task_results')
 
     # ── Migration: rename searchRounds → toolRounds inside messages JSON ──
-    try:
-        cur.execute("""
-            UPDATE conversations
-            SET messages = REPLACE(messages, '"searchRounds":', '"toolRounds":')
-            WHERE messages LIKE '%"searchRounds":%'
-        """)
-        _migrated_count = cur.rowcount
-        if _migrated_count > 0:
-            logger.info('[DB] Migration: renamed searchRounds → toolRounds in %d conversation(s)', _migrated_count)
-        conn._conn.commit()
-    except Exception as e:
-        logger.warning('[DB] Migration: searchRounds→toolRounds failed (non-fatal): %s', e)
+    # Once normalized rows are authoritative this column is a frozen rollback
+    # archive.  Re-running a historical payload migration would bump ``rev``
+    # without changing child rows and make the startup parity gate fail.
+    from lib.database._access_policy import rows_authority_configured
+    if not rows_authority_configured():
+        try:
+            cur.execute("""
+                UPDATE conversations
+                SET messages = REPLACE(messages, '"searchRounds":', '"toolRounds":')
+                WHERE messages LIKE '%"searchRounds":%'
+            """)
+            _migrated_count = cur.rowcount
+            if _migrated_count > 0:
+                logger.info('[DB] Migration: renamed searchRounds → toolRounds in %d conversation(s)', _migrated_count)
+            conn._conn.commit()
+        except Exception as e:
+            logger.warning('[DB] Migration: searchRounds→toolRounds failed (non-fatal): %s', e)
+    else:
+        logger.debug('[DB] Skipping legacy messages payload migration: '
+                     'normalized rows are authoritative')
 
     for col, sql in {
         'settings':     "ALTER TABLE conversations ADD COLUMN settings TEXT NOT NULL DEFAULT '{}'",
@@ -151,6 +303,8 @@ def _init_chat_schema(conn):
         'search_text':  "ALTER TABLE conversations ADD COLUMN search_text TEXT NOT NULL DEFAULT ''",
         # rev (v37): server-issued monotonic message-version, trigger-bumped.
         'rev':          "ALTER TABLE conversations ADD COLUMN rev INTEGER NOT NULL DEFAULT 0",
+        # v46: proven row-mirror revision; -1 is fail-closed/unverified.
+        'messages_rows_rev': "ALTER TABLE conversations ADD COLUMN messages_rows_rev INTEGER NOT NULL DEFAULT -1",
     }.items():
         if not _column_exists(conn, 'conversations', col):
             cur.execute(sql)
@@ -171,7 +325,12 @@ def _init_chat_schema(conn):
         AFTER UPDATE OF messages ON conversations
         FOR EACH ROW WHEN NEW.messages IS NOT OLD.messages
         BEGIN
-            UPDATE conversations SET rev = OLD.rev + 1
+            UPDATE conversations SET
+                rev = OLD.rev + 1,
+                msg_count = CASE
+                    WHEN json_valid(NEW.messages) THEN json_array_length(NEW.messages)
+                    ELSE 0
+                END
             WHERE id = NEW.id AND user_id = NEW.user_id;
         END;
     ''')
@@ -233,9 +392,13 @@ def _init_chat_schema(conn):
 
     # ── Message queue: migrated onto Core. ──
     from lib.database._core_schema import (
-        MESSAGE_QUEUE, create_if_absent,
+        MESSAGE_QUEUE, SCOPED_SEQUENCES, create_if_absent,
     )
     create_if_absent(conn, MESSAGE_QUEUE, table_exists=_table_exists)
+    # Chat schema runs before system schema during bootstrap; create the shared
+    # counter table here before seeding message_queue positions. System schema
+    # later reuses it for project streams.
+    create_if_absent(conn, SCOPED_SEQUENCES, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_mq_conv ON message_queue(conv_id, position)')
     # ── Migration (v26): unified priority turn-source queue columns ──
     for col, sql in {
@@ -250,6 +413,12 @@ def _init_chat_schema(conn):
             cur.execute(sql)
             logger.info('[DB] Migration: added column %s to message_queue', col)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_mq_conv_prio ON message_queue(conv_id, priority, position)')
+    cur.execute(
+        "INSERT INTO scoped_sequences(namespace, scope_key, value) "
+        "SELECT 'message_queue_position', conv_id, MAX(position) "
+        "FROM message_queue WHERE 1 GROUP BY conv_id "
+        "ON CONFLICT(namespace, scope_key) DO UPDATE SET value="
+        "MAX(scoped_sequences.value, excluded.value)")
 
     # paper_reports: migrated onto Core (lib/database/_core_schema.py).
     # _table_exists guard REQUIRED on SQLite (bare execute, Core DDL has no

@@ -79,7 +79,7 @@ class TestBindingContract:
 
 
 # ═══════════════════════════════════════════════════════════
-#  投影:同名 schema + 本地执行提示 + latch
+#  投影:同名 schema + 本地执行提示
 # ═══════════════════════════════════════════════════════════
 
 @pytest.mark.unit
@@ -107,18 +107,12 @@ class TestProjection:
         assert by['write_file']['function']['description'] == \
             base['write_file']['function']['description']
 
-    def test_off_to_on_clears_schema_latch_once(self, monkeypatch):
+    def test_remote_state_is_evaluated_live(self, monkeypatch):
         monkeypatch.setenv('TOFU_REMOTE_WORKTREE', '1')
-        from lib.tools.registry import _latch as L
         conv = 'conv-remote-latch'
-        L.clear_project_remote_sticky(conv)
-        L.clear_tool_list_latch(conv)
-        L.latch_tool_list(conv, [])  # 先冻结一份无提示快照
         assert _ctx(conv_id=conv).project_remote is True
-        assert L.is_project_remote_sticky(conv)
-        assert conv not in L._tool_latch  # OFF→ON 一次性清锁
-        L.clear_project_remote_sticky(conv)
-        L.clear_tool_list_latch(conv)
+        monkeypatch.delenv('TOFU_REMOTE_WORKTREE')
+        assert _ctx(conv_id=conv).project_remote is False
 
 
 # ═══════════════════════════════════════════════════════════

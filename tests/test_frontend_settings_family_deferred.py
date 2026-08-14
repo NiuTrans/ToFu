@@ -43,17 +43,22 @@ import re
 
 import pytest
 
+from tests._runtime_sections import (
+    runtime_section,
+    runtime_section_names,
+    runtime_section_path,
+)
+
 pytestmark = pytest.mark.unit
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-BUNDLER_PY = ROOT / 'lib' / 'js_bundler.py'
 INDEX_HTML = ROOT / 'index.html'
-FEATURE_LOADER = ROOT / 'static' / 'js' / 'feature-loader.js'
-ONBOARDING = ROOT / 'static' / 'js' / 'onboarding.js'
-TOOLBAR = ROOT / 'static' / 'js' / 'main' / 'main_toolbar_ui.js'
-CORE_PANEL = ROOT / 'static' / 'js' / 'settings' / 'core_panel.js'
-LOCAL_EP = ROOT / 'static' / 'js' / 'settings' / 'local_endpoints.js'
+FEATURE_LOADER = ROOT / 'frontend' / 'src' / 'main.ts'
+ONBOARDING = pathlib.Path(runtime_section_path('onboarding.js'))
+TOOLBAR = pathlib.Path(runtime_section_path('main/main_toolbar_ui.js'))
+CORE_PANEL = pathlib.Path(runtime_section_path('settings/core_panel.js'))
+LOCAL_EP = pathlib.Path(runtime_section_path('settings/local_endpoints.js'))
 
 FAMILY = (
     # settings/branding.js deliberately ABSENT (2026-08-02 boundary fix,
@@ -74,28 +79,39 @@ FAMILY = (
     'widgets/chip_input.js',
 )
 STUBS = ('openSettings', 'closeSettings', 'saveSettings', 'switchSettingsTab')
+NATIVE_OWNERS = {
+    'settings/auto_setup.js': 'frontend/src/features/settings/auto-setup.ts',
+    'settings/section_requires.js': 'frontend/src/features/settings/section-requires.ts',
+    'settings/key_stats.js': 'frontend/src/features/settings/key-stats.ts',
+    'settings/balance.js': 'frontend/src/features/settings/balance.ts',
+    'settings/speech.js': 'frontend/src/features/settings/speech.ts',
+    'settings/auth_sources.js': 'frontend/src/features/settings/auth-sources.ts',
+    'settings/private_hosts.js': 'frontend/src/features/settings/private-hosts.ts',
+    'settings/devices.js': 'frontend/src/features/settings/devices.ts',
+}
 
 
 def _manifest():
-    import lib.js_bundler as jb
-    return jb._extract_manifest_from_source(str(BUNDLER_PY))
+    return list(runtime_section_names()), tuple(NATIVE_OWNERS), STUBS, ()
 
 
 # ---------------------------------------------------------------------------
 # 1. manifest move (failing-first drivers)
 # ---------------------------------------------------------------------------
 def test_family_in_deferred_files():
-    _bf, deferred, _ep, _crit = _manifest()
-    missing = [f for f in FAMILY if f not in deferred]
-    assert not missing, (
-        f'these settings-family files must be in _DEFERRED_FILES: {missing}')
+    runtime, native, _ep, _crit = _manifest()
+    missing = [name for name in FAMILY
+               if name not in runtime and name not in native]
+    assert not missing, f'settings owners missing from the Vite graph: {missing}'
+    for name, owner in NATIVE_OWNERS.items():
+        assert (ROOT / owner).is_file(), f'{name} native owner missing: {owner}'
 
 
 def test_family_not_in_core_bundle_files():
-    bundle, _df, _ep, _crit = _manifest()
-    present = [f for f in FAMILY if f in bundle]
-    assert not present, (
-        f'these settings-family files must NOT remain in _BUNDLE_FILES: {present}')
+    runtime, _native, _ep, _crit = _manifest()
+    duplicated = [name for name in NATIVE_OWNERS if name in runtime]
+    assert not duplicated, (
+        f'native settings owners duplicated in the retained runtime: {duplicated}')
 
 
 def test_branding_stays_core():
@@ -107,7 +123,7 @@ def test_branding_stays_core():
         'settings/branding.js must STAY in _BUNDLE_FILES — main.js calls '
         '_modelShortName() BARE at boot/model-switch (_applyModelUI)')
     assert 'settings/branding.js' not in deferred
-    main = (ROOT / 'static' / 'js' / 'main.js').read_text()
+    main = runtime_section('main.js')
     assert main.count('_modelShortName(') >= 2, (
         'main.js must keep its bare _modelShortName calls — if they ever '
         'become guarded, branding can move to the family')
@@ -123,12 +139,9 @@ def test_settings_head_stays_core():
 
 
 def test_deferred_order_preserved():
-    _bf, deferred, _ep, _crit = _manifest()
+    deferred, _native, _ep, _crit = _manifest()
     def _idx(f):
         return deferred.index(f)
-    assert _idx('settings/section_requires.js') < _idx('settings/core_panel.js'), (
-        'section_requires must load BEFORE core_panel (the data-requires '
-        'degraded-section contract is consumed by core_panel at render)')
     assert _idx('settings/provider_faces.js') < _idx('settings/provider_render.js'), (
         'provider_faces declares _faceChipHTML/_renderFacesSection consumed '
         'by provider_render — order preserved from the core manifest')
@@ -140,28 +153,30 @@ def test_deferred_order_preserved():
 # 2. entry-point stubs (failing-first drivers)
 # ---------------------------------------------------------------------------
 def test_stubs_in_py_table():
-    _bf, _df, entry_points, _crit = _manifest()
-    for name in STUBS:
-        assert name in entry_points, (
-            f'{name} must be a _DEFERRED_ENTRY_POINTS member — the sidebar '
-            'gear / mobile sheet / onboarding flows are always-reachable')
+    loader = FEATURE_LOADER.read_text()
+    match = re.search(r'const settingsEntries = new Set\(\[(.*?)\]\);',
+                      loader, re.S)
+    assert match, 'main.ts lost the explicit settings feature-entry set'
+    entry_points = set(re.findall(r"['\"]([^'\"]+)['\"]", match.group(1)))
+    assert entry_points == set(STUBS), (
+        f'Vite settings entry surface drifted: {sorted(entry_points)}')
 
 
 def test_stubs_in_js_table():
     loader = FEATURE_LOADER.read_text()
     for name in STUBS:
         assert f"'{name}'" in loader, (
-            f'{name} must be in feature-loader.js _DEFERRED_ENTRY_POINTS')
+            f'{name} must be routed by the Vite feature registry')
 
 
 def test_modal_internal_handlers_NOT_stubbed():
     """System-prompt editor + _mcp* handlers are only reachable INSIDE the
     open settings modal (bundle already present) — stubbing them would
     fetch the bundle for nothing (Project Brain precedent)."""
-    _bf, _df, entry_points, _crit = _manifest()
+    loader = FEATURE_LOADER.read_text()
     for name in ('applySystemPromptEditor', 'closeSystemPromptEditor',
                  'resetSystemPromptBlocks', '_mcpSaveServer', '_mcpDoInstall'):
-        assert name not in entry_points
+        assert name not in loader
 
 
 # ---------------------------------------------------------------------------
@@ -197,10 +212,10 @@ def test_local_endpoint_timer_moves_with_module():
         'precedent)')
 
 
-def test_dev_fallback_script_tags_kept():
+def test_index_has_no_raw_settings_scripts():
     html = INDEX_HTML.read_text()
     for f in ('static/js/settings/core_panel.js',
               'static/js/settings/branding.js',
               'static/js/widgets/chip_input.js'):
-        assert f in html, (
-            f'index.html must carry the {f} dev-fallback <script> tag')
+        assert f not in html
+    assert '<!-- TOFU_APP_ASSETS -->' in html

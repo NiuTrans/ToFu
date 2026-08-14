@@ -154,8 +154,14 @@ def test_registry_routes_feed_read_to_peer_handler():
     from lib.tasks_pkg.executor import tool_registry
     from lib.tasks_pkg.handlers.misc import _handle_peer_tool
     handler = tool_registry.lookup('project_feed_read', {})
-    assert handler is _handle_peer_tool, \
-        'project_feed_read must route to _handle_peer_tool via PEER_TOOL_NAMES'
+    # Several negative-control suites deliberately reload the handler facade.
+    # A registry populated before such a reload keeps the equivalent original
+    # function object, so object identity is collection-order dependent even
+    # though routing remains correct.  Pin the stable callable identity and
+    # leave behavior to the end-to-end dispatch test below.
+    assert (handler.__module__, handler.__name__) == (
+        _handle_peer_tool.__module__, _handle_peer_tool.__name__), (
+        'project_feed_read must route to _handle_peer_tool via PEER_TOOL_NAMES')
 
 
 def test_feed_read_reachable_end_to_end_via_agent_dispatch(monkeypatch):

@@ -6,9 +6,10 @@ docs/REMOTE_WORKTREE_DESIGN.md §3.2). Path: ``TOFU_DESKTOP_CONFIG`` env
 var, else ``~/.tofu/desktop_agent.json``.
 """
 
+import copy
 import os
 
-from lib.json_store import read_json, write_json_atomic
+from lib.json_store import JsonStoreReadError, read_json, update_json_atomic
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -56,14 +57,11 @@ class ConnectLineError(ValueError):
 
 
 def parse_connect_line(line):
-    """Parse the connect line the web UI hands the user → ``(url, secret)``.
+    """Parse a legacy connect line → ``(url, secret)``.
 
-    THE single owner of this format. The remote setup flow is a closed loop:
-    ``static/js/local-control.js::_lcConnectLine`` renders
-    ``<server-url><whitespace><token>`` into a click-to-copy box, and the user
-    pastes that ONE string here. Both halves are required — a token with no
-    address is unusable because nothing on the user's machine knows which
-    server to poll, which is exactly why they travel together.
+    Current downloads receive both values inside the personalized installer;
+    this remains the single owner of the old ``<url> <token>`` format so an
+    already-shipped client can still complete a manual repair.
 
     Deliberately whitespace-tolerant rather than pinned to a specific
     separator: the string makes a round trip through a clipboard, a terminal
@@ -110,14 +108,23 @@ def save_remote_server(url, secret):
     storage location. Passing an empty url clears the attachment and returns
     the agent to its local server.
     """
-    cfg = load_config()
-    if (url or '').strip():
-        cfg['remote_server'] = {'url': url.strip().rstrip('/'),
-                                'secret': (secret or '').strip()}
-    else:
-        cfg['remote_server'] = {}
-    save_config(cfg)
-    return cfg['remote_server']
+    return save_attachment(url, secret)
+
+
+def save_attachment(url, secret, *, attach_candidates=None):
+    """Atomically persist the active route and optional fallback candidates."""
+    remote = ({'url': url.strip().rstrip('/'),
+               'secret': (secret or '').strip()}
+              if (url or '').strip() else {})
+
+    def _mutate(cfg):
+        cfg['remote_server'] = remote
+        if attach_candidates is not None:
+            cfg['attach_candidates'] = list(attach_candidates)
+        return cfg
+
+    _update_config(_mutate)
+    return remote
 
 
 def load_computer_control():
@@ -149,13 +156,17 @@ def save_computer_control(enabled, perms):
     or a permission-tier click) — never from startup/quit paths, so a
     crash or a normal Quit cannot erase the user's choice.
     """
-    cfg = load_config()
-    cfg['computer_control'] = {
+    state = {
         'enabled': bool(enabled),
         'perms': {str(k): bool(v) for k, v in (perms or {}).items()},
     }
-    save_config(cfg)
-    return cfg['computer_control']
+
+    def _mutate(cfg):
+        cfg['computer_control'] = state
+        return cfg
+
+    _update_config(_mutate)
+    return state
 
 
 def config_path():
@@ -194,17 +205,49 @@ def merge_cli_roots(existing_roots, cli_specs):
 def load_config():
     """Read the agent config, merged over defaults. Never raises."""
     cfg = dict(_DEFAULT_CONFIG)
-    data = read_json(config_path(), default=None)
+    path = config_path()
+    if os.path.exists(path):
+        try:
+            os.chmod(path, 0o600)
+        except OSError as e:
+            logger.warning('[Agent] could not restrict config permissions: %s', e)
+    data = read_json(path, default=None)
     if isinstance(data, dict):
         cfg.update(data)
     return cfg
 
 
 def save_config(cfg):
-    """Persist the agent config atomically (creates the parent dir)."""
+    """Atomically replace the agent config with an explicit full snapshot."""
+    candidate = copy.deepcopy(cfg)
+    return _update_config(lambda _current: candidate)
+
+
+def update_config(mutator):
+    """Public locked field-update primitive for agent lifecycle callers."""
+    return _update_config(mutator)
+
+
+def _update_config(mutator):
+    """Run one strict read-modify-write transaction with private permissions."""
     path = config_path()
     parent = os.path.dirname(path)
     if parent:
-        os.makedirs(parent, exist_ok=True)
-    write_json_atomic(path, cfg)
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(parent, 0o700)
+        except OSError as e:
+            logger.warning('[Agent] could not restrict config directory: %s', e)
+
+    def _mutate(current):
+        if not isinstance(current, dict):
+            raise JsonStoreReadError(
+                f'desktop agent config is not a JSON object: {path}')
+        cfg = copy.deepcopy(_DEFAULT_CONFIG)
+        cfg.update(current)
+        return mutator(cfg)
+
+    saved = update_json_atomic(
+        path, _mutate, default={}, strict=True, indent=2, mode=0o600)
     logger.debug('[Agent] config saved to %s', path)
+    return saved

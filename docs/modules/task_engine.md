@@ -313,8 +313,10 @@ lazy (`_LAZY_MAP`) to save ~600ms startup. Several modules use function-body
    (16× stream anomaly, 2× empty-stop, 3× auto-turn-retry, 3× killed-recovery
    attempts, 2× reactive-compact) require sign-off to change; a split must
    preserve them verbatim.
-9. **`max_tool_rounds` is intentionally unbounded** (`model_config`, explicit
-   Chinese comment forbidding a cap). Do not add a tool-round limit.
+9. **Tool rounds have no numeric hyperparameter.** Keep the assembled tool list
+   available on every model round and stop naturally when the model returns no
+   tool calls. Abort, token budget, timeout and no-progress breakers remain
+   independent safety mechanisms; do not reintroduce a tool-round limit.
 
 ---
 

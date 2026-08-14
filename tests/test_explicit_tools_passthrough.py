@@ -44,19 +44,21 @@ class ExplicitToolsTest(unittest.TestCase):
             'memoryEnabled': True,
             'searchMode': 'multi',
         }
-        tools, has_real, _ = self._assemble(cfg)
+        tools, has_real = self._assemble(cfg)
         self.assertEqual(len(tools), 1)
         self.assertEqual(tools[0]['function']['name'], 'my_tool')
         self.assertTrue(has_real)
+        self.assertEqual(cfg['_frontendSelectedToolNames'], ['my_tool'])
+        self.assertEqual(cfg['_toolNamespaceByName'], {'my_tool': 'custom'})
 
     def test_empty_explicit_tools_falls_back_to_auto(self):
         # Empty list should NOT lock out the auto-derived path —
         # callers who literally want zero tools should set
         # searchMode='off', fetchEnabled=False, etc.
         cfg = {'tools': []}
-        tools, has_real, _ = self._assemble(cfg, search_mode='off',
-                                              search_enabled=False,
-                                              fetch_enabled=False)
+        tools, has_real = self._assemble(cfg, search_mode='off',
+                                         search_enabled=False,
+                                         fetch_enabled=False)
         # read_files always present even with no other tools.
         self.assertTrue(any('read_files' in (t.get('function', {}) or {}).get('name', '')
                              for t in (tools or [])))
@@ -72,15 +74,15 @@ class ExplicitToolsTest(unittest.TestCase):
                 {'no_function_key': True},
             ],
         }
-        tools, has_real, _ = self._assemble(cfg)
+        tools, has_real = self._assemble(cfg)
         self.assertEqual(len(tools), 1)
         self.assertEqual(tools[0]['function']['name'], 'good')
 
     def test_no_tools_field_uses_auto(self):
         # No 'tools' key at all → auto-derive from feature flags.
-        tools, _, _ = self._assemble({}, search_mode='off',
-                                       search_enabled=False,
-                                       fetch_enabled=False)
+        tools, _ = self._assemble({}, search_mode='off',
+                                  search_enabled=False,
+                                  fetch_enabled=False)
         # Should at least include read_files.
         self.assertTrue(tools)
 
@@ -94,7 +96,7 @@ class ExplicitToolsTest(unittest.TestCase):
                                      'parameters': {'type': 'object'}}}],
             'mcpEnabled': True,
         }
-        tools, _, _ = self._assemble(cfg)
+        tools, _ = self._assemble(cfg)
         names = [t['function']['name'] for t in tools]
         self.assertEqual(names, ['a'])
 

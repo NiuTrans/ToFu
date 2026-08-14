@@ -68,7 +68,7 @@ Three measured problems:
 |---|---|---|
 | Full-app startup | `desktop/launcher.py::main` | spawn server → open browser → tray; zero role indication |
 | Full-app tray | `desktop/launcher.py::_run_tray` | 10 hardcoded-English MenuItems; CC toggle + tiers + connect only here |
-| Agent startup | `desktop/agent_launcher.py::main` | 4 acts; act 2 prompts connect line only when UNattached; then tray-only |
+| Agent startup | `desktop/agent_launcher.py::main` | imports the installer attachment, resumes/discovers routes, then starts the agent; no auth prompt |
 | Agent tray | `desktop/agent_launcher.py::_run_tray` | 8 hardcoded-English MenuItems; the whole configuration surface |
 | i18n infra | `desktop/_tk_theme.py` | `STRINGS` zh/en table + `t(key, lang)` + `detect_lang()` — tk dialogs only; pystray never consumes it |
 | Themed window infra | `desktop/_tk_theme.py::apply_theme` + `card_frame` | already powers post_install + connect_ui; the role window reuses it unchanged |
@@ -90,8 +90,9 @@ line is the ROLE:
   endpoint of `<url>` — the exact state that was invisible during the
   tunnel incident.
 * **Agent app:** 「这台电脑是 Tofu 受控端」/ "This computer is controlled
-  by a Tofu server" — with the attached server URL (red "not attached"
-  when empty), the permission tiers, autostart, and **Reconnect…**.
+  by a Tofu server" — with the installer-supplied server URL, live link
+  status, permission tiers, autostart, and browser-assisted reconnect when
+  the environment requires it. No credential is shown or entered.
 
 The window has a **「启动时显示此窗口」/ "Show this window at startup"**
 checkbox (default ON, persisted as `show_role_window` in the agent config
@@ -108,10 +109,11 @@ The role window IS the computer-control panel — the tray's current CC
 cluster is rendered there as real checkbuttons with room for one-line
 explanations:
 
-* Full app: enable/disable computer control, the three write/exec/gui
-  tiers, current attachment, **Connect to remote Tofu…** (the existing
-  shared `connect_ui.prompt_connect_line`).
-* Agent app: the four tiers (incl. egress), autostart (Windows), reconnect.
+* Full app: enable/disable computer control, the three write/exec/gui tiers,
+  and current attachment.
+* Agent app: the four tiers (incl. egress), autostart (Windows), and live
+  connection diagnostics. Changing servers means downloading that server's
+  personalized installer, not handling a token.
 
 Mutations go through the SAME seams the tray already calls
 (`_start_computer_control` / `_stop_computer_control` / `_persist_cc_state`

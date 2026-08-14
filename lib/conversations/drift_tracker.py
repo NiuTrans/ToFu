@@ -24,11 +24,18 @@ MOVING:
     constraint #4 names, and the only shape that justifies keeping a
     fallback branch alive.
 
-So a divergence is escalated to WARNING only when it is BOTH stalled (client
-frozen while server moved) AND sustained past a threshold. Everything else is
-DEBUG. The endpoint's HTTP response is deliberately unchanged — this module
-only decides log severity and records convergence, so the probe stays a
-read-only observer of both sides.
+So a divergence is escalated to WARNING only when the client has remained
+frozen at a *different* value for a sustained threshold.  Requiring the server
+to move again after the first observation is incorrect for the most important
+terminal-frame loss: by the time the first 60-second probe runs, the server has
+already become idle and stays idle, while the client keeps a ghost task id
+forever.  Server movement remains useful diagnostic evidence, but is not a
+precondition for declaring a persistent inequality stuck.
+
+Tracking is per reporting browser page, not merely per conversation.  A fresh
+tab agreeing with the server must never clear a stale sibling tab's evidence;
+that cross-tab collision previously produced a false CONVERGED line every
+minute and made the repair threshold unreachable.
 
 DIRECTION IS ALSO CLASSIFIED. ``client > server`` on a server-authoritative
 rev should be impossible; if it appears it means the server row's rev went
@@ -64,12 +71,12 @@ __all__ = [
 # enough that a single missed beat cannot trip it.
 _DEFAULT_SUSTAINED_SEC = 180.0
 
-# Hard cap on tracked (conv_id, kind) pairs. A pathological client could
+# Hard cap on tracked (observer, conv_id, kind) triples. A pathological client could
 # otherwise pin unbounded memory by cycling conv ids.
 _MAX_TRACKED = 2000
 
 _lock = threading.Lock()
-_state: dict[tuple[str, str], dict] = {}
+_state: dict[tuple[str, str, str], dict] = {}
 
 
 def sustained_threshold_sec() -> float:
@@ -130,7 +137,8 @@ def _prune_locked(now: float) -> None:
 
 
 def observe_divergence(conv_id: str, kind: str, client, server,
-                       now: float | None = None) -> dict:
+                       now: float | None = None,
+                       observer_id: str = '') -> dict:
     """Record that ``conv_id``/``kind`` diverged, and judge how serious it is.
 
     Args:
@@ -139,6 +147,9 @@ def observe_divergence(conv_id: str, kind: str, client, server,
         client: The value the client reported.
         server: The value the server holds.
         now: Epoch seconds; injectable so tests need no sleeps.
+        observer_id: Stable identity of the reporting browser page/socket.
+            Empty preserves the legacy single-observer bucket for callers that
+            predate the HTTP probe identity.
 
     Returns:
         A verdict dict::
@@ -148,14 +159,14 @@ def observe_divergence(conv_id: str, kind: str, client, server,
               'observations':   int,    # times seen consecutively diverged
               'client_moved':   bool,   # client value changed since first seen
               'server_moved':   bool,   # server value changed since first seen
-              'stalled':        bool,   # server moving while client frozen
-              'sustained':      bool,   # stalled AND older than the threshold
+              'stalled':        bool,   # unequal while client stayed frozen
+              'sustained':      bool,   # frozen mismatch older than threshold
               'direction':      str,    # client_behind / client_ahead / …
               'severity':       str,    # 'warning' when sustained, else 'debug'
             }
     """
     ts = time.time() if now is None else now
-    key = (conv_id, kind)
+    key = (observer_id, conv_id, kind)
     c_fp, s_fp = _fingerprint(client), _fingerprint(server)
 
     with _lock:
@@ -167,34 +178,51 @@ def observe_divergence(conv_id: str, kind: str, client, server,
                 'observations': 1,
                 'first_client_fp': c_fp,
                 'first_server_fp': s_fp,
+                'last_client_fp': c_fp,
+                'last_server_fp': s_fp,
                 'client_moved': False,
                 'server_moved': False,
+                # The sustained clock follows the client's CURRENT frozen
+                # run.  If it advances once and then wedges, the old
+                # ever-moved boolean must not immunise it forever.
+                'frozen_since': ts,
+                'frozen_observations': 1,
             }
             _state[key] = entry
             _prune_locked(ts)
         else:
             entry['last_seen'] = ts
             entry['observations'] += 1
-            if c_fp != entry['first_client_fp']:
+            if c_fp != entry['last_client_fp']:
                 entry['client_moved'] = True
-            if s_fp != entry['first_server_fp']:
+                entry['frozen_since'] = ts
+                entry['frozen_observations'] = 1
+            else:
+                entry['frozen_observations'] += 1
+            if s_fp != entry['last_server_fp']:
                 entry['server_moved'] = True
+            entry['last_client_fp'] = c_fp
+            entry['last_server_fp'] = s_fp
 
         age = max(0.0, ts - entry['first_seen'])
         observations = entry['observations']
         client_moved = entry['client_moved']
         server_moved = entry['server_moved']
+        frozen_age = max(0.0, ts - entry['frozen_since'])
+        frozen_observations = entry['frozen_observations']
 
     # A single observation can never establish "frozen" — we have nothing to
     # compare against yet, so the first sighting is always benign.
-    stalled = bool(observations >= 2 and server_moved and not client_moved)
-    sustained = bool(stalled and age >= sustained_threshold_sec())
+    stalled = bool(frozen_observations >= 2)
+    sustained = bool(stalled and frozen_age >= sustained_threshold_sec())
 
     return {
         'age': age,
         'observations': observations,
         'client_moved': client_moved,
         'server_moved': server_moved,
+        'frozen_age': frozen_age,
+        'frozen_observations': frozen_observations,
         'stalled': stalled,
         'sustained': sustained,
         'direction': _classify_direction(client, server),
@@ -203,7 +231,8 @@ def observe_divergence(conv_id: str, kind: str, client, server,
 
 
 def observe_agreement(conv_id: str, kind: str,
-                      now: float | None = None) -> dict | None:
+                      now: float | None = None,
+                      observer_id: str = '') -> dict | None:
     """Record that ``conv_id``/``kind`` now agrees; clear any tracked drift.
 
     Returns:
@@ -214,15 +243,13 @@ def observe_agreement(conv_id: str, kind: str,
         fallback branch.
     """
     ts = time.time() if now is None else now
-    key = (conv_id, kind)
+    key = (observer_id, conv_id, kind)
     with _lock:
         entry = _state.pop(key, None)
     if entry is None:
         return None
     age = max(0.0, ts - entry['first_seen'])
-    was_stalled = bool(entry['observations'] >= 2
-                       and entry['server_moved']
-                       and not entry['client_moved'])
+    was_stalled = bool(entry['frozen_observations'] >= 2)
     return {
         'age': age,
         'observations': entry['observations'],
@@ -231,7 +258,7 @@ def observe_agreement(conv_id: str, kind: str,
 
 
 def tracked_count() -> int:
-    """Number of (conv_id, kind) pairs currently diverged. For tests/diagnostics."""
+    """Number of (observer, conv_id, kind) triples currently diverged."""
     with _lock:
         return len(_state)
 

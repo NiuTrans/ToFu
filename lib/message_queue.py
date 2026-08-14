@@ -38,7 +38,14 @@ import threading
 import time
 import uuid
 
-from lib.database import DOMAIN_CHAT, db_execute_with_retry, get_thread_db
+from lib.database import (
+    DOMAIN_CHAT,
+    allocate_scoped_sequence,
+    db_execute_with_retry,
+    get_thread_db,
+    lock_scoped_sequence,
+    write_transaction,
+)
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -94,36 +101,25 @@ def _reaper_max_dispatch_per_tick() -> int:
 
 
 def _ensure_table():
-    """Create the message_queue table if it doesn't exist (migration-safe)."""
+    """Verify canonical schema ownership created the complete queue table."""
     try:
         db = get_thread_db(DOMAIN_CHAT)
-        db.execute('''
-            CREATE TABLE IF NOT EXISTS message_queue (
-                id TEXT PRIMARY KEY,
-                conv_id TEXT NOT NULL,
-                payload TEXT NOT NULL DEFAULT '{}',
-                config TEXT NOT NULL DEFAULT '{}',
-                position INTEGER NOT NULL DEFAULT 1,
-                created_at BIGINT NOT NULL
-            )
-        ''')
-        db.execute('CREATE INDEX IF NOT EXISTS idx_mq_conv ON message_queue(conv_id, position)')
-        db.commit()
+        db.execute(
+            'SELECT id, conv_id, payload, config, position, kind, priority, '
+            'leased_until, lease_task_id FROM message_queue LIMIT 0')
+        return True
     except Exception as e:
-        logger.warning('[Queue] _ensure_table failed (queue will be unusable): %s', e, exc_info=True)
-        try:
-            db.rollback()
-        except Exception as re:
-            logger.debug('[Queue] rollback after _ensure_table failure: %s', re)
+        logger.error('[Queue] canonical message_queue schema unavailable: %s',
+                     e, exc_info=True)
+        return False
 
-# Auto-create table on module load (safe for existing DBs)
+# Schema is created centrally during init_db; this memoizes the health probe.
 _table_ensured = False
 
 def _maybe_ensure_table():
     global _table_ensured
     if not _table_ensured:
-        _ensure_table()
-        _table_ensured = True
+        _table_ensured = _ensure_table()
 
 
 def _existing_board_kickoff(db, conv_id: str, message_data: dict,
@@ -204,42 +200,51 @@ def enqueue_message(conv_id: str, message_data: dict, config: dict,
 
     db = get_thread_db(DOMAIN_CHAT)
 
-    # ── Structural de-dup floor: one queued kickoff per (conv, epic) ──
-    # See _existing_board_kickoff. Applies ONLY to brain kickoffs carrying a
-    # boardTaskId; human and peer turns are never collapsed.
-    existing = _existing_board_kickoff(db, conv_id, message_data, kind)
-    if existing:
-        row = db.execute(
-            'SELECT position FROM message_queue WHERE id=?', (existing,)).fetchone()
-        position = int(row['position']) if row and row['position'] is not None else 1
-        logger.info('[Queue] collapsed duplicate %s kickoff for conv=%s epic=%s '
-                    '→ reusing queued row %s (position=%d); a second row would '
-                    'inflate the visible queue depth and, on drain, cost a '
-                    'billed task re-doing claimed work',
-                    kind, conv_id[:8], message_data.get('boardTaskId'),
-                    existing[:8], position)
-        return {'queueId': existing, 'position': position, 'kind': kind,
-                'deduped': True}
-
     queue_id = str(uuid.uuid4())
     now_ms = int(time.time() * 1000)
     timestamp = message_data.get('timestamp', now_ms)
     priority = _priority_for_kind(kind)
 
-    # Get current queue depth for position
-    row = db.execute(
-        'SELECT COUNT(*) FROM message_queue WHERE conv_id=?',
-        (conv_id,)
-    ).fetchone()
-    position = (row[0] if row else 0) + 1
-
     payload = json.dumps(message_data, ensure_ascii=False)
     config_json = json.dumps(config, ensure_ascii=False)
 
-    db_execute_with_retry(db, '''
-        INSERT INTO message_queue (id, conv_id, payload, config, position, kind, priority, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (queue_id, conv_id, payload, config_json, position, kind, priority, timestamp))
+    # The counter row is the per-conversation, cross-process serialization
+    # point. Allocate first, then perform the structural dedup probe: a second
+    # worker waits for the first to commit and necessarily sees its kickoff.
+    with write_transaction(db, label='message-queue-enqueue'):
+        position = allocate_scoped_sequence(
+            db, 'message_queue_position', conv_id)
+        existing = _existing_board_kickoff(db, conv_id, message_data, kind)
+        if not existing and kind == KIND_AUTOPILOT:
+            singleton = db.execute(
+                'SELECT id, position FROM message_queue '
+                'WHERE conv_id=? AND kind=? LIMIT 1',
+                (conv_id, KIND_AUTOPILOT)).fetchone()
+            if singleton:
+                return {
+                    'queueId': singleton['id'],
+                    'position': int(singleton['position']),
+                    'kind': kind,
+                    'deduped': True,
+                }
+        if existing:
+            row = db.execute(
+                'SELECT position FROM message_queue WHERE id=?',
+                (existing,)).fetchone()
+            existing_position = int(
+                row['position']) if row and row['position'] is not None else 1
+            logger.info(
+                '[Queue] collapsed duplicate %s kickoff for conv=%s epic=%s '
+                '→ reusing queued row %s (position=%d)', kind, conv_id[:8],
+                message_data.get('boardTaskId'), existing[:8], existing_position)
+            return {'queueId': existing, 'position': existing_position,
+                    'kind': kind, 'deduped': True}
+        db.execute('''
+            INSERT INTO message_queue
+              (id, conv_id, payload, config, position, kind, priority, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (queue_id, conv_id, payload, config_json, position, kind,
+              priority, timestamp))
 
     logger.info('[Queue] Enqueued %s source %s for conv=%s position=%d priority=%d text=%d chars',
                 kind, queue_id[:8], conv_id[:8], position, priority,
@@ -326,7 +331,7 @@ def arm_autopilot_marker(conv_id: str, config: dict) -> dict:
         return {'queueId': existing['queueId'], 'armed': False}
     res = enqueue_message(conv_id, {'_autopilotMarker': True}, config,
                           kind=KIND_AUTOPILOT)
-    return {'queueId': res['queueId'], 'armed': True}
+    return {'queueId': res['queueId'], 'armed': not res.get('deduped', False)}
 
 
 def _get_autopilot_marker(conv_id: str) -> dict | None:
@@ -809,12 +814,15 @@ def clear_autopilot_marker(conv_id: str) -> bool:
     if not conv_id:
         return False
     db = get_thread_db(DOMAIN_CHAT)
-    marker = _get_autopilot_marker(conv_id)
-    if not marker:
-        return False
-    db_execute_with_retry(db, 'DELETE FROM message_queue WHERE id=?',
-                          (marker['queueId'],))
-    _renumber_positions(db, conv_id)
+    with write_transaction(db, label='message-queue-disarm-autopilot'):
+        lock_scoped_sequence(db, 'message_queue_position', conv_id)
+        row = db.execute(
+            'SELECT id FROM message_queue WHERE conv_id=? AND kind=? LIMIT 1',
+            (conv_id, KIND_AUTOPILOT)).fetchone()
+        if not row:
+            return False
+        db.execute('DELETE FROM message_queue WHERE id=?', (row['id'],))
+        _renumber_positions(db, conv_id)
     logger.info('[Queue] Cleared autopilot marker for conv=%s', conv_id[:8])
     return True
 
@@ -880,37 +888,25 @@ def remove_from_queue(conv_id: str, queue_id: str) -> bool:
         True if removed, False if not found.
     """
     db = get_thread_db(DOMAIN_CHAT)
-    row = db.execute(
-        'SELECT id, payload FROM message_queue WHERE id=? AND conv_id=?',
-        (queue_id, conv_id)
-    ).fetchone()
-    if not row:
-        return False
-
-    # Resolve the pending-mirror timestamp BEFORE deleting the queue row —
-    # the conversation body may hold a display-only ``_pendingQueued`` twin
-    # (append_pending_user_msg) that must be swept with the cancel, or a
-    # greyed "queued" bubble for a message that will never run strands on
-    # every device. Matched by the same timestamp the dispatch reconcile uses.
-    _pending_ts = None
-    try:
-        _p = json.loads(row['payload']) if row['payload'] else {}
-        _pending_ts = (_p.get('_user_msg') or {}).get('timestamp')
-    except (json.JSONDecodeError, TypeError, AttributeError) as e:
-        logger.debug('[Queue] payload parse for pending sweep failed (queueId=%s): %s',
-                     queue_id[:8], e)
-
-    db_execute_with_retry(db, 'DELETE FROM message_queue WHERE id=?', (queue_id,))
-    _renumber_positions(db, conv_id)
-
-    if _pending_ts is not None:
+    with write_transaction(db, label='message-queue-remove'):
+        lock_scoped_sequence(db, 'message_queue_position', conv_id)
+        row = db.execute(
+            'SELECT id, payload FROM message_queue WHERE id=? AND conv_id=?',
+            (queue_id, conv_id)).fetchone()
+        if not row:
+            return False
+        _pending_ts = None
         try:
+            _p = json.loads(row['payload']) if row['payload'] else {}
+            _pending_ts = (_p.get('_user_msg') or {}).get('timestamp')
+        except (json.JSONDecodeError, TypeError, AttributeError) as e:
+            logger.debug('[Queue] payload parse for pending sweep failed '
+                         '(queueId=%s): %s', queue_id[:8], e)
+        db.execute('DELETE FROM message_queue WHERE id=?', (queue_id,))
+        _renumber_positions(db, conv_id)
+        if _pending_ts is not None:
             from lib.chat.persistence import remove_pending_user_msgs
             remove_pending_user_msgs(db, conv_id, [_pending_ts])
-        except Exception as e:
-            logger.warning('[Queue] pending-mirror sweep failed conv=%s '
-                           '(queue row already removed; mirror may strand '
-                           'until reload): %s', conv_id[:8], e)
 
     logger.info('[Queue] Removed message %s from conv=%s', queue_id[:8], conv_id[:8])
     return True
@@ -957,23 +953,16 @@ def clear_queue(conv_id: str) -> int:
         Number of messages removed.
     """
     db = get_thread_db(DOMAIN_CHAT)
-    row = db.execute(
-        'SELECT COUNT(*) FROM message_queue WHERE conv_id=?',
-        (conv_id,)
-    ).fetchone()
-    count = row[0] if row else 0
-
-    if count > 0:
-        db_execute_with_retry(db, 'DELETE FROM message_queue WHERE conv_id=?', (conv_id,))
-        logger.info('[Queue] Cleared %d messages from conv=%s', count, conv_id[:8])
-        # Sweep every display-only ``_pendingQueued`` mirror row (timestamps
-        # unknown here — clear semantics cover them all).
-        try:
+    with write_transaction(db, label='message-queue-clear'):
+        lock_scoped_sequence(db, 'message_queue_position', conv_id)
+        cursor = db.execute(
+            'DELETE FROM message_queue WHERE conv_id=?', (conv_id,))
+        count = max(0, int(cursor.rowcount or 0))
+        if count > 0:
             from lib.chat.persistence import remove_pending_user_msgs
             remove_pending_user_msgs(db, conv_id, None)
-        except Exception as e:
-            logger.warning('[Queue] pending-mirror sweep on clear failed conv=%s '
-                           '(queue already cleared): %s', conv_id[:8], e)
+    if count > 0:
+        logger.info('[Queue] Cleared %d messages from conv=%s', count, conv_id[:8])
 
     return count
 
@@ -981,16 +970,17 @@ def clear_queue(conv_id: str) -> int:
 
 def _renumber_positions(db, conv_id: str):
     """Re-number position column after a deletion to keep them contiguous."""
-    rows = db.execute(
-        'SELECT id FROM message_queue WHERE conv_id=? ORDER BY position ASC',
-        (conv_id,)
-    ).fetchall()
-    for i, row in enumerate(rows, 1):
-        db.execute(
-            'UPDATE message_queue SET position=? WHERE id=?',
-            (i, row['id'])
-        )
-    db.commit()
+    with write_transaction(db, label='message-queue-renumber'):
+        lock_scoped_sequence(db, 'message_queue_position', conv_id)
+        rows = db.execute(
+            'SELECT id FROM message_queue WHERE conv_id=? ORDER BY position ASC',
+            (conv_id,)
+        ).fetchall()
+        for i, row in enumerate(rows, 1):
+            db.execute(
+                'UPDATE message_queue SET position=? WHERE id=?',
+                (i, row['id'])
+            )
 
 
 def dequeue_next(conv_id: str) -> dict | None:
@@ -1009,40 +999,36 @@ def dequeue_next(conv_id: str) -> dict | None:
     # crash/failure artifact and the row is fair game again (self-heal even
     # before the reaper runs).
     now_ms = int(time.time() * 1000)
-    row = db.execute(
-        'SELECT id, payload, config FROM message_queue '
-        'WHERE conv_id=? AND kind!=? '
-        'AND (leased_until IS NULL OR leased_until < ?) '
-        'ORDER BY priority ASC, position ASC LIMIT 1',
-        (conv_id, KIND_AUTOPILOT, now_ms)
-    ).fetchone()
-
-    if not row:
-        return None
-
-    queue_id = row['id']
+    with write_transaction(db, label='message-queue-lease-next'):
+        lock_scoped_sequence(db, 'message_queue_position', conv_id)
+        row = db.execute(
+            'SELECT id, payload, config FROM message_queue '
+            'WHERE conv_id=? AND kind!=? '
+            'AND (leased_until IS NULL OR leased_until < ?) '
+            'ORDER BY priority ASC, position ASC LIMIT 1',
+            (conv_id, KIND_AUTOPILOT, now_ms)).fetchone()
+        if not row:
+            return None
+        queue_id = row['id']
+        cursor = db.execute(
+            "UPDATE message_queue SET leased_until=?, lease_task_id='' "
+            'WHERE id=? AND (leased_until IS NULL OR leased_until < ?)',
+            (now_ms + _QUEUE_LEASE_MS, queue_id, now_ms))
+        if cursor.rowcount != 1:
+            return None
+        payload_json = row['payload']
+        config_json = row['config']
     try:
-        payload = json.loads(row['payload'])
+        payload = json.loads(payload_json)
     except (json.JSONDecodeError, TypeError) as e:
         logger.warning('[Queue] Failed to parse payload for dequeue queue_id=%s: %s', queue_id[:8], e)
         payload = {}
 
     try:
-        config = json.loads(row['config'])
+        config = json.loads(config_json)
     except (json.JSONDecodeError, TypeError) as e:
         logger.warning('[Queue] Failed to parse config for dequeue queue_id=%s: %s', queue_id[:8], e)
         config = {}
-
-    # LEASE, don't delete (pt_4ab943fa). The row stays durable until
-    # spawn_task succeeds (the delete moved to _finalize_queue_dispatch), so
-    # any failure/crash between here and the spawn leaves the message
-    # reclaimable instead of silently lost. lease_task_id='' means "dispatch
-    # in flight, task not yet created".
-    db_execute_with_retry(
-        db,
-        "UPDATE message_queue SET leased_until=?, lease_task_id='' WHERE id=?",
-        (now_ms + _QUEUE_LEASE_MS, queue_id),
-    )
 
     logger.info('[Queue] Leased queued message %s for dispatch conv=%s, text=%d chars',
                 queue_id[:8], conv_id[:8], len(payload.get('text', '')))
@@ -1076,8 +1062,10 @@ def _finalize_queue_dispatch(db, conv_id: str, queue_id: str) -> None:
     This is the ONLY delete on the dispatch path now — it runs AFTER
     spawn_task succeeded, so the durable copy outlives every failure window.
     """
-    db_execute_with_retry(db, 'DELETE FROM message_queue WHERE id=?', (queue_id,))
-    _renumber_positions(db, conv_id)
+    with write_transaction(db, label='message-queue-finalize-dispatch'):
+        lock_scoped_sequence(db, 'message_queue_position', conv_id)
+        db.execute('DELETE FROM message_queue WHERE id=?', (queue_id,))
+        _renumber_positions(db, conv_id)
 
 
 def _conv_has_live_task(conv_id: str) -> bool:
@@ -1099,6 +1087,10 @@ def _conv_has_live_task(conv_id: str) -> bool:
         return False
 
 
+class _QueuedConversationMissing(RuntimeError):
+    """The durable queue row outlived the conversation it targets."""
+
+
 def _append_user_msg_with_cas(db, conv_id: str, user_msg: dict) -> bool:
     """Append ``user_msg`` to a conversation's messages under an optimistic
     lock, retrying on a CAS miss.
@@ -1116,38 +1108,28 @@ def _append_user_msg_with_cas(db, conv_id: str, user_msg: dict) -> bool:
     Returns True on success, False if the conversation row is missing.
     """
     from lib.chat import append_user_msg_idempotent
-    from lib.database import json_dumps_pg
+    from lib.database.conversation_repository import (
+        load_conversation,
+        replace_messages,
+    )
 
     _MAX_CAS = 4
     for attempt in range(_MAX_CAS):
-        row = db.execute(
-            'SELECT messages, updated_at, rev FROM conversations WHERE id=? AND user_id=1',
-            (conv_id,)
-        ).fetchone()
-        if not row:
+        snapshot = load_conversation(db, conv_id)
+        if snapshot is None:
             logger.warning('[Queue] Conversation %s not found for dispatch', conv_id[:8])
-            return False
-        try:
-            messages = json.loads(row['messages'] or '[]')
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.warning('[Queue] Failed to parse messages for conv=%s: %s', conv_id[:8], e)
-            messages = []
-        cur_rev = row['rev']  # Phase 4 W3: CAS on rev (loop re-reads each attempt)
+            raise _QueuedConversationMissing(conv_id)
+        messages = snapshot.messages
+        cur_rev = snapshot['rev']  # loop re-reads each attempt
 
         # Idempotent append (dedupes if a prior attempt already wrote it).
         append_user_msg_idempotent(messages, user_msg)
 
         now_ms = int(time.time() * 1000)
-        cur = db.execute(
-            'UPDATE conversations SET messages=?, updated_at=?, msg_count=? '
-            'WHERE id=? AND user_id=1 AND rev=?',
-            (json_dumps_pg(messages), now_ms, len(messages), conv_id, cur_rev)
-        )
-        db.commit()
-        if getattr(cur, 'rowcount', None) != 0:
-            # Phase 5 dual-write (flag-gated, inert when off): tail append.
-            from lib.database.messages_rows import mirror_write_and_commit
-            mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms)
+        result = replace_messages(
+            db, conv_id, messages, expected_rev=cur_rev,
+            metadata={'updated_at': now_ms, 'msg_count': len(messages)})
+        if result.applied:
             return True
         # CAS miss — a concurrent writer bumped updated_at. Re-read + retry.
         logger.debug('[Queue] append CAS miss conv=%s attempt %d/%d — re-reading',
@@ -1166,29 +1148,17 @@ def _append_user_msg_with_cas(db, conv_id: str, user_msg: dict) -> bool:
                    'retry budget rather than overwriting a concurrent writer',
                    conv_id[:8])
     for attempt in range(_MAX_CAS, _MAX_CAS * 3):
-        row = db.execute(
-            'SELECT messages, rev FROM conversations WHERE id=? AND user_id=1',
-            (conv_id,)
-        ).fetchone()
-        if not row:
-            return False
-        try:
-            messages = json.loads(row['messages'] or '[]')
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.debug('[Queue] messages JSON parse failed, using fallback: %s', e)
-            messages = []
-        cur_rev = row['rev']
+        snapshot = load_conversation(db, conv_id)
+        if snapshot is None:
+            raise _QueuedConversationMissing(conv_id)
+        messages = snapshot.messages
+        cur_rev = snapshot['rev']
         append_user_msg_idempotent(messages, user_msg)
         now_ms = int(time.time() * 1000)
-        cur = db.execute(
-            'UPDATE conversations SET messages=?, updated_at=?, msg_count=? '
-            'WHERE id=? AND user_id=1 AND rev=?',
-            (json_dumps_pg(messages), now_ms, len(messages), conv_id, cur_rev)
-        )
-        db.commit()
-        if getattr(cur, 'rowcount', None) != 0:
-            from lib.database.messages_rows import mirror_write_and_commit
-            mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms)
+        result = replace_messages(
+            db, conv_id, messages, expected_rev=cur_rev,
+            metadata={'updated_at': now_ms, 'msg_count': len(messages)})
+        if result.applied:
             return True
         time.sleep(0.05 * (attempt - _MAX_CAS + 1))
     logger.error('[Queue] append could not win the rev CAS for conv=%s after '
@@ -1351,7 +1321,20 @@ def dispatch_next_queued(conv_id: str, *, _wait: float | None = None) -> str | N
             # ★ New path: /api/chat/send already built + translated the user message.
             #   Append it to the conversation DB under an optimistic lock so a
             #   concurrent writer can't clobber the append (see helper).
-            if not _append_user_msg_with_cas(db, conv_id, pre_built_user_msg):
+            try:
+                appended = _append_user_msg_with_cas(
+                    db, conv_id, pre_built_user_msg)
+            except _QueuedConversationMissing:
+                # The parent row was deleted but its durable queue child
+                # survived (legacy DBs did not always cascade this edge).
+                # Retrying can never succeed and would starve every newer
+                # conversation behind this oldest-first row.
+                _finalize_queue_dispatch(db, conv_id, item['queueId'])
+                logger.warning('[Queue] Dropped stale queued row %s for deleted '
+                               'conversation %s', item['queueId'][:8],
+                               conv_id[:8])
+                return None
+            if not appended:
                 _release_queue_lease(db, item['queueId'])
                 return None
             remaining = _get_queue_depth(db, conv_id)
@@ -1489,7 +1472,15 @@ def dispatch_next_queued(conv_id: str, *, _wait: float | None = None) -> str | N
 
             # Append user message to the conversation under an optimistic lock
             # (see _append_user_msg_with_cas — re-reads + CAS internally).
-            if not _append_user_msg_with_cas(db, conv_id, user_msg):
+            try:
+                appended = _append_user_msg_with_cas(db, conv_id, user_msg)
+            except _QueuedConversationMissing:
+                _finalize_queue_dispatch(db, conv_id, item['queueId'])
+                logger.warning('[Queue] Dropped stale queued row %s for deleted '
+                               'conversation %s', item['queueId'][:8],
+                               conv_id[:8])
+                return None
+            if not appended:
                 _release_queue_lease(db, item['queueId'])
                 return None
             remaining = _get_queue_depth(db, conv_id)

@@ -41,10 +41,12 @@ _MODEL = 'aws.claude-opus-4.8'
 
 
 class _Slot:
-    def __init__(self, model, provider_id='sankuai', thinking_format=''):
+    def __init__(self, model, provider_id='sankuai', thinking_format='',
+                 protocol=''):
         self.model = model
         self.provider_id = provider_id
         self.thinking_format = thinking_format
+        self.protocol = protocol
 
 
 def _tools():

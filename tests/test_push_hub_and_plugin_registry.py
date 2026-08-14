@@ -112,7 +112,10 @@ class TestPushHub:
     def test_remove_listener_missing_is_safe(self):
         hub = PushHub()
         # Removing a never-registered listener must not raise (logged at debug).
-        hub.remove_listener(lambda c, t, p: None)
+        missing = lambda c, t, p: None  # noqa: E731
+        result = hub.remove_listener(missing)
+        assert result is None
+        assert hub._listeners == []
 
     def test_broadcast_reaches_all_registered_clients(self):
         hub = PushHub()
@@ -137,6 +140,32 @@ class TestPushHub:
         assert hub.client_count == 0
         hub.push_event('chat', 'task-1', {'type': 'delta'})
         assert client._queue.empty()
+
+    def test_last_unsubscribe_prunes_task_and_channel_tombstones(self):
+        hub = PushHub()
+        client = PushClient()
+        hub.subscribe(client, 'paper', 'task-once')
+        hub.unsubscribe(client, 'paper', 'task-once')
+
+        assert 'paper' not in hub._subscriptions
+
+    def test_unknown_unsubscribe_does_not_create_registry_entry(self):
+        hub = PushHub()
+        hub.unsubscribe(PushClient(), 'never-seen', 'missing-task')
+
+        assert dict(hub._subscriptions) == {}
+
+    def test_unregister_prunes_all_last_owned_subscription_buckets(self):
+        hub = PushHub()
+        client = PushClient()
+        hub.register(client)
+        hub.subscribe(client, 'paper', 'p1')
+        hub.subscribe(client, 'paper', 'p2')
+        hub.subscribe(client, 'notify', '*')
+
+        hub.unregister(client)
+
+        assert dict(hub._subscriptions) == {}
 
 
 @pytest.mark.unit
@@ -248,6 +277,33 @@ class TestPluginRegistry:
         assert ran['good'] is True
         assert n == 1
 
+    def test_shutdown_hook_failure_is_isolated(self, monkeypatch):
+        import routes.plugin_registry as pr
+
+        calls = []
+
+        class _BadEP:
+            name = 'bad'
+
+            def load(self):
+                def fail(_app):
+                    raise RuntimeError('shutdown boom')
+                return fail
+
+        class _GoodEP:
+            name = 'good'
+
+            def load(self):
+                return lambda app: calls.append(app)
+
+        import importlib.metadata as md
+        monkeypatch.setattr(
+            md, 'entry_points', lambda group=None: [_BadEP(), _GoodEP()])
+
+        app = object()
+        assert pr.run_shutdown_hooks(app) == 1
+        assert calls == [app]
+
     def test_task_runtime_plugin_flattens_list_and_skips_none(self, monkeypatch):
         import routes.plugin_registry as pr
 
@@ -275,3 +331,29 @@ class TestPluginRegistry:
             lambda group=None: [_ListEP(), _NoneEP(), _SingleEP()])
 
         assert pr.discover_task_runtime_plugins() == ['rt1', 'rt2', 'rt3']
+
+    def test_task_runtime_discovery_is_cached_per_loader(self, monkeypatch):
+        """The hot generic-task endpoint must not rescan site-packages."""
+        import importlib.metadata as md
+        import routes.plugin_registry as pr
+
+        calls = {'entry_points': 0, 'load': 0}
+
+        class _EP:
+            name = 'cached'
+
+            def load(self):
+                calls['load'] += 1
+                return lambda: ['runtime-sentinel']
+
+        def _entry_points(group=None):
+            calls['entry_points'] += 1
+            return [_EP()]
+
+        monkeypatch.setattr(md, 'entry_points', _entry_points)
+        first = pr.discover_task_runtime_plugins()
+        first.append('caller-mutation')
+        second = pr.discover_task_runtime_plugins()
+
+        assert second == ['runtime-sentinel']
+        assert calls == {'entry_points': 1, 'load': 1}

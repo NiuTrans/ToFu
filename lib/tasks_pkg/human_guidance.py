@@ -50,6 +50,7 @@ def request_human_guidance(guidance_id, task=None):
         _human_guidance_requests[guidance_id] = {
             'event': evt,
             'response': None,
+            'resolved': False,
         }
 
     # Poll loop: wait _ABORT_POLL_INTERVAL at a time, checking for abort
@@ -68,10 +69,16 @@ def request_human_guidance(guidance_id, task=None):
             task['_dispatch_heartbeat'] = _t.time()
         # Check task abort
         if task and task.get('aborted'):
+            with _human_guidance_lock:
+                entry = _human_guidance_requests.get(guidance_id)
+                # A response may have acquired the lock immediately after the
+                # timed wait. Preserve first-resolution-wins: consume it on
+                # the next loop instead of acknowledging then discarding it.
+                if entry and entry.get('resolved'):
+                    continue
+                _human_guidance_requests.pop(guidance_id, None)
             logger.info('[HumanGuidance] Request %s — task aborted, '
                         'unblocking thread', guidance_id)
-            with _human_guidance_lock:
-                _human_guidance_requests.pop(guidance_id, None)
             return None
 
     # Event was set — user responded
@@ -97,10 +104,11 @@ def cancel_human_guidance(guidance_id):
     """
     with _human_guidance_lock:
         entry = _human_guidance_requests.get(guidance_id)
-        if not entry:
+        if not entry or entry.get('resolved'):
             logger.debug('[HumanGuidance] cancel called for unknown '
                          'guidance_id=%s (already resolved?)', guidance_id)
             return False
+        entry['resolved'] = True
         entry['response'] = None
         entry['event'].set()
     logger.info('[HumanGuidance] Cancelled guidance_id=%s', guidance_id)
@@ -119,11 +127,12 @@ def resolve_human_guidance(guidance_id, response_text):
     """
     with _human_guidance_lock:
         entry = _human_guidance_requests.get(guidance_id)
-        if not entry:
+        if not entry or entry.get('resolved'):
             logger.warning('[HumanGuidance] resolve called for unknown '
                            'guidance_id=%s (expired or already resolved)',
                            guidance_id)
             return False
+        entry['resolved'] = True
         entry['response'] = response_text
         entry['event'].set()
     logger.info('[HumanGuidance] User resolved %s → response_len=%d, '

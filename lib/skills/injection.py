@@ -4,8 +4,8 @@ This is the skills channel's discovery seam: a compact, byte-stable index of
 every installed skill package spliced into the system prompt on EVERY
 tool-bearing turn (by ``lib/tasks_pkg/system_context/_inject.py``), so the
 model always knows which guides exist and can pull one in on demand via the
-``activate_skill`` tool (progressive disclosure — only the one-line
-descriptions ride every turn; the full guide is loaded on activation).
+``load_skill`` tool (progressive disclosure — only the one-line
+descriptions ride every turn; the full guide is loaded for the current task).
 
 Byte-stability contract (prompt-cache safety, same rule as the memory count
 hint): the block is a pure function of the installed-skill set — skills are
@@ -65,9 +65,9 @@ def build_skills_index(project_path: str | None = None,
         '<available_skills>',
         'The USER has installed the following skill packages. A skill is an '
         'instruction GUIDE (not a memory): when the task matches a skill\'s '
-        'description, call activate_skill with the skill id to load the full '
+        'description, call load_skill with the exact skill id to load the full '
         'guide BEFORE doing the task, then follow it. Bundled reference and '
-        'script files are listed on activation — read them on demand with '
+        'script files are sampled on load — read them on demand with '
         'read_files.',
         '',
     ]

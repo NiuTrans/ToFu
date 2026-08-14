@@ -13,6 +13,10 @@ Run:  pytest tests/test_remote_brain_writeset.py -m unit -v
 
 from __future__ import annotations
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {
+    'lib/q.py', 'lib/x.py', 'lib/y.py', 'lib/z.py',
+}
+
 import json
 import os
 

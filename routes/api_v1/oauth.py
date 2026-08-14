@@ -17,7 +17,7 @@ JSON contract:
 
 from __future__ import annotations
 
-from flask import Blueprint, request
+from quart import Blueprint, request
 
 from lib.api_response import api_bad_request, api_internal_error, api_ok
 from lib.log import get_logger
@@ -55,6 +55,22 @@ def _with_egress_state(status: dict, provider: str, user_id: str) -> dict:
     return status
 
 
+def _with_quota_state(status: dict, provider: str) -> dict:
+    """Attach the latest successful Codex quota snapshot, when available."""
+    if provider != 'codex' or not status.get('authenticated'):
+        return status
+    try:
+        from lib.subscription_quota import latest_subscription_quota
+        quota = latest_subscription_quota(
+            provider, cache_key='oauth_codex')
+        if quota:
+            status = dict(status)
+            status['quota'] = quota
+    except Exception as e:
+        logger.debug('[OAuth.v1] quota status failed for %s: %s', provider, e)
+    return status
+
+
 @api_v1_oauth_bp.route('/api/v1/oauth/status', methods=['GET'])
 @require_auth
 @api_meta(
@@ -69,6 +85,8 @@ def _with_egress_state(status: dict, provider: str, user_id: str) -> dict:
 )
 def oauth_status():
     try:
+        from lib.oauth.outbound import reconcile_oauth_providers
+        reconcile_oauth_providers()
         from lib.oauth.manager import get_all_oauth_status, get_oauth_status
         from .auth import current_auth
         _auth = current_auth()
@@ -79,10 +97,11 @@ def oauth_status():
         if provider:
             if provider not in ('claude', 'codex'):
                 return api_bad_request('Invalid provider', field='provider')
-            return api_ok(_with_egress_state(
-                get_oauth_status(provider), provider, _uid))
+            return api_ok(_with_quota_state(_with_egress_state(
+                get_oauth_status(provider), provider, _uid), provider))
         all_status = get_all_oauth_status()
-        return api_ok({p: _with_egress_state(s, p, _uid)
+        return api_ok({p: _with_quota_state(
+                           _with_egress_state(s, p, _uid), p)
                        for p, s in all_status.items()})
     except Exception as e:
         logger.error('[OAuth.v1] status check failed: %s', e, exc_info=True)
@@ -195,7 +214,7 @@ def oauth_egress_agent_get():
 )
 def oauth_egress_agent_set():
     try:
-        from flask import request as _req
+        from quart import request as _req
         from lib.json_store import update_json_atomic
         from .auth import current_auth
         auth = current_auth()

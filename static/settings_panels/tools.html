@@ -1,28 +1,22 @@
         <div class="settings-tab-panel" id="settingsTab_tools">
-          <!-- Header: title · live counts · scope pills · refresh · search
-               (same control language as the MCP/Skills store headers) -->
+          <!-- Header: title · live total · refresh · search. This is a
+               process-global catalogue, not a per-conversation state view. -->
           <div class="mcp-store-header">
             <div class="mcp-store-header-title">
-              <span class="settings-section-title" data-i18n="toolsInv.title">工具注册表</span>
+              <span class="settings-section-title" data-i18n="toolsInv.title">工具目录</span>
               <span class="stg-badge" id="toolsInvTotalCount">0</span>
-              <span class="stg-badge" id="toolsInvActiveCount">0</span>
             </div>
             <div class="mcp-store-header-spacer"></div>
-            <div class="skills-scope-tabs">
-              <button class="skills-scope-tab active" data-tools-filter="all" onclick="_toolsInvSetFilter('all')" data-i18n="toolsInv.filterAll">全部</button>
-              <button class="skills-scope-tab" data-tools-filter="on" onclick="_toolsInvSetFilter('on')" data-i18n="toolsInv.filterOn">已启用</button>
-              <button class="skills-scope-tab" data-tools-filter="off" onclick="_toolsInvSetFilter('off')" data-i18n="toolsInv.filterOff">未启用</button>
-            </div>
-            <button class="btn btn-secondary btn-xs" onclick="_populateToolsTab()" title="重新从服务器拉取实时盘点" data-i18n-title="toolsInv.refreshTitle">
+            <button class="btn btn-secondary btn-xs" data-tofu-action="_populateToolsTab()" title="重新从服务器拉取实时盘点" data-i18n-title="toolsInv.refreshTitle">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="vertical-align:-1px"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
               <span data-i18n="toolsInv.refresh">刷新</span>
             </button>
             <input type="text" class="mcp-search" id="toolsInvSearch" placeholder="搜索工具…" data-i18n-placeholder="toolsInv.searchPh"
-                   oninput="_toolsInvSearch(this.value)">
+                   data-tofu-action-input="_toolsInvSearch(this.value)">
           </div>
 
           <p class="settings-desc" data-i18n="toolsInv.intro">
-            这里实时列出本进程注册在案的全部工具（统一注册表 lib/tools/registry 的只读视图）。灰显家族表示当前门未开，附开启方式；每次打开都重新盘点，MCP 重连、插件装拆即刻反映。
+            展示当前后端进程注册的全部工具。目录会在每次打开和手动刷新时从服务器重新同步，MCP 连接与插件变化也会随之更新。
           </p>
 
           <div id="toolsInvBody" class="tools-inv-body">

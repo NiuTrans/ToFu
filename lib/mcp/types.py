@@ -131,6 +131,9 @@ class MCPToolInfo(TypedDict):
     input_schema: dict[str, Any]
     openai_def: dict[str, Any]  # ready-to-use OpenAI function-calling dict
     read_only_hint: bool        # MCP annotations.readOnlyHint (default False)
+    meta: dict[str, Any]        # private retrieval/workflow metadata (_meta)
+    schema_hash: str            # server-provided or normalized SHA-256 fallback
+    catalog_version: str        # optional server catalogVersion
 
 
 def make_namespaced_name(server_name: str, tool_name: str) -> str:

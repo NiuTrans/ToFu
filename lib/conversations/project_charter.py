@@ -47,7 +47,11 @@ from __future__ import annotations
 import json
 import time
 
-from lib.database import DOMAIN_CHAT, get_thread_db
+from lib.database import (
+    DOMAIN_CHAT,
+    db_execute_with_retry,
+    get_thread_db,
+)
 from lib.ids import short_id
 from lib.log import audit_log, get_logger
 
@@ -381,40 +385,25 @@ def _cas_write(db, project_path: str, *, content: str, decisions: list,
     ts = int(time.time() * 1000)
     decisions_json = json.dumps(decisions, ensure_ascii=False)
     if base_version == 0:
-        cur = db.execute(
+        cur = db_execute_with_retry(
+            db,
             'INSERT INTO project_charter '
             '(project_path, content, decisions, updated_by_conv, updated_at, version) '
             'VALUES (?, ?, ?, ?, ?, ?) '
             'ON CONFLICT(project_path) DO NOTHING',
             (project_path, content, decisions_json,
-             updated_by_conv or '', ts, 1))
+             updated_by_conv or '', ts, 1), return_cursor=True)
     else:
-        cur = db.execute(
+        cur = db_execute_with_retry(
+            db,
             'UPDATE project_charter SET content=?, decisions=?, '
             'updated_by_conv=?, updated_at=?, version=? '
             'WHERE project_path=? AND version=?',
             (content, decisions_json, updated_by_conv or '', ts,
-             base_version + 1, project_path, base_version))
+             base_version + 1, project_path, base_version),
+            return_cursor=True)
     landed = (getattr(cur, 'rowcount', 0) or 0) > 0
-    if landed:
-        db.commit()
     return landed
-
-
-def _persist_charter(db, project_path: str, content: str, decisions: list,
-                     updated_by_conv: str, version: int) -> None:
-    """Upsert the single-PK charter row (the same dialect-correct ON CONFLICT
-    pattern commit_charter/repair use). Caller owns the transaction commit."""
-    db.execute(
-        'INSERT INTO project_charter '
-        '(project_path, content, decisions, updated_by_conv, updated_at, version) '
-        'VALUES (?, ?, ?, ?, ?, ?) '
-        'ON CONFLICT(project_path) DO UPDATE SET '
-        'content=excluded.content, decisions=excluded.decisions, '
-        'updated_by_conv=excluded.updated_by_conv, '
-        'updated_at=excluded.updated_at, version=excluded.version',
-        (project_path, content, json.dumps(decisions, ensure_ascii=False),
-         updated_by_conv or '', int(time.time() * 1000), version))
 
 
 # Sentinel distinguishing "caller said nothing about the summary" from "caller
@@ -511,9 +500,12 @@ def update_decision(project_path: str, index: int, text: str, *,
                     d['summary'] = new_summary
         decisions[index] = d
         new_version = cur['version'] + 1
-        _persist_charter(db, project_path, cur['content'], decisions,
-                         updated_by_conv, new_version)
-        db.commit()
+        if not _cas_write(
+                db, project_path, content=cur['content'], decisions=decisions,
+                updated_by_conv=updated_by_conv,
+                base_version=cur['version']):
+            return {'ok': False, 'error': 'version_conflict',
+                    'current_version': read_charter(project_path)['version']}
     except Exception as e:
         logger.error('[Charter] update_decision failed proj=%.40r: %s',
                      project_path, e, exc_info=True)
@@ -559,9 +551,12 @@ def delete_decision(project_path: str, index: int, *,
         removed_txt = (removed.get('text') if isinstance(removed, dict)
                        else str(removed)) or ''
         new_version = cur['version'] + 1
-        _persist_charter(db, project_path, cur['content'], decisions,
-                         updated_by_conv, new_version)
-        db.commit()
+        if not _cas_write(
+                db, project_path, content=cur['content'], decisions=decisions,
+                updated_by_conv=updated_by_conv,
+                base_version=cur['version']):
+            return {'ok': False, 'error': 'version_conflict',
+                    'current_version': read_charter(project_path)['version']}
     except Exception as e:
         logger.error('[Charter] delete_decision failed proj=%.40r: %s',
                      project_path, e, exc_info=True)
@@ -597,9 +592,13 @@ def delete_charter(project_path: str, *, expected_version: int | None = None,
         if expected_version is not None and cur['version'] != expected_version:
             return {'ok': False, 'error': 'version_conflict',
                     'current_version': cur['version']}
-        db.execute('DELETE FROM project_charter WHERE project_path=?',
-                   (project_path,))
-        db.commit()
+        cursor = db_execute_with_retry(
+            db,
+            'DELETE FROM project_charter WHERE project_path=? AND version=?',
+            (project_path, cur['version']), return_cursor=True)
+        if getattr(cursor, 'rowcount', 0) == 0:
+            return {'ok': False, 'error': 'version_conflict',
+                    'current_version': read_charter(project_path)['version']}
     except Exception as e:
         logger.error('[Charter] delete_charter failed proj=%.40r: %s',
                      project_path, e, exc_info=True)
@@ -755,19 +754,12 @@ def repair_truncated_decisions(project_path: str) -> dict:
 
         db = get_thread_db(DOMAIN_CHAT)
         new_version = rec['version'] + 1
-        ts = int(time.time() * 1000)
-        decisions_json = json.dumps(decisions, ensure_ascii=False)
-        db.execute(
-            'INSERT INTO project_charter '
-            '(project_path, content, decisions, updated_by_conv, updated_at, version) '
-            'VALUES (?, ?, ?, ?, ?, ?) '
-            'ON CONFLICT(project_path) DO UPDATE SET '
-            'content=excluded.content, decisions=excluded.decisions, '
-            'updated_by_conv=excluded.updated_by_conv, '
-            'updated_at=excluded.updated_at, version=excluded.version',
-            (project_path, rec['content'], decisions_json,
-             rec['updated_by_conv'] or '', ts, new_version))
-        db.commit()
+        if not _cas_write(
+                db, project_path, content=rec['content'], decisions=decisions,
+                updated_by_conv=rec['updated_by_conv'] or '',
+                base_version=rec['version']):
+            return {'ok': False, 'repaired': 0,
+                    'error': 'version_conflict'}
     except Exception as e:
         logger.error('[Charter] repair failed proj=%.40r: %s',
                      project_path, e, exc_info=True)

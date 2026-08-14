@@ -18,7 +18,8 @@ logger = get_logger(__name__)
 
 def build_assistant_tool_call_message(
     *, tool_calls: list, content=None, reasoning_content=None,
-    thinking_signature=None) -> dict:
+    thinking_signature=None, responses_items=None,
+    anthropic_content_blocks=None) -> dict:
     """THE single source for assembling a normalized assistant/tool_call message.
 
     Both the LIVE tail (orchestrator ``_run.py`` clean_msg, the in-loop tool
@@ -41,6 +42,10 @@ def build_assistant_tool_call_message(
         ``model_requires_reasoning_content_replay`` is preserved.
       * ``thinking_signature`` — carried only when present AND thinking present
         (a signature without reasoning text is meaningless).
+      * ``_responses_items`` — opaque OpenAI Responses reasoning/compaction
+        state, carried without interpretation for stateless replay.
+      * ``_anthropic_content_blocks`` — opaque Anthropic hosted-tool blocks,
+        carried unchanged so server_tool_use continuity survives replay.
       * key order is FIXED (role, content, reasoning_content, thinking_signature,
         tool_calls) so the serialized wire bytes are deterministic regardless of
         which caller populated the fields.
@@ -58,6 +63,8 @@ def build_assistant_tool_call_message(
         content: The assistant's inter-round prose (raw; stripped here).
         reasoning_content: Thinking text (or None/empty).
         thinking_signature: Opaque Claude thinking-block signature (or None).
+        responses_items: Opaque OpenAI Responses output items (or None).
+        anthropic_content_blocks: Opaque Anthropic assistant blocks (or None).
 
     Returns:
         A normalized assistant message dict in canonical key order.
@@ -72,6 +79,13 @@ def build_assistant_tool_call_message(
         msg['reasoning_content'] = _reasoning
         if _sig:
             msg['thinking_signature'] = _sig
+    if responses_items:
+        msg['_responses_items'] = [dict(item) for item in responses_items
+                                   if isinstance(item, dict)]
+    if anthropic_content_blocks:
+        msg['_anthropic_content_blocks'] = [dict(block)
+                                             for block in anthropic_content_blocks
+                                             if isinstance(block, dict)]
     msg['tool_calls'] = tool_calls
     return msg
 
@@ -144,6 +158,13 @@ def _reconstruct_tool_call_messages(rounds: list[dict]) -> list[dict] | None:
     if not rounds:
         return None
 
+    # todo_write is a state-sync protocol, not a sequence of independent
+    # observations. Replaying 0/3 → 1/3 → 2/3 teaches the model to churn the
+    # checklist and wastes context. Keep the latest effective carrier on the
+    # model wire while the untouched persisted toolRounds remain the audit log.
+    from lib.tools.todo import compact_todo_rounds_for_replay
+    rounds = compact_todo_rounds_for_replay(rounds)
+
     # Group into batches by llmRound (preferred) or roundNum gap (legacy).
     has_llm_round = any(r.get('llmRound') is not None for r in rounds)
     batches: list[list[dict]] = []
@@ -174,6 +195,8 @@ def _reconstruct_tool_call_messages(rounds: list[dict]) -> list[dict] | None:
         assistant_text = ''
         assistant_thinking = ''
         assistant_thinking_sig = ''
+        assistant_responses_items = None
+        assistant_anthropic_blocks = None
         for r in batch:
             tc_id = r['toolCallId']
             args_raw = r.get('toolArgs')
@@ -212,12 +235,17 @@ def _reconstruct_tool_call_messages(rounds: list[dict]) -> list[dict] | None:
             # Unused by other providers (they strip unknown fields server-side).
             if r.get('extraContent'):
                 tc_entry['extra_content'] = r['extraContent']
+            if isinstance(r.get('caller'), dict):
+                tc_entry['caller'] = dict(r['caller'])
             tool_calls.append(tc_entry)
-            tool_results.append({
+            tool_result = {
                 'role': 'tool',
                 'tool_call_id': tc_id,
                 'content': r['toolContent'] or '',
-            })
+            }
+            if isinstance(r.get('caller'), dict):
+                tool_result['caller'] = dict(r['caller'])
+            tool_results.append(tool_result)
             # First-seen assistantContent / thinking in the batch become the
             # assistant message's text + reasoning (Claude-style prefix).
             if not assistant_text and r.get('assistantContent'):
@@ -226,6 +254,11 @@ def _reconstruct_tool_call_messages(rounds: list[dict]) -> list[dict] | None:
                 assistant_thinking = r['thinking']
             if not assistant_thinking_sig and r.get('thinkingSignature'):
                 assistant_thinking_sig = r['thinkingSignature']
+            if assistant_responses_items is None and r.get('_responsesItems'):
+                assistant_responses_items = r['_responsesItems']
+            if (assistant_anthropic_blocks is None
+                    and r.get('_anthropicContentBlocks')):
+                assistant_anthropic_blocks = r['_anthropicContentBlocks']
 
         # ★ SINGLE SOURCE: field assembly goes through
         #   build_assistant_tool_call_message so this replay path and the live
@@ -235,7 +268,9 @@ def _reconstruct_tool_call_messages(rounds: list[dict]) -> list[dict] | None:
         asst_msg = build_assistant_tool_call_message(
             tool_calls=tool_calls, content=assistant_text or None,
             reasoning_content=assistant_thinking or None,
-            thinking_signature=assistant_thinking_sig or None)
+            thinking_signature=assistant_thinking_sig or None,
+            responses_items=assistant_responses_items,
+            anthropic_content_blocks=assistant_anthropic_blocks)
         out.append(asst_msg)
         out.extend(tool_results)
 

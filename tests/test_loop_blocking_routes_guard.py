@@ -58,7 +58,7 @@ _GUARDED_HELPERS = frozenset({
     '_count_convs_for_date',
     '_extract_convs_for_date',
     '_analyse_conversations',
-    '_conv_days_from_rows',
+    '_activity_counts_for_range',
     '_get_monthly_costs',
 })
 
@@ -67,8 +67,8 @@ _GUARDED_HELPERS = frozenset({
 # turns this suite red.
 _OFFLOAD_TOKENS = {
     'routes/api_v1/conversations.py': [
-        ("await asyncio.to_thread(json.loads, row['messages'] or '[]')", 2),
-        ('_branch_persist_payload, messages)', 1),
+        ('snapshot = await asyncio.to_thread(_load)', 1),
+        ('mutation = await asyncio.to_thread(_persist_branch)', 1),
     ],
     'routes/conversations_compaction.py': [
         ("await asyncio.to_thread(json.loads, r['messages_json'])", 1),

@@ -282,11 +282,17 @@ def create_task(conv_id, messages, config, *, supersede=True):
         #   committed translation address the SAME message. Empty for non-UI /
         #   external callers → live preview is simply skipped (no regression).
         '_assistantMsgId': (config or {}).get('assistantMsgId') or '',
+        # v2 lifecycle identity. Internal task ids remain executor plumbing;
+        # public state is addressed only by this stable turn / attempt pair.
+        '_turnProtocolV2': bool((config or {}).get('_turnProtocolV2')),
+        '_turnId': (config or {}).get('_turnId') or '',
+        '_attemptId': (config or {}).get('_attemptId') or '',
         # Override TaskRuntime defaults with chat-specific shape:
         'status': 'running',          # chat tasks start running, not pending
         'content': '', 'thinking': '', 'error': None,
         'aborted': False, 'toolRounds': [],
         'content_lock': threading.Lock(),
+        '_contentEpoch': 0,
         'finishReason': None, 'usage': None, 'toolSummary': None,
         'phase': None,                # current phase for polling fallback
         # ★ Timing anchor: when the task was created (route thread). Used by
@@ -299,6 +305,12 @@ def create_task(conv_id, messages, config, *, supersede=True):
         # '_force_rotate_pair' is set transiently by analyse_stream_result
         # and consumed (cleared) by stream_llm_response on the next call.
     })
+    try:
+        from lib.log import req_id as _current_request_id
+        task['_requestId'] = _current_request_id() or task.get('_requestId', '')
+    except Exception as e:
+        logger.debug('[Task %s] request correlation capture failed: %s',
+                     task_id[:8], e)
     # ★ Identity scope for the personal-preference profile. Resolved HERE,
     #   in the request thread, because the post-turn consolidation runs in a
     #   detached daemon with no request context. The scope is the multi-user
@@ -325,6 +337,47 @@ def create_task(conv_id, messages, config, *, supersede=True):
         task['_profileScope'] = ''
         task['_userId'] = ''
 
+    # ── Ingress affinity capture ──────────────────────────────────────
+    # The browser derives this key before task creation (stable per
+    # conversation, random only without one) and the load balancer hashes it.
+    # Persisting it with the durable-at-birth row lets /active on
+    # ANY replica hand a reloading/second-device client the exact same routing
+    # key. It is routing metadata only (never an auth credential).
+    #
+    # Background children inherit their conversation's last direct key from
+    # the shared runtime store. Only a task created in an actual request is
+    # marked reconnectable here: that excludes invisible VU/inline carriers
+    # from the cross-replica DB projection while the local registry continues
+    # to apply its richer is_carrier_task predicate.
+    _direct_affinity = False
+    _affinity_key = ''
+    try:
+        from quart import has_request_context, request
+        if has_request_context():
+            _affinity_key = (
+                request.headers.get('X-Tofu-Affinity-Key', '') or '')[:256]
+            _direct_affinity = bool(_affinity_key)
+    except Exception as e:
+        logger.debug('[Task %s] request affinity capture failed: %s',
+                     task_id[:8], e)
+    try:
+        from lib.runtime_state_store import get_store
+        _affinity_store = get_store()
+        if not _affinity_key and conv_id:
+            _affinity_key = (
+                _affinity_store.get_value('conv-affinity', conv_id) or '')[:256]
+        if _affinity_key and conv_id:
+            # Mapping retention is not a task deadline; it only permits a
+            # future child/reconnect to route to the existing owner.
+            _affinity_store.set_value(
+                'conv-affinity', conv_id, _affinity_key, 365 * 24 * 3600)
+    except Exception as e:
+        logger.debug('[Task %s] shared affinity mirror failed: %s',
+                     task_id[:8], e)
+    if _affinity_key:
+        task['_affinityKey'] = _affinity_key
+    task['_reconnectable'] = _direct_affinity
+
     # ★ Durable-at-birth: write the task_results row AT CREATION
     #   (status='running', empty content/thinking). The running-checkpoint
     #   writers only fire on content/thinking deltas and per-round boundaries,
@@ -348,6 +401,14 @@ def create_task(conv_id, messages, config, *, supersede=True):
             _birth_meta['preset'] = _bcfg['preset']
         if _bcfg.get('thinkingDepth'):
             _birth_meta['thinkingDepth'] = _bcfg['thinkingDepth']
+        if task.get('_affinityKey'):
+            _birth_meta['affinityKey'] = task['_affinityKey']
+        if task.get('_reconnectable'):
+            _birth_meta['reconnectable'] = True
+        if task.get('_userId') not in (None, ''):
+            _birth_meta['userId'] = str(task['_userId'])
+        if task.get('_requestId'):
+            _birth_meta['requestId'] = task['_requestId']
         _upsert_task_row(
             task, conv_id or '', content='', thinking='', status='running',
             error_json=None, tr_json=None,
@@ -426,6 +487,12 @@ def discard_task(task_id: str, conv_id: str | None = None) -> None:
     logger.info('[Manager] discard_task: task=%s conv=%s popped=%s caller=%s',
                 (task_id or '?')[:8], (conv_id or '')[:8],
                 bool(_popped), _caller)
+    if _popped:
+        try:
+            from lib.observability import record_registry_eviction
+            record_registry_eviction('chat', 'discard')
+        except Exception as exc:
+            logger.debug('[Manager] discard_task metric skipped: %s', exc)
     if conv_id:
         # Clears the store mirror too — a local-only delete leaves the
         # store-backed _latest_task_for_conv returning this corpse for up to
@@ -441,19 +508,18 @@ _DB_TOMBSTONE_POLL_S = 5.0  # abort_check 回读 DB tombstone 的最小间隔
 
 
 def _db_abort_tombstoned(task_id: str) -> bool:
-    """True when the task_results row carries an ``_abort_requested`` mark."""
+    """True when the task_results row carries a durable abort tombstone."""
     if not task_id:
         return False
     try:
-        from lib.database import DOMAIN_CHAT, get_thread_db
-        db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT metadata FROM task_results WHERE task_id=?',
-            (task_id,)).fetchone()
+        from lib.database import DOMAIN_CHAT, pooled_db
+        with pooled_db(DOMAIN_CHAT) as db:
+            row = db.execute(
+                'SELECT abort_requested_at FROM task_results WHERE task_id=?',
+                (task_id,)).fetchone()
         if not row:
             return False
-        meta = json.loads(row['metadata'] or '{}')
-        return bool(meta.get('_abort_requested'))
+        return bool(int(row['abort_requested_at'] or 0))
     except Exception as e:
         logger.debug('[Manager] db tombstone probe failed task=%s: %s',
                      task_id[:8], e)
@@ -463,34 +529,20 @@ def _db_abort_tombstoned(task_id: str) -> bool:
 def _write_abort_tombstone_row(task_id: str, source: str) -> bool:
     """Best-effort DB half of the tombstone (cross-process visibility).
 
-    RACES (accepted): the running checkpoint upsert is last-writer-wins on the
-    whole row, so a concurrent checkpoint can drop this metadata mark — the
-    in-memory set is the authoritative same-process channel; this write exists
-    so a SECOND process / future replica can see the request too. Content is
-    never touched (metadata-only UPDATE), so a lost race costs the mark, not
-    data.
+    Dedicated columns are deliberately excluded from checkpoint UPSERTs, so a
+    concurrent whole-metadata replacement cannot erase this mark.
     """
     try:
-        from lib.database import DOMAIN_CHAT, get_thread_db
-        db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT metadata, status FROM task_results WHERE task_id=?',
-            (task_id,)).fetchone()
-        if not row:
-            return False
-        if row['status'] != 'running':
-            return False
-        try:
-            meta = json.loads(row['metadata'] or '{}')
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.debug('[Manager] abort tombstone: unreadable metadata (%s) — starting fresh', e)
-            meta = {}
-        meta['_abort_requested'] = int(time.time() * 1000)
-        meta['_abort_source'] = source
-        db.execute('UPDATE task_results SET metadata=? WHERE task_id=?',
-                   (json.dumps(meta, ensure_ascii=False), task_id))
-        db.commit()
-        return True
+        from lib.database import (
+            DOMAIN_CHAT, db_execute_with_retry, pooled_db)
+        with pooled_db(DOMAIN_CHAT) as db:
+            cursor = db_execute_with_retry(
+                db,
+                'UPDATE task_results SET abort_requested_at=?, abort_source=? '
+                "WHERE task_id=? AND status='running'",
+                (int(time.time() * 1000), source, task_id),
+                return_cursor=True)
+        return cursor.rowcount == 1
     except Exception as e:
         logger.debug('[Manager] abort tombstone row write failed task=%s: %s',
                      task_id[:8], e)
@@ -536,11 +588,11 @@ def plant_abort_tombstones_for_conv(conv_id: str, *, source: str) -> int:
     if not conv_id:
         return 0
     try:
-        from lib.database import DOMAIN_CHAT, get_thread_db
-        db = get_thread_db(DOMAIN_CHAT)
-        rows = db.execute(
-            "SELECT task_id FROM task_results WHERE conv_id=? AND status='running'",
-            (conv_id,)).fetchall()
+        from lib.database import DOMAIN_CHAT, pooled_db
+        with pooled_db(DOMAIN_CHAT) as db:
+            rows = db.execute(
+                "SELECT task_id FROM task_results WHERE conv_id=? AND status='running'",
+                (conv_id,)).fetchall()
     except Exception as e:
         logger.warning('[Manager] conv tombstone scan failed conv=%s: %s',
                        conv_id[:8], e)
@@ -797,6 +849,12 @@ def snapshot_running_by_conv(user_id: str = '') -> dict[str, list[str]]:
     _now = time.time()
     with tasks_lock:
         for tid, t in tasks.items():
+            # Turn-v2 work is public by attemptId and reconnects through the
+            # durable attempt cursor. Leaking its executor task id into the
+            # legacy busy snapshot makes old clients call connectToTask and
+            # create a second DOM owner for the same stable turn.
+            if t.get('_turnProtocolV2'):
+                continue
             # ★ "Is this conv still working for the user?" — the SHARED
             #   predicate, not a bare status read. This is what covers the
             #   finalize/VU window in which the parent is already
@@ -1021,5 +1079,3 @@ def _write_aborted_terminal_floor(task) -> None:
     except Exception as e:
         logger.warning('[Task %s] Failed to write aborted terminal floor: %s',
                        task.get('id', '?')[:8], e, exc_info=True)
-
-

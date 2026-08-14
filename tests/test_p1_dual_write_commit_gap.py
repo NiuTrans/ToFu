@@ -72,6 +72,7 @@ fixing the crash-half via a caller-side ``finally``) still surfaces the
 pool-half regression cleanly.
 """
 
+import contextlib
 import json
 import os
 import sys
@@ -228,16 +229,13 @@ def test_dual_write_rows_are_durable_across_rollback():
     finally:
         # Housekeeping regardless of test outcome.
         os.environ.pop('TOFU_MESSAGES_ROWS', None)
-        try:
-            db_execute_with_retry(
-                db, 'DELETE FROM conversation_messages WHERE conv_id=?',
-                (conv_id,))
-            db_execute_with_retry(
-                db, 'DELETE FROM conversations WHERE id=? AND user_id=1',
-                (conv_id,))
-            db.commit()
-        except Exception:
-            db.rollback()
+        db_execute_with_retry(
+            db, 'DELETE FROM conversation_messages WHERE conv_id=?',
+            (conv_id,))
+        db_execute_with_retry(
+            db, 'DELETE FROM conversations WHERE id=? AND user_id=1',
+            (conv_id,))
+        db.commit()
 
 
 @_unit
@@ -333,26 +331,70 @@ def test_dual_write_rows_are_durable_across_pool_return():
         # Close the independent reader connection first so it does not hold
         # a lock on the row we're about to clean up.
         if reader_db is not None:
-            try:
-                reader_db.close()
-            except Exception:
-                pass
+            reader_db.close()
         # Rollback the writer's still-uncommitted implicit transaction so
         # the cleanup writes below see a clean slate.
-        try:
+        writer_db.rollback()
+        db_execute_with_retry(
+            writer_db, 'DELETE FROM conversation_messages WHERE conv_id=?',
+            (conv_id,))
+        db_execute_with_retry(
+            writer_db, 'DELETE FROM conversations WHERE id=? AND user_id=1',
+            (conv_id,))
+        writer_db.commit()
+
+
+@_unit
+def test_full_put_mirror_is_visible_from_an_independent_connection():
+    """The frontend's full-conversation PUT must own its mirror commit too.
+
+    ``persist_conv_messages`` had a durability guard, but
+    ``routes.conversations._save_conv_blocking`` called ``dual_write_conv``
+    directly.  Its authoritative upsert committed, then the mirror opened a
+    new implicit transaction which pool-scope cleanup rolled back.  Drive the
+    real PUT writer and observe from a fresh connection so read-your-own-write
+    cannot hide the defect.
+    """
+    from lib.database import DOMAIN_CHAT, get_thread_db, db_execute_with_retry
+    from lib.database._core import _new_connection
+    from routes.conversations import _save_conv_blocking
+
+    _ensure_table()
+    conv_id = 'cv-p1-put-' + str(int(time.time() * 1000))
+    os.environ['TOFU_MESSAGES_ROWS'] = '1'
+    writer_db = get_thread_db(DOMAIN_CHAT)
+    reader_db = None
+    try:
+        result = _save_conv_blocking(writer_db, conv_id, {
+            'title': 'p1-put',
+            'messages': [dict(m) for m in SAMPLE_MSGS],
+            'createdAt': int(time.time() * 1000),
+            'updatedAt': int(time.time() * 1000),
+            'settings': {},
+        })
+        assert result is not None
+        reader_db = _new_connection()
+        row = reader_db.execute(
+            'SELECT COUNT(*) AS n FROM conversation_messages WHERE conv_id=?',
+            (conv_id,)).fetchone()
+        n = int(row['n'] if hasattr(row, 'keys') else row[0])
+        assert n == len(SAMPLE_MSGS), (
+            f'full PUT returned but only {n}/{len(SAMPLE_MSGS)} mirror rows '
+            'were durable on an independent connection')
+    finally:
+        os.environ.pop('TOFU_MESSAGES_ROWS', None)
+        if reader_db is not None:
+            with contextlib.suppress(Exception):
+                reader_db.close()
+        with contextlib.suppress(Exception):
             writer_db.rollback()
-        except Exception:
-            pass
-        try:
-            db_execute_with_retry(
-                writer_db, 'DELETE FROM conversation_messages WHERE conv_id=?',
-                (conv_id,))
-            db_execute_with_retry(
-                writer_db, 'DELETE FROM conversations WHERE id=? AND user_id=1',
-                (conv_id,))
-            writer_db.commit()
-        except Exception:
-            writer_db.rollback()
+        db_execute_with_retry(
+            writer_db, 'DELETE FROM conversation_messages WHERE conv_id=?',
+            (conv_id,))
+        db_execute_with_retry(
+            writer_db, 'DELETE FROM conversations WHERE id=? AND user_id=1',
+            (conv_id,))
+        writer_db.commit()
 
 
 @_unit

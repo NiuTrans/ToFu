@@ -17,12 +17,19 @@ until the leaf lands and conversations.js delegates.
 from __future__ import annotations
 
 import pathlib
+import sys
+
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-CONV_JS = ROOT / 'static' / 'js' / 'core' / 'conversations.js'
-LEAF_JS = ROOT / 'static' / 'js' / 'core' / 'conv_hydrate_cache.js'
-BUNDLER_PY = ROOT / 'lib' / 'js_bundler.py'
+sys.path.insert(0, str(ROOT / 'tests'))
+from _runtime_sections import runtime_section_names, runtime_section_path  # noqa: E402
+
+CONV_JS = pathlib.Path(runtime_section_path('core/conversations.js'))
+LEAF_JS = pathlib.Path(runtime_section_path('core/conv_hydrate_cache.js'))
 INDEX_HTML = ROOT / 'index.html'
 
 
@@ -111,14 +118,9 @@ def test_bundler_lists_leaf_before_conversations_js():
     """Load order: leaf must precede conversations.js so main.js's
     bootstrap call to hydrateSidebarFromCache() resolves via the shared
     bundle scope."""
-    import sys
-    if str(ROOT) not in sys.path:
-        sys.path.insert(0, str(ROOT))
-    from lib.js_bundler import _BUNDLE_FILES
-    assert 'core/conv_hydrate_cache.js' in _BUNDLE_FILES, (
-        'core/conv_hydrate_cache.js missing from _BUNDLE_FILES')
-    idx_leaf = _BUNDLE_FILES.index('core/conv_hydrate_cache.js')
-    idx_conv = _BUNDLE_FILES.index('core/conversations.js')
+    owners = runtime_section_names()
+    idx_leaf = owners.index('core/conv_hydrate_cache.js')
+    idx_conv = owners.index('core/conversations.js')
     assert idx_leaf < idx_conv, (
         f'core/conv_hydrate_cache.js (idx {idx_leaf}) must precede '
         f'core/conversations.js (idx {idx_conv}) so bundle scope resolves '
@@ -128,18 +130,12 @@ def test_bundler_lists_leaf_before_conversations_js():
 
 
 # ---------------------------------------------------------------------------
-# 4. Dev-fallback <script> tag exists in index.html
+# 4. The page shell contains no raw app-script inventory
 # ---------------------------------------------------------------------------
-def test_index_html_has_devfallback_script_tag_for_leaf():
-    """Per the peer note about slice 4: every _BUNDLE_FILES entry MUST
-    have a matching <script> in index.html or the bundling-failed dev
-    fallback path silently drops the leaf."""
+def test_index_html_has_no_raw_script_tag_for_leaf():
     src = INDEX_HTML.read_text()
-    assert 'core/conv_hydrate_cache.js' in src, (
-        'index.html must have a <script defer src="static/js/core/'
-        'conv_hydrate_cache.js"> tag for the dev fallback path — '
-        'otherwise a bundling failure silently disables cache-first '
-        'sidebar paint')
+    assert 'static/js/core/conv_hydrate_cache.js' not in src
+    assert '<!-- TOFU_APP_ASSETS -->' in src
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +145,7 @@ def test_main_js_still_bootstraps_hydrator():
     """Callsite MUST survive the extraction — bare-name call resolved via
     bundle-level window scope (leaf loaded BEFORE main.js because leaf
     lives in core/, main.js in the root)."""
-    main_js = ROOT / 'static' / 'js' / 'main.js'
+    main_js = pathlib.Path(runtime_section_path('main.js'))
     src = main_js.read_text()
     assert 'hydrateSidebarFromCache()' in src, (
         'main.js must still bootstrap hydrateSidebarFromCache() — '

@@ -30,6 +30,12 @@ def guard(monkeypatch):
               'TOFU_CGROUP_REQUEST_PCT', 'TOFU_CGROUP_POLL_SEC',
               'TOFU_CGROUP_REQUEST_MIN_BYTES', 'TOFU_CGROUP_REQUEST_GUARD'):
         monkeypatch.delenv(k, raising=False)
+    for k in ('TOFU_PROCESS_RSS_RELIEF_MB',
+              'TOFU_PROCESS_RSS_COOLDOWN_SEC',
+              'TOFU_PROCESS_RSS_RECYCLE_MB'):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(cg, '_last_process_rss_relief_at', 0.0)
+    monkeypatch.setattr(cg, '_process_rss_recycle_requested', False)
     return cg
 
 
@@ -95,6 +101,92 @@ def test_monitor_neuter_below_threshold_no_relief(guard, monkeypatch):
                         lambda reason: called.__setitem__('n', called['n'] + 1))
     assert guard.run_monitor_once() is None
     assert called['n'] == 0
+
+
+def test_monitor_relieves_process_rss_even_when_cgroup_is_roomy(
+        guard, monkeypatch):
+    """A large Tofu process must not hide behind a roomy shared cgroup."""
+    _set_pressure(guard, monkeypatch, pct=40.0, swap=0)
+    monkeypatch.setenv('TOFU_PROCESS_RSS_RELIEF_MB', '1024')
+    rss = iter([5 * _GIB, 2 * _GIB])
+    monkeypatch.setattr(guard, '_self_rss_bytes', lambda: next(rss))
+    monkeypatch.setattr(guard, 'write_pressure_journal', lambda _snap: True)
+    monkeypatch.setattr(guard, 'check_oom_kill_count', lambda: False)
+    called = []
+    monkeypatch.setattr(
+        guard, 'relieve_memory',
+        lambda reason: called.append(reason) or {'reason': reason})
+    out = guard.run_monitor_once()
+    assert out['process_rss_before'] == 5 * _GIB
+    assert out['process_rss_after'] == 2 * _GIB
+    assert called and 'process RSS' in called[0]
+
+
+def test_process_rss_relief_is_cooldown_bounded(guard, monkeypatch):
+    monkeypatch.setenv('TOFU_PROCESS_RSS_RELIEF_MB', '1024')
+    monkeypatch.setenv('TOFU_PROCESS_RSS_COOLDOWN_SEC', '300')
+    monkeypatch.setattr(guard, '_self_rss_bytes', lambda: 5 * _GIB)
+    called = []
+    monkeypatch.setattr(
+        guard, 'relieve_memory',
+        lambda reason: called.append(reason) or {'reason': reason})
+    assert guard._maybe_relieve_process_rss(now=1000.0) is not None
+    assert guard._maybe_relieve_process_rss(now=1100.0) is None
+    assert guard._maybe_relieve_process_rss(now=1301.0) is not None
+    assert len(called) == 2
+
+
+def test_process_rss_hard_ceiling_requests_one_recycle_after_failed_relief(
+        guard, monkeypatch):
+    monkeypatch.setenv('TOFU_PROCESS_RSS_RELIEF_MB', '1024')
+    monkeypatch.setenv('TOFU_PROCESS_RSS_RECYCLE_MB', '2048')
+    monkeypatch.setattr(guard, '_self_rss_bytes', lambda: 3 * _GIB)
+    monkeypatch.setattr(guard, 'relieve_memory', lambda _reason: {})
+    requested = []
+
+    first = guard._maybe_relieve_process_rss(
+        now=1000.0, recycle_callback=requested.append)
+    second = guard._maybe_relieve_process_rss(
+        now=1400.0, recycle_callback=requested.append)
+
+    assert first['process_rss_recycle_requested'] is True
+    assert len(requested) == 1
+    assert 'hard ceiling' in requested[0]
+    assert second is not None
+    assert len(requested) == 1
+
+
+def test_effective_process_rss_relief_avoids_recycle(guard, monkeypatch):
+    monkeypatch.setenv('TOFU_PROCESS_RSS_RELIEF_MB', '1024')
+    monkeypatch.setenv('TOFU_PROCESS_RSS_RECYCLE_MB', '2048')
+    rss = iter([3 * _GIB, 1 * _GIB])
+    monkeypatch.setattr(guard, '_self_rss_bytes', lambda: next(rss))
+    monkeypatch.setattr(guard, 'relieve_memory', lambda _reason: {})
+    requested = []
+
+    result = guard._maybe_relieve_process_rss(
+        now=1000.0, recycle_callback=requested.append)
+
+    assert result['process_rss_after'] == 1 * _GIB
+    assert requested == []
+
+
+def test_default_process_rss_thresholds_adapt_to_small_cgroup(
+        guard, monkeypatch):
+    monkeypatch.setattr(guard, 'mem_limit_bytes', lambda: 4 * _GIB)
+
+    assert guard._process_rss_relief_limit_bytes() == 2 * _GIB
+    assert guard._process_rss_recycle_limit_bytes() == int(2.8 * _GIB)
+
+
+def test_explicit_process_rss_thresholds_override_cgroup_fraction(
+        guard, monkeypatch):
+    monkeypatch.setattr(guard, 'mem_limit_bytes', lambda: 4 * _GIB)
+    monkeypatch.setenv('TOFU_PROCESS_RSS_RELIEF_MB', '3072')
+    monkeypatch.setenv('TOFU_PROCESS_RSS_RECYCLE_MB', '3584')
+
+    assert guard._process_rss_relief_limit_bytes() == 3 * _GIB
+    assert guard._process_rss_recycle_limit_bytes() == int(3.5 * _GIB)
 
 
 def test_relieve_clears_caches_and_trims(guard, monkeypatch):
@@ -355,9 +447,16 @@ def test_effective_relief_never_escalates(guard, monkeypatch):
                         lambda log_dir='logs': {'files': 1, 'bytes': 100, 'skipped': 0})
     monkeypatch.setattr(guard, '_ineffective_reliefs', 0)
     monkeypatch.setattr(guard, '_ineffective_escalated', False)
-    monkeypatch.setattr(guard, 'audit_log', lambda *a, **k: 1 / 0)  # must not fire
+    fired = []
+    monkeypatch.setattr(guard, 'audit_log',
+                        lambda *a, **k: fired.append((a, k)))
+    last = None
     for _ in range(guard._INEFFECTIVE_LIMIT * 2):
-        guard.relieve_memory('monitor')
+        last = guard.relieve_memory('monitor')
+    assert fired == [], 'effective relief must never emit the escalation audit'
+    assert last is not None and last['reclaimed_bytes'] > 0
+    assert guard._ineffective_reliefs == 0
+    assert guard._ineffective_escalated is False
 
 
 def test_noise_sized_reclaim_does_not_rearm_the_escalation(guard, monkeypatch):
@@ -459,10 +558,33 @@ def test_pressure_journal_writes_and_rings(guard, monkeypatch, tmp_path):
     import json as _json
     lines = jpath.read_text().strip().split('\n')
     assert len(lines) < 30                      # ring bound kept the tail only
-    rec = _json.loads(lines[-1])
+    records = [_json.loads(line) for line in lines]
+    rec = records[-1]
     assert rec['pct'] == 50.0
     assert rec['cache_gib'] == 1.0 and rec['kmem_gib'] == 3.0
     assert os.path.getsize(jpath) <= 400 + 200  # bounded (last append may exceed slightly)
+
+
+def test_pressure_journal_concurrent_appends_are_not_lost(guard, monkeypatch,
+                                                          tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    import json as _json
+
+    jpath = tmp_path / 'journal.log'
+    monkeypatch.setattr(guard, '_JOURNAL_PATH', str(jpath))
+    monkeypatch.setattr(guard, '_JOURNAL_MAX_BYTES', 1 << 20)
+    monkeypatch.setattr(guard, '_read_memory_stat', lambda: {})
+    snap = {'pct': 50.0, 'usage': 100, 'limit': 200}
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        results = list(pool.map(
+            lambda _index: guard.write_pressure_journal(snap), range(64)))
+
+    assert all(results)
+    lines = jpath.read_text().splitlines()
+    assert len(lines) == 64
+    assert all(_json.loads(line)['pct'] == 50.0 for line in lines)
+    assert not (tmp_path / 'journal.log.tmp').exists()
 
 
 def test_pressure_journal_env_off(guard, monkeypatch, tmp_path):

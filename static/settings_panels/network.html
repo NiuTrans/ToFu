@@ -1,33 +1,46 @@
         <div class="settings-tab-panel" id="settingsTab_network">
-          <div class="settings-section-title" data-i18n="settings.httpProxy">HTTP 代理</div>
-          <p class="settings-desc" data-i18n-html="settings.httpProxyBody">配置用于所有出站请求（LLM API、网页搜索、页面抓取）的 HTTP/HTTPS 代理。留空则使用系统环境变量（<code>http_proxy</code> / <code>https_proxy</code>）。修改立即生效，无需重启。</p>
+          <div class="settings-section-title" data-i18n="settings.proxyPoolTitle">代理池</div>
+          <p class="settings-desc" data-i18n-html="settings.proxyPoolBody">粘贴完整代理链接。系统按顺序连接，失败自动切换；不添加则使用系统代理。</p>
           <div id="proxyEnvBanner" class="settings-hint-banner" style="display:none;margin-top:0;margin-bottom:12px">
             ℹ️ <span id="proxyEnvBannerText"></span>
           </div>
-          <div class="settings-group">
-            <div class="settings-row two-col">
-              <div class="settings-field">
-                <label data-i18n="settings.httpProxy">HTTP 代理</label>
-                <input type="text" id="settingHttpProxy" class="settings-mono" placeholder="http://proxy.example.com:8080" spellcheck="false">
-              </div>
-              <div class="settings-field">
-                <label data-i18n="settings.httpsProxy">HTTPS 代理</label>
-                <input type="text" id="settingHttpsProxy" class="settings-mono" placeholder="http://proxy.example.com:8080" spellcheck="false">
-              </div>
+          <div class="settings-group proxy-pool-group">
+            <div class="proxy-pool-toolbar">
+              <span class="proxy-pool-meta">
+                <span id="proxyPoolCount" class="proxy-pool-count">0 个代理</span>
+                <span class="proxy-pool-meta-sep" aria-hidden="true">·</span>
+                <span class="proxy-pool-order-hint" data-i18n="settings.proxyPoolOrderHint">从上到下按顺序尝试</span>
+              </span>
+              <button type="button" id="proxyPoolAddBtn" class="auth-src-btn sm"></button>
             </div>
+            <div id="proxyPoolList"></div>
           </div>
 
           <div class="settings-divider"></div>
-          <div class="settings-section-title" data-i18n="settings.proxyBypassTitle">不代理域名</div>
-          <p class="settings-desc" data-i18n-html="settings.proxyBypassBody">在此添加不需要走代理的域名后缀或主机名（每行一个，后缀匹配）。匹配的请求会<strong>完全绕过 HTTP 代理</strong>。</p>
-          <p class="settings-desc" style="margin-top:4px" data-i18n-html="settings.proxyBypassTipFull"><strong>💡 提示：</strong>内网地址和 LLM API 域名都应加在这里。企业/VPN 代理会静默断开长连接（SSE 流），导致 <code>BrokenPipeError</code>，添加对应域名即可解决。也可通过环境变量 <code>PROXY_BYPASS_DOMAINS</code>（逗号分隔）配置，两处合并生效。</p>
-          <div class="settings-group">
-            <div class="settings-field">
-              <label data-i18n-html="settings.bypassDomainsFull">绕过域名 <span style="color:var(--text-tertiary);font-weight:normal">（后缀匹配 — 例如 <code>.your-corp.com</code>，回车添加）</span></label>
-              <div id="settingProxyBypass" class="chip-input" data-placeholder=".internal.example.com"></div>
+          <details class="proxy-bypass-section">
+            <summary>
+              <span class="proxy-bypass-summary-copy">
+                <strong data-i18n="settings.proxyBypassTitle">直连规则</strong>
+                <small data-i18n-html="settings.proxyBypassBody">域名或 URL 不经过代理</small>
+              </span>
+              <span id="proxyBypassCount" class="proxy-bypass-count">0 项</span>
+            </summary>
+            <div class="proxy-bypass-card">
+              <div id="proxyBypassList" class="proxy-bypass-list"></div>
+              <div class="proxy-bypass-footer">
+                <button type="button" id="proxyBypassAddBtn" class="auth-src-btn ghost sm"></button>
+                <details class="proxy-bypass-rules-help">
+                  <summary data-i18n="settings.proxyBypassRules">查看匹配规则</summary>
+                  <div>
+                    <p><code>api.internal.example.com</code><span data-i18n="settings.proxyBypassExact">只匹配这个主机</span></p>
+                    <p><code>.internal.example.com</code><span data-i18n="settings.proxyBypassSuffix">匹配该域名及其子域名</span></p>
+                    <p data-i18n-html="settings.proxyBypassTipFull">也可以粘贴完整 URL，保存时会提取主机名。环境变量 <code>PROXY_BYPASS_DOMAINS</code> 会与这里合并。</p>
+                  </div>
+                </details>
+              </div>
+              <div id="proxyEnvHint" class="settings-hint-banner" style="display:none;margin-top:8px">
+                ℹ️ <span id="proxyEnvHintText"></span>
+              </div>
             </div>
-          </div>
-          <div id="proxyEnvHint" class="settings-hint-banner" style="display:none;margin-top:8px">
-            ℹ️ <span id="proxyEnvHintText"></span>
-          </div>
+          </details>
         </div>

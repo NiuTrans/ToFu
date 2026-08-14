@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Guard tests: install.sh defaults to SQLite; PostgreSQL is opt-in.
+"""Guard tests: SQLite defaults; explicit PostgreSQL fails closed.
 
 Background — the "install is too slow / fails too often" complaint (2026-07):
   The PostgreSQL install step (layered icu/libxml2/PG-major conda solve +
   initdb + start smoke-test + force-reinstall recovery) is the single
   slowest and most failure-prone part of install.sh, yet single-user setups
   (the overwhelming majority) never need PG — SQLite is a zero-config, fully
-  supported fallback. So PG became OPT-IN behind `--with-postgres`; the
+  supported equal backend. PG is opt-in behind `--with-postgres`; the
   default install skips PG entirely and pins TOFU_DB_BACKEND=sqlite.
 
   These tests pin that contract by STATIC ANALYSIS of install.sh (no network,
@@ -115,11 +115,11 @@ def test_downstream_pg_steps_require_installed_major():
     text = _install_sh()
     # initdb delegation (local-disk split) requires a non-empty installed major.
     assert re.search(
-        r'if \[\[ -z "\$DB_BACKEND_CHOICE" && -n "\$PG_INSTALLED_MAJOR".*?initdb via runtime',
+        r'if \[\[ "\$DB_BACKEND_CHOICE" == "postgres" && -n "\$PG_INSTALLED_MAJOR".*?initdb via runtime',
         text, re.S), 'initdb-delegate step is not gated on -n PG_INSTALLED_MAJOR'
     # pg_ctl smoke-test likewise requires a non-empty installed major.
     assert re.search(
-        r'elif \[\[ -z "\$DB_BACKEND_CHOICE" && -n "\$PG_INSTALLED_MAJOR".*?Smoke-testing PostgreSQL',
+        r'elif \[\[ "\$DB_BACKEND_CHOICE" == "postgres" && -n "\$PG_INSTALLED_MAJOR".*?Smoke-testing PostgreSQL',
         text, re.S), 'smoke-test step is not gated on -n PG_INSTALLED_MAJOR'
     _ok('initdb + smoke-test steps require a non-empty PG_INSTALLED_MAJOR')
 
@@ -127,18 +127,18 @@ def test_downstream_pg_steps_require_installed_major():
 def test_default_env_backend_is_sqlite():
     """With no PG installed, .env must be pinned to TOFU_DB_BACKEND=sqlite."""
     text = _install_sh()
-    # The validation region sets DB_BACKEND_CHOICE=sqlite when PG_INSTALLED_MAJOR
-    # is empty, and the .env writer emits sqlite for that choice.
+    # The validation region initializes the exact default choice to SQLite and
+    # the .env writer emits it.
     assert re.search(
-        r'elif \[\[ -z "\$PG_INSTALLED_MAJOR" \]\]; then.*?DB_BACKEND_CHOICE="sqlite"',
-        text, re.S), 'no-PG case does not set DB_BACKEND_CHOICE=sqlite'
+        r'DB_BACKEND_CHOICE="sqlite"', text), \
+        'installer does not initialize the exact SQLite default'
     assert re.search(
         r'if \[\[ "\$DB_BACKEND_CHOICE" == "sqlite" \]\]; then\s*\n\s*_set_env_var "TOFU_DB_BACKEND" "sqlite"',
         text), '.env writer does not pin TOFU_DB_BACKEND=sqlite for the sqlite choice'
     _ok('default install pins TOFU_DB_BACKEND=sqlite in .env')
 
 
-def test_existing_pgdata_recovery_warning_survives():
+def test_explicit_postgres_failure_never_switches_backend():
     """Old users with pgdata but PG off must be told how to re-enable it.
 
     Owner requirement: never let an existing PostgreSQL dataset silently go
@@ -148,14 +148,26 @@ def test_existing_pgdata_recovery_warning_survives():
     # The "pgdata exists but no PG binaries" warning must still exist.
     assert 'pgdata exists (PG ${PGDATA_MAJOR}) but no PG binaries installed in env' in text, \
         'the pgdata-exists warning was removed'
-    # And it must point users at --with-postgres to recover their data.
-    m = re.search(r'pgdata exists \(PG \$\{PGDATA_MAJOR\}\) but no PG binaries.*?fi',
-                  text, re.S)
-    assert m and '--with-postgres' in m.group(0), \
-        'pgdata-exists warning does not tell the user to re-run with --with-postgres'
-    assert m and 'NOT lost' in m.group(0), \
-        'pgdata-exists warning no longer reassures the data is preserved'
-    _ok('existing-pgdata recovery warning survives and names --with-postgres')
+    assert 'refusing backend fallback' in text
+    assert not re.search(
+        r'PG bootstrap failed.*?DB_BACKEND_CHOICE="sqlite"', text, re.S), \
+        'a failed explicit PostgreSQL selection still switches to SQLite'
+    _ok('explicit PostgreSQL failures are fail-closed')
+
+
+def test_post_install_smoke_uses_storage_sidecar_boundary():
+    """Installer verification must not reopen the database in-process."""
+    text = _install_sh()
+    marker = '#  Step 9.5: Post-install Sidecar smoke test'
+    start = text.index(marker)
+    end = text.index('#  Step 10: Launch or print completion', start)
+    smoke = text[start:end]
+    assert 'from lib.storage import StorageSupervisor' in smoke
+    assert 'from lib.database' not in smoke
+    assert "'record.put'" in smoke
+    assert "'record.get'" in smoke
+    assert "'record.delete'" in smoke
+    _ok('post-install verification crosses only the storage.v1 Sidecar boundary')
 
 
 def main():
@@ -168,7 +180,8 @@ def main():
         test_default_path_runs_no_pg_install_or_initdb,
         test_downstream_pg_steps_require_installed_major,
         test_default_env_backend_is_sqlite,
-        test_existing_pgdata_recovery_warning_survives,
+        test_explicit_postgres_failure_never_switches_backend,
+        test_post_install_smoke_uses_storage_sidecar_boundary,
     ]
     for fn in tests:
         try:

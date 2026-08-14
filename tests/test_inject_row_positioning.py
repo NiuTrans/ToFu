@@ -54,13 +54,15 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-CORE_JS = os.path.join(ROOT, 'static', 'js', 'core.js')
-TR_JS = os.path.join(ROOT, 'static', 'js', 'ui', 'tool_rounds.js')
-SUI_JS = os.path.join(ROOT, 'static', 'js', 'ui', 'streaming_ui.js')
+CORE_JS = runtime_section_path('core.js')
+TR_JS = runtime_section_path('ui/tool_rounds.js')
+SUI_JS = runtime_section_path('ui/streaming_ui.js')
 
 _HAS_NODE = shutil.which('node') is not None
 _HAS_JSDOM = os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
@@ -81,7 +83,7 @@ def _extract_core_inject_fns() -> str:
     core.js (all three sit contiguously, ending before the window export)."""
     src = open(CORE_JS, encoding='utf-8').read()
     start = src.index('function getToolRoundsFromMsg(')
-    end = src.index('if (typeof window !== "undefined") {\n  window._rehydrateInjectRows')
+    end = src.index('if (typeof window !== "undefined") {\n  runtimeScope._rehydrateInjectRows')
     chunk = src[start:end]
     assert '_spliceInjectRow' in chunk, 'extraction missed _spliceInjectRow'
     assert '_rehydrateInjectRows' in chunk, 'extraction missed _rehydrateInjectRows'
@@ -232,9 +234,12 @@ def test_live_reposition_moves_chip_above_anchor():
 
 def _extract_timeline_fns() -> str:
     src = open(TR_JS, encoding='utf-8').read()
+    project_start = src.index('function _projectTodoRoundsForDisplay(')
+    project_end = src.index('\nfunction ', project_start + 1)
+    project = src[project_start:project_end]
     start = src.index('function _roundsByToolCallId(')
     end = src.index('\nfunction _renderUnifiedGroup(')
-    chunk = src[start:end]
+    chunk = project + '\n' + src[start:end]
     assert 'renderSegmentTimelineHTML' in chunk
     return chunk
 

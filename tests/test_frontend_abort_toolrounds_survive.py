@@ -53,19 +53,19 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
-
-STREAM_LIFECYCLE = os.path.join(JS_DIR, 'ui', 'stream_lifecycle.js')
-CONV_VIEW = os.path.join(JS_DIR, 'conv_view.js')
-CHAT_RENDER = os.path.join(JS_DIR, 'ui', 'chat_render.js')
-ESCAPE_HTML = os.path.join(JS_DIR, 'core', 'escape_html.js')
-SAFE_HTML = os.path.join(JS_DIR, 'core', 'safe_html.js')
-TRANSLATION_MODEL = os.path.join(JS_DIR, 'core', 'translation_model.js')
-TRANSLATION_INDICATOR = os.path.join(JS_DIR, 'ui', 'translation_indicator.js')
+STREAM_LIFECYCLE = runtime_section_path('ui/stream_lifecycle.js')
+CONV_VIEW = runtime_section_path('conv_view.js')
+CHAT_RENDER = runtime_section_path('ui/chat_render.js')
+ESCAPE_HTML = runtime_section_path('core/escape_html.js')
+SAFE_HTML = runtime_section_path('core/safe_html.js')
+TRANSLATION_MODEL = runtime_section_path('core/translation_model.js')
+TRANSLATION_INDICATOR = runtime_section_path('ui/translation_indicator.js')
 
 
 def _node_deps_available() -> bool:
@@ -100,11 +100,14 @@ const activeStreams = new Map();
 const streamBufs = new Map();
 let conversations = [];
 let activeConvId = 'c1';
+let _editingMsgIdx = null;
 win.activeStreams = global.activeStreams = activeStreams;
 win.streamBufs = global.streamBufs = streamBufs;
 win.conversations = global.conversations = conversations;
 Object.defineProperty(win, 'activeConvId', { get: () => activeConvId, set: v => activeConvId = v });
 Object.defineProperty(global, 'activeConvId', { get: () => activeConvId, set: v => activeConvId = v });
+Object.defineProperty(win, '_editingMsgIdx', { get: () => _editingMsgIdx, set: v => _editingMsgIdx = v });
+Object.defineProperty(global, '_editingMsgIdx', { get: () => _editingMsgIdx, set: v => _editingMsgIdx = v });
 
 function spy(name) { return (...a) => { spy[name] = (spy[name] || 0) + 1; spy[name + '_args'] = a; }; }
 // ── Render-adjacent helpers renderMessage / finishStream need. ──
@@ -130,9 +133,11 @@ for (const name of [
   'renderMcpLoginHintHtml','renderTurnProvenanceHtml','renderFileChangesBar',
   'renderErrorEnvelope','renderBranchZone','renderTurnCtxNote',
   'renderPreferenceLearnedHtml','renderFinishInfo','_buildSwarmInboxChipsHTML',
-  '_injectAnchoredBranches','_prefetchConvCosts','_prefetchConvFileChanges',
+  '_injectAnchoredBranches','_destroyLazyObserver',
   '_stampFreshness','calcCostCny','renderRelatedConversationsHtml',
 ]) { if (typeof win[name] === 'undefined') { win[name] = global[name] = _noop0; } }
+win._prefetchConvCosts = global._prefetchConvCosts = () => Promise.resolve(false);
+win._prefetchConvFileChanges = global._prefetchConvFileChanges = () => Promise.resolve(false);
 win._USER_AVATAR_SVG = global._USER_AVATAR_SVG = '<i>u</i>';
 win._TOFU_WORKER_SVG = global._TOFU_WORKER_SVG = '<i>w</i>';
 win._TOFU_PLANNER_SVG = global._TOFU_PLANNER_SVG = '<i>p</i>';
@@ -157,6 +162,12 @@ win.convAutoTranslate = global.convAutoTranslate = () => false;
 win.convAutoTranslateEffective = global.convAutoTranslateEffective = () => false;
 win.autoTranslate = global.autoTranslate = false;
 win._lastRenderedFingerprint = global._lastRenderedFingerprint = '';
+win._lazyConvId = global._lazyConvId = null;
+win._lazyRenderedFrom = global._lazyRenderedFrom = 0;
+win._lazyRenderedTo = global._lazyRenderedTo = Infinity;
+win._openScrollConvId = global._openScrollConvId = null;
+win._explicitBottomLatch = global._explicitBottomLatch = null;
+win._activeBranch = global._activeBranch = null;
 // getActiveConv (finishStream reads it via the render belt) + the terminal
 // continuation's carrier probe. Neither affects "did the rounds reach the DOM".
 win.getActiveConv = global.getActiveConv = () => conversations.find(c => c.id === activeConvId) || null;
@@ -252,7 +263,12 @@ if (SCENARIO === 'abort_basic') {
 else if (SCENARIO === 'abort_no_streaming_msg') {
   const { conv, am } = setupConv();
   am.finishReason = 'aborted';
-  activeStreams.set('c1', { controller: {}, taskId: 't1', assistantMsg: am });
+  // A late server conversation load replaced conv.messages after stream
+  // registration, so the stream entry still points at a detached old object.
+  // The retained terminal assistant in the conversation is authoritative.
+  const detached = { role: 'assistant', content: '', thinking: '',
+    toolRounds: [], _msgId: 'm-detached' };
+  activeStreams.set('c1', { controller: {}, taskId: 't1', assistantMsg: detached });
   // The abort teardown removed #streaming-msg BEFORE finishStream ran (the
   // controller.abort() → reader teardown race). Only the static user node
   // remains; the assistant bubble was never painted as a static msg-1.
@@ -302,7 +318,7 @@ def _run(scenario: str) -> str:
             os.remove(harness)
         except OSError:
             pass
-    output = proc.stdout.strip()
+    output = (proc.stdout + '\n' + proc.stderr).strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     return output
 
@@ -324,13 +340,12 @@ def test_abort_basic_keeps_rounds():
                     reason='node + jsdom dev-deps not installed (run npm install)')
 def test_abort_no_streaming_msg_probe():
     """B: user Stop but #streaming-msg was already torn down when finishStream
-    ran. This probes the 'abort teardown raced ahead of the authoritative
-    repaint' vector. Recorded (not asserted green) so the run PRINTS whether the
-    rounds vanished — a FAIL here is the reproduction we are hunting."""
+    ran. The authoritative conversation document must be repainted so its
+    partial content and completed tool rounds remain visible."""
     output = _run('abort_no_streaming_msg')
     print(output)
-    # Always emit the diagnostic; only assert the harness completed.
-    assert 'nosm_panels=' in output, output
+    assert 'FAIL nosm_rounds_visible_in_dom' not in output, (
+        'ABORT WITHOUT A LIVE BUBBLE LOST THE RETAINED MESSAGE DOM:\n' + output)
 
 
 @pytest.mark.skipif(not _node_deps_available(),

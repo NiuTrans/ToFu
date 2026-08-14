@@ -34,6 +34,7 @@ import os
 import sys
 import time
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -76,20 +77,35 @@ class _FakeAgent:
             rounds_used=1,
             tool_log=list(tool_log or []),
         )
-        self.max_rounds = spec.max_rounds
-
     def run(self):
         time.sleep(0.01)
         return self.result
 
 
+@contextmanager
 def _patch_factory(by_id=None):
+    """Isolate the snapshot path from the product's follow-up turn.
+
+    A settled swarm deliberately invokes ``_maybe_autocontinue`` after its
+    final snapshot is durable.  These tests keep a synthetic conversation and
+    (in the contention case) a synthetic live chat task just long enough to
+    observe that snapshot; allowing the settle hook to race their teardown can
+    start a real chat worker against the placeholder test API key.  That worker
+    outlives pytest's capture stream and causes both network traffic and
+    ``I/O operation on closed file`` logging failures after the suite exits.
+
+    Auto-continue has its own integration coverage.  Stub only that orthogonal
+    side effect here while retaining the real swarm driver and DB snapshot
+    writer this module promises to exercise.
+    """
     by_id = by_id or {}
 
     def _factory(spec, **kwargs):
         return _FakeAgent(spec, **by_id.get(spec.id, {}))
 
-    return patch('lib.swarm.master._build_sub_agent', side_effect=_factory)
+    with patch('lib.swarm.master._build_sub_agent', side_effect=_factory), \
+            patch('lib.swarm.integration._maybe_autocontinue', return_value=None):
+        yield
 
 
 def _wait_until(predicate, timeout=5.0, poll=0.02):
@@ -301,7 +317,7 @@ class TestSwarmSnapshotPersist(unittest.TestCase):
         # it by-reference (via _merge_tool_rounds) on this thread while the
         # driver thread stamps _swarmSnapshot onto it. THIS is the #1 race.
         from lib.tasks_pkg.manager import (
-            create_task, _sync_partial_to_conversation, tasks, tasks_lock)
+            create_task, discard_task, _sync_partial_to_conversation)
         handle = {'status': 'async_launched', 'swarm_id': self.conv_id + '-t1',
                   'agents': [{'id': s['id'], 'role': s['role'],
                               'objective': s['objective']} for s in specs]}
@@ -351,8 +367,18 @@ class TestSwarmSnapshotPersist(unittest.TestCase):
         finally:
             stop.set()
             hammer.join(timeout=2.0)
-            with tasks_lock:
-                tasks.pop(live_task['id'], None)
+            discard_task(live_task['id'], self.conv_id)
+            # ``create_task`` writes a durable-at-birth running result.  This
+            # synthetic task has no worker/finalizer, so delete its test-only
+            # row instead of leaving a startup-recovery zombie for a later
+            # test in this shared pytest database.
+            from lib.database import (DOMAIN_CHAT, db_execute_with_retry,
+                                      get_thread_db)
+            db = get_thread_db(DOMAIN_CHAT)
+            db_execute_with_retry(
+                db, 'DELETE FROM task_results WHERE task_id=?',
+                (live_task['id'],))
+            db.commit()
 
         self.assertGreater(hammer_count['n'], 5,
                            'hammer thread never ran — race not exercised')

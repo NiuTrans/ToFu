@@ -106,6 +106,11 @@ win.renderMemoryPrefetchHtml = global.renderMemoryPrefetchHtml = () => '';
 // related-conversations + resolved-login) — updateStreamingUI renders it.
 win.renderTurnProvenanceHtml = global.renderTurnProvenanceHtml = () => '';
 win._isRoundSwarm = global._isRoundSwarm = (r) => !!(r && r._swarm);
+// Program-call cards are implemented by core ui/tool_rounds.js, which this
+// focused harness intentionally replaces with render stubs. Mirror the small
+// shared predicate so streaming_ui.js is exercised against its real dependency
+// contract without loading the entire tool-round renderer.
+win._isProgramRound = global._isProgramRound = (r) => !!(r && r._programSynthetic);
 win.convAutoTranslate = global.convAutoTranslate = (c) =>
   (c && c.autoTranslate !== undefined) ? !!c.autoTranslate
     : (typeof autoTranslate !== 'undefined' && autoTranslate !== undefined ? !!autoTranslate : false);
@@ -292,6 +297,35 @@ const _vuHtml = bodyVu.querySelector('[data-zone="status"]').innerHTML;
 check('phase_tool_exec_no_tools_fallback',
   _vuHtml.includes('apply_diff a.py'));
 bodyVu.remove();
+
+// ── 1d. execute_tools is a protocol adapter, never a live tool row/count ──
+const bodyGateway = _freshBody();
+updateStreamingUI({
+  content: '', thinking: '', phase: null,
+  toolRounds: [{ roundNum: 1, llmRound: 0, status: 'done',
+                 toolName: 'execute_tools', query: 'execute_tools' }],
+});
+check('execute_gateway_only_hidden',
+  !bodyGateway.querySelector('.ptool-panel')
+  && !bodyGateway.querySelector('[data-prn="1"]'));
+
+updateStreamingUI({
+  content: '', thinking: '', phase: null,
+  toolRounds: [
+    { roundNum: 1, llmRound: 0, status: 'done',
+      toolName: 'execute_tools', query: 'execute_tools' },
+    { roundNum: 8700000, llmRound: 0, status: 'error',
+      toolName: 'read_files', query: 'read_files' },
+  ],
+});
+const _gatewayPanel = bodyGateway.querySelector('.ptool-panel');
+check('execute_gateway_child_only_visible',
+  !!_gatewayPanel
+  && !_gatewayPanel.querySelector('[data-prn="1"]')
+  && !!_gatewayPanel.querySelector('[data-prn="8700000"]')
+  && _gatewayPanel.querySelectorAll('[data-prn]').length === 1
+  && _gatewayPanel.querySelector('.ptool-panel-label').textContent.includes(':1'));
+bodyGateway.remove();
 
 // ── 2. finishStream clears orphaned awaiting_human / submitted rounds to done ──
 const conv = {

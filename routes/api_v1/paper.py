@@ -36,7 +36,7 @@ in :mod:`routes.api_v1.agents` continue to wrap the same engine.
 
 from __future__ import annotations
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.log import get_logger
 

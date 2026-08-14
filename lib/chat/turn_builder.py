@@ -474,11 +474,16 @@ def build_tool_history_round(batch):
         }
         if r.get('extraContent'):
             tc['extraContent'] = r.get('extraContent')
+        if isinstance(r.get('caller'), dict):
+            tc['caller'] = dict(r['caller'])
         round_out['toolCalls'].append(tc)
-        round_out['toolResults'].append({
+        result = {
             'tool_call_id': r.get('toolCallId'),
             'content': r.get('toolContent') or '',
-        })
+        }
+        if isinstance(r.get('caller'), dict):
+            result['caller'] = dict(r['caller'])
+        round_out['toolResults'].append(result)
     return round_out
 
 
@@ -541,9 +546,27 @@ def scan_continue_checkpoint(assistant_msg):
     if last_complete_idx < 0:
         return None
 
-    tool_history = [build_tool_history_round(batch) for batch in batches.values()]
     kept_rounds = all_rounds[:last_complete_idx + 1]
     discarded_rounds = len(all_rounds) - len(kept_rounds)
+
+    # Keep the full checkpoint/audit list on the message, but replay only the
+    # newest effective checklist revision to the model.
+    from lib.tools.todo import compact_todo_rounds_for_replay
+    replay_rounds = compact_todo_rounds_for_replay(kept_rounds)
+    replay_batches: dict = {}
+    replay_key = 0
+    replay_prev = None
+    replay_has_llm = any(r.get('llmRound') is not None for r in replay_rounds)
+    for r in replay_rounds:
+        if replay_has_llm:
+            replay_key = r.get('llmRound')
+        elif (replay_prev and r.get('roundNum', 0)
+              > replay_prev.get('roundNum', -999) + 1):
+            replay_key += 1
+        replay_batches.setdefault(replay_key, []).append(r)
+        replay_prev = r
+    tool_history = [build_tool_history_round(batch)
+                    for batch in replay_batches.values()]
 
     preserved_content_parts = [r.get('assistantContent') or '' for r in kept_rounds]
     preserved_content = '\n\n'.join(p for p in preserved_content_parts if p)

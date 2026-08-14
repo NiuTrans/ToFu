@@ -95,8 +95,9 @@ _CLAUDE_TOOLS_BETA = 'advanced-tool-use-2025-11-20'
 #: moved from codex_cli_rs to codex-tui (CLIProxyAPI
 #: ``codex_executor_request.go`` — drift alarm in test_oauth_cloaking_drift).
 _CODEX_ORIGINATOR = 'codex-tui'
-_CODEX_USER_AGENT = ('codex-tui/0.146.0 (Mac OS 26.5.0; arm64) '
-                     'iTerm.app/3.6.10 (codex-tui; 0.146.0)')
+CODEX_CLIENT_VERSION = '0.146.0'
+_CODEX_USER_AGENT = (f'codex-tui/{CODEX_CLIENT_VERSION} (Mac OS 26.5.0; arm64) '
+                     f'iTerm.app/3.6.10 (codex-tui; {CODEX_CLIENT_VERSION})')
 _CLAUDE_USER_AGENT = f'claude-cli/{CLAUDE_CODE_VERSION} (external, cli)'
 
 #: Provider-config ``oauth`` values this module knows how to bridge.
@@ -474,7 +475,21 @@ def resolve_oauth_request(oauth: str, body: dict, extra_headers: dict | None,
         hdrs['OpenAI-Beta'] = 'responses=experimental'
         hdrs['originator'] = _CODEX_ORIGINATOR
         hdrs['User-Agent'] = _CODEX_USER_AGENT
-        hdrs['session_id'] = uuid.uuid4().hex
+        # Codex keeps these values stable for the lifetime of one thread and
+        # uses the same lifetime for ``prompt_cache_key``.  A fresh session id
+        # per round destroys backend cache affinity: a live Luna tool-call A/B
+        # measured 0 cached tokens with random ids versus 5,504 cached tokens
+        # on every warm round with stable ids.  Hashing the internal conv/task
+        # id keeps the upstream value non-identifying.
+        from lib.llm.responses_outbound import responses_cache_affinity_key
+        cache_key = responses_cache_affinity_key(body)
+        # Codex CLI 0.147 sends the SAME UUID value in all three headers and
+        # in Responses ``prompt_cache_key``.  Do not create two merely-related
+        # namespaces here: exact equality is the first-party contract.
+        affinity_id = cache_key or str(uuid.uuid4())
+        hdrs['session-id'] = affinity_id
+        hdrs['thread-id'] = affinity_id
+        hdrs['x-client-request-id'] = affinity_id
         if account_id:
             hdrs['chatgpt-account-id'] = account_id
         return token, hdrs, body
@@ -552,7 +567,7 @@ def _merge_betas(existing: str, has_tools: bool = False) -> str:
 # without touching user-curated providers.
 
 #: Codex model tables per subscription plan tier, ported from CLIProxyAPI
-#: ``internal/registry/models/models.json`` (v7, synced 2026-07-31).
+#: ``internal/registry/models/models.json`` (v7, synced 2026-08-08).
 #: plus and pro share the full table upstream; team/business/go share the
 #: mid table; free is the reduced set. Unknown plans fall back to pro
 #: (CLIProxyAPI's default branch) so a NEW plan name is never a downgrade.
@@ -630,9 +645,21 @@ _MANAGED_SPECS = {
         'protocol': 'anthropic',
         'thinking_format': 'thinking_type',
         'models': [
+            {'model_id': 'claude-opus-5', 'capabilities': ['text', 'vision', 'thinking']},
+            {'model_id': 'claude-sonnet-5', 'capabilities': ['text', 'vision', 'thinking']},
+            {'model_id': 'claude-fable-5', 'capabilities': ['text', 'vision', 'thinking']},
+            {'model_id': 'claude-opus-4-8', 'capabilities': ['text', 'vision', 'thinking']},
+            {'model_id': 'claude-opus-4-7', 'capabilities': ['text', 'vision', 'thinking']},
+            {'model_id': 'claude-opus-4-6', 'capabilities': ['text', 'vision', 'thinking']},
+            {'model_id': 'claude-sonnet-4-6', 'capabilities': ['text', 'vision', 'thinking']},
             {'model_id': 'claude-opus-4-5-20251101', 'capabilities': ['text', 'vision', 'thinking']},
             {'model_id': 'claude-sonnet-4-5-20250929', 'capabilities': ['text', 'vision', 'thinking']},
             {'model_id': 'claude-haiku-4-5-20251001', 'capabilities': ['text', 'vision', 'thinking']},
+            {'model_id': 'claude-opus-4-1-20250805', 'capabilities': ['text', 'vision', 'thinking']},
+            {'model_id': 'claude-opus-4-20250514', 'capabilities': ['text', 'vision', 'thinking']},
+            {'model_id': 'claude-sonnet-4-20250514', 'capabilities': ['text', 'vision', 'thinking']},
+            {'model_id': 'claude-3-7-sonnet-20250219', 'capabilities': ['text', 'vision', 'thinking']},
+            {'model_id': 'claude-3-5-haiku-20241022', 'capabilities': ['text', 'vision']},
         ],
         'stream_only': False,
     },
@@ -643,32 +670,32 @@ _MANAGED_SPECS = {
 _OAUTH_SENTINEL_KEY = 'oauth-managed'
 
 
-def provision_oauth_provider(provider: str, plan_type: str = None) -> bool:
-    """Add/refresh the managed server_config provider for a subscription.
-
-    Idempotent: replaces any existing managed entry for this provider.
-    For ``codex`` the model table is chosen by ``chatgpt_plan_type`` —
-    passed explicitly or read from the stored token. Returns True when
-    server_config.json was updated.
-    """
+def _managed_oauth_entry(provider: str, plan_type: str = None) -> dict:
+    """Build the authoritative server-owned provider projection."""
     spec = _MANAGED_SPECS.get(provider)
     if not spec:
-        return False
-    from lib import _SERVER_CONFIG_PATH, reload_config
-    from lib.json_store import update_json_atomic
-    from lib.llm_dispatch import reset_dispatcher
+        return {}
 
     if provider == 'codex':
         if plan_type is None:
             from lib.oauth.token_store import load_token
             stored = load_token('codex') or {}
             plan_type = stored.get('plan_type', '')
-        models = [{'model_id': mid, 'capabilities': ['text', 'vision']}
-                  for mid in _codex_tier_models(plan_type)]
+        from lib.oauth.codex_catalog import cached_codex_provider_models
+        models = cached_codex_provider_models()
+        catalog_source = 'remote_cache' if models else 'static_fallback'
+        if not models:
+            models = [{
+                'model_id': mid,
+                'capabilities': ['text', 'vision'],
+                'catalog_visibility': ('hide' if mid == 'codex-auto-review'
+                                       else 'list'),
+            } for mid in _codex_tier_models(plan_type)]
     else:
         models = spec['models']
+        catalog_source = 'static'
 
-    entry = {
+    return {
         'id': spec['id'],
         'name': spec['name'],
         'base_url': spec['base_url'],
@@ -678,23 +705,137 @@ def provision_oauth_provider(provider: str, plan_type: str = None) -> bool:
         'api_keys': [_OAUTH_SENTINEL_KEY],
         'protocol': spec.get('protocol', ''),
         'thinking_format': spec.get('thinking_format', ''),
+        'catalog_source': catalog_source,
         'models': [dict(m, stream_only=spec.get('stream_only', False))
                    for m in models],
     }
 
+
+def _activate_oauth_config_change() -> None:
+    from lib import reload_config
+    from lib.llm_dispatch import reset_dispatcher
+
+    reload_config()
+    reset_dispatcher()
+
+
+def provision_oauth_provider(provider: str, plan_type: str = None) -> bool:
+    """Add or refresh the server-owned provider for a subscription."""
+    entry = _managed_oauth_entry(provider, plan_type)
+    if not entry:
+        return False
+    from lib import _SERVER_CONFIG_PATH
+    from lib.json_store import update_json_atomic
+
+    changed = {'yes': False}
+
     def _mutate(cfg):
-        providers = [p for p in (cfg.get('providers') or [])
-                     if p.get('id') != spec['id']]
-        providers.append(entry)
-        cfg['providers'] = providers
+        providers = list(cfg.get('providers') or [])
+        found = False
+        out = []
+        for current in providers:
+            if current.get('id') != entry['id']:
+                out.append(current)
+                continue
+            if not found:
+                out.append(entry)
+                found = True
+                if current != entry:
+                    changed['yes'] = True
+            else:
+                changed['yes'] = True
+        if not found:
+            out.append(entry)
+            changed['yes'] = True
+        if not changed['yes']:
+            return None
+        cfg['providers'] = out
         return cfg
 
     update_json_atomic(_SERVER_CONFIG_PATH, _mutate, default={})
-    reload_config()
-    reset_dispatcher()
-    logger.info('[OAuth] Provisioned managed provider %s (%d models)',
-                spec['id'], len(entry['models']))
-    return True
+    if changed['yes']:
+        _activate_oauth_config_change()
+        logger.info('[OAuth] Provisioned managed provider %s (%d models)',
+                    entry['id'], len(entry['models']))
+    return changed['yes']
+
+
+def reconcile_oauth_providers() -> dict:
+    """Repair token-to-managed-provider drift for all direct OAuth logins."""
+    from lib import _SERVER_CONFIG_PATH
+    from lib.json_store import update_json_atomic
+    from lib.oauth.token_store import load_token
+
+    desired = {}
+    for provider in OAUTH_PROVIDERS:
+        token = load_token(provider) or {}
+        if token.get('access_token'):
+            desired[provider] = _managed_oauth_entry(
+                provider, token.get('plan_type'))
+
+    managed_ids = {spec['id']: provider
+                   for provider, spec in _MANAGED_SPECS.items()}
+    changed = {'yes': False}
+
+    def _mutate(cfg):
+        out = []
+        seen = set()
+        for current in (cfg.get('providers') or []):
+            provider = managed_ids.get(current.get('id'))
+            if not provider:
+                out.append(current)
+                continue
+            wanted = desired.get(provider)
+            if wanted and provider not in seen:
+                out.append(wanted)
+                seen.add(provider)
+                if current != wanted:
+                    changed['yes'] = True
+            else:
+                changed['yes'] = True
+        for provider in OAUTH_PROVIDERS:
+            if provider in desired and provider not in seen:
+                out.append(desired[provider])
+                changed['yes'] = True
+        if not changed['yes']:
+            return None
+        cfg['providers'] = out
+        return cfg
+
+    update_json_atomic(_SERVER_CONFIG_PATH, _mutate, default={})
+    if changed['yes']:
+        _activate_oauth_config_change()
+        logger.info('[OAuth] Reconciled managed subscription providers: %s',
+                    ', '.join(sorted(desired)) or '(none)')
+    return {provider: managed_oauth_provider_status(provider)
+            for provider in OAUTH_PROVIDERS}
+
+
+def managed_oauth_provider_status(provider: str) -> dict:
+    """Read-only readiness projection used by the OAuth status UI."""
+    spec = _MANAGED_SPECS.get(provider)
+    if not spec:
+        return {'provider_ready': False, 'provider_id': '', 'model_ids': []}
+    from lib import _SERVER_CONFIG_PATH
+    from lib.json_store import read_json
+
+    cfg = read_json(_SERVER_CONFIG_PATH, default={}) or {}
+    entry = next((p for p in (cfg.get('providers') or [])
+                  if p.get('id') == spec['id']), None)
+    models = [m.get('model_id') for m in ((entry or {}).get('models') or [])
+              if isinstance(m, dict) and m.get('model_id')]
+    ready = bool(entry and entry.get('enabled', True)
+                 and entry.get('oauth') == provider and models)
+    status = {
+        'provider_ready': ready,
+        'provider_id': spec['id'],
+        'model_ids': models,
+        'model_count': len(models),
+    }
+    if provider == 'codex':
+        from lib.oauth.codex_catalog import codex_catalog_status
+        status.update(codex_catalog_status())
+    return status
 
 
 def deprovision_oauth_provider(provider: str) -> bool:
@@ -705,9 +846,8 @@ def deprovision_oauth_provider(provider: str) -> bool:
     spec = _MANAGED_SPECS.get(provider)
     if not spec:
         return False
-    from lib import _SERVER_CONFIG_PATH, reload_config
+    from lib import _SERVER_CONFIG_PATH
     from lib.json_store import update_json_atomic
-    from lib.llm_dispatch import reset_dispatcher
 
     removed = {'n': 0}
 
@@ -715,13 +855,14 @@ def deprovision_oauth_provider(provider: str) -> bool:
         before = cfg.get('providers') or []
         after = [p for p in before if p.get('id') != spec['id']]
         removed['n'] = len(before) - len(after)
+        if not removed['n']:
+            return None
         cfg['providers'] = after
         return cfg
 
     update_json_atomic(_SERVER_CONFIG_PATH, _mutate, default={})
     if removed['n']:
-        reload_config()
-        reset_dispatcher()
+        _activate_oauth_config_change()
         logger.info('[OAuth] Deprovisioned managed provider %s', spec['id'])
     return bool(removed['n'])
 
@@ -730,6 +871,7 @@ __all__ = [
     'CLAUDE_CODE_IDENTITY',
     'CLAUDE_CODE_STATIC_PROMPT',
     'CLAUDE_CODE_VERSION',
+    'CODEX_CLIENT_VERSION',
     'OAUTH_PROVIDERS',
     'apply_claude_cloak',
     'is_oauth_provider',
@@ -737,5 +879,7 @@ __all__ = [
     'restore_claude_tool_names',
     'claude_oauth_url',
     'provision_oauth_provider',
+    'reconcile_oauth_providers',
+    'managed_oauth_provider_status',
     'deprovision_oauth_provider',
 ]

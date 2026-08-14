@@ -22,7 +22,8 @@ import lib.database.db_paths as db_paths
 def _clean_env(monkeypatch):
     for v in ('TOFU_DB_TIER_B', 'TOFU_DB_LOCAL_SPLIT', 'TOFU_DB_LOCAL_ROOT',
               'TOFU_DB_BACKUP_ROOT', 'TOFU_DB_RESTORE_DIVERGENCE_WARN_S',
-              'TOFU_DB_WAL_ARCHIVE_TIMEOUT'):
+              'TOFU_DB_WAL_ARCHIVE_TIMEOUT',
+              'TOFU_DB_WAL_ARCHIVE_MAX_FAILS'):
         monkeypatch.delenv(v, raising=False)
     yield
 
@@ -182,6 +183,37 @@ def test_archive_shim_timeout_returns_nonzero(tmp_path, monkeypatch):
     elapsed = time.time() - t0
     assert rc != 0                 # PG will RETAIN + retry
     assert elapsed < 5             # did NOT wedge for the full 30s sleep
+
+
+def test_archive_invalid_integer_knobs_fall_back(tmp_path, monkeypatch):
+    src = tmp_path / 'seg'
+    src.write_text('segment-bytes')
+    monkeypatch.setenv('TOFU_DB_BACKUP_ROOT', str(tmp_path / 'backup'))
+    monkeypatch.setenv('TOFU_DB_WAL_ARCHIVE_TIMEOUT', 'typo')
+    monkeypatch.setenv('TOFU_DB_WAL_ARCHIVE_MAX_FAILS', 'typo')
+    monkeypatch.setattr('lib.runtime_paths.data_root',
+                        lambda: str(tmp_path / 'data'))
+    assert wal.archive_segment(
+        str(src), '000000010000000000000011') == 0
+
+
+def test_archive_and_restore_refuse_segment_path_escape(tmp_path, monkeypatch):
+    src = tmp_path / 'seg'
+    src.write_text('segment-bytes')
+    monkeypatch.setenv('TOFU_DB_BACKUP_ROOT', str(tmp_path / 'backup'))
+    monkeypatch.setattr('lib.runtime_paths.data_root',
+                        lambda: str(tmp_path / 'data'))
+    assert wal.archive_segment(str(src), '../outside') != 0
+    assert wal.restore_segment('../outside', str(tmp_path / 'restored')) != 0
+    assert not (tmp_path / 'outside').exists()
+
+
+def test_restore_invalid_divergence_knob_does_not_break_selection(
+        tmp_path, monkeypatch):
+    base = _seed_backups(tmp_path, monkeypatch, dump_age_s=120, wal_age_s=30)
+    monkeypatch.setenv('TOFU_DB_RESTORE_DIVERGENCE_WARN_S', 'typo')
+    chan, _ = boot._select_restore_channel(base)
+    assert chan == 'tier_b'
 
 
 # ── 5: END-TO-END — selector drives PITR (the seconds-RPO proof) ────────────

@@ -104,11 +104,15 @@ def test_validate_is_the_gate_between_them():
     # The stub is unusable: parse_pdf either RAISES (unopenable stream) or yields
     # near-empty text. Both outcomes confirm the validity gate and the parser
     # agree that a stub is not recoverable.
+    stub_len = None
+    parse_error = None
     try:
-        stub_len = len(parse_pdf(stub, max_text_chars=0, max_images=0).get('text') or '')
-        assert stub_len < 50, 'stub unexpectedly parsed to real text'
-    except Exception:
-        pass  # raising is an acceptable "unusable" signal
+        stub_len = len(
+            parse_pdf(stub, max_text_chars=0, max_images=0).get('text') or '')
+    except Exception as exc:
+        parse_error = exc
+    assert parse_error is not None or (stub_len is not None and stub_len < 50), (
+        f'stub unexpectedly parsed to recoverable text ({stub_len} chars)')
 
 
 # ── Ghost reaper now catches a present-but-invalid PDF ─────────────────────

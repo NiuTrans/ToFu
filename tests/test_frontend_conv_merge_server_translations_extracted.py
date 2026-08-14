@@ -32,11 +32,19 @@ from __future__ import annotations
 
 import pathlib
 import re
+import sys
+
+import pytest
+
+pytestmark = pytest.mark.unit
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-CONV_JS = ROOT / 'static' / 'js' / 'core' / 'conversations.js'
-REDUCERS_JS = ROOT / 'static' / 'js' / 'core' / 'conv_reducers.js'
+sys.path.insert(0, str(ROOT / 'tests'))
+from _runtime_sections import runtime_section_names, runtime_section_path  # noqa: E402
+
+CONV_JS = pathlib.Path(runtime_section_path('core/conversations.js'))
+REDUCERS_JS = pathlib.Path(runtime_section_path('core/conv_reducers.js'))
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +67,7 @@ def test_reducers_exposes_wrapper_on_window():
     call sites via bundle-level window scope. The new wrapper must
     follow the same convention."""
     src = REDUCERS_JS.read_text()
-    assert 'window._mergeServerTranslations = _mergeServerTranslations' in src, (
+    assert 'runtimeScope._mergeServerTranslations = _mergeServerTranslations' in src, (
         'core/conv_reducers.js must expose _mergeServerTranslations on '
         'window — same convention slice 1 established for its two '
         'sibling primitives')
@@ -149,14 +157,9 @@ def test_bundler_lists_reducers_before_conversations_js():
     """conv_reducers.js is already before conversations.js in the
     manifest (slice 1). This test double-checks: the promoted wrapper
     needs the same load order the primitives already have."""
-    import sys
-    if str(ROOT) not in sys.path:
-        sys.path.insert(0, str(ROOT))
-    from lib.js_bundler import _BUNDLE_FILES
-    assert 'core/conv_reducers.js' in _BUNDLE_FILES, (
-        'core/conv_reducers.js must be in _BUNDLE_FILES')
-    idx_reducers = _BUNDLE_FILES.index('core/conv_reducers.js')
-    idx_conv = _BUNDLE_FILES.index('core/conversations.js')
+    owners = runtime_section_names()
+    idx_reducers = owners.index('core/conv_reducers.js')
+    idx_conv = owners.index('core/conversations.js')
     assert idx_reducers < idx_conv, (
         f'core/conv_reducers.js (idx {idx_reducers}) must precede '
         f'core/conversations.js (idx {idx_conv}) so the extracted '

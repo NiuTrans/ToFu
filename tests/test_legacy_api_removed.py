@@ -1,14 +1,14 @@
 """End-state assertion for the legacy-API removal effort.
 
-After the 28 per-domain commits, the only remaining ``/api/<x>`` routes
-that aren't ``/api/v1/<x>`` should be the documented carve-outs (SSE
+After the per-domain migrations, the only remaining ``/api/<x>`` routes
+that aren't under a versioned JSON namespace should be documented carve-outs (SSE
 streams, multipart uploads, browser-redirect OAuth flows, static-asset
 serving, telemetry beacon, WebSocket multiplexer, liveness probe,
 OpenAPI viewers).
 
 This test enumerates every URL rule registered on ``server.app`` and
-fails if any non-v1 ``/api/`` route falls outside the allow-list. New
-routes should land under ``/api/v1/...``; if a new carve-out is
+fails if any unversioned ``/api/`` route falls outside the allow-list. New
+JSON routes should land under ``/api/v1/...`` or ``/api/v2/...``; if a new carve-out is
 genuinely needed, add it to ``ALLOWED_NON_V1`` here AND document it in
 ``docs/legacy_api_migration.md`` §1.
 """
@@ -130,7 +130,7 @@ def test_no_legacy_api_routes_remain():
 
     # The migration policy governs IN-TREE (core) routes only. External
     # plugin blueprints (mounted via the tofu.blueprints entry-point group,
-    # e.g. liantong_kb / liantong_resume) legitimately own their own
+    # e.g. a private knowledge plugin) legitimately own their own
     # ``/api/<plugin>/`` namespace and are environment-dependent (present
     # only when that plugin is installed), so they're out of scope here.
     from routes import ALL_BLUEPRINTS
@@ -141,7 +141,7 @@ def test_no_legacy_api_routes_remain():
         path = rule.rule
         if not path.startswith('/api/'):
             continue
-        if path.startswith('/api/v1/'):
+        if path.startswith(('/api/v1/', '/api/v2/')):
             continue
         if path in ALLOWED_NON_V1:
             continue
@@ -157,7 +157,7 @@ def test_no_legacy_api_routes_remain():
           'static/redirect/beacon), add them to ALLOWED_NON_V1 in '
           'tests/test_legacy_api_removed.py and document in '
           'docs/legacy_api_migration.md §1. Otherwise migrate them to '
-          '/api/v1/<...>.'
+          'a versioned /api/v1/<...> or /api/v2/<...> namespace.'
     )
 
 

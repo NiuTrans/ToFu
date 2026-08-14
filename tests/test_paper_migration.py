@@ -12,11 +12,6 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Install Flask→Quart shim before importing routes
-import quart as _quart
-sys.modules['flask'] = _quart
-
-
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
 def _ok(msg): print(' ', _color('✓', '32'), msg)
 def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)

@@ -13,8 +13,7 @@ Measured truth in the task log (task 695e4b39):
   * ``parse_tool_calls``' drop guard answered each with ``logger.warning`` +
     ``continue`` — no execution, no round, and fatally NO tool_result. The
     orphan-stripper then removed the trace from the wire, so the model stared
-    at an unexplained hole and INVENTED an explanation ("tool-call limit" —
-    a limit that does not exist; ``max_tool_rounds = 999_999_999``).
+    at an unexplained hole and INVENTED a nonexistent "tool-call limit".
   * The swarm sub-agent path never had this bug: it returns
     ``f'Error: ignored malformed tool name ...'`` to the model
     (lib/swarm/agent.py). Only the CHAT path was silent.

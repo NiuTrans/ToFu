@@ -88,6 +88,29 @@ def test_stale_threshold_conservative_floor(srv, monkeypatch):
     assert srv._heartbeat_stale_threshold() == 30.0
 
 
+def test_booting_holder_gets_bounded_startup_grace(srv, tmp_path, monkeypatch):
+    hb = str(tmp_path / 'server.heartbeat')
+    now = 10_000.0
+    monkeypatch.setenv('TOFU_BOOT_HEARTBEAT_GRACE_SECS', '180')
+    srv._write_heartbeat(pid=777, ts=now - 90, path=hb, phase='booting')
+
+    # A 90-second schema migration is not a serving-loop wedge.
+    assert srv._holder_wedge_age(777, now=now, path=hb) is None
+
+    # The grace stays finite: a genuinely wedged import becomes reclaimable.
+    srv._write_heartbeat(pid=777, ts=now - 181, path=hb, phase='booting')
+    assert srv._holder_wedge_age(777, now=now, path=hb) == pytest.approx(181.0)
+
+
+def test_instance_lock_precedes_every_database_backed_import():
+    source = (os.path.join(os.path.dirname(os.path.dirname(__file__)), 'server.py'))
+    with open(source, encoding='utf-8') as f:
+        text = f.read()
+    acquire = text.index('mark_booting=True')
+    assert acquire < text.index('from lib.log_aggregates import')
+    assert acquire < text.index('from lib.database import init_db, warmup_db')
+
+
 def test_holder_wedge_age_matrix(srv, tmp_path, monkeypatch):
     monkeypatch.delenv('TOFU_LOOP_HEARTBEAT_SECS', raising=False)  # threshold=30
     hb = str(tmp_path / 'server.heartbeat')

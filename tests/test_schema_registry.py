@@ -9,6 +9,8 @@ import pytest
 
 from lib.database import schema_registry as sr
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
@@ -73,3 +75,22 @@ def test_discover_is_fail_soft_with_no_plugins(monkeypatch):
     monkeypatch.setattr(importlib.metadata, 'entry_points',
                         lambda *a, **k: [])
     assert sr.discover_schema_plugins() == 0
+
+
+def test_db_init_discovery_is_once_and_test_isolated(monkeypatch):
+    from lib.database import _core
+
+    calls = []
+    monkeypatch.setattr(sr, 'discover_schema_plugins',
+                        lambda: calls.append('scan') or 0)
+    monkeypatch.setattr(_core, '_OPTIONAL_DOMAINS_DISCOVERED', False)
+    monkeypatch.setenv('PYTEST_CURRENT_TEST', 'unit::schema')
+    monkeypatch.delenv('TOFU_TEST_SCHEMA_PLUGIN_DISCOVERY', raising=False)
+
+    _core._register_optional_domains()
+    assert calls == [], 'ordinary tests must not load ambient installed plugins'
+
+    monkeypatch.setenv('TOFU_TEST_SCHEMA_PLUGIN_DISCOVERY', '1')
+    _core._register_optional_domains()
+    _core._register_optional_domains()
+    assert calls == ['scan'], 'metadata discovery must be process-once'

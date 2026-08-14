@@ -100,12 +100,20 @@ class _FakeDB:
         'VU turn not persisted'."""
         return None
 
+    def begin(self):
+        return None
+
+    def rollback(self):
+        return None
+
     def fetchone(self):
         if 'SELECT messages' in self._sql:
             # Mirror the production SELECT's column list: messages + rev.
             if 'rev' in self._sql:
                 return (json.dumps(self.messages), self.rev)
             return (json.dumps(self.messages),)
+        if 'SELECT rev' in self._sql:
+            return (self.rev,)
         return None
 
 

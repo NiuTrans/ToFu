@@ -30,7 +30,8 @@ pytestmark = pytest.mark.unit
 
 from lib.tasks_pkg.chat_mode import CHAT_MODES, chat_mode_defaults
 
-_JS = Path(__file__).resolve().parent.parent / 'static' / 'js' / 'main' / 'main_toolbar_ui.js'
+_JS = (Path(__file__).resolve().parent.parent
+       / 'frontend' / 'src' / 'runtime' / 'app-runtime.js')
 
 
 def _extract_js_table() -> dict:

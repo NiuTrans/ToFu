@@ -9,10 +9,10 @@ dependency — the ``POST /api/v1/features`` handler just parses the body,
 calls this, and ``jsonify``s the result.
 """
 
-import json
-import os
+import threading
 
 from lib.config_dir import config_path as _config_path
+from lib.json_store import JsonStoreReadError, read_json, update_json_atomic
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -26,6 +26,7 @@ _BASE_BOOL_FLAGS = [
     ('debug_mode', 'DEBUG_MODE'),
     ('optimizer_enabled', 'OPTIMIZER_ENABLED'),
 ]
+_APPLY_LOCK = threading.Lock()
 
 
 def _managed_flags():
@@ -43,13 +44,11 @@ def _managed_flags():
 def read_features() -> dict:
     """Read features.json (empty dict on failure)."""
     features_path = _config_path('features.json')
-    try:
-        if os.path.isfile(features_path):
-            with open(features_path) as f:
-                return json.load(f)
-    except Exception as e:
-        logger.warning('[Features] Failed to read features.json: %s', e)
-    return {}
+    data = read_json(features_path, default={})
+    if not isinstance(data, dict):
+        logger.warning('[Features] Ignoring non-object features.json')
+        return {}
+    return data
 
 
 def apply_feature_updates(data: dict):
@@ -62,29 +61,44 @@ def apply_feature_updates(data: dict):
         ``{saved, changed, needs_restart}`` on success, or
         ``{error: 'internal_error'}`` if the file write failed.
     """
+    with _APPLY_LOCK:
+        return _apply_feature_updates_locked(data)
+
+
+def _apply_feature_updates_locked(data: dict):
+    """Persist and hot-apply one update while preserving commit order."""
     import lib as _lib
 
     features_path = _config_path('features.json')
-    existing = read_features()
-
-    changed = []
     managed = _managed_flags()
-    for json_key, _attr in managed:
-        if json_key in data:
+    outcome = {'changed': [], 'saved': {}}
+
+    def _merge(existing):
+        if not isinstance(existing, dict):
+            raise JsonStoreReadError('features.json is not a JSON object')
+        changed = []
+        for json_key, _attr in managed:
+            if json_key not in data:
+                continue
             new_val = bool(data[json_key])
             old_val = existing.get(json_key, None)
             existing[json_key] = new_val
             if old_val != new_val:
                 changed.append(json_key)
-                logger.info('[Features] %s: %s → %s', json_key, old_val, new_val)
+                logger.info('[Features] %s: %s → %s',
+                            json_key, old_val, new_val)
+        outcome['changed'] = changed
+        outcome['saved'] = existing
+        return existing if changed else None
 
     try:
-        os.makedirs(os.path.dirname(features_path), exist_ok=True)
-        with open(features_path, 'w') as f:
-            json.dump(existing, f, indent=2)
+        updated = update_json_atomic(
+            features_path, _merge, default={}, strict=True, indent=2)
     except Exception as e:
         logger.error('[Features] Failed to write features.json: %s', e, exc_info=True)
         return {'error': 'internal_error'}
+    existing = updated if updated is not None else outcome['saved']
+    changed = outcome['changed']
 
     # ── Audit trail for each flag that actually changed ──
     if changed:

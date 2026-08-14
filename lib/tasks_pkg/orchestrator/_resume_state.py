@@ -2,7 +2,7 @@
 
 Extracted from ``lib/tasks_pkg/orchestrator/_run.py`` (previously inline in
 ``run_task`` between the Section 3.5 eligibility-drift guard and the
-``await_memory_prefetch`` join). Bodies are byte-identical to the
+local-memory selection/context composition boundary). Bodies are byte-identical to the
 pre-slice inline form — no logic changes.
 
 The block hydrates ``task[]`` (and, when eligible, ``messages``) from the
@@ -121,6 +121,15 @@ def apply_resume_state(
         task['_checkpointToolRounds'] = list(_checkpoint_tr)
         logger.debug('[%s] conv=%s Stashed %d checkpoint toolRounds for DB merge',
                      tid, task.get('convId', ''), len(_checkpoint_tr))
+    if cfg.get('checkpointTodoState'):
+        from lib.tools.todo import public_todo_state
+        _todo_state = public_todo_state(cfg['checkpointTodoState'])
+        task['_todoState'] = _todo_state
+        _todo_stack = _todo_state.get('stack') or []
+        task['_todos'] = (list(_todo_stack[-1].get('todos') or [])
+                          if _todo_stack else [])
+        logger.debug('[%s] conv=%s Restored checklist stack depth=%d on Continue',
+                     tid, task.get('convId', ''), len(_todo_stack))
     if cfg.get('checkpointUsage'):
         task['_checkpointUsage'] = cfg['checkpointUsage']
     if cfg.get('checkpointApiRounds'):

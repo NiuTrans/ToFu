@@ -40,6 +40,8 @@ import sys
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -207,7 +209,7 @@ console.log('__JSDOM_RESULT__ ' + JSON.stringify({
 }));
 """
 
-_SOURCES = [
+_AUDIT_SYNTHETIC_REPO_PATHS = _SOURCES = [
     'static/js/core/safe_html.js',
     'static/js/core/chatinner_dom.js',
     'static/js/core/conv_reducers.js',
@@ -249,7 +251,9 @@ def _run(neuter='none'):
     return proc.stdout.strip()
 
 
-SOURCES_ABS = [os.path.join(ROOT, s) for s in _SOURCES]
+JS_DIR = runtime_sections_dir()
+SOURCES_ABS = [
+    os.path.join(JS_DIR, s.removeprefix('static/js/')) for s in _SOURCES]
 
 
 def test_streaming_view_renders_settled_tail_statically():

@@ -16,10 +16,8 @@
 #    --api-key <key>       Pre-configure LLM API key
 #    --no-launch           Install only, don't start
 #    --skip-playwright     Skip Playwright browser install
-#    --skip-node           Skip the OPTIONAL Node.js + esbuild step entirely
-#                          (conda-nodejs solve + npm). The JS bundle then uses
-#                          the dependency-free Python minifier — byte-identical
-#                          output, just a slightly larger gzip. Fastest install.
+#    --skip-node           Legacy no-op. Release installs always consume the
+#                          verified prebuilt frontend and never install Node.
 #    --no-update-conda     Skip conda self-update (only relevant when we
 #                          install our OWN sibling Miniforge — we never
 #                          touch a pre-existing conda the user owns)
@@ -31,11 +29,10 @@
 #                          (glibc < 2.28) if auto-detection misfires, or when
 #                          you specifically want the conda-forge toolchain.
 #    --with-postgres       Install + bootstrap PostgreSQL (opt-in). WITHOUT this
-#                          flag the installer uses SQLite by default — zero
-#                          config, no dependencies, fine for single-user /
-#                          <100 concurrent. Pass --with-postgres only when you
-#                          need PG's higher concurrency (100+ users). PG install
-#                          is the slowest, most failure-prone install step
+#                          flag the installer selects SQLite by default. Both
+#                          backends implement the same capacity and durability
+#                          contract; this flag only provisions PG binaries. PG install
+#                          is the slowest install step
 #                          (icu/libxml2/PG-major solve + initdb), so it is no
 #                          longer done by default.
 #    --force-sqlite        Force SQLite even if --with-postgres was also passed
@@ -48,7 +45,7 @@
 #    --reinit-pgdata       If data/pgdata exists but was created by a different
 #                          PG major than the one we install, back it up and
 #                          re-initdb. WITHOUT this flag we auto-detect the
-#                          mismatch and fall back to SQLite (data preserved).
+#                          mismatch and fail closed (data preserved).
 #    --min-conda <N>       Minimum acceptable conda MAJOR version (default 24).
 #                          If the user's conda is older we install a private
 #                          sibling Miniforge instead of touching theirs.
@@ -88,7 +85,7 @@
 #    4. Creates a fresh conda env with Python 3.10+
 #    5. Installs ALL Python dependencies from conda-forge (no pip)
 #    6. Installs ripgrep, fd-find, and Chromium shared libs from conda-forge
-#    7. Installs PostgreSQL with layered fallback (18 → 17 → 16 → SQLite)
+#    7. When selected, installs PostgreSQL (tries majors 18 → 17 → 16)
 #    8. Validates data/pgdata/ matches installed PG major (auto-heals)
 #    9. Installs the Playwright Chromium browser binary
 #   10. Writes .tofu_env.json marker so server.py/bootstrap.py auto-activate
@@ -406,6 +403,14 @@ _try_uv_install() {
         warn "uv-installed wheels failed the import smoke-test (likely glibc too old) — falling back to conda"
         return 1
     fi
+    # Presence is not enough for this exact-pin trio.  Exercise the classic
+    # Markdown path so a split PyMuPDF/PyMuPDF4LLM environment is rejected at
+    # install time rather than on the user's first paper.
+    if ! PYTHONPATH="$INSTALL_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+            "$_uvpy" "$INSTALL_DIR/scripts/verify_pdf_stack.py" 2>&1; then
+        warn "uv-installed PyMuPDF stack failed its version/Markdown smoke-test — falling back to conda"
+        return 1
+    fi
 
     # rg / fd are performance optimizations, NOT hard deps (grep_search degrades
     # rg → grep → pure-Python). Detect system copies; never build from source.
@@ -534,7 +539,7 @@ CONDA_OWNED_BY_US="${CONDA_OWNED_BY_US:-0}"
 # fast path that block is skipped, so pre-seed it empty here — the shared
 # pgdata-validation tail (Step 8.5+) reads it under `set -u` and would otherwise
 # crash with "PG_INSTALLED_MAJOR: unbound variable". Empty = "no PG installed",
-# which the tail already handles by pinning TOFU_DB_BACKEND=sqlite.
+# which the tail handles as the default SQLite selection.
 PG_INSTALLED_MAJOR="${PG_INSTALLED_MAJOR:-}"
 if [[ "$_FAST_PATH_DONE" -ne 1 ]]; then
 
@@ -1019,15 +1024,13 @@ CONDA_PKGS=(
     # fails with "No module named pip" and trafilatura/htmldate never get
     # installed. Install pip explicitly every time.
     "pip>=23"
-    # Quart (async Flask) + Hypercorn (ASGI server) — the core server runtime.
+    # Quart + Hypercorn (ASGI server) — the core server runtime.
     # cryptography is needed for Hypercorn's auto-TLS (HTTP/2).
     "quart>=0.19"
     "hypercorn>=0.17"
     "cryptography>=42"
-    "flask>=3.0"
-    "flask-compress>=1.14"
     "requests>=2.31"
-    # jinja2 / urllib3 / pyyaml — transitive deps (jinja2←flask/quart,
+    # jinja2 / urllib3 / pyyaml — transitive deps (jinja2←quart,
     # urllib3←requests, pyyaml used directly by routes/api_docs.py for the
     # YAML OpenAPI spec). Pinned in requirements.txt to CVE-clearing floors;
     # listed here so the drift guard passes and clean envs get the fixed
@@ -1077,7 +1080,9 @@ CONDA_PKGS=(
     "markdown>=3.4"
     # tiktoken — exact BPE tokenizer tier for lib/token_counter.
     "tiktoken>=0.5"
-    # PDF parsing (fitz) — used in lib/pdf_parser and routes/paper
+    # Bootstrap PyMuPDF core from conda for old-glibc hosts. The exact trio is
+    # harmonized with pip immediately below; this floor is not the final
+    # version contract.
     "pymupdf>=1.24"
     # uv / uvx — used by lib/mcp/client.py to launch MCP servers
     "uv>=0.4"
@@ -1099,8 +1104,18 @@ CONDA_PKGS=(
 # academic PDFs) is NOT in this list. It's installed separately later when
 # --with-docling is passed, because it pulls ~2 GB of torch + model weights
 # and most users don't need it (pymupdf4llm covers the common case).
+# PyMuPDF4LLM exact-pins both companions. Keep this array byte-aligned with
+# requirements.txt; tests/test_pdf_stack_install_contract.py enforces it.
+# Unlike the pure-Python group below, this trio is installed WITH dependency
+# resolution so pymupdf-layout's runtime requirements cannot be absent on a
+# clean conda fallback.
+PDF_STACK_PKGS=(
+    "pymupdf==1.27.2.3"
+    "pymupdf_layout==1.27.2.3"
+    "pymupdf4llm==1.27.2.3"
+)
+
 PIP_ONLY_PKGS=(
-    "pymupdf4llm>=0.0.17"
     # vtracer — Rust-backed raster→vector tracer for generate_image(svg=true)
     # (scripts/png_to_svg.py). Self-contained wheel: no Python deps, does not
     # touch lxml/icu, so --no-deps is safe. Hard dep — the svg parameter on
@@ -1170,7 +1185,7 @@ info "Purging any pip-installed copies that would shadow conda-forge..."
 # pip versions of those — conda-forge's htmldate ≤1.9.3 has the
 # lxml<6 pin that locks us out of modern icu/PG). So we DON'T include
 # them in this purge list.
-PIP_NAMES=(quart hypercorn cryptography flask flask-compress Flask-Compress requests psutil
+PIP_NAMES=(quart hypercorn cryptography requests psutil
            playwright pillow Pillow python-pptx lxml beautifulsoup4 bs4
            python-dateutil dateutil python-docx docx openpyxl xlrd olefile
            mcp pymupdf PyMuPDF uv)
@@ -1301,8 +1316,6 @@ _IMPORT_CHECK_PKGS=(
     "quart:quart"
     "hypercorn:hypercorn"
     "cryptography:cryptography"
-    "flask:flask"
-    "flask_compress:flask-compress"
     "requests:requests"
     "psutil:psutil"
     "playwright:playwright"
@@ -1393,9 +1406,18 @@ _safe_pip_install() {
     return "$_rc"
 }
 
-# ── Install pip-only deps (e.g. pymupdf4llm) into the conda env ──
-# pymupdf4llm is not shipped on conda-forge; it's a thin LLM-oriented Markdown
-# extractor built on top of pymupdf (which we just installed via conda).
+# ── Harmonize the exact PDF trio in the conda env ──
+# Installing only pymupdf4llm with --no-deps used to leave users with conda's
+# arbitrary pymupdf floor and no pymupdf-layout at all. The package was present,
+# but its first real import/parse failed. Resolve the trio together and make a
+# failure fatal: rich PDF parsing is a shipped default, not an optional surprise.
+info "Installing pinned PyMuPDF stack: ${PDF_STACK_PKGS[*]}"
+if ! _safe_pip_install --upgrade "${PDF_STACK_PKGS[@]}"; then
+    fail "Pinned PyMuPDF stack install failed. Check that your package index carries all three exact versions, then rerun install.sh."
+fi
+ok "Pinned PyMuPDF stack installed"
+
+# ── Install remaining pip-only deps into the conda env ──
 if [[ ${#PIP_ONLY_PKGS[@]} -gt 0 ]]; then
     info "Installing pip-only deps (not on conda-forge): ${PIP_ONLY_PKGS[*]}"
 
@@ -1425,6 +1447,15 @@ if [[ ${#PIP_ONLY_PKGS[@]} -gt 0 ]]; then
             warn "Pip-only deps install failed — some PDF features may be degraded"
         fi
     fi
+fi
+
+# Exact versions plus one real Markdown page. This catches half-installed
+# wheels, wrong-interpreter installs and ABI/version split-brain immediately.
+if (cd "$INSTALL_DIR" && PYTHONPATH="$INSTALL_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+        python scripts/verify_pdf_stack.py); then
+    ok "PyMuPDF stack verified (exact pins + Markdown smoke)"
+else
+    fail "PyMuPDF stack verification failed. Run: python scripts/verify_pdf_stack.py"
 fi
 
 # ── tofu-search — the standalone search + content-fetch pipeline ──
@@ -1566,11 +1597,11 @@ if [[ "$WITH_DOCLING" -eq 1 ]]; then
     fi
 fi
 
-# ── Install PostgreSQL + psycopg2 from conda-forge (optional but recommended) ──
-# tofu uses PG for better concurrency (100+ concurrent users), auto-falls back
-# to SQLite if PG is missing.
+# ── Install PostgreSQL + psycopg2 from conda-forge (explicit equal backend) ──
+# SQLite and PostgreSQL share one Sidecar contract. PostgreSQL provisioning is
+# opt-in, and a failed explicit selection aborts instead of switching engines.
 #
-# Layered fallback: try PG 18 → 17 → 16 → SQLite. Different conda-forge
+# Within the selected PostgreSQL backend, try majors 18 → 17 → 16. Different conda-forge
 # snapshots pin icu/libxml2 in ways that conflict with trafilatura/lxml
 # (we saw this on hosts where PG 18 requires icu>=78 but trafilatura needs
 # icu<76). Trying older majors often succeeds because their icu pins are
@@ -1582,12 +1613,12 @@ if [[ "$WITH_POSTGRES" -ne 1 ]]; then
     #    initdb + smoke-test) is the slowest, most failure-prone step and
     #    single-user setups don't need it. Leaving PG_INSTALLED_MAJOR empty
     #    makes the pgdata-validation + smoke-test steps below no-op cleanly
-    #    and pins TOFU_DB_BACKEND=sqlite in .env.
+    #    and pins the default TOFU_DB_BACKEND=sqlite in .env.
     if [[ "$FORCE_SQLITE" -eq 1 ]]; then
         info "--force-sqlite: using SQLite (PostgreSQL not installed)"
     else
         info "Using SQLite (default, zero-config). Pass --with-postgres to install"
-        info "PostgreSQL instead (recommended only for 100+ concurrent users)."
+        info "PostgreSQL instead (equal storage contract; adds server binaries)."
     fi
 elif [[ "$FORCE_SQLITE" -eq 1 ]]; then
     info "--force-sqlite overrides --with-postgres: skipping PostgreSQL install entirely"
@@ -1663,9 +1694,7 @@ else
         warn "  3. Is conda itself outdated?"
         warn "     → Re-run WITHOUT --no-update-conda"
         warn ""
-        warn "Last-resort: re-run with --force-sqlite if you just want to get running (SQLite"
-        warn "                 is fine for single-user / <100 concurrent and is bit-for-bit"
-        warn "                 compatible with the same app code)."
+        fail "PostgreSQL was explicitly selected but could not be installed; refusing backend fallback"
     fi
 fi
 
@@ -1763,105 +1792,6 @@ else
     warn "ripgrep/fd-find/tmux install failed — code search will fall back to grep / os.walk"
 fi
 
-
-# ═══════════════════════════════════════════════════════════════
-#  Node.js (OPTIONAL) — powers two best-effort, fail-open features:
-#    1. `node --check` syntax gate on the built JS bundle (lib/js_bundler.py)
-#    2. the optional esbuild stronger-minify pass (~12% smaller gzip bundle)
-#  Neither is required: without node the bundler uses its dependency-free
-#  Python minifier and the app is byte-identical. So this step NEVER fails
-#  the install — it only enhances.
-# ═══════════════════════════════════════════════════════════════
-if [[ "$SKIP_NODE" -eq 1 ]]; then
-    step "Skipping Node.js + esbuild (--skip-node)"
-    info "JS bundle will use the dependency-free Python minifier (byte-identical output)."
-elif conda install -n "$ENV_NAME" -c conda-forge --override-channels -y nodejs; then
-    step "Installing Node.js + esbuild (optional — stronger JS bundle minify)"
-    ok "Node.js installed"
-    # ── npm must FAIL-FAST, never hang ────────────────────────────────
-    # npm has no corp-mirror redirect and its defaults are fetch-timeout
-    # 300s × fetch-retries 2, so on a network that blocks
-    # registry.npmjs.org it STALLS for many minutes per package instead
-    # of erroring — the `|| warn` fallback below then never fires and the
-    # whole install appears frozen.  Since this step is OPTIONAL and
-    # fail-open (the Python minifier is byte-identical), we bound npm hard:
-    #   1. a ~5s PREFLIGHT reachability probe against the effective
-    #      registry — if it's unreachable we SKIP npm outright (turns the
-    #      worst case from 5 min into ~5s, generically, on ANY blocked net).
-    #   2. npm_config_* env vars cap per-request timeout + retries so a
-    #      registry that resolves-but-stalls errors in ~1 min, not ~15.
-    #   3. an outer `timeout` wrapper is an absolute ceiling regardless.
-    #   4. TOFU_NPM_REGISTRY (baked by export for corp hosts) redirects
-    #      the registry to a reachable mirror, same story as conda/pip.
-    export npm_config_fetch_timeout=60000
-    export npm_config_fetch_retries=1
-    export npm_config_fetch_retry_maxtimeout=20000
-    export npm_config_fetch_retry_mintimeout=5000
-    if [[ -n "${TOFU_NPM_REGISTRY:-}" ]]; then
-        info "npm registry override: ${TOFU_NPM_REGISTRY}"
-        export npm_config_registry="${TOFU_NPM_REGISTRY}"
-    fi
-    # Portable hard-timeout wrapper: GNU `timeout`, macOS `gtimeout`, else none.
-    _NPM_TIMEOUT=""
-    if command -v timeout >/dev/null 2>&1; then
-        _NPM_TIMEOUT="timeout 300"
-    elif command -v gtimeout >/dev/null 2>&1; then
-        _NPM_TIMEOUT="gtimeout 300"
-    fi
-    # ── Preflight: is the effective registry reachable in ~5s? ──────────
-    # This is the real speedup: on a network that can't reach the registry
-    # (the corp-proxy case), skip npm in ~5s instead of burning the full
-    # 5-min timeout cap. The probe MUST itself be hard-bounded so it can
-    # never become the new hang. `curl --max-time 5` is the ceiling; a
-    # `timeout 6` wrapper is a belt-and-braces backstop for a curl that
-    # ignores its own timeout (e.g. stuck in DNS).
-    #
-    # CRITICAL — probe a real PACKAGE endpoint, not the registry ROOT.
-    # A transparent corp proxy can 200/redirect the registry root while
-    # still 403-ing actual package traffic; a HEAD to the root would then
-    # FALSE-POSITIVE "reachable" and npm would stall on the first package
-    # fetch anyway. So we GET the metadata of a package we actually need
-    # (`esbuild`) — exactly the traffic npm will do — and rely on curl's
-    # `-f` (fail on HTTP >= 400) so a 403/404 on package traffic is
-    # correctly classified UNREACHABLE. Same for wget's `--server-response`
-    # gate via exit code on 4xx/5xx.
-    _NPM_REGISTRY_URL="${npm_config_registry:-https://registry.npmjs.org/}"
-    _NPM_PROBE_URL="${_NPM_REGISTRY_URL%/}/esbuild"
-    _NPM_REACHABLE=1
-    info "Checking npm registry reachability (5s preflight): ${_NPM_PROBE_URL}"
-    if command -v curl >/dev/null 2>&1; then
-        # -f → non-zero exit on 4xx/5xx (a proxy 403 on package traffic).
-        ${_NPM_TIMEOUT:+timeout 6} curl -fsS --max-time 5 -o /dev/null "$_NPM_PROBE_URL" \
-            2>/dev/null || _NPM_REACHABLE=0
-    elif command -v wget >/dev/null 2>&1; then
-        # wget exits non-zero on 4xx/5xx unless --content-on-error; a GET to
-        # /dev/null exercises real package traffic (not a HEAD --spider).
-        ${_NPM_TIMEOUT:+timeout 6} wget -q --timeout=5 --tries=1 -O /dev/null "$_NPM_PROBE_URL" \
-            2>/dev/null || _NPM_REACHABLE=0
-    else
-        # No probe tool — fall through to the timeout-bounded npm run.
-        _NPM_REACHABLE=1
-    fi
-    if [[ "$_NPM_REACHABLE" -eq 0 ]]; then
-        warn "npm registry unreachable (${_NPM_REGISTRY_URL}) — skipping npm; bundler falls back to the Python minifier (no impact on the app)"
-        warn "To enable esbuild later: set a reachable registry (export TOFU_NPM_REGISTRY=<mirror>) and re-run, or 'cd ${INSTALL_DIR} && npm ci'"
-    # One-time `npm ci` populates node_modules/ (esbuild + the typecheck
-    # harness). Persists across restarts — server.py never re-runs it.
-    elif [[ -f "${INSTALL_DIR}/package-lock.json" ]]; then
-        info "Installing JS devDependencies (npm ci — one-time, 5-min cap)..."
-        (cd "$INSTALL_DIR" && $_NPM_TIMEOUT npm ci --no-audit --no-fund) \
-            && ok "JS devDependencies installed (esbuild available to the bundler)" \
-            || warn "npm ci failed/timed out — bundler falls back to the Python minifier (no impact on the app)"
-    else
-        info "Installing esbuild (npm install — one-time, 5-min cap)..."
-        (cd "$INSTALL_DIR" && $_NPM_TIMEOUT npm install --no-audit --no-fund) \
-            && ok "esbuild installed" \
-            || warn "npm install failed/timed out — bundler falls back to the Python minifier (no impact on the app)"
-    fi
-else
-    step "Installing Node.js + esbuild (optional — stronger JS bundle minify)"
-    warn "Node.js install skipped/failed — JS bundle uses the dependency-free Python minifier (fine; the app is unaffected)"
-fi
 
 # ═══════════════════════════════════════════════════════════════
 #  Step 8: Playwright — Chromium browser + shared libs (rootless)
@@ -2027,6 +1957,44 @@ fi
 fi  # ── end legacy conda path ($_FAST_PATH_DONE != 1) ──
 
 # ═══════════════════════════════════════════════════════════════
+#  Step 8.4: Prebuilt frontend — release users never need Node/npm.
+# ═══════════════════════════════════════════════════════════════
+step "Installing verified prebuilt frontend"
+_FRONTEND_VERSION="$(tr -d '[:space:]' < "${INSTALL_DIR}/VERSION")"
+[[ -n "$_FRONTEND_VERSION" ]] || fail "VERSION is empty; cannot resolve frontend artifact"
+_FRONTEND_NAME="frontend-dist-${_FRONTEND_VERSION}.tar.gz"
+_FRONTEND_BASE="${TOFU_FRONTEND_DIST_BASE_URL:-https://github.com/rangehow/ToFu/releases/download/v${_FRONTEND_VERSION}}"
+_FRONTEND_TMP="$(mktemp -d "${TMPDIR:-/tmp}/tofu-frontend.XXXXXX")"
+_FRONTEND_ARCHIVE="${_FRONTEND_TMP}/${_FRONTEND_NAME}"
+_FRONTEND_CHECKSUM="${_FRONTEND_ARCHIVE}.sha256"
+_download_frontend_file() {
+    local _url="$1" _dest="$2"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fL --retry 3 --connect-timeout 15 -o "$_dest" "$_url"
+    elif command -v wget >/dev/null 2>&1; then
+        wget --tries=3 --timeout=30 -O "$_dest" "$_url"
+    else
+        fail "Need curl or wget to download the prebuilt frontend"
+    fi
+}
+_download_frontend_file "${_FRONTEND_BASE}/${_FRONTEND_NAME}" "$_FRONTEND_ARCHIVE"
+_download_frontend_file "${_FRONTEND_BASE}/${_FRONTEND_NAME}.sha256" "$_FRONTEND_CHECKSUM"
+if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$_FRONTEND_TMP" && sha256sum -c "${_FRONTEND_NAME}.sha256")
+elif command -v shasum >/dev/null 2>&1; then
+    (cd "$_FRONTEND_TMP" && shasum -a 256 -c "${_FRONTEND_NAME}.sha256")
+else
+    fail "Need sha256sum or shasum to verify the frontend artifact"
+fi
+rm -rf "${INSTALL_DIR}/static/vite"
+tar xzf "$_FRONTEND_ARCHIVE" -C "$INSTALL_DIR"
+rm -rf "$_FRONTEND_TMP"
+(cd "$INSTALL_DIR" && "$ENV_PYTHON" scripts/verify_frontend_dist.py) || \
+    fail "Downloaded frontend manifest or chunks are incomplete"
+ok "Prebuilt frontend ${_FRONTEND_VERSION} installed (Node/npm not required)"
+
+
+# ═══════════════════════════════════════════════════════════════
 #  Step 8.5: Validate data/pgdata/ matches installed PG major
 #
 #  Catches: "unrecognized configuration parameter 'autovacuum_worker_slots'"
@@ -2037,57 +2005,16 @@ fi  # ── end legacy conda path ($_FAST_PATH_DONE != 1) ──
 #    - No pgdata/ yet           → nothing to check, PG bootstrap will initdb later.
 #    - pgdata major == installed major → OK, reuse.
 #    - mismatch + --reinit-pgdata     → back up pgdata, let PG bootstrap re-initdb.
-#    - mismatch without --reinit-pgdata → pin TOFU_DB_BACKEND=sqlite (data preserved).
-#    - pgdata exists but no PG installed locally → pin TOFU_DB_BACKEND=sqlite.
+#    - mismatch without --reinit-pgdata → fail closed (data preserved).
+#    - pgdata exists but no PG installed locally → fail if PostgreSQL selected.
 # ═══════════════════════════════════════════════════════════════
 step "Validating PostgreSQL data directory (version compatibility)"
 
-# Resolve the pgdata path the SAME way the runtime does (lib/database/db_paths.py):
-# on a network/FUSE mount the LIVE cluster is redirected to local disk
-# ($TOFU_DB_LOCAL_ROOT/pgdata, default /tmp/tofu/pgdata); on a vanilla local box
-# it stays at <data>/pgdata (byte-identical). Querying the resolver — instead of
-# hardcoding data/pgdata — is what keeps install.sh and server.py from EVER
-# disagreeing on where the cluster lives (the exact bug that made PG silently
-# fall back to SQLite). Run under TOFU_DB_BACKEND=sqlite so merely importing the
-# DB layer to ASK the question can never auto-start PG as a side-effect.
+# storage.v1 permanently owns a project-local cluster. No resolver, local-disk
+# split, or temporary-directory fallback may move live data out of the project.
+PGDATA_DIR="${INSTALL_DIR}/data/pgdata"
+PGDATA_LEGACY="$PGDATA_DIR"
 PGDATA_SPLIT="0"
-PGDATA_LEGACY="${INSTALL_DIR}/data/pgdata"
-_PGDATA_INFO="$(cd "$INSTALL_DIR" && TOFU_DB_BACKEND=sqlite "$ENV_PYTHON" - <<'PYEOF' 2>/dev/null
-import sys
-try:
-    from lib.runtime_paths import data_root
-    from lib.database.db_paths import (
-        resolve_pgdata_dir, legacy_pgdata_dir, local_data_split_enabled)
-    dr = data_root()
-    print(resolve_pgdata_dir(dr))
-    print(legacy_pgdata_dir(dr))
-    print('1' if local_data_split_enabled(dr) else '0')
-except Exception:
-    sys.exit(1)
-PYEOF
-)"
-if [[ -n "$_PGDATA_INFO" ]]; then
-    PGDATA_DIR="$(sed -n '1p' <<<"$_PGDATA_INFO")"
-    PGDATA_LEGACY="$(sed -n '2p' <<<"$_PGDATA_INFO")"
-    PGDATA_SPLIT="$(sed -n '3p' <<<"$_PGDATA_INFO")"
-else
-    # Resolver query failed (unexpected post-install) — degrade to the historical
-    # in-tree path so the rest of the step still runs.
-    warn "Could not query the runtime pgdata resolver \u2014 falling back to data/pgdata"
-    PGDATA_DIR="${INSTALL_DIR}/data/pgdata"
-fi
-
-if [[ "$PGDATA_DIR" != "$PGDATA_LEGACY" ]]; then
-    info "Runtime pgdata resolves to ${PGDATA_DIR}"
-    info "(local-disk split engaged; the legacy in-tree path would be ${PGDATA_LEGACY})"
-fi
-# /tmp is a common but VOLATILE default for the local-disk split — warn so the
-# user doesn't assume the cluster lives on persistent storage.
-if [[ "$PGDATA_DIR" == /tmp/* ]]; then
-    warn "Resolved pgdata is under /tmp (${PGDATA_DIR})."
-    warn "If this /tmp is cleared on reboot, the live PostgreSQL cluster will NOT persist."
-    warn "Set TOFU_DB_LOCAL_ROOT to a persistent local volume to keep DB data across reboots."
-fi
 
 PGDATA_MAJOR=""
 if [[ -f "${PGDATA_DIR}/PG_VERSION" ]]; then
@@ -2095,8 +2022,11 @@ if [[ -f "${PGDATA_DIR}/PG_VERSION" ]]; then
     info "Found existing pgdata (PG ${PGDATA_MAJOR})"
 fi
 
-# Default: whatever we installed wins.
-DB_BACKEND_CHOICE=""   # empty = auto (let server.py decide), 'sqlite' = force
+# The installer makes one exact choice. There is no auto-detection/fallback.
+DB_BACKEND_CHOICE="sqlite"
+if [[ "$WITH_POSTGRES" -eq 1 && "$FORCE_SQLITE" -ne 1 ]]; then
+    DB_BACKEND_CHOICE="postgres"
+fi
 
 if [[ "$FORCE_SQLITE" -eq 1 ]]; then
     DB_BACKEND_CHOICE="sqlite"
@@ -2107,13 +2037,13 @@ elif [[ -z "$PG_INSTALLED_MAJOR" ]]; then
     # PG never got installed
     if [[ -n "$PGDATA_MAJOR" ]]; then
         warn "pgdata exists (PG ${PGDATA_MAJOR}) but no PG binaries installed in env"
-        warn "Would cause scheduler/db retry storms \u2014 pinning TOFU_DB_BACKEND=sqlite"
-        warn "Your existing PostgreSQL data is NOT lost, just unused. To re-enable it,"
-        warn "re-run the installer with --with-postgres (installs PG ${PGDATA_MAJOR} and reuses this pgdata)."
+        warn "Your existing PostgreSQL data is not modified."
     else
         info "No PG installed \u2014 tofu will use SQLite"
     fi
-    DB_BACKEND_CHOICE="sqlite"
+    if [[ "$DB_BACKEND_CHOICE" == "postgres" ]]; then
+        fail "PostgreSQL was selected but no compatible PostgreSQL binaries are installed"
+    fi
 elif [[ -n "$PGDATA_MAJOR" && "$PGDATA_MAJOR" != "$PG_INSTALLED_MAJOR" ]]; then
     warn "pgdata major (${PGDATA_MAJOR}) differs from installed PG (${PG_INSTALLED_MAJOR})"
     warn "Running pgdata under a mismatched major will cause FATAL config-param errors"
@@ -2125,9 +2055,7 @@ elif [[ -n "$PGDATA_MAJOR" && "$PGDATA_MAJOR" != "$PG_INSTALLED_MAJOR" ]]; then
         # Also nuke the SQLite db if we want a totally clean slate? No \u2014
         # SQLite is independent, leave it alone.
     else
-        warn "Re-run with --reinit-pgdata to auto-initdb (existing PG data will be backed up)"
-        warn "For now, pinning TOFU_DB_BACKEND=sqlite so scheduler doesn't spin"
-        DB_BACKEND_CHOICE="sqlite"
+        fail "PostgreSQL data major mismatch; install the matching major or rerun with --reinit-pgdata after verifying a backup"
     fi
 elif [[ -n "$PGDATA_MAJOR" ]]; then
     ok "pgdata (PG ${PGDATA_MAJOR}) matches installed PG (${PG_INSTALLED_MAJOR}) \u2014 reusing"
@@ -2216,7 +2144,7 @@ _run_pg_ctl_smoke() {
     return 1
 }
 
-if [[ -z "$DB_BACKEND_CHOICE" && -n "$PG_INSTALLED_MAJOR" && "$PGDATA_SPLIT" == "1" && ! -d "$PGDATA_DIR" ]]; then
+if [[ "$DB_BACKEND_CHOICE" == "postgres" && -n "$PG_INSTALLED_MAJOR" && "$PGDATA_SPLIT" == "1" && ! -d "$PGDATA_DIR" ]]; then
     # ── Split engaged + resolved cluster not yet created ──
     # The bash pg_ctl smoke-test below can only START an EXISTING cluster; it
     # cannot fulfil the "bootstrap will initdb on first server.py run" promise
@@ -2227,7 +2155,7 @@ if [[ -z "$DB_BACKEND_CHOICE" && -n "$PG_INSTALLED_MAJOR" && "$PGDATA_SPLIT" == 
     # the runtime does on first boot; doing it here just moves it earlier.
     step "Bootstrapping PostgreSQL at ${PGDATA_DIR} (initdb via runtime)"
     # Portable hard-timeout wrapper for the delegated bootstrap: GNU `timeout`,
-    # macOS `gtimeout`, else none. Mirrors the npm-install wrapper above (~L1428).
+    # macOS `gtimeout`, else none.
     # The runtime bootstrap it delegates to is ALREADY internally bounded
     # (initdb 60s / pg_ctl 30s / createdb 15s ≈ 2min worst case), so this outer
     # ceiling is pure defense-in-depth: subprocess's SIGKILL cannot reap a
@@ -2264,10 +2192,9 @@ if [[ -z "$DB_BACKEND_CHOICE" && -n "$PG_INSTALLED_MAJOR" && "$PGDATA_SPLIT" == 
             warn "Runtime PG bootstrap failed even after force-reinstall \u2014 see ${INSTALL_DIR}/logs/postgresql.log"
             _pg_broken_env_advice
         fi
-        warn "Pinning TOFU_DB_BACKEND=sqlite to avoid scheduler retry storms"
-        DB_BACKEND_CHOICE="sqlite"
+        fail "Selected PostgreSQL backend failed project-local bootstrap; refusing backend fallback"
     fi
-elif [[ -z "$DB_BACKEND_CHOICE" && -n "$PG_INSTALLED_MAJOR" && -d "$PGDATA_DIR" ]]; then
+elif [[ "$DB_BACKEND_CHOICE" == "postgres" && -n "$PG_INSTALLED_MAJOR" && -d "$PGDATA_DIR" ]]; then
     step "Smoke-testing PostgreSQL startup"
     if _run_pg_ctl_smoke; then
         ok "PostgreSQL started successfully (smoke test)"
@@ -2280,9 +2207,7 @@ elif [[ -z "$DB_BACKEND_CHOICE" && -n "$PG_INSTALLED_MAJOR" && -d "$PGDATA_DIR" 
         else
             warn "PG still fails to start after force-reinstall \u2014 see ${INSTALL_DIR}/logs/postgresql.log"
             _pg_broken_env_advice
-            warn "Pinning TOFU_DB_BACKEND=sqlite to avoid scheduler retry storms"
-            warn "Re-run with --reinit-pgdata after moving ${PGDATA_DIR} aside if you want fresh PG"
-            DB_BACKEND_CHOICE="sqlite"
+            fail "Selected PostgreSQL backend failed startup after repair; refusing backend fallback"
         fi
     fi
 fi
@@ -2334,7 +2259,7 @@ fi
 if [[ "$DB_BACKEND_CHOICE" == "sqlite" ]]; then
     _set_env_var "TOFU_DB_BACKEND" "sqlite" "$ENV_FILE"
     info "TOFU_DB_BACKEND=sqlite pinned in .env"
-elif [[ -n "$PG_INSTALLED_MAJOR" ]]; then
+elif [[ "$DB_BACKEND_CHOICE" == "postgres" && -n "$PG_INSTALLED_MAJOR" ]]; then
     _set_env_var "TOFU_DB_BACKEND" "postgres" "$ENV_FILE"
     info "TOFU_DB_BACKEND=postgres pinned in .env (PG ${PG_INSTALLED_MAJOR})"
 fi
@@ -2343,86 +2268,66 @@ ok ".env ready (PORT=${PORT})"
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Step 9.5: Post-install DB smoke test (create → insert → read → delete)
+#  Step 9.5: Post-install Sidecar smoke test (write → read → delete)
 #
 #  Prove the SELECTED backend actually works on THIS machine before we
-#  declare success — a create/insert/read-back/delete/drop round-trip via
-#  the same interpreter and the same resolved DB target the server will use.
+#  declare success — a semantic write/read/delete round-trip through the
+#  authenticated storage.v1 Sidecar that the server will use.  The installer
+#  never imports a database driver or opens the selected database itself.
 #  Runs for BOTH the uv and conda paths (this is the shared tail; the conda
 #  guard closed back before Step 8.5). Failure ABORTS the install (fail) with
 #  a backend-specific hint. The temp table is dropped in a finally so no
 #  _tofu_install_smoke residue is left in the user's real DB.
 # ═══════════════════════════════════════════════════════════════
-step "Verifying the database backend works (create → insert → read → delete)"
+step "Verifying the storage Sidecar works (write → read → delete)"
 
 # Mirror the .env backend decision: sqlite unless a PG major was installed
 # AND we didn't pin sqlite.
-_SMOKE_BACKEND="sqlite"
-[[ -z "$DB_BACKEND_CHOICE" && -n "$PG_INSTALLED_MAJOR" ]] && _SMOKE_BACKEND="postgres"
+_SMOKE_BACKEND="$DB_BACKEND_CHOICE"
 
 _SMOKE_TIMEOUT=""
 command -v timeout >/dev/null 2>&1 && _SMOKE_TIMEOUT="timeout -k 5 60"
 
 if (cd "$INSTALL_DIR" && TOFU_DB_BACKEND="$_SMOKE_BACKEND" $_SMOKE_TIMEOUT "$ENV_PYTHON" - <<'PYEOF'
-import os, sys
-backend = os.environ.get('TOFU_DB_BACKEND', 'sqlite').lower()
-conn = None
-created = False
+import sys
+import uuid
 try:
-    if backend == 'postgres':
-        import psycopg2
-        from lib.database import PG_DSN
-        conn = psycopg2.connect(PG_DSN)
-        ph = '%s'
-    else:
-        import sqlite3
-        from lib.database import DB_PATH
-        # The server makedirs the data dir at boot; do the same here so a
-        # first-ever install has somewhere to put the file. An UNWRITABLE
-        # path still raises (→ caught below → exit 1), so this does not mask
-        # the permission-failure case.
-        os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)) or '.', exist_ok=True)
-        conn = sqlite3.connect(DB_PATH)
-        ph = '?'
-    cur = conn.cursor()
-    # Single TEXT column: `INTEGER PRIMARY KEY` autofills on SQLite but is a
-    # NULL-PK error on PG, so keep it backend-neutral.
-    cur.execute('CREATE TABLE IF NOT EXISTS _tofu_install_smoke (v TEXT)')
-    created = True
-    cur.execute('INSERT INTO _tofu_install_smoke (v) VALUES (' + ph + ')', ('ok',))
-    conn.commit()
-    cur.execute('SELECT v FROM _tofu_install_smoke LIMIT 1')
-    row = cur.fetchone()
-    assert row is not None and row[0] == 'ok', 'read-back mismatch'
-    cur.execute('DELETE FROM _tofu_install_smoke')
-    conn.commit()
-    print('  DB smoke OK (backend=%s): create/insert/read/delete round-trip passed' % backend)
+    from lib.storage import StorageSupervisor
+    key = 'install-' + uuid.uuid4().hex
+    with StorageSupervisor(backend=None, startup_timeout=45) as storage:
+        backend = storage.client.health()['backend']
+        storage.client.command(
+            'record.put',
+            {'namespace': 'system.install_smoke', 'key': key, 'value': True},
+            'put-' + key,
+        )
+        stored = storage.client.query(
+            'record.get',
+            {'namespace': 'system.install_smoke', 'key': key},
+        )
+        if stored is None or stored.get('value') is not True:
+            raise RuntimeError('Sidecar read-back did not match the committed value')
+        storage.client.command(
+            'record.delete',
+            {'namespace': 'system.install_smoke', 'key': key},
+            'delete-' + key,
+        )
+        if storage.client.query(
+                'record.get',
+                {'namespace': 'system.install_smoke', 'key': key}) is not None:
+            raise RuntimeError('Sidecar delete was not visible')
+    print('  Storage smoke OK (backend=%s): semantic write/read/delete passed' % backend)
 except Exception as e:
-    sys.stderr.write('  DB smoke FAILED (backend=%s): %s\n' % (backend, e))
+    sys.stderr.write('  Storage Sidecar smoke FAILED: %s\n' % e)
     sys.exit(1)
-finally:
-    # Always drop the temp table so no _tofu_install_smoke residue survives,
-    # even if the round-trip raised midway.
-    if conn is not None:
-        try:
-            if created:
-                cur2 = conn.cursor()
-                cur2.execute('DROP TABLE IF EXISTS _tofu_install_smoke')
-                conn.commit()
-        except Exception as _drop_err:
-            sys.stderr.write('  (warning) could not drop smoke table: %s\n' % _drop_err)
-        try:
-            conn.close()
-        except Exception:
-            pass
 PYEOF
 ); then
-    ok "Database backend verified (${_SMOKE_BACKEND}): create/insert/read/delete round-trip passed"
+    ok "Storage Sidecar verified (${_SMOKE_BACKEND}): semantic write/read/delete passed"
 else
     if [[ "$_SMOKE_BACKEND" == "sqlite" ]]; then
-        fail "SQLite backend failed its post-install smoke test — check disk space / write permissions on ${INSTALL_DIR}/data, or re-run with --with-postgres to use PostgreSQL. Full log: ${TOFU_INSTALL_LOG}"
+        fail "SQLite backend failed its post-install smoke test — check project disk space/write permissions. Refusing backend fallback. Full log: ${TOFU_INSTALL_LOG}"
     else
-        fail "PostgreSQL backend failed its post-install smoke test — see ${INSTALL_DIR}/logs/postgresql.log, or re-run with --force-sqlite to use SQLite. Full log: ${TOFU_INSTALL_LOG}"
+        fail "PostgreSQL backend failed its post-install smoke test — see ${INSTALL_DIR}/logs/storage-postgresql.log. Refusing backend fallback. Full log: ${TOFU_INSTALL_LOG}"
     fi
 fi
 

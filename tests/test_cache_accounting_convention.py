@@ -500,7 +500,7 @@ def test_hybrid_round_is_not_overcharged_against_its_own_residual():
 
 
 def test_the_production_billing_call_site_resolves_the_split_at_the_seam():
-    """WIRING: `request_flow` must hand `compute_request_cost` the RESIDUAL.
+    """WIRING: `request_flow` must hand `compute_request_cost` rich usage.
 
     ★ Added because a NEUTER exposed this hole: reverting the real call site to
     `_nu['input']` left `tests/test_billing.py` fully GREEN (22 passed). Every
@@ -510,7 +510,7 @@ def test_the_production_billing_call_site_resolves_the_split_at_the_seam():
     call site" failure this project has hit repeatedly.
 
     Asserted on the AST, not by substring: a comment mentioning
-    `split_input_tokens` must not be able to satisfy this.
+    `raw_usage` must not be able to satisfy this.
     """
     import ast
     import pathlib
@@ -527,22 +527,13 @@ def test_the_production_billing_call_site_resolves_the_split_at_the_seam():
 
     for call in calls:
         kw = {k.arg: k.value for k in call.keywords if k.arg}
-        assert 'input_tokens' in kw, 'call site stopped passing input_tokens'
-        node = kw['input_tokens']
-        # It must NOT be the raw normalize_usage alias — that is the defect.
-        if isinstance(node, ast.Subscript):
-            key = getattr(node.slice, 'value', None)
-            assert key != 'input', (
-                "billing passes normalize_usage()['input'] — on a HYBRID "
-                'payload that is the cache-INCLUSIVE total, so the wallet '
-                'diverges from the displayed cost (measured 2.246x)')
-        # ...and split_input_tokens must actually be called in this module.
-        assert any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                   and n.func.id == 'split_input_tokens'
-                   for n in ast.walk(tree)), (
-            'request_flow.py never calls split_input_tokens — the convention '
-            'decision is being re-guessed from scalars instead of resolved '
-            'at the seam that owns it')
+        assert 'raw_usage' in kw, 'call site stopped passing the full usage shape'
+        assert 'input_tokens' not in kw, (
+            'request_flow collapsed rich usage back to a scalar before the '
+            'shared cost engine could resolve cache convention and prompt tier')
+        node = kw['raw_usage']
+        assert isinstance(node, ast.Name) and node.id == 'u', (
+            'billing must forward the unmodified task usage object')
 
 
 # ── Defect 5b: the TELEMETRY axis of the very same double-count ─────────

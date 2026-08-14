@@ -112,10 +112,8 @@ class TestThreadConnLifecycle:
             # Simulate a health-check failure forcing a reconnect by closing
             # the underlying connection, then re-fetching.
             db = getattr(core._thread_local, f'db_{DOMAIN_CHAT}', None)
-            try:
-                db._conn.close()  # next _test_connection() fails → reconnect
-            except Exception:
-                pass
+            assert db is not None, 'worker did not cache its chat connection'
+            db._conn.close()  # next _test_connection() fails → reconnect
             get_thread_db(DOMAIN_CHAT)
             get_thread_db(DOMAIN_CHAT)
             # Count entries belonging to THIS thread.
@@ -168,3 +166,9 @@ class TestThreadConnLifecycle:
         get_thread_db(DOMAIN_CHAT)
         close_thread_db()
         close_thread_db()  # second call: nothing to release, must not raise
+        assert getattr(core._thread_local, f'db_{DOMAIN_CHAT}', None) is None
+        if core._BACKEND == 'pg':
+            me = threading.current_thread()
+            with core._thread_conn_lock:
+                assert not any(r() is me and d == DOMAIN_CHAT
+                               for r, _c, d in core._thread_conn_registry)

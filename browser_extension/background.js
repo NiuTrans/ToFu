@@ -1,5 +1,5 @@
 /**
- * Tofu Browser Bridge — Background Service Worker (v4.8)
+ * Tofu Browser Bridge — Background Service Worker (v5.0)
  *
  * Single-endpoint architecture:
  *   Every poll is a POST to /api/browser/poll with:
@@ -29,7 +29,14 @@ const AUTH_GIVE_UP_AFTER    = 5;       // consecutive 401s → needs-re-pair sta
 // Some commands can legitimately take longer than the default; override here.
 const COMMAND_TIMEOUT_OVERRIDES = {
   screenshot_tab: 55000,  // full-page CDP capture + lazy-load wait
+  wait_download: 65000,
 };
+const PROTOCOL_VERSION = 2;
+const BROWSER_CAPABILITIES = [
+  'tabs', 'navigate', 'read', 'snapshot', 'click', 'fill', 'press',
+  'select', 'scroll', 'wait', 'execute', 'iframes', 'network_capture',
+  'upload', 'downloads', 'screenshot',
+];
 // Auto re-pair (owner decree 2026-08-04): the extension must NEVER send the
 // user hunting for a bridge secret. A 401 kicks a silent re-pair ladder that
 // mints a fresh agents:bridge key through the user's OWN Tofu session (an
@@ -45,6 +52,7 @@ const REPAIR_TAB_COOLDOWN = 30 * 60 * 1000;  // hidden-tab repair, twice/hour ca
 
 let SERVER_URL = '';
 let CLIENT_ID = '';               // Stable per-device client identifier
+let PROFILE_NAME = '';
 let BRIDGE_SECRET = '';           // Optional: matches server TOFU_BRIDGE_SECRET
 let pollActive = false;
 let connected = false;
@@ -83,6 +91,8 @@ let _flushPending = false;        // true ⇒ active poll aborted to flush a res
 // Result queue: completed results waiting to be sent with next poll
 const _resultQueue = [];        // [{id, result, error}, ...]
 const _inflight = new Set();    // Command IDs currently executing
+const _networkCaptures = new Map(); // captureId -> {tabId, patterns, responses}
+let _networkListenerInstalled = false;
 
 // Stats
 let commandsExecuted = 0;
@@ -142,7 +152,9 @@ function init() {
   // Generate or restore a stable client ID for per-device command routing.
   // Then adopt the download-time preseed (if any) BEFORE server detection,
   // so a freshly-installed package pairs with zero user input.
-  chrome.storage.local.get(['clientId', 'bridgeSecret', 'serverUrl'], (data) => {
+  // v4 base keys: ['clientId', 'bridgeSecret', 'serverUrl']; profileName is
+  // optional v5 identity metadata and never changes preseed adoption.
+  chrome.storage.local.get(['clientId', 'bridgeSecret', 'serverUrl', 'profileName'], (data) => {
     if (data.clientId) {
       CLIENT_ID = data.clientId;
     } else {
@@ -150,6 +162,7 @@ function init() {
       chrome.storage.local.set({ clientId: CLIENT_ID });
     }
     BRIDGE_SECRET = data.bridgeSecret || '';
+    PROFILE_NAME = data.profileName || '';
     console.log('[Bridge] Client ID:', CLIENT_ID,
                 BRIDGE_SECRET ? '(bridge secret configured)' : '');
     adoptBridgePreseed(data).then(autoDetectServer);
@@ -382,7 +395,11 @@ async function poll() {
       // cross-origin extension fetch. This is what lets the bridge work
       // through such proxies with zero configuration.
       credentials: 'include',
-      body: JSON.stringify({ results: resultsToSend, clientId: CLIENT_ID, chromeMajor: CHROME_MAJOR, extVersion: EXT_VERSION }),
+      body: JSON.stringify({
+        results: resultsToSend, clientId: CLIENT_ID, chromeMajor: CHROME_MAJOR,
+        extVersion: EXT_VERSION, protocolVersion: PROTOCOL_VERSION,
+        capabilities: BROWSER_CAPABILITIES, profile: PROFILE_NAME,
+      }),
     });
     clearTimeout(timeoutId);
     _activePollController = null;
@@ -564,6 +581,17 @@ async function executeCommand(type, params) {
     case 'download':       return cmdDownload(params);
     case 'notify':         return cmdNotify(params);
     case 'fetch_url':      return cmdFetchUrl(params);
+    case 'page_state':     return cmdPageState(params);
+    case 'page_snapshot':  return cmdPageSnapshot(params);
+    case 'page_click':     return cmdPageClick(params);
+    case 'page_fill':      return cmdPageFill(params);
+    case 'page_press':     return cmdPagePress(params);
+    case 'page_select':    return cmdPageSelect(params);
+    case 'page_execute':   return cmdPageExecute(params);
+    case 'page_upload':    return cmdPageUpload(params);
+    case 'network_capture_start': return cmdNetworkCaptureStart(params);
+    case 'network_capture_stop': return cmdNetworkCaptureStop(params);
+    case 'wait_download':  return cmdWaitDownload(params);
     default:
       throw new Error(`Unknown command: ${type}`);
   }
@@ -605,18 +633,20 @@ async function cmdReadTab(params) {
   } catch (e) {
     throw new Error(`Tab ${tabId} not found: ${e.message}`);
   }
-
   if (tab.url && isProtectedUrl(tab.url)) {
     throw new Error(`Cannot read protected page: ${tab.url}`);
   }
+  await _assertExpectedDomain(params, tab);
 
   // Wait for tab to finish loading
   if (tab.status !== 'complete') {
     await waitForTabLoad(tabId, 10000);
   }
 
+  const target = { tabId };
+  if (params.frameId != null) target.frameIds = [Number(params.frameId)];
   const results = await chrome.scripting.executeScript({
-    target: { tabId },
+    target,
     func: _extractContent,
     args: [selector, maxChars],
   });
@@ -743,7 +773,7 @@ async function cmdExecuteJs(params) {
   for (const world of ['MAIN', 'ISOLATED']) {
     try {
       const results = await chrome.scripting.executeScript({
-        target: { tabId },
+        target: _pageTarget(params),
         world,
         func: _executeInPage,
         args: [code],
@@ -807,6 +837,7 @@ function _executeInPage(code) {
 const FULL_PAGE_MAX_HEIGHT_PX = 16000;  // Chrome texture/CDP safety cap
 
 async function cmdScreenshotTab(params) {
+  await _assertExpectedDomain(params);
   const format   = params.format || 'png';
   const quality  = params.quality || 80;
   const fullPage = params.fullPage !== false;  // default true
@@ -1725,16 +1756,21 @@ async function cmdClickElement(params) {
     throw new Error(`Cannot interact with protected page: ${tab.url}`);
   }
 
-  try {
-    return await _cdpClick(tabId, params.selector,
-                           params.rightClick || false, params.scrollTo !== false);
-  } catch (err) {
-    console.warn('[Bridge] CDP click failed, falling back to synthetic events:',
-                 err && err.message);
+  // CDP coordinates are top-frame coordinates. For an explicitly targeted
+  // iframe use frame-scoped script injection; otherwise preserve trusted CDP
+  // input for the common top-frame path.
+  if (params.frameId == null) {
+    try {
+      return await _cdpClick(tabId, params.selector,
+                             params.rightClick || false, params.scrollTo !== false);
+    } catch (err) {
+      console.warn('[Bridge] CDP click failed, falling back to synthetic events:',
+                   err && err.message);
+    }
   }
 
   const results = await chrome.scripting.executeScript({
-    target: { tabId },
+    target: _pageTarget(params),
     world: 'MAIN',
     func: _clickElement,
     args: [params.selector, params.rightClick || false, params.scrollTo !== false],
@@ -1890,15 +1926,17 @@ async function cmdKeyboardInput(params) {
     throw new Error(`Cannot interact with protected page: ${tab.url}`);
   }
 
-  try {
-    return await _cdpKeyboard(tabId, params.keys, params.selector || null);
-  } catch (err) {
-    console.warn('[Bridge] CDP keyboard failed, falling back to synthetic events:',
-                 err && err.message);
+  if (params.frameId == null) {
+    try {
+      return await _cdpKeyboard(tabId, params.keys, params.selector || null);
+    } catch (err) {
+      console.warn('[Bridge] CDP keyboard failed, falling back to synthetic events:',
+                   err && err.message);
+    }
   }
 
   const results = await chrome.scripting.executeScript({
-    target: { tabId },
+    target: _pageTarget(params),
     world: 'MAIN',
     func: _keyboardInput,
     args: [params.keys, params.selector || null],
@@ -1999,6 +2037,10 @@ async function cmdWaitForElement(params) {
   } catch (e) {
     throw new Error(`Tab ${tabId} not found: ${e.message}`);
   }
+  if (tab.url && isProtectedUrl(tab.url)) {
+    throw new Error(`Cannot interact with protected page: ${tab.url}`);
+  }
+  await _assertExpectedDomain(params, tab);
 
   const timeout = params.timeout || 5000; // Default 5s
   const interval = params.interval || 100; // Poll every 100ms
@@ -2008,7 +2050,7 @@ async function cmdWaitForElement(params) {
   while (Date.now() - startTime < timeout) {
     try {
       const results = await chrome.scripting.executeScript({
-        target: { tabId },
+        target: _pageTarget(params),
         world: 'MAIN',
         func: _checkElement,
         args: [params.selector, params.condition || 'present'],
@@ -2081,7 +2123,7 @@ async function cmdTypeText(params) {
   if (tab.url && isProtectedUrl(tab.url)) throw new Error(`Cannot interact with protected page: ${tab.url}`);
 
   const results = await chrome.scripting.executeScript({
-    target: { tabId },
+    target: _pageTarget(params),
     world: 'MAIN',
     func: _typeText,
     args: [params.selector || null, params.text, params.clearFirst !== false, params.pressEnter || false],
@@ -2156,9 +2198,10 @@ async function cmdScrollPage(params) {
   let tab;
   try { tab = await chrome.tabs.get(tabId); } catch (e) { throw new Error(`Tab ${tabId} not found: ${e.message}`); }
   if (tab.url && isProtectedUrl(tab.url)) throw new Error(`Cannot interact with protected page: ${tab.url}`);
+  await _assertExpectedDomain(params, tab);
 
   const results = await chrome.scripting.executeScript({
-    target: { tabId },
+    target: _pageTarget(params),
     world: 'MAIN',
     func: _scrollPage,
     args: [params.direction || 'down', params.amount || null, params.selector || null],
@@ -2336,7 +2379,13 @@ async function cmdCreateTab(params) {
   if (params.windowId) opts.windowId = params.windowId;
 
   const tab = await chrome.tabs.create(opts);
-  return { id: tab.id, url: tab.url, title: tab.title, windowId: tab.windowId };
+  if (params.waitForLoad) {
+    await waitForTabLoad(
+      tab.id, Math.max(1000, Math.min(30000, Number(params.timeoutMs) || 15000)));
+  }
+  const current = await chrome.tabs.get(tab.id);
+  return { id: current.id, url: current.url, title: current.title,
+           windowId: current.windowId, status: current.status };
 }
 
 async function cmdCloseTab(params) {
@@ -2456,6 +2505,269 @@ async function cmdDownload(params) {
   return { downloadId };
 }
 
+// ══════════════════════════════════════════
+//  Protocol-v2 Page primitives
+// ══════════════════════════════════════════
+
+function _pageTarget(params) {
+  const target = { tabId: Number(params.tabId) };
+  if (!target.tabId) throw new Error('No tabId specified');
+  if (params.frameId != null) target.frameIds = [Number(params.frameId)];
+  return target;
+}
+
+async function _assertExpectedDomain(params, knownTab) {
+  if (!params.expectedDomain) return;
+  const tab = knownTab || await chrome.tabs.get(Number(params.tabId));
+  let actual = '';
+  try {
+    actual = (new URL(tab.url || '')).hostname.toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
+  } catch (_) { /* handled by mismatch below */ }
+  const expected = String(params.expectedDomain).toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
+  if (!actual || actual !== expected) {
+    throw new Error(`Page origin changed before action (expected ${expected}, got ${actual || 'unknown'})`);
+  }
+}
+
+function _selectorForPageParams(params) {
+  if (params.ref) {
+    const escaped = String(params.ref).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    return `[data-tofu-ref="${escaped}"]`;
+  }
+  if (params.selector) return String(params.selector);
+  throw new Error('selector or ref is required');
+}
+
+async function cmdPageState(params) {
+  const tab = await chrome.tabs.get(Number(params.tabId));
+  return {
+    tabId: tab.id, url: tab.url || '', title: tab.title || '',
+    status: tab.status || '', active: !!tab.active, windowId: tab.windowId,
+  };
+}
+
+function _snapshotPage(maxElements) {
+  let next = 1;
+  const selector = [
+    'a[href]', 'button', 'input', 'textarea', 'select',
+    '[role="button"]', '[role="link"]', '[contenteditable="true"]',
+    '[tabindex]:not([tabindex="-1"])',
+  ].join(',');
+  const elements = [];
+  for (const el of document.querySelectorAll(selector)) {
+    if (elements.length >= maxElements) break;
+    const rect = el.getBoundingClientRect();
+    const style = getComputedStyle(el);
+    if (!rect.width || !rect.height || style.visibility === 'hidden' || style.display === 'none') continue;
+    let ref = el.getAttribute('data-tofu-ref');
+    if (!ref) {
+      ref = `t${Date.now().toString(36)}-${next++}`;
+      el.setAttribute('data-tofu-ref', ref);
+    }
+    elements.push({
+      ref, tag: el.tagName.toLowerCase(), role: el.getAttribute('role') || '',
+      text: (el.innerText || el.value || el.getAttribute('aria-label') || '').trim().slice(0, 300),
+      type: el.getAttribute('type') || '', href: el.href || '',
+      name: el.getAttribute('name') || '', disabled: !!el.disabled,
+      rect: {x: Math.round(rect.x), y: Math.round(rect.y),
+             width: Math.round(rect.width), height: Math.round(rect.height)},
+    });
+  }
+  return {url: location.href, title: document.title || '', elements, count: elements.length};
+}
+
+async function cmdPageSnapshot(params) {
+  const tab = await chrome.tabs.get(Number(params.tabId));
+  if (tab.url && isProtectedUrl(tab.url)) throw new Error(`Cannot snapshot protected page: ${tab.url}`);
+  await _assertExpectedDomain(params, tab);
+  const results = await chrome.scripting.executeScript({
+    target: _pageTarget(params), func: _snapshotPage,
+    args: [Math.max(1, Math.min(1000, Number(params.maxElements) || 250))],
+  });
+  const value = results && results[0] ? results[0].result : {elements: [], count: 0};
+  return {value, page: await cmdPageState(params)};
+}
+
+async function cmdPageClick(params) {
+  await _assertExpectedDomain(params);
+  const result = await cmdClickElement(Object.assign({}, params, {
+    selector: _selectorForPageParams(params),
+  }));
+  return {value: result, page: await cmdPageState(params)};
+}
+
+async function cmdPageFill(params) {
+  await _assertExpectedDomain(params);
+  const result = await cmdTypeText(Object.assign({}, params, {
+    selector: _selectorForPageParams(params), text: String(params.value == null ? '' : params.value),
+    clearFirst: true, pressEnter: false,
+  }));
+  return {value: result, page: await cmdPageState(params)};
+}
+
+async function cmdPagePress(params) {
+  await _assertExpectedDomain(params);
+  const p = Object.assign({}, params);
+  if (params.ref || params.selector) p.selector = _selectorForPageParams(params);
+  const result = await cmdKeyboardInput(p);
+  return {value: result, page: await cmdPageState(params)};
+}
+
+function _selectPageOption(selector, value) {
+  const el = document.querySelector(selector);
+  if (!el) return {error: `Element not found: ${selector}`};
+  if (!(el instanceof HTMLSelectElement)) return {error: 'Target is not a select element'};
+  const wanted = Array.isArray(value) ? value.map(String) : [String(value)];
+  for (const option of el.options) option.selected = wanted.includes(option.value);
+  el.dispatchEvent(new Event('input', {bubbles: true}));
+  el.dispatchEvent(new Event('change', {bubbles: true}));
+  return {selected: Array.from(el.selectedOptions).map(o => o.value)};
+}
+
+async function cmdPageSelect(params) {
+  const tab = await chrome.tabs.get(Number(params.tabId));
+  if (tab.url && isProtectedUrl(tab.url)) throw new Error(`Cannot interact with protected page: ${tab.url}`);
+  await _assertExpectedDomain(params, tab);
+  const results = await chrome.scripting.executeScript({
+    target: _pageTarget(params), func: _selectPageOption,
+    args: [_selectorForPageParams(params), params.value],
+  });
+  const result = results && results[0] && results[0].result;
+  if (result && result.error) throw new Error(result.error);
+  return {value: result, page: await cmdPageState(params)};
+}
+
+async function cmdPageExecute(params) {
+  if (!params.expression) throw new Error('No expression specified');
+  const tab = await chrome.tabs.get(Number(params.tabId));
+  if (tab.url && isProtectedUrl(tab.url)) throw new Error(`Cannot execute on protected page: ${tab.url}`);
+  await _assertExpectedDomain(params, tab);
+  const results = await chrome.scripting.executeScript({
+    target: _pageTarget(params), world: 'MAIN', func: _executeInPageWithArgs,
+    args: [String(params.expression), params.args == null ? {} : params.args],
+  });
+  const value = results && results[0] && results[0].result;
+  if (value && value.__error) throw new Error(value.message || 'Page execution failed');
+  return {value, page: await cmdPageState(params)};
+}
+
+function _executeInPageWithArgs(expression, args) {
+  try {
+    // The executable body and structured arguments travel separately.  This
+    // prevents query/filter values from being interpolated into JavaScript.
+    return (new Function('args', `"use strict"; return (${expression});`))(args);
+  } catch (e) {
+    return {__error: true, message: e.message || String(e)};
+  }
+}
+
+function _uploadPageFile(selector, base64, filename, mimeType) {
+  const input = document.querySelector(selector);
+  if (!input || !(input instanceof HTMLInputElement) || input.type !== 'file') {
+    return {error: 'Target is not a file input'};
+  }
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const transfer = new DataTransfer();
+  transfer.items.add(new File([bytes], filename, {type: mimeType || 'application/octet-stream'}));
+  input.files = transfer.files;
+  input.dispatchEvent(new Event('input', {bubbles: true}));
+  input.dispatchEvent(new Event('change', {bubbles: true}));
+  return {filename, size: bytes.length, type: mimeType || 'application/octet-stream'};
+}
+
+async function cmdPageUpload(params) {
+  if (!params.data || String(params.data).length > 28 * 1024 * 1024) {
+    throw new Error('Upload data is missing or exceeds the 20 MB decoded limit');
+  }
+  const tab = await chrome.tabs.get(Number(params.tabId));
+  if (tab.url && isProtectedUrl(tab.url)) throw new Error(`Cannot upload on protected page: ${tab.url}`);
+  await _assertExpectedDomain(params, tab);
+  const results = await chrome.scripting.executeScript({
+    target: _pageTarget(params), func: _uploadPageFile,
+    args: [_selectorForPageParams(params), String(params.data),
+           String(params.filename || 'upload.bin'), String(params.mimeType || '')],
+  });
+  const result = results && results[0] && results[0].result;
+  if (result && result.error) throw new Error(result.error);
+  return {value: result, page: await cmdPageState(params)};
+}
+
+function _networkPatternMatches(url, patterns) {
+  if (!patterns || !patterns.length) return true;
+  return patterns.some(p => {
+    const escaped = String(p).replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    try { return new RegExp(`^${escaped}$`).test(url); } catch (_) { return false; }
+  });
+}
+
+function _onNetworkCompleted(details) {
+  for (const capture of _networkCaptures.values()) {
+    if (details.tabId !== capture.tabId || !_networkPatternMatches(details.url, capture.patterns)) continue;
+    if (capture.responses.length >= 500) capture.responses.shift();
+    capture.responses.push({
+      url: details.url, status: details.statusCode, method: details.method,
+      type: details.type, fromCache: !!details.fromCache,
+      timeStamp: details.timeStamp,
+    });
+  }
+}
+
+async function cmdNetworkCaptureStart(params) {
+  const tab = await chrome.tabs.get(Number(params.tabId));
+  if (tab.url && isProtectedUrl(tab.url)) throw new Error(`Cannot capture protected page: ${tab.url}`);
+  await _assertExpectedDomain(params, tab);
+  const captureId = crypto.randomUUID();
+  _networkCaptures.set(captureId, {
+    tabId: Number(params.tabId), patterns: Array.isArray(params.urlPatterns) ? params.urlPatterns : [],
+    responses: [], startedAt: Date.now(),
+  });
+  if (!_networkListenerInstalled) {
+    chrome.webRequest.onCompleted.addListener(_onNetworkCompleted, {urls: ['<all_urls>']});
+    _networkListenerInstalled = true;
+  }
+  return {captureId, page: await cmdPageState(params)};
+}
+
+async function cmdNetworkCaptureStop(params) {
+  const capture = _networkCaptures.get(String(params.captureId));
+  _networkCaptures.delete(String(params.captureId));
+  if (!_networkCaptures.size && _networkListenerInstalled) {
+    chrome.webRequest.onCompleted.removeListener(_onNetworkCompleted);
+    _networkListenerInstalled = false;
+  }
+  return {captureId: String(params.captureId), responses: capture ? capture.responses : [],
+          startedAt: capture ? capture.startedAt : null, stoppedAt: Date.now()};
+}
+
+async function cmdWaitDownload(params) {
+  const downloadId = Number(params.downloadId);
+  const timeoutMs = Math.max(1000, Math.min(120000, Number(params.timeoutMs) || 60000));
+  const current = await chrome.downloads.search({id: downloadId});
+  if (!current.length) throw new Error(`Download ${downloadId} not found`);
+  if (current[0].state === 'complete') return current[0];
+  if (current[0].state === 'interrupted') throw new Error(current[0].error || 'Download interrupted');
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      chrome.downloads.onChanged.removeListener(listener);
+      reject(new Error(`Download ${downloadId} timed out`));
+    }, timeoutMs);
+    const listener = async (delta) => {
+      if (delta.id !== downloadId || !delta.state) return;
+      if (delta.state.current === 'complete') {
+        clearTimeout(timer); chrome.downloads.onChanged.removeListener(listener);
+        const rows = await chrome.downloads.search({id: downloadId});
+        resolve(rows[0] || {id: downloadId, state: 'complete'});
+      } else if (delta.state.current === 'interrupted') {
+        clearTimeout(timer); chrome.downloads.onChanged.removeListener(listener);
+        reject(new Error('Download interrupted'));
+      }
+    };
+    chrome.downloads.onChanged.addListener(listener);
+  });
+}
+
 async function cmdNotify(params) {
   const id = await chrome.notifications.create({
     type: 'basic',
@@ -2472,7 +2784,7 @@ async function cmdNotify(params) {
 // ══════════════════════════════════════════
 
 function isProtectedUrl(url) {
-  return /^(chrome|chrome-extension|about|chrome-search|devtools):/.test(url);
+  return /^(chrome|edge|chrome-extension|moz-extension|about|file|view-source|chrome-search|devtools):/.test(url);
 }
 
 // Binary assets that Chrome downloads (instead of rendering) when a tab

@@ -27,16 +27,19 @@ NEUTERs (each patches a COPY; the shipped files stay byte-identical):
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = runtime_sections_dir()
 _DEBUG_SRC = os.path.join(JS_DIR, 'core', 'debug_panel.js')
 _RI_SRC = os.path.join(JS_DIR, 'core', 'request_inspector.js')
 
@@ -299,17 +302,33 @@ def test_structured_body_static_pins():
     for sym in ('_renderMsgBodyHtml', '_debugRenderBody', '_debugOpenBlock',
                 '_debugToolCallHtml', '_debugTryParseJson'):
         assert sym in dbg, f'{sym} missing from debug_panel.js'
-    i18n = open(os.path.join(JS_DIR, 'i18n.js'), encoding='utf-8').read()
-    for key in ("'debug.structReasoning'", "'debug.structContent'",
-                "'debug.structToolCalls'", "'debug.structToolResult'",
-                "'debug.structFields'", "'debug.structRawJson'",
-                "'debug.structImage'"):
-        assert key in i18n, f'{key} missing from i18n.js'
+    locale_dir = os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales')
+    locales = [
+        json.loads(open(os.path.join(locale_dir, f'{lang}.json'),
+                        encoding='utf-8').read())
+        for lang in ('zh', 'en')
+    ]
+    for key in ('debug.structReasoning', 'debug.structContent',
+                'debug.structToolCalls', 'debug.structToolResult',
+                'debug.structFields', 'debug.structRawJson',
+                'debug.structImage'):
+        assert all(key in locale for locale in locales), \
+            f'{key} missing from native locale JSON'
     css = open(os.path.join(ROOT, 'static', 'styles.css'),
                encoding='utf-8').read()
     for cls in ('.debug-struct', '.debug-tc-card', '.debug-arg-val',
                 '.debug-raw', '.debug-json'):
         assert cls in css, f'{cls} missing from styles.css'
+    # 2026-08-13 owner screenshot: the structured view ALSO mounts inside
+    # .ri-state-panel in the chat flow, where the inherited face is the 14.5px
+    # sans chat font — arg rows rendered ~45% larger than the 10–11px panel
+    # chrome around them. The baseline must be pinned on .debug-struct itself,
+    # not inherited from .debug-panel (which only wraps the drawer view).
+    base = next((ln for ln in css.splitlines()
+                 if ln.startswith('.debug-struct{')), '')
+    assert 'font-size:' in base and 'font-family:' in base, (
+        '.debug-struct lost its pinned font baseline — arg rows fall back to '
+        'the mount container face (the 2026-08-13 mixed-font bug)')
 
 
 if __name__ == '__main__':

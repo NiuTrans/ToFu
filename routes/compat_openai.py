@@ -15,7 +15,7 @@ Auth: standard ``Authorization: Bearer tofu_…`` (validated by the
 
 from __future__ import annotations
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.agent_core.admission import (
     await_terminal, controller, on_terminal, register_waiter,
@@ -192,7 +192,7 @@ async def chat_completions():
         logger.debug('[compat:openai] record_tokens failed: %s', e)
     # Return raw dict (no 'ok' envelope) — OpenAI SDKs expect the unwrapped
     # body. We intentionally bypass api_ok here.
-    from flask import jsonify
+    from quart import jsonify
     return jsonify(out)
 
 
@@ -205,7 +205,7 @@ async def chat_completions():
                         'so OpenAI SDKs can pin without custom code).'),
           tags=['compat:openai'], scope='chat')
 def models():
-    from flask import jsonify
+    from quart import jsonify
     auth = current_auth()
     owner = (auth.key_id if auth else '') or ''
     return jsonify(models_payload(owner_key_id=owner))
@@ -279,7 +279,7 @@ def embeddings():
             f'Upstream embedding failed: {resp.status_code}',
             upstream_status=resp.status_code,
             upstream_body=resp.text[:500])
-    from flask import jsonify
+    from quart import jsonify
     return jsonify(resp.json())
 
 

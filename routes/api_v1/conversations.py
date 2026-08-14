@@ -13,10 +13,9 @@ their primary registration here once the JS leak audit is complete.
 
 from __future__ import annotations
 
-from flask import Blueprint
+from quart import Blueprint
 
 import asyncio
-import json
 import secrets
 import time
 
@@ -209,21 +208,16 @@ async def list_branches(conv_id, msg_idx):
     legacy = _load_branches_module()
     if legacy is None:
         return api_internal_error('Branches module unavailable')
-    from lib.database import DOMAIN_CHAT, async_fetchone
     from routes.common import DEFAULT_USER_ID, _db_safe  # noqa: F401
-    row = await async_fetchone(
-        'SELECT messages FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
-    if not row:
+    def _load():
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        from lib.database.conversation_repository import load_conversation
+        return load_conversation(
+            get_thread_db(DOMAIN_CHAT), conv_id, user_id=DEFAULT_USER_ID)
+    snapshot = await asyncio.to_thread(_load)
+    if snapshot is None:
         return api_not_found('Conversation not found')
-    try:
-        # Off-loop: the messages column is the FULL conversation blob (tens of
-        # MB on long convs) — parsing it here would stall the event loop.
-        messages = await asyncio.to_thread(json.loads, row['messages'] or '[]')
-    except (json.JSONDecodeError, TypeError) as e:
-        logger.warning('[api_v1.branches] conv=%s parse failed: %s',
-                       conv_id[:8], e)
-        return api_internal_error('Failed to parse conversation messages')
+    messages = snapshot.messages
     # Stable-id resolution (query msgId authoritative, index fallback) so a
     # windowed-read client lists the correct message's branches.
     from quart import request as _request
@@ -281,40 +275,8 @@ async def create_branch(conv_id, msg_idx):
     parent_selection = optional_str(body, 'parent_selection',
                                       default='', max_len=4000) or ''
 
-    from lib.database import DOMAIN_CHAT, async_execute, async_fetchone
     from routes.common import DEFAULT_USER_ID
-
-    row = await async_fetchone(
-        'SELECT messages, title, settings, created_at '
-        'FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
-    if not row:
-        return api_not_found('Conversation not found')
-    try:
-        # Off-loop: full conversation blob parse (see list_branches).
-        messages = await asyncio.to_thread(json.loads, row['messages'] or '[]')
-    except (json.JSONDecodeError, TypeError) as e:
-        logger.warning('[api_v1.branches] conv=%s parse failed: %s',
-                       conv_id[:8], e)
-        return api_internal_error('Failed to parse conversation messages')
-    # ── Stable-id resolution: msgId (body) is authoritative, index the fallback.
-    #    Drift-proof under windowed reads where the client's msg_idx is a tail
-    #    window position, NOT the absolute index. ──
     _anchor_msg_id = optional_str(body, 'msg_id', default='', max_len=64) or ''
-    if _anchor_msg_id:
-        from lib.tasks_pkg.manager import find_message_by_id
-        _ridx, _ = find_message_by_id(messages, _anchor_msg_id)
-        if _ridx is not None:
-            if _ridx != msg_idx:
-                logger.info('[api_v1.branches] conv=%s msgId=%s resolved to index %d '
-                            '(client sent %d — drift corrected)',
-                            conv_id[:8], _anchor_msg_id[:12], _ridx, msg_idx)
-            msg_idx = _ridx
-    if msg_idx < 0 or msg_idx >= len(messages):
-        return api_bad_request(f'msg_idx {msg_idx} out of range')
-    msg = messages[msg_idx]
-    if not isinstance(msg, dict):
-        return api_bad_request(f'message at index {msg_idx} is not an object')
 
     classified = classify_branch_title(title)
     branch = {
@@ -329,52 +291,64 @@ async def create_branch(conv_id, msg_idx):
     if parent_selection:
         branch['parentSelection'] = parent_selection
 
-    branches = msg.get('branches')
-    if not isinstance(branches, list):
-        branches = []
-        msg['branches'] = branches
-    branches.append(branch)
-    branch_idx = len(branches) - 1
+    def _persist_branch():
+        import copy
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        from lib.database.conversation_repository import (
+            ConversationMutation,
+            mutate_conversation,
+        )
 
-    # Persist (mirrors the legacy delete_branch impl).
-    now_ms = int(time.time() * 1000)
-    try:
-        settings = json.loads(row['settings'] or '{}')
-    except (json.JSONDecodeError, TypeError) as _e_audit:
-        logger.debug('[conversations] create_branch caught %s: %s', type(_e_audit).__name__, _e_audit)
-        settings = {}
-    settings_json = json.dumps(settings, ensure_ascii=False)
-    # Off-loop: serializing + search-indexing the full messages blob is CPU
-    # proportional to conversation size — one thread hop for both.
-    messages_json, search_text = await asyncio.to_thread(
-        _branch_persist_payload, messages)
-    title_db = row['title']
-    created_at = row['created_at'] if 'created_at' in row.keys() else now_ms
+        def _mutate(messages, _snapshot):
+            resolved_idx = msg_idx
+            if _anchor_msg_id:
+                from lib.tasks_pkg.manager import find_message_by_id
+                found, _ = find_message_by_id(messages, _anchor_msg_id)
+                if found is not None:
+                    resolved_idx = found
+            if resolved_idx < 0 or resolved_idx >= len(messages):
+                return ConversationMutation(
+                    changed=False,
+                    value={'error': 'out_of_range', 'index': resolved_idx})
+            msg = messages[resolved_idx]
+            if not isinstance(msg, dict):
+                return ConversationMutation(
+                    changed=False,
+                    value={'error': 'not_object', 'index': resolved_idx})
+            branches = msg.get('branches')
+            if not isinstance(branches, list):
+                branches = []
+                msg['branches'] = branches
+            branches.append(copy.deepcopy(branch))
+            return ConversationMutation(
+                value={'index': resolved_idx,
+                       'branch_idx': len(branches) - 1,
+                       'total': len(branches)},
+                changed_seqs=[resolved_idx])
+
+        return mutate_conversation(
+            get_thread_db(DOMAIN_CHAT), conv_id, _mutate,
+            user_id=DEFAULT_USER_ID, max_attempts=5)
 
     try:
-        # Build the dialect-correct upsert via Core (same backend-agnostic
-        # path as the sync upsert() helper) and run it on the async executor.
-        # 8-col insert (search_tsv omitted → PG trigger fills it); on conflict
-        # update only messages/settings/updated_at/search_text (NOT title /
-        # created_at — a branch must not rewrite those), matching the prior
-        # hand-rolled ON CONFLICT clause.
-        from lib.database._core_schema import CONVERSATIONS, upsert_sql
-        _branch_sql = upsert_sql(
-            CONVERSATIONS, conflict_cols=['id', 'user_id'],
-            insert_cols=['id', 'user_id', 'title', 'messages', 'settings',
-                         'created_at', 'updated_at', 'search_text'],
-            update_cols=['messages', 'settings', 'updated_at', 'search_text'])
-        await async_execute(
-            _branch_sql,
-            {'id': conv_id, 'user_id': DEFAULT_USER_ID, 'title': title_db,
-             'messages': messages_json, 'settings': settings_json,
-             'created_at': created_at, 'updated_at': now_ms,
-             'search_text': search_text},
-            domain=DOMAIN_CHAT)
+        mutation = await asyncio.to_thread(_persist_branch)
     except Exception as e:
         logger.error('[api_v1.branches] persist failed conv=%s: %s',
                      conv_id[:8], e, exc_info=True)
         return api_internal_error(f'Failed to persist branch: {e}')
+    if mutation.missing:
+        return api_not_found('Conversation not found')
+    if not mutation.applied:
+        error = (mutation.value or {}).get('error') if mutation.value else None
+        if error == 'out_of_range':
+            return api_bad_request(
+                f'msg_idx {(mutation.value or {}).get("index")} out of range')
+        if error == 'not_object':
+            return api_bad_request('target message is not an object')
+        return api_internal_error('Conversation remained busy; retry')
+    resolved = mutation.value
+    branch_idx = resolved['branch_idx']
+    msg_idx = resolved['index']
 
     # Event-driven cross-device sync: a new branch changes the conversation
     # body, so push the post-write rev → a sibling tab with this conv open
@@ -382,16 +356,8 @@ async def create_branch(conv_id, msg_idx):
     # the sidebar meta cache, so it replaces the bare _invalidate_meta_cache().
     try:
         from routes.common import _notify_conv_changed, _request_user_id
-        _rev_row = await async_fetchone(
-            'SELECT rev FROM conversations WHERE id=? AND user_id=?',
-            (conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
-        _branch_rev = None
-        if _rev_row is not None:
-            try:
-                _branch_rev = _rev_row['rev']
-            except (KeyError, TypeError, IndexError):
-                _branch_rev = _rev_row[0]
-        _notify_conv_changed(conv_id, rev=_branch_rev, user_id=_request_user_id())
+        _notify_conv_changed(
+            conv_id, rev=mutation.rev, user_id=_request_user_id())
     except Exception as e:
         logger.debug('[api_v1.branches] conv-changed notify: %s', e)
 
@@ -400,47 +366,11 @@ async def create_branch(conv_id, msg_idx):
               kind=branch['kind'],
               key_id=(current_auth().key_id if current_auth() else ''))
     return api_ok(branch=branch, branch_idx=branch_idx,
-                   total_branches=len(branches))
+                   total_branches=resolved['total'])
 
 
 # DELETE /api/v1/conversations/<id>/messages/<i>/branches/<j> is registered
 # by routes/conversations.py:delete_branch on this same blueprint.
-
-
-@api_v1_conversations_bp.route(
-    '/api/v1/conversations/<conv_id>/toolset/apply',
-    methods=['POST'],
-)
-@require_scope('conversations')
-@api_meta(
-    summary='Apply a pending tool-toggle change to an active conversation',
-    description=(
-        'Clears the per-conversation tool-schema latch so the next chat '
-        'round re-assembles the tool list from the CURRENT toggles. The '
-        'latch normally freezes the tool array for a conversation\'s '
-        'lifetime to keep the prompt cache prefix byte-identical; a '
-        'mid-conversation toggle (Swarm/Scheduler/Browser/…) is otherwise '
-        'deferred to the next NEW conversation. Call this when the user '
-        'explicitly chooses "Apply now" — it accepts a one-time prompt-cache '
-        'rebuild (~65k tokens) in exchange for the new tools taking effect '
-        'immediately.\n\nResponse: ``{ok: true, conv_id}``.'),
-    tags=['conversations'], scope='conversations',
-)
-async def apply_toolset(conv_id):
-    if not conv_id:
-        return api_bad_request('conv_id is required', field='conv_id')
-    try:
-        from lib.tools import clear_tool_list_latch
-        clear_tool_list_latch(conv_id)
-    except Exception as e:
-        logger.error('[api_v1.conv] toolset apply failed conv=%s: %s',
-                     conv_id[:8], e, exc_info=True)
-        return api_internal_error(f'Failed to apply toolset change: {e}')
-    audit_log('toolset_apply', conv_id=conv_id,
-              key_id=(current_auth().key_id if current_auth() else ''))
-    logger.info('[api_v1.conv] toolset latch cleared (Apply now) conv=%s',
-                conv_id[:8])
-    return api_ok(conv_id=conv_id)
 
 
 # ── pt_conv_state_ssot P5: sync-drift probe ────────────────────────────
@@ -456,15 +386,18 @@ async def apply_toolset(conv_id):
 _SYNC_DIGEST_MAX = 500
 
 
-def _log_divergence(conv_id: str, kind: str, client, server) -> dict | None:
+def _log_divergence(conv_id: str, kind: str, client, server,
+                    observer_id: str = '') -> dict | None:
     """Log a divergence at a severity that reflects whether it is a FAULT.
 
     P5 logged every inequality at WARNING. On a streaming conversation the
     client's 60s-old digest can never match a live server read, so the warning
     fired constantly and buried the real signal. The tracker distinguishes a
-    client that is merely sampling late (moving) from one that is frozen while
-    the server advances — only the latter is the "notify frame dropped, never
-    converges" hole.
+    client that is merely sampling late (moving) from one that remains frozen
+    at an unequal value — only the latter is the "notify frame dropped, never
+    converges" hole.  The server may already be static by the first probe (for
+    example after a lost terminal frame), so repeated server movement is not a
+    prerequisite.
 
     Returns the tracker's verdict dict (or None when the tracker itself
     failed) so the caller can act on a SUSTAINED stall instead of only
@@ -474,7 +407,8 @@ def _log_divergence(conv_id: str, kind: str, client, server) -> dict | None:
     """
     try:
         from lib.conversations.drift_tracker import observe_divergence
-        v = observe_divergence(conv_id, kind, client, server)
+        v = observe_divergence(
+            conv_id, kind, client, server, observer_id=observer_id)
     except Exception as e:
         # Never let the tracker suppress the underlying signal.
         logger.debug('[SyncDrift] tracker failed conv=%s kind=%s: %s',
@@ -486,10 +420,10 @@ def _log_divergence(conv_id: str, kind: str, client, server) -> dict | None:
     if v['severity'] == 'warning':
         logger.warning(
             '[SyncDrift] STALLED conv=%s kind=%s client=%s server=%s '
-            'age=%.0fs observations=%d direction=%s — client value has NOT '
-            'moved while the server advanced; this conversation is not '
+            'frozen_age=%.0fs observations=%d direction=%s — client value has NOT '
+            'moved while the values remained unequal; this conversation is not '
             'converging on its own',
-            conv_id[:8], kind, client, server, v['age'], v['observations'],
+            conv_id[:8], kind, client, server, v['frozen_age'], v['observations'],
             v['direction'])
     else:
         logger.debug(
@@ -500,7 +434,7 @@ def _log_divergence(conv_id: str, kind: str, client, server) -> dict | None:
     return v
 
 
-def _log_agreement(conv_id: str, kind: str) -> None:
+def _log_agreement(conv_id: str, kind: str, observer_id: str = '') -> None:
     """Record that a previously-diverged pair converged.
 
     This is the positive evidence P6 needs: proof the channel self-heals
@@ -509,7 +443,7 @@ def _log_agreement(conv_id: str, kind: str) -> None:
     """
     try:
         from lib.conversations.drift_tracker import observe_agreement
-        res = observe_agreement(conv_id, kind)
+        res = observe_agreement(conv_id, kind, observer_id=observer_id)
     except Exception as e:
         logger.debug('[SyncDrift] agreement record failed conv=%s: %s',
                      conv_id[:8], e)
@@ -528,7 +462,7 @@ def _log_agreement(conv_id: str, kind: str) -> None:
 @api_meta(
     summary='Compare client conv-state digests against the server SSOTs',
     description=(
-        'pt_conv_state_ssot P5 (drift probe). Body: ``{digests: [{convId, '
+        'pt_conv_state_ssot P5 (drift probe). Body: ``{probeId, digests: [{convId, '
         'taskIds: [...], rev: <number|null>}]}``. For each entry the server '
         'compares the client busy set against the task-registry snapshot and '
         'the client rev against ``conversations.rev``; divergences are '
@@ -544,6 +478,8 @@ def _log_agreement(conv_id: str, kind: str) -> None:
             'required': ['digests'],
             'properties': {
                 'identityGateDegraded': {'type': 'boolean'},
+                'probeId': {'type': 'string'},
+                'pushRid': {'type': 'string'},
                 'digests': {
                     'type': 'array',
                     'items': {
@@ -563,6 +499,15 @@ def _log_agreement(conv_id: str, kind: str) -> None:
 async def sync_digest():
     body = await async_parse_body()
 
+    # A drift belongs to the reporting PAGE, not globally to a conversation.
+    # Otherwise an up-to-date sibling tab clears the stale tab's evidence on
+    # every alternating probe, making the sustained threshold unreachable.
+    # New clients send the page-stable probeId.  pushRid keeps old clients
+    # isolated too; the empty legacy bucket preserves wire compatibility.
+    _raw_observer = body.get('probeId') or body.get('pushRid') or ''
+    observer_id = (_raw_observer[:64]
+                   if isinstance(_raw_observer, str) else '')
+
     # ── Identity-gate fail-open telemetry ──────────────────────────────
     # The client's multi-user identity gate (conv_state_reducer::_frameIsOurs)
     # fails OPEN when the predicate is missing — a build-order regression makes
@@ -579,7 +524,7 @@ async def sync_digest():
             'window._frameIsOurs was unavailable, so notify frames are being '
             'accepted UNSCOPED (multi-user isolation is off on that page). '
             'Cause is a JS build-order regression: core/conv_state_reducer.js '
-            'must load before its consumers in lib/js_bundler.py. '
+            'must initialize before its consumers in the Vite module graph. '
             'key_id=%s user_id=%s digests=%s',
             (_auth_ig.key_id if _auth_ig else ''),
             (getattr(_auth_ig, 'user_id', '') if _auth_ig else ''),
@@ -613,8 +558,45 @@ async def sync_digest():
         logger.warning('[SyncDrift] registry snapshot failed: %s', e)
         snap = {}
 
-    from lib.database import DOMAIN_CHAT, async_fetchone
+    from lib.database import DOMAIN_CHAT, async_fetchall
     from routes.common import DEFAULT_USER_ID
+
+    # Resolve every idle numeric-rev digest in ONE indexed query. The former
+    # per-item ``async_fetchone`` loop allowed a valid 500-item probe to create
+    # 500 serial database round trips. On a FUSE-backed local PostgreSQL data
+    # directory even a small storage hiccup then stretched a tiny sync request
+    # into seconds. Busy conversations deliberately remain excluded because
+    # their client rev is frozen by design until the stream settles.
+    rev_conv_ids = []
+    rev_conv_seen = set()
+    for d in digests:
+        if not isinstance(d, dict):
+            continue
+        conv_id = str(d.get('convId') or '')[:64]
+        client_rev = d.get('rev')
+        if (not conv_id or conv_id in rev_conv_seen
+                or snap.get(conv_id)
+                or not isinstance(client_rev, (int, float))
+                or isinstance(client_rev, bool)):
+            continue
+        rev_conv_seen.add(conv_id)
+        rev_conv_ids.append(conv_id)
+
+    server_revs = {}
+    if rev_conv_ids:
+        placeholders = ','.join('?' for _ in rev_conv_ids)
+        rows = await async_fetchall(
+            'SELECT id, rev FROM conversations '
+            f'WHERE user_id=? AND id IN ({placeholders})',
+            (DEFAULT_USER_ID, *rev_conv_ids), domain=DOMAIN_CHAT)
+        for row in rows:
+            try:
+                row_id, row_rev = row['id'], row['rev']
+            except (KeyError, TypeError, IndexError) as e:
+                logger.debug('[api_v1.conv] positional sync-digest row '
+                             'fallback: %s', e)
+                row_id, row_rev = row[0], row[1]
+            server_revs[str(row_id)] = row_rev
 
     divergences = []
     verdicts = []
@@ -634,11 +616,13 @@ async def sync_digest():
         if client_tids != server_tids:
             divergences.append({'convId': conv_id, 'kind': 'task_ids',
                                 'client': client_tids, 'server': server_tids})
-            _v = _log_divergence(conv_id, 'task_ids', client_tids, server_tids)
+            _v = _log_divergence(
+                conv_id, 'task_ids', client_tids, server_tids, observer_id)
             if _v:
+                _v.update(convId=conv_id, kind='task_ids')
                 verdicts.append(_v)
         else:
-            _log_agreement(conv_id, 'task_ids')
+            _log_agreement(conv_id, 'task_ids', observer_id)
 
         client_rev = d.get('rev')
         if isinstance(client_rev, (int, float)) and not isinstance(client_rev, bool):
@@ -658,28 +642,23 @@ async def sync_digest():
                     '(client=%s, %d running task(s))',
                     conv_id[:8], client_rev, len(server_tids))
                 continue
-            row = await async_fetchone(
-                'SELECT rev FROM conversations WHERE id=? AND user_id=?',
-                (conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
-            if row is None:
+            if conv_id not in server_revs:
                 divergences.append({'convId': conv_id, 'kind': 'unknown_conv',
                                     'client': client_rev, 'server': None})
                 logger.warning('[SyncDrift] conv=%s kind=unknown_conv client_rev=%s',
                                conv_id[:8], client_rev)
                 continue
-            try:
-                server_rev = row['rev']
-            except (KeyError, TypeError, IndexError) as _e:
-                logger.debug('sync digest: missing key/unexpected type/short/malformed (%s)', _e)
-                server_rev = row[0]
+            server_rev = server_revs[conv_id]
             if server_rev != client_rev:
                 divergences.append({'convId': conv_id, 'kind': 'rev',
                                     'client': client_rev, 'server': server_rev})
-                _v = _log_divergence(conv_id, 'rev', client_rev, server_rev)
+                _v = _log_divergence(
+                    conv_id, 'rev', client_rev, server_rev, observer_id)
                 if _v:
+                    _v.update(convId=conv_id, kind='rev')
                     verdicts.append(_v)
             else:
-                _log_agreement(conv_id, 'rev')
+                _log_agreement(conv_id, 'rev', observer_id)
 
     # ── REPAIR: a detected stall must produce a correction, not just a log ──
     # pt_cadaa70ffa6b468d. Everything above is observation; without this block
@@ -730,10 +709,21 @@ async def sync_digest():
     #
     # Best-effort: a failed repair must never turn this read-only diagnostic
     # into a 500.
+    # A rev inequality needs a BODY refresh, not a running-task snapshot.
+    # Return this directive immediately on the first observation: the digest
+    # POST itself proves HTTP is alive, active tabs can verify non-destructively,
+    # and background tabs merely mark their shell stale for the next open.
+    reload_conv_ids = sorted({
+        d['convId'] for d in divergences if d.get('kind') == 'rev'
+    })
+
     repaired = False
     snapshot = None
     try:
-        socket_id = str(body.get('pushRid') or '')[:64]
+        _raw_socket_id = body.get('pushRid') or ''
+        socket_id = (_raw_socket_id[:64]
+                     if isinstance(_raw_socket_id, str) else '')
+        repair_client_id = socket_id or observer_id
         from lib.conversations.drift_repair import (note_repair_attempt,
                                                     note_repair_outcome,
                                                     should_repair)
@@ -744,25 +734,26 @@ async def sync_digest():
         # socket we repaired last round now reports no sustained divergence, the
         # correction landed. Evaluated BEFORE this round's decision so a fresh
         # attempt does not overwrite the pending verdict.
-        if socket_id:
+        if repair_client_id:
             _still_stalled = any(v.get('sustained') for v in verdicts)
-            note_repair_outcome(socket_id, converged=not _still_stalled)
+            note_repair_outcome(
+                repair_client_id, converged=not _still_stalled)
 
         # ``should_repair`` is keyed on the socket id only as an identity for
         # rate-limiting; it does NOT require that socket to be live, because the
         # correction no longer travels that way.
-        if should_repair(socket_id, verdicts):
+        if should_repair(repair_client_id, verdicts):
             from lib.agent_core.push import build_conv_state_snapshot, hub
             snapshot = build_conv_state_snapshot(user_id=_scope)
             # Delivery is the HTTP response itself: returning 200 with this body
             # IS the delivery, so the cooldown may be armed honestly here.
-            note_repair_attempt(socket_id)
+            note_repair_attempt(repair_client_id)
             repaired = True
             logger.warning(
                 '[SyncDrift] REPAIR returned in-band to socket=%s (%d sustained '
                 'divergence(s)) — corrective conv_state_snapshot covering %d '
                 'running conv(s)',
-                socket_id[:8],
+                repair_client_id[:8],
                 sum(1 for v in verdicts if v.get('sustained')),
                 len(snapshot.get('convs') or {}))
             # OPTIONAL ACCELERATOR, never the delivery proof: if the socket
@@ -770,7 +761,8 @@ async def sync_digest():
             # push lands a beat sooner. Its return value is deliberately
             # IGNORED — treating an enqueue as delivery is the bug above.
             try:
-                hub.deliver_to_socket(socket_id, snapshot)
+                if socket_id:
+                    hub.deliver_to_socket(socket_id, snapshot)
             except Exception as _pe:
                 logger.debug('[SyncDrift] optional push accelerator failed '
                              '(the in-band copy is authoritative): %s', _pe)
@@ -778,7 +770,8 @@ async def sync_digest():
         logger.warning('[SyncDrift] repair attempt failed: %s', e)
 
     return api_ok(checked=checked, divergences=divergences,
-                  repaired=repaired, snapshot=snapshot)
+                  repaired=repaired, snapshot=snapshot,
+                  reloadConvIds=reload_conv_ids)
 
 
 __all__ = ['api_v1_conversations_bp']

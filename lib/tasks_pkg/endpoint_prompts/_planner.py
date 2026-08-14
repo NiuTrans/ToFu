@@ -99,9 +99,11 @@ Use EXACTLY this structure (the Worker and Critic both parse it):
   value by making it executable.
 - **DO NOT execute the task yourself.**  You are planning, not doing.
 - You have FULL tool access (list_dir, read_files, grep_search,
-  find_files, run_command, fetch_url, web_search, etc.) — **use them
-  sparingly** to ground the plan in actual code, but do not rewrite the
-  project before planning.  Typically 3-8 targeted tool calls is enough.
+  find_files, run_command, fetch_url, web_search, etc.) — use them to
+  ground the plan in actual code, but do not rewrite the project before
+  planning.  Begin with one bounded, batched discovery pass.  Make
+  follow-up calls only when the evidence leaves a decision unresolved;
+  tool-call count is not a quality target.
 - Be specific.  "Improve the code" is bad.  "Refactor the auth
   middleware in `routes/auth.py` to use async/await and add error
   handling for expired tokens" is good.
@@ -129,8 +131,9 @@ Before producing a checklist, classify the user's request:
          - ``## Audit``     — enumerated findings, one per bullet.
          - ``## Spec``      — interfaces, data shapes, migration notes.
        Use your read-only tools (list_dir, read_files, grep_search,
-       find_files, fetch_url, web_search) liberally here — 10-20
-       tool calls is normal for a substantive audit.
+       find_files, fetch_url, web_search) in bounded batches here.
+       Reuse evidence already gathered and add follow-up calls only for
+       a specific unresolved question; do not target a number of calls.
 
     2. **The checklist then ships CODE CHANGES derived from the
        analysis.**  Not a doc.  Examples of GOOD checklist items in

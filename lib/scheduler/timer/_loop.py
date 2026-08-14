@@ -72,15 +72,17 @@ def _execute_continuation(timer: dict[str, Any]) -> str | None:
     if agentic_task_id:
         # Mark timer as triggered in DB
         try:
-            from lib.database import DOMAIN_SYSTEM, get_thread_db
+            from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, get_thread_db
             sysdb = get_thread_db(DOMAIN_SYSTEM)
             now_iso = datetime.now().isoformat()
-            sysdb.execute(
+            db_execute_with_retry(
+                sysdb,
                 "UPDATE timer_watchers SET status='triggered', triggered_at=?, "
-                "execution_task_id=?, updated_at=? WHERE id=?",
+                "execution_task_id=?, updated_at=? WHERE id=? AND status='active'",
                 [now_iso, agentic_task_id, now_iso, timer_id]
             )
-            sysdb.commit()
+            from ._notify import notify_timer_changed
+            notify_timer_changed('triggered')
         except Exception as e:
             logger.error('%s Failed to mark timer as triggered: %s',
                          log_prefix, e, exc_info=True)

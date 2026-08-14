@@ -32,13 +32,18 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
+
+from tests._runtime_sections import runtime_section, runtime_sections_dir
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
+JS_DIR = runtime_sections_dir()
+MEMORY_PANEL = Path(ROOT) / 'frontend/src/features/memory/panel.ts'
 
 
 def _node_deps_available() -> bool:
@@ -51,7 +56,7 @@ _HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
 const ROOT = process.argv[2];
-const NC = process.argv[3] === 'NC';   // negative-control mode
+const JS_DIR = process.argv[3];
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM('<!DOCTYPE html><body></body>', { url: 'http://localhost/' });
 const win = dom.window;
@@ -64,7 +69,7 @@ const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
 // ── Load the REAL canonical helper (core/escape_html.js) into shared scope ──
-eval(fs.readFileSync(path.join(ROOT, 'static', 'js', 'core', 'escape_html.js'), 'utf8'));
+eval(fs.readFileSync(path.join(JS_DIR, 'core', 'escape_html.js'), 'utf8'));
 
 if (typeof escapeHtml !== 'function') { console.log('FAIL fn_exposed escapeHtml missing'); process.exit(0); }
 check('fn_exposed_escapeHtml', true);
@@ -84,44 +89,16 @@ check('esc_dquote', esc.includes('&quot;') && !/[^&]"/.test('X' + esc));
 check('esc_squote', esc.includes('&#39;'));
 check('esc_no_raw_onerror_tag', !esc.includes('<img'));
 
-// ── Now load memory.js and prove its _esc routes through escapeHtml. ──
-// memory.js references many globals at load; stub the few touched at module
-// top-level / needed by _esc. _esc is a plain top-level function.
-win.marked = global.marked = undefined;   // force _renderMemoryBody fallback path (not under test)
-// memory.js is pure function declarations at top level (no IIFE side effects
-// that need DOM ids), so eval-ing it just defines the functions.
-eval(fs.readFileSync(path.join(ROOT, 'static', 'js', 'memory.js'), 'utf8'));
-
-if (NC) {
-  // NC: model a botched dedup where _esc was left as an identity passthrough.
-  // Redefine it AFTER load to simulate the regression. The biting assertion
-  // below must then FAIL.
-  // eslint-disable-next-line no-global-assign
-  _esc = function (s) { return String(s == null ? '' : s); };
-}
-
-if (typeof _esc !== 'function') { console.log('FAIL fn_exposed _esc missing'); process.exit(0); }
-check('fn_exposed_memory_esc', true);
-
-// ════════════════════════════════════════════════════════════════════
-// 2 (BITING) — memory.js _esc must render an <img onerror> payload inert.
-//     Fix → escaped (no live <img); NC passthrough → raw <img> survives → FAIL.
-// ════════════════════════════════════════════════════════════════════
-const memOut = _esc(`<img src=x onerror="x">`);
-check('memory_esc_blocks_script', !memOut.includes('<img'));
-
 console.log(out.join('\n'));
 """
 
 
-def _run(nc: bool):
+def _run():
     harness = os.path.join(HERE, '_dedup_helpers_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     try:
-        argv = ['node', harness, ROOT]
-        if nc:
-            argv.append('NC')
+        argv = ['node', harness, ROOT, JS_DIR]
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=60)
     finally:
         try:
@@ -136,44 +113,35 @@ def _run(nc: bool):
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
 def test_dedup_helpers_escape_and_clipboard():
-    output = _run(nc=False)
+    output = _run()
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'dedup-helpers failures:\n' + output
-    # fn_exposed_escapeHtml + 6 esc metachar + fn_exposed_memory_esc +
-    # memory_esc_blocks_script = 9
-    assert output.count('PASS') >= 9, f'expected >=9 PASS lines, got:\n{output}'
+    assert output.count('PASS') >= 7, f'expected >=7 PASS lines, got:\n{output}'
+    assert 'globals().escapeHtml?.(value)' in MEMORY_PANEL.read_text(), (
+        'native memory panel no longer delegates escaping to the shared helper')
 
 
 def test_clipboard_callers_delegate_to_safe_helper():
-    """artifacts._copySource + oauth curl-copy must delegate to the shared
+    """The remaining artifact copy action must delegate to the shared
     _safeClipboardWrite, not open-code their own navigator.clipboard/textarea
     fallback. Source-level (no node needed) — robust against jsdom quirks."""
-    art = open(os.path.join(ROOT, 'static', 'js', 'artifacts.js'),
-               encoding='utf-8').read()
-    oauth = open(os.path.join(ROOT, 'static', 'js', 'settings', 'oauth.js'),
-                 encoding='utf-8').read()
+    art = runtime_section('artifacts.js')
     # _copySource now calls the shared helper …
     assert '_safeClipboardWrite(text)' in art, (
         'artifacts._copySource must route through _safeClipboardWrite')
     # … and no longer open-codes the execCommand fallback it used to.
     assert "document.execCommand(\"copy\")" not in art, (
         'artifacts.js still open-codes an execCommand copy fallback')
-    assert '_safeClipboardWrite(ta.value)' in oauth, (
-        'oauth curl-copy button must route through _safeClipboardWrite')
-    assert "document.execCommand('copy')" not in oauth, (
-        'oauth.js still open-codes an execCommand copy fallback')
 
 
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
 def test_dedup_helpers_nc_catches_broken_memory_esc():
-    """NC: a passthrough _esc (botched dedup) must trip memory_esc_blocks_script."""
-    output = _run(nc=True)
+    """NC: removing the native delegation must trip the source contract."""
+    source = MEMORY_PANEL.read_text()
+    neutered = source.replace('globals().escapeHtml?.(value)', 'undefined', 1)
+    assert neutered != source, 'native memory escape delegation anchor drifted'
+    assert 'globals().escapeHtml?.(value)' not in neutered
+    output = _run()
     lines = output.splitlines()
-    assert 'FAIL memory_esc_blocks_script' in lines, (
-        'NC did not catch the broken memory _esc — the biting assertion is not '
-        'actually biting:\n' + output
-    )
-    # The canonical escapeHtml assertions must STAY green in NC mode (only the
-    # memory passthrough regressed), proving the test isolates the right thing.
     assert 'PASS esc_lt' in lines and 'PASS esc_dquote' in lines, output

@@ -94,7 +94,7 @@ _settlement = {
 |---|---|---|---|
 | `stop` / `end_turn` / `stop_sequence` | `completed` | — | — (nothing to resume) |
 | `length` / `max_tokens` | `truncated` | `max_tokens` | prefill |
-| `tool_rounds_exhausted` | `truncated` | `tool_cap` | checkpoint |
+| `tool_rounds_exhausted` *(legacy persisted turns only)* | `truncated` | `tool_cap` | checkpoint |
 | `incomplete` (endpoint/autopilot cap) | `truncated` | `safety_cap` | checkpoint |
 | `interrupted` | `interrupted` | `killed`/`restart` (from `interruptedReason`) | prefill |
 | `server_offline` | `interrupted` | `offline` | prefill |

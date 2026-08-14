@@ -169,17 +169,25 @@ def test_token_budget_stops_the_loop(monkeypatch, tmp_path):
     _fake_llm(monkeypatch, [('', [('composition_check', {})])] * 10)
     res = sa.author_scene(_scene(), str(tmp_path), width=1080, height=1440,
                           duration=4.0, scene_index=1, total_scenes=3,
-                          max_rounds=8, token_budget=1500)
+                          token_budget=1500)
     assert res['mode'] == 'template'      # never wrote anything
     assert res['tokens'] <= 3000          # stopped early, not 8 rounds
 
 
-def test_max_rounds_is_bounded(monkeypatch, tmp_path):
-    calls = _fake_llm(monkeypatch, [('', [('composition_check', {})])] * 50)
+def test_tools_continue_past_former_round_cap(monkeypatch, tmp_path):
+    script = [('', [('composition_check', {})])] * 8 + [('done', [])]
+    calls = _fake_llm(monkeypatch, script)
     sa.author_scene(_scene(), str(tmp_path), width=1080, height=1440,
                     duration=4.0, scene_index=1, total_scenes=3,
-                    max_rounds=3, token_budget=10 ** 9)
-    assert calls['n'] <= 5  # max_tool_rounds=3 → at most 3+1 dispatches (+slack)
+                    token_budget=10 ** 9)
+    assert calls['n'] == 9
+
+
+def test_removed_max_rounds_argument_is_rejected(tmp_path):
+    with pytest.raises(TypeError):
+        sa.author_scene(_scene(), str(tmp_path), width=1080, height=1440,
+                        duration=4.0, scene_index=1, total_scenes=3,
+                        max_rounds=3)
 
 
 # ══════════════════════════════════════════════════════════

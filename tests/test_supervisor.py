@@ -9,6 +9,7 @@ Run: pytest -p no:napari tests/test_supervisor.py
 
 import json
 import os
+import socket
 import threading
 import urllib.request
 import urllib.error
@@ -194,6 +195,12 @@ def live_server(tmp_path, monkeypatch):
     monkeypatch.setenv(supervisor.ENV_HOST, '127.0.0.1')
     monkeypatch.setenv(supervisor.ENV_PORT, '0')      # ephemeral
     monkeypatch.setenv(supervisor.ENV_PROJECTS, canon)
+    # The project manager's worker port must be isolated from the developer's
+    # real :15000 server; the stub never binds it, but conflict detection is
+    # deliberately strict before spawn.
+    with socket.socket() as worker_socket:
+        worker_socket.bind(('127.0.0.1', 0))
+        monkeypatch.setenv('PORT', str(worker_socket.getsockname()[1]))
     # Never actually spawn server.py in the HTTP test.
     monkeypatch.setattr(supervisor, '_pid_is_server', lambda pid: False)
     httpd = supervisor.build_server()
@@ -201,6 +208,8 @@ def live_server(tmp_path, monkeypatch):
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
     yield {'base': f'http://{host}:{port}', 'proj': canon}
+    for manager in httpd.managers.values():
+        manager.stop(source='test-cleanup')
     httpd.shutdown()
     httpd.server_close()
 
@@ -330,6 +339,7 @@ def _kill_group(pid):
 
 
 @_needs_bash_setsid
+@pytest.mark.ci_serial
 def test_daemon_launches_detached_session_leader_with_pidfile(tmp_path):
     proj = _make_sh_project(tmp_path)
     sh = str(proj / 'supervisor.sh')
@@ -368,6 +378,7 @@ def test_daemon_launches_detached_session_leader_with_pidfile(tmp_path):
 
 
 @_needs_bash_setsid
+@pytest.mark.ci_serial
 def test_setsid_is_load_bearing_neuter(tmp_path):
     """NEUTER: strip setsid → the watchdog is NOT its own session leader.
 
@@ -399,7 +410,7 @@ def _run_watchdog_with_fastfail(tmp_path, neuter_backoff=False):
     """Run cmd_watchdog in the FOREGROUND against a stub supervisor.py that
     exits immediately (simulating a persistent port-in-use fast-fail), for a
     bounded window. Each launch appends a line to launches.log. Returns the
-    number of launches observed in ~6s.
+    number of launches observed in a 15s window.
 
     When *neuter_backoff* is True, strip the escalation so the loop restarts at
     the fixed 2s base every time — the storm the backoff is meant to prevent.
@@ -427,7 +438,12 @@ def _run_watchdog_with_fastfail(tmp_path, neuter_backoff=False):
                         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                         start_new_session=True)
     try:
-        time.sleep(11)
+        # Leave enough scheduler slack for a loaded shared CI host. At 11s the
+        # fixed-2s neuter intermittently produced only four launches because
+        # process startup/logging overhead consumed >3s; 15s still keeps the
+        # exponential path at <=4 launches (t≈0,2,6,14) while the fixed path
+        # has ample room to cross the >=5 proof threshold.
+        time.sleep(15)
     finally:
         try:
             os.killpg(os.getpgid(p.pid), _signal.SIGTERM)
@@ -448,9 +464,8 @@ def test_watchdog_backs_off_on_persistent_fast_fail(tmp_path):
     """A supervisor.py that dies immediately (e.g. port 15001 in use) must NOT
     trigger a 2s restart storm — escalating backoff caps the attempt rate."""
     n = _run_watchdog_with_fastfail(tmp_path, neuter_backoff=False)
-    # Over ~11s, escalating backoff (sleep 2,4,8,…) launches at t≈0,2,6 (the
-    # next is at t≈14, past the window) → ~3. Fixed-2s would give ~6 (t≈0,2,4,
-    # 6,8,10). Assert the escalation is engaged and caps the attempt rate.
+    # Over ~15s, escalating backoff (sleep 2,4,8,…) launches at t≈0,2,6,14
+    # → at most 4. Fixed-2s has time for at least 5 even with scheduler load.
     assert 1 <= n <= 4, f'expected escalating backoff to cap launches (got {n})'
 
 
@@ -459,7 +474,7 @@ def test_backoff_escalation_is_load_bearing_neuter(tmp_path):
     """NEUTER: remove the *=2 escalation → constant 2s restarts → more launches
     in the same window. Proves the backoff assertion above is real."""
     n_fixed = _run_watchdog_with_fastfail(tmp_path, neuter_backoff=True)
-    # Fixed 2s over ~11s → launches at t≈0,2,4,6,8,10 ≈ 6. Must clearly exceed
+    # Fixed 2s over ~15s → launches at t≈0,2,4,…14. Must clearly exceed
     # the escalating case's cap (≤4), proving the escalation is load-bearing.
     assert n_fixed >= 5, (
         f'without escalation the loop should restart ~every 2s (got {n_fixed}) — '

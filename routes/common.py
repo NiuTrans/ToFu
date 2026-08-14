@@ -14,8 +14,9 @@ import threading
 import time
 from functools import wraps
 
-import sqlite3
-from flask import Blueprint, Response, make_response, request, send_from_directory
+from quart import Blueprint, Response, request
+
+from lib.quart_sync import make_response, send_from_directory
 
 import lib as _lib  # module ref for hot-reload
 from lib.css_bundler import (
@@ -23,17 +24,17 @@ from lib.css_bundler import (
     get_settings_link_tag as _get_settings_link_tag,
 )
 from lib.settings_panels import inject_panels as _inject_settings_panels, panels_signature as _settings_panels_signature
-from lib.js_bundler import (
-    get_bundle_script_tag_nonblocking as _get_bundle_tag,
-    get_feature_bundle_filename_nonblocking as _get_feature_bundle_filename,
-    get_i18n_pack_tag as _get_i18n_pack_tag,
-    get_i18n_pack_urls as _get_i18n_pack_urls,
-)
 from lib.log import get_logger
+from lib.vite_assets import (
+    ViteAssetError,
+    get_vite_asset_tags as _get_vite_asset_tags,
+)
 from lib.api_response import (
     api_bad_request, api_error, api_internal_error, api_ok,
 )
 from lib.request_parser import parse_body
+from lib.storage import StorageError, http_status_for_storage_error
+from lib.storage.errors import coerce_legacy_storage_error
 
 logger = get_logger(__name__)
 
@@ -53,19 +54,23 @@ def _db_safe(fn):
     async-migration-dual-mode-decorators convention.
     """
     import asyncio
-    _db_errors = (sqlite3.OperationalError,)
-
+    _db_errors = (Exception,)
     def _handle(e):
-        err_msg = str(e)
-        if 'database is locked' in err_msg:
-            logger.warning('[%s] DB locked during %s %s — returning 503: %s',
-                           fn.__name__, request.method, request.path, e)
+        original = e
+        if not isinstance(e, StorageError):
+            e = coerce_legacy_storage_error(e)
+        if e is None:
+            raise original
+        status = http_status_for_storage_error(e)
+        if status in {409, 503}:
+            logger.warning('[%s] storage error code=%s during %s %s',
+                           fn.__name__, e.code, request.method, request.path)
             return api_error(
-                'database_busy', status=503,
-                message='Database temporarily busy, please retry.',
-                retryAfter=2)
-        logger.error('[%s] DB error during %s %s: %s',
-                     fn.__name__, request.method, request.path, e, exc_info=True)
+                e.code, status=status, message=e.message,
+                retryAfter=max(1, (e.retry_after_ms or 0) // 1000))
+        logger.error('[%s] storage error code=%s during %s %s',
+                     fn.__name__, e.code, request.method, request.path,
+                     exc_info=True)
         raise e
 
     if asyncio.iscoroutinefunction(fn):
@@ -424,10 +429,19 @@ FAVICON_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
 </svg>'''
 
 
-# ── Cached bundled index.html (avoids re-reading + regex on every page load) ──
-# Keyed by (bundle_tag, styles_link_tag, html_mtime) so any of those changing
-# triggers a re-render of the cached HTML.
-_bundled_index_cache = {'tag': None, 'styles_tag': None, 'feature': None, 'html': None, 'mtime': 0, 'panels': None, 'lang': None}
+# ── Cached assembled index.html ──
+# Cached only while the Vite tags, stylesheet tags, shell and panel fragments
+# are unchanged.
+_bundled_index_cache = {
+    'styles_tag': None,
+    'settings_tag': None,
+    'vite': None,
+    'html': None,
+    'mtime': 0,
+    'panels': None,
+    'lang': None,
+}
+
 
 # ── UI language as a SERVER-VISIBLE signal (Epic-E sub-part 1, owner-approved) ──
 # The UI language has always lived in localStorage['tofu_ui_lang'], which the
@@ -460,60 +474,21 @@ def request_ui_lang():
         return _UI_LANG_DEFAULT
     return raw if raw in _UI_LANGS else _UI_LANG_DEFAULT
 
-# Regex: match contiguous block of app script tags + interleaved HTML comments/blank lines.
-# Two important details:
-#   1. Path char class includes '/' so subdirectory scripts (e.g. static/js/ui/popups.js,
-#      static/js/settings/branding.js, static/js/main/main_input_handling.js) are also
-#      stripped — otherwise they'd survive the bundle replacement and load as duplicate
-#      top-level <script> tags, causing "Identifier has already been declared" SyntaxErrors
-#      (see CLAUDE.md §3.2.1).
-#   2. The comment alternative `<!--[^<]*?-->` is body-restricted to chars that are NOT
-#      `<`, which lets us safely span 1-2 line subpackage comments (e.g. between
-#      core.js and core/folders.js) WITHOUT backtracking across whole HTML regions
-#      that happen to contain other comments. Without this carve-out the regex either
-#      fires multiple times (.*? doesn't cross \n → bundle injected per-block →
-#      duplicate-IIFE crash) or matches enormous spans ([\s\S]*? backtracks across
-#      <head> meta tags etc).
-# The SINGLE source of truth for "which static/js/<path> is an app script the
-# bundle replaces". Both the strip regex below AND the is_stripped_app_script()
-# predicate consume this ONE sub-pattern, so a test can drive the predicate to
-# assert manifest↔regex parity without re-typing (and thus drifting from) the
-# pattern. The `(?!bundle-)` negative lookahead excludes the built bundle tag
-# itself (bundle-<hash>.js) so re-serving the cached HTML doesn't strip its own
-# injected tag. See CLAUDE.md §3.2.1 and tests/test_bundle_manifest_parity.py.
-_APP_SCRIPT_SRC_SUBPATTERN = r'static/js/(?!bundle-)[\w./-]+\.js'
-
-# Predicate form of the sub-pattern above (anchored at start). True iff the
-# given <script src> value is an app script _APP_SCRIPTS_RE would strip — i.e.
-# a file the bundle MUST rebuild. Used by the parity test to close the
-# regex↔manifest edge structurally (never a re-typed copy of the pattern).
-_APP_SCRIPT_SRC_RE = re.compile(_APP_SCRIPT_SRC_SUBPATTERN)
+_APP_ASSET_MARKER = '<!-- TOFU_APP_ASSETS -->'
+_ADMIN_ASSET_MARKER = '<!-- TOFU_ADMIN_ASSETS -->'
 
 
-def is_stripped_app_script(src_attr):
-    """Return True iff ``src_attr`` names an app script the bundle replaces.
-
-    ``src_attr`` is a ``<script>`` ``src`` value (e.g.
-    ``"static/js/foo.js?v=1"``). Returns True for every app script the
-    ``_APP_SCRIPTS_RE`` strip pass removes from the served HTML, and False for
-    the built ``bundle-<hash>.js`` tag (and anything not under ``static/js/``).
-    Shares ``_APP_SCRIPT_SRC_SUBPATTERN`` with the strip regex so the two can
-    never diverge.
-
-    Args:
-        src_attr: The raw ``src`` attribute value of a ``<script>`` tag.
-
-    Returns:
-        True if this src would be stripped as an app script, else False.
-    """
-    return bool(_APP_SCRIPT_SRC_RE.match(src_attr or ''))
-
-
-_APP_SCRIPTS_RE = re.compile(
-    r'(?:(?:<!--[^<]*?-->\n)|(?:<script defer src="' + _APP_SCRIPT_SRC_SUBPATTERN + r'[^"]*"[^>]*></script>\n)|(?:\s*\n))*'
-    r'<script defer src="' + _APP_SCRIPT_SRC_SUBPATTERN + r'[^"]*"[^>]*></script>\n'
-    r'(?:(?:<!--[^<]*?-->\n)|(?:<script defer src="' + _APP_SCRIPT_SRC_SUBPATTERN + r'[^"]*"[^>]*></script>\n)|(?:\s*\n))*'
-)
+def _boot_config_tag(entry):
+    payload = json.dumps({
+        'entry': entry,
+        'uiLanguageHint': request_ui_lang(),
+        'viteBase': 'static/vite/',
+    }, ensure_ascii=False, separators=(',', ':'))
+    # Keep JSON data inert even if future boot values contain user-controlled
+    # text. application/json is not executable, but an HTML parser still sees
+    # a literal closing script tag.
+    payload = payload.replace('<', '\\u003c').replace('>', '\\u003e')
+    return '<script type="application/json" id="tofu-boot-config">' + payload + '</script>'
 
 # Regex: match the app stylesheet `<link>` tag (with whatever ?v=… is in the
 # file) so we can swap it for a content-hashed version computed at request
@@ -529,66 +504,32 @@ _SETTINGS_STYLES_RE = re.compile(
     r'<link rel="stylesheet" href="static/settings\.css(?:\?[^"]*)?">'
 )
 
-def _serve_raw_index_with_panels():
-    """Dev-fallback response: raw index.html (individual <script> tags) but
-    WITH settings-panel fragments spliced in. Used when bundling/injection
-    fails — the settings panels must still appear, so we can't just
-    ``send_from_directory`` the marker-only file. Falls back to the bare file
-    only if even reading it fails."""
-    html_path = os.path.join(BASE_DIR, 'index.html')
-    try:
-        with open(html_path, 'r', encoding='utf-8') as f:
-            html = _inject_settings_panels(f.read())
-        resp = make_response(html)
-        resp.content_type = 'text/html; charset=utf-8'
-    except Exception as e:
-        logger.warning('[Index] raw-index panel splice failed, serving bare file: %s', e)
-        resp = send_from_directory(BASE_DIR, 'index.html')
-    resp.headers['Cache-Control'] = 'private, no-cache'
+def _frontend_unavailable(message):
+    logger.error('[Index] frontend artifact unavailable: %s', message)
+    resp = make_response(
+        '<!doctype html><meta charset="utf-8"><title>Frontend unavailable</title>'
+        '<h1>Frontend build unavailable</h1><p>Run npm run build:frontend and restart.</p>')
+    resp.status_code = 503
+    resp.content_type = 'text/html; charset=utf-8'
+    resp.headers['Cache-Control'] = 'no-store'
     return resp
 
 
 @common_bp.route('/')
 def index_page():
-    bundle_tag = _get_bundle_tag()
-    styles_tag = _get_styles_link_tag()
-    ui_lang = request_ui_lang()
-    if not bundle_tag:
-        # Bundling failed — serve original index.html with individual scripts
-        # (panels still spliced in so the settings modal isn't crippled).
-        return _serve_raw_index_with_panels()
-
-    # Deferred feature bundle (lazy-loaded by static/js/feature-loader.js). We
-    # expose its hashed URL to the page as window.__FEATURE_BUNDLE_SRC__ via a
-    # tiny inline <script> injected right before the core bundle tag. None when
-    # there is nothing to defer (dev fallback / empty deferred manifest) — the
-    # loader then no-ops and the deferred entry-point stubs are never installed.
-    feature_name = None
     try:
-        feature_name = _get_feature_bundle_filename()
-    except Exception as _e_feat:
-        logger.debug('[Index] feature bundle unavailable: %s', _e_feat)
-    if feature_name:
-        feature_tag = ('<script>window.__FEATURE_BUNDLE_SRC__='
-                       f'"static/js/{feature_name}";</script>\n')
-    else:
-        feature_tag = ''
+        vite_tag = _get_vite_asset_tags('main')
+    except ViteAssetError as exc:
+        logger.debug('[Index] Vite asset resolution failed: %s', exc)
+        return _frontend_unavailable(str(exc))
+    styles_tag = _get_styles_link_tag()
+    settings_tag = _get_settings_link_tag()
+    boot_tag = _boot_config_tag('main')
 
-    # i18n single-language pack (Epic-E sub-part 1 slice 2). When the core
-    # bundle excludes i18n.js, its per-language replacement MUST be injected
-    # BEFORE the bundle tag (both are defer; document order decides), or t()
-    # is undefined for every module. The pack URLs let setLanguage() fetch
-    # the other language on demand. Both are None in the dual-bundle
-    # fallback — inject nothing then, the dictionary is already in the bundle.
-    pack_tag = _get_i18n_pack_tag(ui_lang) or ''
-    pack_urls = _get_i18n_pack_urls()
-    i18n_tag = (pack_tag + '\n') if pack_tag else ''
-    if pack_urls:
-        i18n_tag += ('<script>window.__I18N_PACK_URLS__='
-                     + json.dumps(pack_urls) + ';</script>\n')
-
-    # Use cached version if bundle tag, styles tag, AND index.html mtime
-    # are all unchanged. Any of those changing → rebuild the served HTML.
+    # Use cached version only while both stylesheet tags, the Vite graph,
+    # and index.html are unchanged. settings.css is independently hashed; if
+    # it is omitted here, a CSS-only edit leaves the page pointing at the old
+    # cached file until some unrelated HTML/JS change happens to invalidate it.
     html_path = os.path.join(BASE_DIR, 'index.html')
     try:
         html_mtime = os.path.getmtime(html_path)
@@ -596,56 +537,53 @@ def index_page():
         logger.debug('[common] index_page caught %s: %s', type(_e_audit).__name__, _e_audit)
         html_mtime = 0
     panels_sig = _settings_panels_signature()
-    if (_bundled_index_cache['tag'] == bundle_tag
-            and _bundled_index_cache['styles_tag'] == styles_tag
-            and _bundled_index_cache['feature'] == feature_tag
+    if (_bundled_index_cache['styles_tag'] == styles_tag
+            and _bundled_index_cache['settings_tag'] == settings_tag
+            and _bundled_index_cache['vite'] == vite_tag
             and _bundled_index_cache['mtime'] == html_mtime
             and _bundled_index_cache['panels'] == panels_sig
-            and _bundled_index_cache['lang'] == ui_lang
-            and _bundled_index_cache.get('i18n') == i18n_tag
+            and _bundled_index_cache['lang'] == request_ui_lang()
             and _bundled_index_cache['html']):
         resp = make_response(_bundled_index_cache['html'])
         resp.content_type = 'text/html; charset=utf-8'
-        resp.headers['Cache-Control'] = 'private, no-cache'
+        resp.headers['Cache-Control'] = 'no-store'
         return resp
 
-    # Read index.html and rewrite both:
-    #   1. The contiguous block of <script defer src="static/js/*.js"> tags
-    #      → single bundle tag with content-hashed filename.
-    #   2. The single <link rel="stylesheet" href="static/styles.css">
-    #      → hashed minified file static/styles-<hash>.css (lib/css_bundler.py).
+    # Read the shell and assemble its single explicit asset slot. The template
+    # contains no raw app-script inventory, so production and Vite development
+    # use the same graph and cannot silently diverge.
     try:
         with open(html_path, 'r', encoding='utf-8') as f:
             html = f.read()
 
-        # Pack tag FIRST (t() must be defined before the bundle executes),
-        # feature_tag prepended so window.__FEATURE_BUNDLE_SRC__ is defined
-        # BEFORE the core bundle (which contains feature-loader.js) executes.
-        html = _APP_SCRIPTS_RE.sub(i18n_tag + feature_tag + bundle_tag + '\n', html)
+        if html.count(_APP_ASSET_MARKER) != 1:
+            raise ValueError('index.html must contain exactly one app asset marker')
+        assets = boot_tag + '\n' + vite_tag + '\n'
+        html = html.replace(_APP_ASSET_MARKER, assets, 1)
         html = _APP_STYLES_RE.sub(styles_tag, html)
-        html = _SETTINGS_STYLES_RE.sub(_get_settings_link_tag(), html)
+        html = _SETTINGS_STYLES_RE.sub(settings_tag, html)
         # Splice decoupled settings-panel fragments back in at their markers
         # (lib/settings_panels). Runs on the SAME rewrite pass; a missing
         # fragment leaves its marker visible + logs an error (never a silent
         # vanished tab).
         html = _inject_settings_panels(html)
 
-        _bundled_index_cache['tag'] = bundle_tag
         _bundled_index_cache['styles_tag'] = styles_tag
-        _bundled_index_cache['feature'] = feature_tag
+        _bundled_index_cache['settings_tag'] = settings_tag
+        _bundled_index_cache['vite'] = vite_tag
         _bundled_index_cache['panels'] = panels_sig
-        _bundled_index_cache['lang'] = ui_lang
-        _bundled_index_cache['i18n'] = i18n_tag
+        _bundled_index_cache['lang'] = request_ui_lang()
         _bundled_index_cache['html'] = html
         _bundled_index_cache['mtime'] = html_mtime
 
         resp = make_response(html)
         resp.content_type = 'text/html; charset=utf-8'
     except Exception as e:
-        logger.warning('[Index] Bundle injection failed, serving original: %s', e)
-        return _serve_raw_index_with_panels()
+        logger.debug('[Index] frontend injection failed: %s', e,
+                     exc_info=True)
+        return _frontend_unavailable(f'frontend injection failed: {e}')
 
-    resp.headers['Cache-Control'] = 'private, no-cache'
+    resp.headers['Cache-Control'] = 'no-store'
     return resp
 
 @common_bp.route('/login')
@@ -694,7 +632,7 @@ def admin_page():
     The page itself is ALWAYS served — there is no server-side gate on
     the route, so it can never 401 a browser (per the project's "never
     trap a frontend user" rule). Authorization is decided client-side
-    by ``static/js/relay-admin.js`` (mode must be ``multi-user`` and the
+    by the Vite ``admin`` entry (mode must be ``multi-user`` and the
     principal must hold the ``admin`` scope) AND enforced server-side by
     every ``/api/v1/users`` / ``/api/v1/billing`` endpoint it calls. A
     non-admin sees only the "需要管理员权限" notice and cannot mutate
@@ -704,8 +642,22 @@ def admin_page():
     managing OTHER users lives here, parallel to the customer-facing
     ``/dashboard``.
     """
-    return send_from_directory(os.path.join(BASE_DIR, 'static'),
-                                'admin.html')
+    try:
+        vite_tag = _get_vite_asset_tags('admin')
+        path = os.path.join(BASE_DIR, 'static', 'admin.html')
+        with open(path, encoding='utf-8') as handle:
+            html = handle.read()
+        if html.count(_ADMIN_ASSET_MARKER) != 1:
+            raise ValueError('admin.html must contain exactly one app asset marker')
+        assets = _boot_config_tag('admin') + '\n' + vite_tag + '\n'
+        html = html.replace(_ADMIN_ASSET_MARKER, assets, 1)
+    except (OSError, ValueError, ViteAssetError) as exc:
+        logger.debug('[Admin] frontend injection failed: %s', exc)
+        return _frontend_unavailable(str(exc))
+    resp = make_response(html)
+    resp.content_type = 'text/html; charset=utf-8'
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
 
 @api_v1_common_bp.route('/api/v1/features')
 def features():
@@ -786,6 +738,14 @@ def _refresh_db_probe():
         _db_probe_cache['error'] = str(e)[:200]
         logger.warning('[Health] background DB probe failed: %s', e)
     finally:
+        # A fresh short-lived daemon is spawned every probe interval.  Without
+        # an explicit release, each dead thread leaves a PG semaphore slot to
+        # the 30s reaper (three overlapping generations at the 10s default).
+        try:
+            from lib.database import close_thread_db
+            close_thread_db()
+        except Exception as e:
+            logger.debug('[Health] DB probe connection release failed: %s', e)
         _db_probe_cache['ever'] = True
         _db_probe_cache['at'] = time.time()
 
@@ -849,6 +809,18 @@ def health_check():
     # which previously mislabeled every PostgreSQL deployment as sqlite.
     result['db_engine'] = 'postgresql' if _BACKEND == 'pg' else 'sqlite'
 
+    # Sidecar status is an in-memory snapshot: it must stay non-blocking just
+    # like process liveness.  A runtime crash is visible here without turning
+    # ``ok`` false and falsely telling every browser the whole server is down.
+    try:
+        from lib.storage import storage_status
+        result['storage'] = storage_status()
+        result['storage_ready'] = bool(result['storage'].get('ready'))
+    except Exception as e:
+        logger.debug('[Health] storage status unavailable: %s', e)
+        result['storage'] = {'ready': False, 'state': 'unknown'}
+        result['storage_ready'] = False
+
     # DB connectivity — served from the background-probe cache (see above).
     # Deliberately does NOT flip result['ok']: `ok` reports PROCESS liveness
     # (what the offline arbiter consumes); a stalled DB degrades
@@ -873,4 +845,3 @@ def health_check():
 @common_bp.route('/favicon.svg')
 def favicon():
     return Response(FAVICON_SVG, mimetype='image/svg+xml', headers={'Cache-Control': 'public, max-age=86400'})
-

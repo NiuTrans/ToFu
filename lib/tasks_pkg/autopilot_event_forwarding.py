@@ -127,7 +127,14 @@ def make_vu_event_transform(parent_task: dict, vu_msg_id: str):
     return _vu_transform
 
 
-def _emit_vu_setup_phase(task: dict, vu_msg_id: str | None, detail: str) -> None:
+def _emit_vu_setup_phase(
+    task: dict,
+    vu_msg_id: str | None,
+    detail: str,
+    *,
+    detail_key: str,
+    detail_args: dict | None = None,
+) -> None:
     """Surface a pre-stream Autopilot setup step in the VU bubble.
 
     Diagnosis (task_events probe, debug/autopilot_warmup_window_probe.py):
@@ -155,7 +162,12 @@ def _emit_vu_setup_phase(task: dict, vu_msg_id: str | None, detail: str) -> None
         append_event(task, build_event(
             EventType.AUTOPILOT_VU_EVENT,
             vuMsgId=vu_msg_id,
-            inner=build_phase(Phase.WORKING, detail=detail),
+            inner=build_phase(
+                Phase.WORKING,
+                detail=detail,
+                detailKey=detail_key,
+                **({'detailArgs': detail_args} if detail_args else {}),
+            ),
         ))
     except Exception as e:
         logger.debug('[Autopilot] vu setup-phase emit failed (non-fatal): %s', e)

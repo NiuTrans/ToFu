@@ -41,6 +41,8 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section, runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -57,7 +59,8 @@ _HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
 const ROOT = process.argv[2];
-const MODE = process.argv[3] || 'WIRE_ATTACH';   // WIRE_ATTACH | NO_STAMP | SELF_STAMP
+const SOURCES = process.argv[3];
+const MODE = process.argv[4] || 'WIRE_ATTACH';   // WIRE_ATTACH | NO_STAMP | SELF_STAMP
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM('<!DOCTYPE html><body><div id="chatInner"></div></body>', { url: 'http://localhost/' });
 const win = dom.window;
@@ -88,7 +91,7 @@ win.activeConvId = global.activeConvId = 'C1';
 const conv = { id: 'C1', messages: [], activeTaskId: null };
 win.conversations = global.conversations = [conv];
 
-eval(fs.readFileSync(path.join(ROOT, 'static', 'js', 'ui', 'stream_lifecycle.js'), 'utf8'));
+eval(fs.readFileSync(path.join(SOURCES, 'ui', 'stream_lifecycle.js'), 'utf8'));
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -142,7 +145,7 @@ def _run(mode: str):
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     try:
-        proc = subprocess.run(['node', harness, ROOT, mode],
+        proc = subprocess.run(['node', harness, ROOT, runtime_sections_dir(), mode],
                               capture_output=True, text=True, timeout=60)
     finally:
         try:
@@ -181,8 +184,8 @@ def test_self_stamp_never_reattaches():
 # ────────────────────── static wire pins (no node needed) ──────────────────────
 
 def _read(rel: str) -> str:
-    with open(os.path.join(ROOT, rel), encoding='utf-8') as f:
-        return f.read()
+    prefix = os.path.join('static', 'js') + os.sep
+    return runtime_section(rel[len(prefix):] if rel.startswith(prefix) else rel)
 
 
 def test_done_branch_calls_stamp_helper():

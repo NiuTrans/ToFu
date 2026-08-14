@@ -5,6 +5,7 @@ test behind the matrix's "Probe & Recommend" button. We patch the HTTP layer
 so no network is touched and assert each HTTP status maps to the right verdict.
 """
 
+import json as jsonlib
 import unittest
 from unittest import mock
 
@@ -25,12 +26,27 @@ class ProbeCellClassificationTest(unittest.TestCase):
                                        'modelX', {}, 5)
 
     def test_200_is_ok(self):
-        self.assertEqual(self._probe(200, 'hi')[0], 'ok')
+        body = jsonlib.dumps({'choices': [{'message': {'content': 'OK'}}]})
+        self.assertEqual(self._probe(200, body)[0], 'ok')
 
-    def test_400_is_ok_routing_reached(self):
-        # 400 means the gateway accepted (key, model) routing, just rejected
-        # the tiny payload shape — the pair is reachable.
-        self.assertEqual(self._probe(400, 'bad request')[0], 'ok')
+    def test_400_is_bad_request_not_green(self):
+        # Reaching the gateway is not enough: a request the provider rejects
+        # is not usable by the app and must never paint a green matrix cell.
+        status, detail = self._probe(400, 'bad request')
+        self.assertEqual(status, 'bad_request')
+        self.assertIn('bad request', detail)
+
+    def test_200_without_generated_content_is_not_green(self):
+        status, detail = self._probe(200, '{"choices":[]}')
+        self.assertEqual(status, 'invalid_response')
+        self.assertIn('no generated text', detail)
+
+    def test_provider_error_detail_redacts_echoed_app_id(self):
+        status, detail = self._probe(
+            400, 'invalid model name for appId YOUR_API_KEY_HERE')
+        self.assertEqual(status, 'not_found')
+        self.assertNotIn('YOUR_API_KEY_HERE', detail)
+        self.assertIn('appId ***', detail)
 
     def test_400_chinese_route_missing_is_not_found(self):
         # 2026-08-04 incident: the AIGC gateway answers a nonexistent route
@@ -136,6 +152,49 @@ class ProbeMultiAttemptTest(unittest.TestCase):
         self.assertNotIn('attempt', detail)
 
 
+class ProbeSnapshotMigrationTest(unittest.TestCase):
+    """Old cache must never preserve the v1 false-green contract."""
+
+    def test_legacy_ok_http_400_becomes_bad_request(self):
+        import lib.provider_probe as pp
+        snap = pp.normalize_probe_snapshot({
+            'cells': {'0::fable': {
+                'status': 'ok', 'detail': 'HTTP 400',
+                'probe_surface': 'chat', 'recommend_disable': False,
+            }},
+            'summary': {'ok': 1, 'disable': 0},
+        })
+        cell = snap['cells']['0::fable']
+        self.assertEqual(cell['status'], 'bad_request')
+        self.assertTrue(cell['recommend_disable'])
+        self.assertEqual(cell['http_status'], 400)
+        self.assertEqual(snap['summary']['ok'], 0)
+        self.assertEqual(snap['summary']['disable'], 1)
+
+    def test_legacy_chat_200_is_neutral_until_retested(self):
+        import lib.provider_probe as pp
+        snap = pp.normalize_probe_snapshot({
+            'cells': {'0::m': {
+                'status': 'ok', 'detail': 'HTTP 200',
+                'probe_surface': 'chat', 'recommend_disable': False,
+            }},
+        })
+        self.assertEqual(snap['cells']['0::m']['status'], 'unverified')
+        self.assertEqual(snap['summary']['neutral'], 1)
+
+    def test_legacy_modality_200_keeps_validated_proof(self):
+        import lib.provider_probe as pp
+        snap = pp.normalize_probe_snapshot({
+            'cells': {'0::embed': {
+                'status': 'ok', 'detail': 'HTTP 200 via /embeddings',
+                'probe_surface': 'embedding', 'recommend_disable': False,
+            }},
+        })
+        cell = snap['cells']['0::embed']
+        self.assertEqual(cell['status'], 'ok')
+        self.assertEqual(cell['proof'], 'embedding_vector')
+
+
 class ProbeProtocolTest(unittest.TestCase):
     """``protocol='anthropic'`` probes the Messages API with anthropic auth."""
 
@@ -147,7 +206,10 @@ class ProbeProtocolTest(unittest.TestCase):
             seen['url'] = url
             seen['headers'] = headers
             seen['body'] = json
-            return _FakeResp(200, 'ok')
+            payload = ({'content': [{'type': 'text', 'text': 'OK'}]}
+                       if protocol == 'anthropic'
+                       else {'choices': [{'message': {'content': 'OK'}}]})
+            return _FakeResp(200, jsonlib.dumps(payload))
 
         with mock.patch('lib.http_client.http_post', side_effect=fake_post):
             status, _ = cfg._probe_one_cell(
@@ -163,7 +225,7 @@ class ProbeProtocolTest(unittest.TestCase):
         self.assertEqual(seen['headers'].get('x-api-key'), 'app-id-123')
         self.assertEqual(seen['headers'].get('anthropic-version'), '2023-06-01')
         self.assertEqual(seen['headers'].get('M-X'), '1')  # extra_headers merged
-        self.assertEqual(seen['body']['max_tokens'], 1)
+        self.assertEqual(seen['body']['max_tokens'], 16)
         self.assertNotIn('stream', seen['body'])
 
     def test_openai_branch_unchanged(self):

@@ -37,6 +37,7 @@ from lib.database._core_schema import (
     TASK_EVENTS as _TASK_EVENTS,
     TASK_RESULTS as _TASK_RESULTS,
     CONVERSATION_MESSAGES as _CONVERSATION_MESSAGES,
+    CONVERSATION_MESSAGE_ARCHIVES as _CONVERSATION_MESSAGE_ARCHIVES,
     TRADING_CONFIG as _TRADING_CONFIG,
     # ── Wave 2 (2026-06) ──
     MESSAGE_QUEUE as _MESSAGE_QUEUE,
@@ -51,6 +52,7 @@ from lib.database._core_schema import (
     PROJECT_EVENTS as _PROJECT_EVENTS,
     PROJECT_CHARTER as _PROJECT_CHARTER,
     PROJECT_TASKS as _PROJECT_TASKS,
+    SCOPED_SEQUENCES as _SCOPED_SEQUENCES,
     OPTIMIZER_PROPOSALS as _OPTIMIZER_PROPOSALS,
     OPTIMIZER_ACTION_LOG as _OPTIMIZER_ACTION_LOG,
     RATE_LIMIT_EVENTS as _RATE_LIMIT_EVENTS,
@@ -85,6 +87,7 @@ LIVE_PG_CONVERSATIONS = """
         msg_count INTEGER NOT NULL DEFAULT 0,
         search_text TEXT NOT NULL DEFAULT '',
         rev INTEGER NOT NULL DEFAULT 0,
+        messages_rows_rev INTEGER NOT NULL DEFAULT -1,
         PRIMARY KEY (id, user_id)
     )
 """
@@ -101,6 +104,7 @@ LIVE_SQLITE_CONVERSATIONS = """
         msg_count INTEGER NOT NULL DEFAULT 0,
         search_text TEXT NOT NULL DEFAULT '',
         rev INTEGER NOT NULL DEFAULT 0,
+        messages_rows_rev INTEGER NOT NULL DEFAULT (-1),
         PRIMARY KEY (id, user_id)
     )
 """
@@ -287,6 +291,8 @@ LIVE_PG_TASK_RESULTS = """
         tool_rounds TEXT,
         search_results TEXT,
         metadata TEXT,
+        abort_requested_at BIGINT NOT NULL DEFAULT 0,
+        abort_source TEXT NOT NULL DEFAULT '',
         segments TEXT,
         created_at BIGINT NOT NULL,
         completed_at BIGINT
@@ -303,6 +309,8 @@ LIVE_SQLITE_TASK_RESULTS = """
         tool_rounds TEXT,
         search_results TEXT,
         metadata TEXT,
+        abort_requested_at INTEGER NOT NULL DEFAULT 0,
+        abort_source TEXT NOT NULL DEFAULT '',
         segments TEXT,
         created_at INTEGER NOT NULL,
         completed_at INTEGER
@@ -345,6 +353,10 @@ LIVE_PG_CONVERSATION_MESSAGES = """
         thinking           TEXT    NOT NULL DEFAULT '',
         translated_content TEXT    NOT NULL DEFAULT '',
         meta               JSONB   NOT NULL DEFAULT '{}'::jsonb,
+        translation_state  JSONB,
+        meta_light         JSONB,
+        message_ts         BIGINT,
+        billing_meta       JSONB,
         created_at         BIGINT  NOT NULL DEFAULT 0,
         updated_at         BIGINT  NOT NULL DEFAULT 0,
         PRIMARY KEY (conv_id, seq)
@@ -361,9 +373,36 @@ LIVE_SQLITE_CONVERSATION_MESSAGES = """
         thinking           TEXT    NOT NULL DEFAULT '',
         translated_content TEXT    NOT NULL DEFAULT '',
         meta               TEXT    NOT NULL DEFAULT '{}',
+        translation_state  TEXT,
+        meta_light         TEXT,
+        message_ts         INTEGER,
+        billing_meta       TEXT,
         created_at         INTEGER NOT NULL DEFAULT 0,
         updated_at         INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (conv_id, seq)
+    )
+"""
+
+LIVE_PG_CONVERSATION_MESSAGE_ARCHIVES = """
+    CREATE TABLE conversation_message_archives (
+        conv_id      TEXT    NOT NULL,
+        user_id      INTEGER NOT NULL,
+        messages     JSONB   NOT NULL,
+        source_rev   INTEGER NOT NULL,
+        msg_count    INTEGER NOT NULL,
+        archived_at  BIGINT  NOT NULL,
+        PRIMARY KEY (conv_id, user_id)
+    )
+"""
+LIVE_SQLITE_CONVERSATION_MESSAGE_ARCHIVES = """
+    CREATE TABLE conversation_message_archives (
+        conv_id      TEXT    NOT NULL,
+        user_id      INTEGER NOT NULL,
+        messages     TEXT    NOT NULL,
+        source_rev   INTEGER NOT NULL,
+        msg_count    INTEGER NOT NULL,
+        archived_at  INTEGER NOT NULL,
+        PRIMARY KEY (conv_id, user_id)
     )
 """
 
@@ -665,6 +704,16 @@ def test_conversation_messages_sqlite_parity():
         "\n--- Core SQLite ---\n" + core +
         "\n--- Live SQLite ---\n" + LIVE_SQLITE_CONVERSATION_MESSAGES
     )
+
+
+def test_conversation_message_archives_pg_parity():
+    core = both_ddl(_CONVERSATION_MESSAGE_ARCHIVES)["pg"]
+    assert _norm(core) == _norm(LIVE_PG_CONVERSATION_MESSAGE_ARCHIVES)
+
+
+def test_conversation_message_archives_sqlite_parity():
+    core = both_ddl(_CONVERSATION_MESSAGE_ARCHIVES)["sqlite"]
+    assert _norm(core) == _norm(LIVE_SQLITE_CONVERSATION_MESSAGE_ARCHIVES)
 
 
 def test_schema_meta_pg_parity():
@@ -1535,6 +1584,23 @@ LIVE_SQLITE_BILLING_PAYMENTS = """
     )
 """
 
+LIVE_PG_SCOPED_SEQUENCES = """
+    CREATE TABLE scoped_sequences (
+        namespace TEXT NOT NULL,
+        scope_key TEXT NOT NULL,
+        value BIGINT NOT NULL DEFAULT 0,
+        PRIMARY KEY (namespace, scope_key)
+    )
+"""
+LIVE_SQLITE_SCOPED_SEQUENCES = """
+    CREATE TABLE scoped_sequences (
+        namespace TEXT NOT NULL,
+        scope_key TEXT NOT NULL,
+        value INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (namespace, scope_key)
+    )
+"""
+
 
 def _assert_parity(table, live_pg, live_sqlite):
     """Compile both backends and compare against the live DDL constants."""
@@ -1547,6 +1613,12 @@ def _assert_parity(table, live_pg, live_sqlite):
 
 def test_message_queue_parity():
     _assert_parity(_MESSAGE_QUEUE, LIVE_PG_MESSAGE_QUEUE, LIVE_SQLITE_MESSAGE_QUEUE)
+
+
+def test_scoped_sequences_parity():
+    _assert_parity(
+        _SCOPED_SEQUENCES, LIVE_PG_SCOPED_SEQUENCES,
+        LIVE_SQLITE_SCOPED_SEQUENCES)
 
 
 def test_scheduled_tasks_parity():

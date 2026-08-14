@@ -11,11 +11,11 @@ CREATE_MEMORY_TOOL = {
     "function": {
         "name": "create_memory",
         "description": (
-            "Save a new memory (accumulated experience) for future sessions. "
-            "Call this proactively whenever you discover a bug pattern, project "
-            "convention, user preference, complex workflow, or tool/API quirk. "
-            "Memories are stored as Markdown files and can be loaded in future "
-            "sessions when the user enables them."
+            "Save verified, reusable project experience for future sessions: "
+            "a confirmed convention, reproduced failure/root-cause/fix, or "
+            "documented tool/API quirk. Never save user identity/preferences, "
+            "one-off requests, chat summaries, speculative reasoning, or a "
+            "solution transcript; user-specific facts belong to My Context."
         ),
         "parameters": {
             "type": "object",
@@ -30,7 +30,7 @@ CREATE_MEMORY_TOOL = {
                 },
                 "body": {
                     "type": "string",
-                    "description": "The full memory content as skimmable Markdown, not a conversation recap. Suggested skeleton: '## Symptom/Why' (what goes wrong, how to recognise it) → '## Fix/What' (the concrete change with file:line and code/commands) → '## Guardrail' (the rule for next time + any covering test)."
+                    "description": "Concise reusable evidence as skimmable Markdown, never a conversation or reasoning recap. Include the verified context, concrete rule/fix, and evidence/test that established it."
                 },
                 "tags": {
                     "type": "array",
@@ -169,7 +169,7 @@ SEARCH_MEMORIES_TOOL = {
             "local copy. A `<relevant_memories>` block, when present, was already "
             "prefetched for this turn — don't re-search the same topic. "
             "Installed skill packages are NOT memories and are not in this corpus — "
-            "see the <available_skills> block and use activate_skill for those."
+            "see the <available_skills> block and use load_skill for those."
         ),
         "parameters": {
             "type": "object",

@@ -8,6 +8,11 @@ silence; board failure → silence; same (conv, path) warns once.
 """
 from __future__ import annotations
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {
+    'docs/a.md', 'lib/bar.py', 'lib/foo.py', 'lib/sub/deep/y.py',
+    'tests/test_x1.py', 'tests/test_z.py',
+}
+
 import os
 
 import pytest

@@ -1,7 +1,7 @@
 'use strict';
 /*
  * Records the COMPLETE ordered 2D-canvas draw stream produced by the REAL
- * shipped static/js/tofu-scene.js, for a given pet state, at the real
+ * migrated tofu-scene.js runtime section, for a given pet state, at the real
  * project-bar size. The stream (base gradient fill + every resolved dab:
  * x,y,rx,ry,ang,color,alpha + composite op) is emitted as JSON on stdout; a
  * Python cairo rasterizer replays it into a real image and pixel-diffs the foot
@@ -9,7 +9,7 @@
  * rasterizer is ours (cairo == node-canvas's engine), so this is a faithful
  * composite, not a re-implementation.
  *
- * Usage:  node tests/_scene_pixeldiff.js <W> <H> <FOOT_X|none> <ms> [decor]
+ * Usage:  node tests/_scene_pixeldiff.js <W> <H> <FOOT_X|none> <ms> [decor] [source]
  *   decor ∈ meadow|pool|sky (default meadow) — which scene to render.
  * Emits:  {"w":W,"h":H,"buffer":[ops...],"frame":[ops...]}
  *   buffer = the baked static scene (drawn once); frame = the per-frame overlay
@@ -23,6 +23,7 @@ const H = parseInt(process.argv[3] || '48', 10);
 const FOOT = process.argv[4] || 'none';
 const MS = parseFloat(process.argv[5] || '1600');
 const DECOR = process.argv[6] || 'meadow';
+const SOURCE = process.argv[7] || path.join(__dirname, '..', 'static', 'js', 'tofu-scene.js');
 
 function recorder() {
   const ops = [];
@@ -136,7 +137,7 @@ if (FOOT !== 'none') {
   global.Date = function(...a){ return a.length ? new _RealDate(...a) : new _RealDate(2026, 0, 1, 14, 0, 0); };
   global.Date.now = _RealDate.now; global.Date.parse = _RealDate.parse; global.Date.UTC = _RealDate.UTC;
   global.Date.prototype = _RealDate.prototype; }
-const src = fs.readFileSync(path.join(__dirname, '..', 'static', 'js', 'tofu-scene.js'), 'utf8');
+const src = fs.readFileSync(SOURCE, 'utf8');
 eval(src);   // IIFE: mount()+_resize() bake into bufRec; _ensureLoop registers _loop via rAF
 
 // The buffer bake is now in bufRec.ops. Pump the animation frame to render the

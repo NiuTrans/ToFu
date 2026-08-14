@@ -357,7 +357,7 @@ def test_healthcheck_probe_actually_launches_chromium():
     """
     with open(os.path.join(ROOT, 'healthcheck.py'), 'r', encoding='utf-8') as f:
         text = f.read()
-    probe = text[text.index('# 5. Optional browser engine'):]
+    probe = text[text.index('# 6. Optional browser engine'):]
     probe = probe[:probe.index("print(f\"\\n{C.BOLD}")]
     assert 'chromium.launch' in probe, \
         'healthcheck browser probe never launches Chromium (import-only check)'

@@ -13,11 +13,11 @@ block stable→volatile reordering) deferred pending readDrop data.
   while its own comment claimed it "rides the BP4 5m tail". The detail tier is
   relevance-gated PER TURN, so a cross-turn selection flip rewrote the carrier
   bytes → the whole prefix from `messages[1]` (incl. large CLAUDE.md + tools +
-  history) re-billed within the 5m TTL window. `<relevant_memories>`
-  (`inject_relevant_memories`) correctly rides the LAST user message — the author
+  history) re-billed within the 5m TTL window. The legacy relevant-memory
+  injector correctly targeted the LAST user message — the author
   conflated the two.
-- **Fix.** `_refresh_detail_block` now targets the LAST user message (true tail),
-  mirroring `inject_relevant_memories`; the byte-stable CORE still rides the
+- **Fix at the time.** `_refresh_detail_block` targeted the LAST user message;
+  the 2026-08-12 Context Composer supersedes both direct mutation seams and the byte-stable CORE still rides the
   carrier. In-task endpoint re-entry on the same tail message is strip-then-append
   idempotent; a prior turn's frozen detail on a now-historical message is left
   untouched (the same accepted `<relevant_memories>` tradeoff — stripping a

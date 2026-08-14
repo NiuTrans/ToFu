@@ -176,7 +176,13 @@ def codex_exchange_code(code: str, pkce_verifier: str,
             'expires_in': expires_in,
         }
 
-        save_token('codex', token_data)
+        if not save_token('codex', token_data):
+            raise OAuthExchangeError(
+                'OpenAI authorized successfully, but the credentials could '
+                'not be saved securely. Check data-directory permissions or '
+                'free disk space.',
+                status_code=500,
+            )
         logger.info('[Codex OAuth] Token exchange successful (email=%s, account=%s, expires_in=%ds)',
                      email, account_id[:8] if account_id else '?', expires_in)
         return token_data
@@ -226,7 +232,12 @@ def codex_store_token(data: dict) -> dict:
         'expire': time.time() + expires_in,
         'expires_in': expires_in,
     }
-    save_token('codex', token_data)
+    if not save_token('codex', token_data):
+        raise OAuthExchangeError(
+            'OpenAI credentials could not be saved securely. Check '
+            'data-directory permissions or free disk space.',
+            status_code=500,
+        )
     logger.info('[Codex OAuth] Stored browser-exchanged token (email=%s, account=%s, expires_in=%ds)',
                 email, account_id[:8] if account_id else '?', expires_in)
     return token_data
@@ -256,11 +267,12 @@ def codex_refresh_token(refresh_tok: str = None,
 
     # Singleflight: refresh tokens are single-use — concurrent refreshes of
     # the SAME token merge into one upstream call (see claude.py).
-    from lib.oauth.token_store import refresh_singleflight
+    from lib.oauth.token_store import refresh_singleflight, token_path
     return refresh_singleflight(
         'codex', refresh_tok,
         lambda rt: _codex_refresh_upstream(rt, user_id=user_id),
-        load=lambda: load_token('codex'))
+        load=lambda: load_token('codex'),
+        lock_path=token_path('codex') + '.refresh')
 
 
 def _codex_refresh_upstream(refresh_tok: str, *, user_id: str = '') -> dict | None:
@@ -310,13 +322,19 @@ def _codex_refresh_upstream(refresh_tok: str, *, user_id: str = '') -> dict | No
                 'expires_in': expires_in,
                 'last_refresh': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
             })
-            save_token('codex', stored)
+            if not save_token('codex', stored):
+                # Refresh tokens can be single-use. Do not retry upstream with
+                # the now-consumed old token after a local persistence failure.
+                logger.error('[Codex OAuth] Refreshed token could not be persisted')
+                return None
             if plan_type and plan_type != old_plan:
                 # Plan changed on refresh (upgrade/downgrade) — re-gate the
                 # managed provider's model table (idempotent).
                 try:
                     from lib.oauth.outbound import provision_oauth_provider
                     provision_oauth_provider('codex', plan_type=plan_type)
+                    from lib.oauth.codex_catalog import trigger_codex_catalog_refresh
+                    trigger_codex_catalog_refresh()
                     logger.info('[Codex OAuth] Plan changed %s → %s, re-provisioned',
                                 old_plan or '?', plan_type)
                 except Exception as e:

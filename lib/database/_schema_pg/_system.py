@@ -230,6 +230,21 @@ def _init_system_schema(conn):
     # reader, no writer), and dropping columns on a live table buys nothing.
     cur.execute('CREATE INDEX IF NOT EXISTS idx_project_watch_items_path ON project_watch_items(project_path, updated_at DESC)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_project_watch_resp_item_seq ON project_watch_responses(item_id, seq DESC)')
+    # Cross-host monotonic stream counters. Seed/repair from durable rows so a
+    # migrated deployment starts strictly above every legacy sequence.
+    from lib.database._core_schema import SCOPED_SEQUENCES
+    create_if_absent(conn, SCOPED_SEQUENCES, table_exists=_table_exists)
+    for _ns, _table, _scope_col in (
+        ('project_events', 'project_events', 'project_path'),
+        ('project_status_snapshots', 'project_status_snapshots', 'project_path'),
+        ('project_watch_responses', 'project_watch_responses', 'item_id'),
+    ):
+        cur.execute(
+            f"INSERT INTO scoped_sequences(namespace, scope_key, value) "
+            f"SELECT %s, {_scope_col}, MAX(seq) FROM {_table} "
+            f"GROUP BY {_scope_col} "
+            "ON CONFLICT(namespace, scope_key) DO UPDATE SET value="
+            "GREATEST(scoped_sequences.value, EXCLUDED.value)", (_ns,))
 
     # ── Daily Optimizer tables (see lib/optimizer/) ──
     # optimizer_proposals + optimizer_action_log: migrated onto Core.
@@ -304,5 +319,12 @@ def _init_system_schema(conn):
     cur.execute('CREATE INDEX IF NOT EXISTS idx_payments_user ON billing_payments(user_id)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_payments_provider ON billing_payments(provider, provider_id)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_payments_status ON billing_payments(status)')
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_billing_payments_provider_id "
+        "ON billing_payments(provider, provider_id) WHERE provider_id <> ''")
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_billing_ledger_idempotency "
+        "ON billing_ledger(user_id, kind, ref_type, ref_id) "
+        "WHERE ref_type <> '' AND ref_id <> ''")
 
     conn.commit()

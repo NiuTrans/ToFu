@@ -39,6 +39,7 @@ from lib.presence.registry import (
     record_files,
     snapshot,
     start_sweeper,
+    stop_sweeper,
     sweep,
 )
 
@@ -52,4 +53,5 @@ __all__ = [
     'snapshot',
     'reconcile_on_startup',
     'start_sweeper',
+    'stop_sweeper',
 ]

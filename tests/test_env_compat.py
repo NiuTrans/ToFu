@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.env_compat import getenv_compat
+from lib.env_compat import getenv_compat, getenv_project_compat
 
 pytestmark = pytest.mark.unit
 
@@ -83,6 +83,31 @@ class TestVariadicAndNonTofu:
         monkeypatch.delenv('TOFU_X', raising=False)
         monkeypatch.setenv('CHATUI_X', 'legacy-x')
         assert getenv_compat('TOFU_X', 'CHATUI_X') == 'legacy-x'
+
+
+class TestProjectDotenvFallback:
+    def test_standalone_tool_sees_project_dotenv(self, tmp_path, monkeypatch):
+        (tmp_path / '.env').write_text(
+            'TOFU_MESSAGES_ROWS_AUTHORITY=1\n', encoding='utf-8')
+        monkeypatch.delenv('TOFU_MESSAGES_ROWS_AUTHORITY', raising=False)
+        monkeypatch.delenv('CHATUI_MESSAGES_ROWS_AUTHORITY', raising=False)
+        assert getenv_project_compat(
+            'TOFU_MESSAGES_ROWS_AUTHORITY', project_root=tmp_path) == '1'
+
+    def test_explicit_process_value_shadows_dotenv(self, tmp_path, monkeypatch):
+        (tmp_path / '.env').write_text(
+            'TOFU_MESSAGES_ROWS_AUTHORITY=1\n', encoding='utf-8')
+        monkeypatch.setenv('TOFU_MESSAGES_ROWS_AUTHORITY', '0')
+        assert getenv_project_compat(
+            'TOFU_MESSAGES_ROWS_AUTHORITY', project_root=tmp_path) == '0'
+
+    def test_quoted_legacy_alias_is_supported(self, tmp_path, monkeypatch):
+        (tmp_path / '.env').write_text(
+            'CHATUI_MESSAGES_ROWS_AUTHORITY="yes"\n', encoding='utf-8')
+        monkeypatch.delenv('TOFU_MESSAGES_ROWS_AUTHORITY', raising=False)
+        monkeypatch.delenv('CHATUI_MESSAGES_ROWS_AUTHORITY', raising=False)
+        assert getenv_project_compat(
+            'TOFU_MESSAGES_ROWS_AUTHORITY', project_root=tmp_path) == 'yes'
 
 
 if __name__ == '__main__':

@@ -20,7 +20,7 @@ Routes (timer):
 
 from __future__ import annotations
 
-from flask import Blueprint, request
+from quart import Blueprint, request
 
 from lib.api_response import (
     api_bad_request, api_conflict, api_internal_error, api_not_found, api_ok,
@@ -218,7 +218,16 @@ def trigger_proactive_task(task_id):
 @require_auth
 @api_meta(summary='List timer watchers', tags=['scheduler'])
 def timer_list():
-    from lib.scheduler.timer import get_active_timer_count, list_active_timers
+    from lib.scheduler.timer import (
+        get_active_timer_count,
+        has_timer_history,
+        list_active_timers,
+    )
+    if request.args.get('summary') == '1':
+        return api_ok({
+            'has_timers': has_timer_history(),
+            'active_count': get_active_timer_count(),
+        })
     return api_ok({
         'timers': list_active_timers(),
         'active_count': get_active_timer_count(),

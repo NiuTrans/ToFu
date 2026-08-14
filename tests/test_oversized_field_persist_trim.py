@@ -42,16 +42,16 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
-from tests._conv_bundle_sources import sources_defining
+from tests._runtime_sections import runtime_section_path
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
 
 
 def _node_available() -> bool:
@@ -69,11 +69,16 @@ def _fat_task():
     still-running round whose buffer must be KEPT."""
     return {
         'usage': {'prompt_tokens': 10, 'trace_id': 't', '_wire_fp': _big_wire_fp(),
-                  '_wire_static': 'abc'},
+                  '_wire_static': 'abc', '_wire_bytes': list(range(2000)),
+                  '_wire_field_bytes': {'messages': list(range(2000))},
+                  '_wire_markers': {'ttls': ['5m'] * 1000},
+                  '_wire_region': {'system': 'x' * 4000}},
         'apiRounds': [
             {'round': 1, 'model': 'm', 'tag': 'R1',
              'usage': {'prompt_tokens': 5, 'trace_id': 't1', '_dispatch': {'k': 1},
-                       '_wire_fp': _big_wire_fp(), '_wire_static': 'x'}},
+                       '_wire_fp': _big_wire_fp(), '_wire_static': 'x',
+                       '_wire_bytes': list(range(1000)),
+                       '_wire_system': {'shape': 'x' * 4000}}},
             {'round': 2, 'model': 'm', 'tag': 'R2',
              'usage': {'prompt_tokens': 5, 'trace_id': 't2'}},
         ],
@@ -130,9 +135,12 @@ def test_server_build_result_meta_strips_wire_fp():
     assert '_wire_fp' not in meta['usage'] and '_wire_static' not in meta['usage'], (
         'regression: build_result_meta persisted usage._wire_fp (226 KB/round '
         'diagnostic that no render path reads).')
+    assert not any(k.startswith('_wire_') for k in meta['usage']), (
+        'every key in the private _wire_ namespace is transient persistence data')
     assert meta['usage']['trace_id'] == 't', 'must keep render-read fields (trace_id).'
     for r in meta['apiRounds']:
-        assert '_wire_fp' not in r['usage'], 'apiRounds[].usage._wire_fp must be stripped.'
+        assert not any(k.startswith('_wire_') for k in r['usage']), (
+            'apiRounds[].usage must strip the whole _wire_ diagnostic namespace')
     # _dispatch is read by finish_info.js — must survive.
     assert meta['apiRounds'][0]['usage'].get('_dispatch') == {'k': 1}, (
         'must keep usage._dispatch (read by finish_info.js).')
@@ -182,7 +190,9 @@ eval(code);
 
 const msg = {
   role: 'assistant',
+  usage: { prompt_tokens: 5, trace_id: 'top', _wire_bytes: Array(4000).fill('z') },
   apiRounds: [{ round: 1, usage: { prompt_tokens: 5, trace_id: 't', _wire_fp: Array(4000).fill('x'), _wire_static: 's' } }],
+  _continueApiRounds: [{ round: 2, usage: { prompt_tokens: 3, trace_id: 'c', _wire_field_bytes: Array(4000).fill('c') } }],
   toolRounds: [
     { roundNum: 1, toolName: 'run_command', status: 'done', toolContent: 'real',
       _partialOutput: 'X'.repeat(500000),
@@ -195,6 +205,9 @@ const out = _trimMsgForPersist(msg);
 const s = JSON.stringify(out);
 const res = {
   wire: s.includes('_wire_fp'),
+  anyWire: s.includes('_wire_'),
+  topUsageKept: out.usage && out.usage.trace_id === 'top' && out.usage.prompt_tokens === 5,
+  continueUsageKept: out._continueApiRounds && out._continueApiRounds[0].usage.trace_id === 'c',
   donePO: (out.toolRounds[0]._partialOutput !== undefined),
   livePO: (out.toolRounds[1]._partialOutput === 'live'),
   b64kept: /data:image\/png;base64,A{5000}/.test(s),   // PUT keeps base64 (render source)
@@ -206,9 +219,7 @@ console.log(JSON.stringify(res));
 
 
 def _run_put(neuter=False):
-    # Located by SYMBOL: _trimMsgForPersist moved out of core/conversations.js in
-    # pt_3879f00e slice 3, which is what broke the hard-coded-path version.
-    conv_js = sources_defining('_trimMsgForPersist')[0]
+    conv_js = runtime_section_path('core/conv_persist_helpers.js')
     harness = os.path.join(HERE, '_put_trim_harness.js')
     with open(harness, 'w') as f:
         f.write(_PUT_HARNESS)
@@ -232,7 +243,10 @@ def test_frontend_put_trim():
     _partialOutput, KEEPS a running round's buffer and the base64 render
     source, and never mutates the live message."""
     r = _run_put(neuter=False)
-    assert not r['wire'], 'PUT body still carries usage._wire_fp (all nests must be stripped).'
+    assert not r['wire'], 'PUT body still carries usage._wire_fp.'
+    assert not r['anyWire'], 'PUT body still carries a _wire_* diagnostic.'
+    assert r['topUsageKept'], 'public top-level usage fields were lost.'
+    assert r['continueUsageKept'], 'continue-round public usage fields were lost.'
     assert not r['donePO'], 'PUT body still carries a DONE round _partialOutput.'
     assert r['livePO'], 'a running round must keep _partialOutput.'
     assert r['b64kept'], 'PUT (server DB) must KEEP inline base64 — it is the render source.'
@@ -246,6 +260,7 @@ def test_frontend_put_trim_double_neuter():
     the done-round _partialOutput survive — proving the trim is load-bearing."""
     r = _run_put(neuter=True)
     assert r['wire'], 'neuter did not bite: _wire_fp should survive when the trim is identity.'
+    assert r['anyWire'], 'neuter did not bite: wire diagnostics should survive.'
     assert r['donePO'], 'neuter did not bite: done-round _partialOutput should survive.'
 
 
@@ -296,7 +311,7 @@ console.log(JSON.stringify(res));
 
 
 def _run_cache(neuter=False):
-    idb_js = os.path.join(JS_DIR, 'idb-cache.js')
+    idb_js = runtime_section_path('idb-cache.js')
     harness = os.path.join(HERE, '_cache_strip_harness.js')
     with open(harness, 'w') as f:
         f.write(_CACHE_HARNESS)
@@ -360,6 +375,10 @@ def _fat_messages():
                 {'round': 1, 'usage': {'prompt_tokens': 5, 'trace_id': 't1',
                                        '_dispatch': {'k': 1}, '_wire_fp': _big_wire_fp()}},
             ],
+            '_continueApiRounds': [
+                {'round': 2, 'usage': {'prompt_tokens': 3, 'trace_id': 'c',
+                                       '_wire_field_bytes': _big_wire_fp()}},
+            ],
             '_liveLastRoundUsage': {'tokensIn': 5, 'usage': {'prompt_tokens': 5, '_wire_fp': _big_wire_fp()}},
             'toolRounds': [
                 {'roundNum': 1, 'toolName': 'run_command', 'status': 'done',
@@ -388,6 +407,8 @@ def test_migration_trim_messages_shrinks_and_preserves_content():
     assert '_wire_fp' not in asst['usage'] and asst['usage']['trace_id'] == 't'
     assert '_wire_fp' not in asst['apiRounds'][0]['usage']
     assert asst['apiRounds'][0]['usage'].get('_dispatch') == {'k': 1}, 'keep _dispatch'
+    assert '_wire_field_bytes' not in asst['_continueApiRounds'][0]['usage']
+    assert asst['_continueApiRounds'][0]['usage']['trace_id'] == 'c'
     assert '_wire_fp' not in asst['_liveLastRoundUsage']['usage']
     assert asst['_liveLastRoundUsage']['tokensIn'] == 5, 'keep tokensIn'
     assert '_partialOutput' not in asst['toolRounds'][0], 'done-round buffer dropped'
@@ -410,13 +431,26 @@ def test_migration_trim_messages_idempotent():
 
 
 def test_migration_reuses_manager_helpers_no_reimplementation():
-    """The migration must import the manager.py sanitizers, not re-implement the
-    trim logic (single source of truth — a divergent copy would drift)."""
+    """Migration and manager must share the same pure sanitizer functions."""
     mig = _load_migration()
     import lib.tasks_pkg.manager as M
     assert mig._sanitize_usage_for_persist is M._sanitize_usage_for_persist
     assert mig._sanitize_api_rounds_for_persist is M._sanitize_api_rounds_for_persist
     assert mig._trim_round_for_persist is M._trim_round_for_persist
+
+
+def test_storage_projection_import_is_bootstrap_free():
+    """Projection reuse must never inspect or start a database cluster."""
+    code = (
+        "import sys; import lib.storage_projection; "
+        "assert 'lib.database' not in sys.modules; "
+        "assert 'lib.tasks_pkg' not in sys.modules"
+    )
+    result = subprocess.run(
+        [sys.executable, '-c', code], cwd=ROOT,
+        text=True, capture_output=True, timeout=15, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_migration_trim_messages_neuter():
@@ -439,3 +473,79 @@ def test_migration_trim_messages_neuter():
         mig._sanitize_usage_for_persist = orig_u
         mig._sanitize_api_rounds_for_persist = orig_a
         mig._trim_round_for_persist = orig_r
+
+
+def test_migration_apply_is_rev_cas_and_blob_row_atomic(monkeypatch):
+    """Online maintenance must not overwrite a concurrent chat write, and a
+    successful blob trim must rebuild its normalized mirror before commit."""
+    mig = _load_migration()
+
+    class Cur:
+        def __init__(self, row=None, rowcount=0):
+            self._row = row
+            self.rowcount = rowcount
+
+        def fetchone(self):
+            return self._row
+
+    class DB:
+        def __init__(self, update_count=1):
+            self.update_count = update_count
+            self.calls = []
+            self.commits = 0
+            self.rollbacks = 0
+
+        def execute(self, sql, params=None):
+            self.calls.append((sql, params))
+            if sql.startswith('SELECT messages'):
+                return Cur({'messages': _fat_messages(), 'msg_count': 2, 'rev': 7})
+            if sql.startswith('UPDATE conversations'):
+                return Cur(rowcount=self.update_count)
+            raise AssertionError(f'unexpected SQL: {sql}')
+
+        def commit(self):
+            self.commits += 1
+
+        def rollback(self):
+            self.rollbacks += 1
+
+    mirrored = []
+    monkeypatch.setattr(mig, 'backfill_conv',
+                        lambda db, cid, messages, commit=False:
+                        mirrored.append((cid, len(messages), commit)))
+    db = DB(update_count=1)
+    result = mig._process_one(db, 'conv-cas', True)
+    assert result['status'] == 'applied'
+    update_sql, update_params = next(c for c in db.calls
+                                     if c[0].startswith('UPDATE conversations'))
+    assert 'WHERE id=? AND rev=?' in update_sql
+    assert update_params[-1] == 7
+    assert mirrored == [('conv-cas', 2, False)]
+    assert db.commits == 1 and db.rollbacks == 0
+
+    mirrored.clear()
+    lost = DB(update_count=0)
+    result = mig._process_one(lost, 'conv-cas', True)
+    assert result['status'] == 'cas_lost'
+    assert mirrored == []
+    assert lost.commits == 0 and lost.rollbacks == 1
+
+
+def test_migration_candidate_scan_uses_toast_metadata_and_sql_limit(monkeypatch):
+    """Regression for the live 87-second full JSONB detoast/sort scan."""
+    import asyncio
+    mig = _load_migration()
+    seen = {}
+
+    async def fake_fetchall(sql, params):
+        seen['sql'], seen['params'] = sql, params
+        return [{'id': 'c1', 'n': 123}]
+
+    monkeypatch.setattr(mig, '_BACKEND', 'pg')
+    monkeypatch.setattr(mig, 'async_fetchall', fake_fetchall)
+    rows = asyncio.run(mig._candidate_ids(1024, '', 20))
+    assert rows == [('c1', 123)]
+    assert 'pg_column_size(messages)' in seen['sql']
+    assert 'messages::text' not in seen['sql']
+    assert seen['sql'].endswith('LIMIT ?')
+    assert seen['params'] == (1024, 20)

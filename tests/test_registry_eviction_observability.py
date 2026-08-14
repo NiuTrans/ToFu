@@ -21,6 +21,9 @@ from lib.tasks_pkg.manager import _registry as reg
 class TestDiscardTaskLeavesAFingerprint:
 
     def test_discard_logs_task_id_and_caller(self, caplog):
+        from lib.observability import prometheus_lines, reset_for_tests
+
+        reset_for_tests()
         tid = 'obs-evict-test-0001'
         with reg.tasks_lock:
             reg.tasks[tid] = {'id': tid, 'convId': 'convObs1',
@@ -37,6 +40,9 @@ class TestDiscardTaskLeavesAFingerprint:
             assert 'popped=True' in msg
             assert 'test_discard_logs_task_id_and_caller' in msg, (
                 f'caller frame missing from fingerprint: {msg}')
+            metrics = '\n'.join(prometheus_lines())
+            assert 'tofu_task_registry_evictions_total' in metrics
+            assert 'kind="chat",reason="discard"' in metrics
         finally:
             with reg.tasks_lock:
                 reg.tasks.pop(tid, None)
@@ -46,6 +52,9 @@ class TestDiscardTaskLeavesAFingerprint:
 class TestCleanupStaleLeavesAFingerprint:
 
     def test_cleanup_stale_logs_evicted_ids(self, caplog):
+        from lib.observability import prometheus_lines, reset_for_tests
+
+        reset_for_tests()
         rt = TaskRuntime('obs-kind', ttl=1)
         tid = rt.create(task_id='obs-evict-test-0002')['id']
         with rt._lock:
@@ -62,3 +71,6 @@ class TestCleanupStaleLeavesAFingerprint:
             'cleanup_stale evicted a task without an INFO fingerprint '
             'naming the evicted id: '
             f'{[r.getMessage() for r in caplog.records]}')
+        metrics = '\n'.join(prometheus_lines())
+        assert 'tofu_task_registry_evictions_total' in metrics
+        assert 'kind="obs-kind",reason="ttl"' in metrics

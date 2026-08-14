@@ -209,7 +209,7 @@ def test_xhigh_effort_not_downgraded_on_opus5():
     downgraded it to high."""
     got = _claude_body(OPUS5, thinking_depth='xhigh')
     assert got.get('effort') == 'xhigh', got.get('effort')
-    # …and the GPT-5.6 'ultra' tier still maps to Claude's top rung (max).
+    # …and Tofu's legacy 'ultra' label maps to Claude's top rung (max).
     got_ultra = _claude_body(OPUS5, thinking_depth='ultra')
     assert got_ultra.get('effort') == 'max', got_ultra.get('effort')
 

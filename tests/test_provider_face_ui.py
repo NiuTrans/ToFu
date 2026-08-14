@@ -65,13 +65,13 @@ _NEEDS_INTERNAL_DUAL_FACE_HOST = pytest.mark.skipif(
 )
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_FACES_JS = os.path.join(_ROOT, 'static', 'js', 'settings', 'provider_faces.js')
-_EDIT_JS = os.path.join(_ROOT, 'static', 'js', 'settings', 'model_edit.js')
-_RENDER_JS = os.path.join(_ROOT, 'static', 'js', 'settings', 'provider_render.js')
-_API_JS = os.path.join(_ROOT, 'static', 'js', 'api.js')
+_RUNTIME_JS = os.path.join(_ROOT, 'frontend', 'src', 'runtime', 'app-runtime.js')
+_FACES_JS = _RUNTIME_JS
+_EDIT_JS = _RUNTIME_JS
+_RENDER_JS = _RUNTIME_JS
+_API_JS = _RUNTIME_JS
 _ROUTES = os.path.join(_ROOT, 'routes', 'config.py')
-_BUNDLER = os.path.join(_ROOT, 'lib', 'js_bundler.py')
-_I18N = os.path.join(_ROOT, 'static', 'js', 'i18n.js')
+_LOCALE_DIR = os.path.join(_ROOT, 'frontend', 'src', 'i18n', 'locales')
 
 GW = 'your-llm-gateway.example.com'
 OPENAI_URL = 'https://api.openai.com/v1'
@@ -101,6 +101,25 @@ FACELESS = {
 def _src(path, lang='js'):
     with open(path, encoding='utf-8') as f:
         return strip_comments(f.read(), lang=lang)
+
+
+def _runtime_owner(name):
+    """Return one retained classic owner's body from the Vite runtime module."""
+    with open(_RUNTIME_JS, encoding='utf-8') as handle:
+        source = handle.read()
+    marker = f'/* ===== migrated source: {name} ===== */'
+    start = source.index(marker)
+    end = source.find('/* ===== migrated source:', start + len(marker))
+    owner = source[start:] if end < 0 else source[start:end]
+    return strip_comments(owner, lang='js')
+
+
+def _locales():
+    return {
+        lang: json.loads(open(os.path.join(_LOCALE_DIR, f'{lang}.json'),
+                              encoding='utf-8').read())
+        for lang in ('zh', 'en')
+    }
 
 
 # ═══════════════════════════════════════════════════════════
@@ -282,8 +301,9 @@ def test_frontend_contains_no_second_family_rule():
     keying a claude-ish token against an anthropic-ish one.
     """
     offenders = []
-    for path in (_FACES_JS, _EDIT_JS, _RENDER_JS):
-        src = _src(path, lang='js')
+    for owner in ('settings/provider_faces.js', 'settings/model_edit.js',
+                  'settings/provider_render.js'):
+        src = _runtime_owner(owner)
         for i, line in enumerate(src.splitlines(), 1):
             low = line.lower()
             if 'claude' not in low:
@@ -291,7 +311,7 @@ def test_frontend_contains_no_second_family_rule():
             # A line naming claude is only acceptable if it does NOT also
             # decide a protocol/face from it.
             if re.search(r'anthropic|\.face\s*=|protocol\s*=', low):
-                offenders.append('%s:%d: %s' % (os.path.basename(path), i,
+                offenders.append('%s:%d: %s' % (owner, i,
                                                 line.strip()[:110]))
     assert not offenders, (
         'the frontend appears to decide the wire face from the model name '
@@ -307,7 +327,7 @@ def test_chip_renders_only_from_a_landed_resolution():
     An absent pill is honest ("not resolved yet"); a guessed one is a claim
     about routing the frontend is not entitled to make.
     """
-    src = _src(_FACES_JS, lang='js')
+    src = _runtime_owner('settings/provider_faces.js')
     fn = src[src.index('function _faceChipHTML'):]
     fn = fn[:fn.index('\nfunction ')] if '\nfunction ' in fn else fn
     assert re.search(r'if\s*\(\s*!r\s*\)\s*return\s+[\'"]{2}', fn), (
@@ -322,7 +342,7 @@ def test_ui_calls_the_endpoint_through_the_api_client():
     assert 'resolveFaces' in api, 'Api.providers.resolveFaces not registered'
     assert '/api/v1/providers/resolve-faces' in api
 
-    faces = _src(_FACES_JS, lang='js')
+    faces = _runtime_owner('settings/provider_faces.js')
     assert 'Api.providers.resolveFaces' in faces
     assert 'fetch(' not in faces, (
         'provider_faces.js must not issue a raw fetch — route it through Api')
@@ -334,7 +354,7 @@ def test_ui_calls_the_endpoint_through_the_api_client():
 
 def test_model_card_renders_the_face_chip():
     """Surface 1. Without this call the chip function is dead code."""
-    src = _src(_RENDER_JS, lang='js')
+    src = _runtime_owner('settings/provider_render.js')
     assert '_faceChipHTML(' in src, (
         'the model card never calls _faceChipHTML — the pill would never '
         'appear, which is the exact gap this batch set out to close')
@@ -346,7 +366,7 @@ def test_model_editor_exposes_the_pin_and_persists_it():
     A dropdown that renders but never writes `m.face` is the worst outcome:
     the user believes they pinned a face and routing ignores it.
     """
-    src = _src(_EDIT_JS, lang='js')
+    src = _runtime_owner('settings/model_edit.js')
     assert 'stg-edit-face' in src, 'no face pin control in the edit form'
     assert '_faceNamesFor(' in src, (
         'the pin options must come from the backend-derived face list, not '
@@ -361,10 +381,10 @@ def test_model_editor_exposes_the_pin_and_persists_it():
 def test_provider_card_exposes_the_faces_editor():
     """Surface 3. Before this, faces{} was writable only by template sync,
     so a self-built dual-face gateway needed a hand-edited JSON file."""
-    render = _src(_RENDER_JS, lang='js')
+    render = _runtime_owner('settings/provider_render.js')
     assert '_renderFacesSection(' in render, (
         'the provider card never renders the faces editor')
-    faces = _src(_FACES_JS, lang='js')
+    faces = _runtime_owner('settings/provider_faces.js')
     for fn in ('_renderFacesSection', '_addFace', '_deleteFace',
                '_collectFacesFromDom'):
         assert 'function %s' % fn in faces, 'missing %s' % fn
@@ -375,7 +395,7 @@ def test_faces_editor_refuses_to_redefine_the_default_face():
     named 'default' would create a second, contradictory source for one
     face — the resolver would read faces['default'] while every other
     surface reads provider.base_url."""
-    src = _src(_FACES_JS, lang='js')
+    src = _runtime_owner('settings/provider_faces.js')
     collect = src[src.index('function _collectFacesFromDom'):]
     collect = collect[:collect.index('\nfunction ')]
     assert re.search(r"n\s*===\s*'default'", collect), (
@@ -386,7 +406,7 @@ def test_face_resolution_does_not_full_rerender():
     """The resolve round-trip is triggered BY an edit, so re-rendering the
     whole tab on its return would destroy the open form / half-typed row
     that caused it."""
-    src = _src(_FACES_JS, lang='js')
+    src = _runtime_owner('settings/provider_faces.js')
     fn = src[src.index('async function _refreshFaceResolutions'):]
     fn = fn[:fn.index('\nfunction ')]
     assert '_renderProvidersTab()' not in fn, (
@@ -419,10 +439,8 @@ def _node_eval(js_body, extra_files=()):
     Mirrors how lib/js_bundler.py concatenates these files (all globals in
     one window scope), so the functions under test are the shipped ones.
     """
-    parts = []
-    for path in (_FACES_JS,) + tuple(extra_files):
-        with open(path, encoding='utf-8') as f:
-            parts.append(f.read())
+    assert not extra_files, 'provider-face harness has one explicit ESM owner'
+    parts = [_runtime_owner('settings/provider_faces.js')]
     harness = '''
 // ── minimal global surface the face JS touches ──
 var window = globalThis;
@@ -533,18 +551,16 @@ console.log(JSON.stringify({
 
 
 def test_provider_faces_js_is_bundled():
-    """An unbundled file is invisible to users no matter how correct it is."""
-    src = _src(_BUNDLER, lang='python')
-    assert "'settings/provider_faces.js'" in src, (
-        'provider_faces.js is not in _BUNDLE_FILES — none of the three '
-        'surfaces would load')
+    """The provider-face owner is part of the sole Vite runtime module."""
+    source = open(_RUNTIME_JS, encoding='utf-8').read()
+    assert source.count('migrated source: settings/provider_faces.js') == 1
+    assert not os.path.exists(os.path.join(_ROOT, 'static', 'js'))
 
 
 def test_every_new_i18n_key_has_both_languages():
     """A missing key renders as its literal dotted name (measured before:
     a literal `project.qrScan` shipped to users)."""
-    with open(_I18N, encoding='utf-8') as f:
-        i18n = f.read()
+    locales = _locales()
     keys = [
         'settings.faceChipRefused', 'settings.faceChipTitle',
         'settings.faceChipPinnedTag', 'settings.faceChipPinnedTitle',
@@ -554,33 +570,20 @@ def test_every_new_i18n_key_has_both_languages():
         'settings.faceProtoTitle', 'settings.deleteFaceTitle',
         'settings.faceDeleteConfirm',
     ]
-    missing = []
-    for k in keys:
-        # Match to END OF LINE, not to the first '}': these values contain
-        # placeholders like {face} / {url}, and a lazy [^}]* body stops
-        # INSIDE the placeholder — reporting a complete entry as missing its
-        # en half. (Measured: faceChipTitle + faceDeleteConfirm both have
-        # zh AND en, but the naive regex captured only "zh: '协议面：{face".)
-        m = re.search(r"^\s*'%s':\s*\{.*$" % re.escape(k), i18n, re.M)
-        if not m:
-            missing.append('%s (absent)' % k)
-            continue
-        body = m.group(0)
-        if 'zh:' not in body or 'en:' not in body:
-            missing.append('%s (missing zh or en)' % k)
+    missing = [k for k in keys if any(k not in messages
+                                     for messages in locales.values())]
     assert not missing, 'i18n keys incomplete: %s' % missing
 
 
 def test_referenced_i18n_keys_all_exist():
     """Complement of the above: every settings.* key the new UI ASKS for must
     be defined. Catches a typo'd key, which renders as raw dotted text."""
-    with open(_I18N, encoding='utf-8') as f:
-        i18n = f.read()
-    src = _src(_FACES_JS, lang='js')
+    locales = _locales()
+    src = _runtime_owner('settings/provider_faces.js')
     used = set(re.findall(r"t\(\s*'(settings\.[A-Za-z0-9_]+)'", src))
     assert used, 'no i18n keys found in provider_faces.js — scan is vacuous'
     missing = [k for k in sorted(used)
-               if ("'%s':" % k) not in i18n]
+               if any(k not in messages for messages in locales.values())]
     assert not missing, 'provider_faces.js uses undefined i18n keys: %s' % missing
 
 
@@ -695,7 +698,7 @@ def test_provider_card_exposes_a_protocol_select_with_responses():
     """Provider-level (default-face) protocol: before S3 it was writable
     only by templates / hand-edited JSON — a DeepSeek responses-default
     provider was inexpressible in the UI."""
-    src = _src(_RENDER_JS, lang='js')
+    src = _runtime_owner('settings/provider_render.js')
     assert re.search(r"_onProvField\([^)]*protocol", src), (
         'the provider editor must wire a protocol select through '
         '_onProvField (the wholesale-save seam)')
@@ -712,11 +715,9 @@ def test_responses_chip_style_and_i18n_keys():
     assert '.stg-face-chip.responses' in css, (
         'missing CSS for .stg-face-chip.responses — a responses face is '
         'indistinguishable from openai')
-    with open(_I18N, encoding='utf-8') as f:
-        i18n = f.read()
+    locales = _locales()
     for k in ('settings.protocol', 'settings.protocolHint'):
-        m = re.search(r"^\s*'%s':\s*\{.*$" % re.escape(k), i18n, re.M)
-        assert m and 'zh:' in m.group(0) and 'en:' in m.group(0), (
+        assert all(k in messages for messages in locales.values()), (
             f'i18n key {k} incomplete')
 
 
@@ -782,7 +783,7 @@ console.log(JSON.stringify({
     assert 'data-auto-name="0"' in got['custom'], (
         'a stored CUSTOM name is not auto: protocol switches must not '
         'rename it (model pins reference the name)')
-    src = _src(_FACES_JS, lang='js')
+    src = _runtime_owner('settings/provider_faces.js')
     assert 'settings.faceNamePlaceholder' not in src, (
         'the name-placeholder i18n key is dead — the input it labeled is gone')
 

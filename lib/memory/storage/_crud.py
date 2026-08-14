@@ -117,7 +117,7 @@ def get_eligible_memories(project_path=None, extra_paths=None,
 
     SKILL PACKAGES are excluded by default: they are a different noun
     (user-installed instruction guides) with their own channel — the
-    ``<available_skills>`` index + ``activate_skill`` — so the memory
+    ``<available_skills>`` index + ``load_skill`` — so the memory
     prefetch/search/injection corpus stays pure MEMORY and packages stop
     competing with experience notes for injection slots.
     """
@@ -144,7 +144,7 @@ def _guard_not_package(target, memory_id, op):
         raise ValueError(
             f"Cannot {op} '{memory_id}': it is an installed skill package, "
             f"not a memory. Skill packages are managed by the user in the "
-            f"Settings → Skills tab; use activate_skill to load one.")
+            f"Settings → Skills tab; use load_skill to load one.")
 
 def create_memory(name, description='', body='', tags=None, scope='global', project_path=None):
     """Create a new memory file. Returns the memory dict."""
@@ -236,6 +236,37 @@ def delete_memory(memory_id, project_path=None, extra_paths=None):
             logger.warning('Failed to delete memory %s', s['filepath'], exc_info=True)
             return False
     return False
+
+
+def clear_memories(project_path=None, extra_paths=None, *, dry_run=False):
+    """Delete every visible flat memory while preserving skill packages.
+
+    This operation is intentionally scoped to the same global + project view
+    returned by :func:`list_all_memories`.  It is exposed only through the
+    authenticated Settings flow for personal/private deployments.
+    """
+    memories = [m for m in list_all_memories(project_path,
+                                              extra_paths=extra_paths)
+                if not m.get('is_package')]
+    counts = {
+        'total': len(memories),
+        'global': sum(1 for m in memories if m.get('scope') == 'global'),
+        'project': sum(1 for m in memories if m.get('scope') == 'project'),
+    }
+    if dry_run:
+        return {**counts, 'deleted_ids': [], 'failed_ids': []}
+    deleted_ids = []
+    failed_ids = []
+    for memory in memories:
+        memory_id = memory.get('id', '')
+        try:
+            os.remove(memory['filepath'])
+            deleted_ids.append(memory_id)
+        except OSError:
+            logger.warning('Failed to clear memory %s', memory.get('filepath'),
+                           exc_info=True)
+            failed_ids.append(memory_id)
+    return {**counts, 'deleted_ids': deleted_ids, 'failed_ids': failed_ids}
 
 
 def merge_memories(memory_ids, name, description, body, tags=None, scope='project', project_path=None, extra_paths=None):

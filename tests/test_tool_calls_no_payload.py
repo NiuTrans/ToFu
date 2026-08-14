@@ -249,6 +249,8 @@ def test_retry_resets_round_text_to_base():
     resets = [e for e in task['events']
               if isinstance(e, dict) and e.get('type') == 'delta_reset']
     assert resets and resets[-1].get('discard') is True, task['events']
+    assert task.get('_contentEpoch') == 1, task
+    assert resets[-1].get('contentEpoch') == 1, resets[-1]
     residue = task.get('_floor_retry_residue') or []
     assert residue and residue[-1]['content'] == '。', residue
 

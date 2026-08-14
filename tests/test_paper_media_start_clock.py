@@ -68,8 +68,8 @@ def _call_podcast_poll(app, task_id, cursor=0):
 
 @pytest.fixture
 def app():
-    from quart import Quart
-    return Quart(__name__)
+    from lib.app_factory import create_base_app
+    return create_base_app(__name__)
 
 
 # ── podcast poll: the endpoint that bypassed the throat ────────
@@ -118,10 +118,38 @@ def test_podcast_poll_preserves_cursor_wire_name(app, podcast_task):
     _podcast_runtime.append_event(tid, {'type': 'phase', 'phase': 'b'})
     body = _call_podcast_poll(app, tid, cursor=1)
     assert body['cursor'] == 2, 'cursor must remain the wire name + advance'
-    assert 'next_cursor' not in body, \
-        'do not leak the throat\'s internal cursor name onto this endpoint'
+    assert body['next_cursor'] == 2
+    assert body['cursorInfo'] == {
+        'requested': 1, 'next': 2, 'reset': False,
+    }
     assert [e['phase'] for e in body['events']] == ['b'], \
         'cursor-based replay must still slice from the caller cursor'
+
+
+def test_podcast_poll_exposes_standard_replay_and_correlation(app):
+    """Legacy poll is now discoverable as the same task-replay protocol."""
+    from lib.log import set_req_id
+    from lib.paper.podcast_runtime import _podcast_runtime
+
+    set_req_id('paper-page-12')
+    tid = 'pc_replay_envelope'
+    task = _podcast_runtime.create(task_id=tid)
+    task['task_id'] = tid
+    task['progress'] = {'done': 0, 'total': 1}
+    set_req_id('')
+    try:
+        _podcast_runtime.append_event(tid, {'type': 'phase', 'phase': 'script'})
+        body = _call_podcast_poll(app, tid)
+        assert body['format'] == 'tofu.task-replay/v1'
+        assert body['taskId'] == tid
+        assert body['requestId'] == 'paper-page-12'
+        assert body['events'][0]['taskId'] == tid
+        assert body['events'][0]['requestId'] == 'paper-page-12'
+        assert body['cursorInfo'] == {
+            'requested': 0, 'next': 1, 'reset': False,
+        }
+    finally:
+        _podcast_runtime._tasks.pop(tid, None)
 
 
 def test_podcast_poll_preserves_progress_and_status(app, podcast_task):
@@ -169,7 +197,7 @@ def test_video_lookup_running_branch_carries_clock():
     Drives the real handler against a real motion task so the assertion is on
     the response the tab receives, not on the source text.
     """
-    from quart import Quart
+    from lib.app_factory import create_base_app
     from lib.motion_video.runtime import _motion_runtime
     from routes.paper import lookup_video_abstract
 
@@ -179,7 +207,7 @@ def test_video_lookup_running_branch_carries_clock():
     task['task_id'] = tid
     task['paper_hash'] = phash
     task['status'] = 'running'
-    app = Quart(__name__)
+    app = create_base_app(__name__)
     try:
         import asyncio
 

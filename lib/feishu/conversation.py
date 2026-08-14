@@ -21,7 +21,6 @@ from lib.feishu._state import (
     _user_web_messages,
     _web_msg_lock,
 )
-from lib.utils import safe_json
 
 from lib.log import get_logger
 
@@ -123,18 +122,10 @@ def sync_to_db(user_id: str) -> None:
         db_user_id = 1  # single-user; Feishu users map to this
 
         # ── Guard: refuse to overwrite non-empty conv with fewer messages ──
-        existing = db.execute(
-            'SELECT messages FROM conversations WHERE id=? AND user_id=?',
-            (conv_id, db_user_id)
-        ).fetchone()
-        if existing:
-            # safe_json handles None, empty-string, and corrupt JSON
-            # without crashing — returns *default* on any parse failure.
-            existing_msgs = safe_json(
-                existing['messages'], default=[], label='feishu-sync-messages'
-            )
-            if not isinstance(existing_msgs, list):
-                existing_msgs = []
+        from lib.database.conversation_repository import load_conversation
+        existing = load_conversation(db, conv_id, user_id=db_user_id)
+        if existing is not None:
+            existing_msgs = existing.messages
             if len(existing_msgs) > len(web_msgs):
                 logger.warning(
                     '[Feishu] ⚠️ BLOCKED overwrite of conv %s — '
@@ -146,28 +137,16 @@ def sync_to_db(user_id: str) -> None:
 
         title = (web_msgs[0].get('content', '') or 'Feishu')[:80]
         from lib.conversations import build_search_text
-        from lib.database import json_dumps_pg
-        messages_json = json_dumps_pg(web_msgs)
         search_text = build_search_text(web_msgs)
         now = int(time.time() * 1000)
 
-        from lib.database._core_schema import CONVERSATIONS, upsert
-        # 8-col partial: omit `settings` (DEFAULT '{}') and `search_tsv`
-        # (PG conversations_search_tsv_trg trigger derives it from search_text).
-        # retry=False + commit=True mirrors the prior plain db.execute()+commit().
-        upsert(db, CONVERSATIONS, {
-            'id': conv_id, 'user_id': db_user_id, 'title': title,
-            'messages': messages_json, 'created_at': now, 'updated_at': now,
-            'msg_count': len(web_msgs), 'search_text': search_text,
-        }, insert_cols=['id', 'user_id', 'title', 'messages', 'created_at',
-                        'updated_at', 'msg_count', 'search_text'],
-           retry=False, commit=True)
-        from lib.conversations import update_conversation_fts
-        update_conversation_fts(db, conv_id, search_text)
-        # Phase 5 dual-write (flag-gated, inert when off): the Feishu buffer
-        # front-trims at MAX_WEB_MESSAGES (re-sequences) → full rebuild.
-        from lib.database.messages_rows import mirror_write_and_commit
-        mirror_write_and_commit(db, conv_id, web_msgs, now_ms=now, full=True)
+        from lib.database.conversation_repository import upsert_conversation
+        # The Feishu buffer front-trims at MAX_WEB_MESSAGES, so the repository
+        # performs a full canonical-row refresh in the same transaction.
+        upsert_conversation(
+            db, conv_id, web_msgs, user_id=db_user_id, title=title,
+            created_at=now, updated_at=now, search_text=search_text, full=True,
+            expected_rev=(existing['rev'] if existing is not None else None))
         logger.debug('[Feishu] Synced %d messages for user %s to DB conv %s',
                       len(web_msgs), user_id, conv_id[:12])
     except Exception as e:

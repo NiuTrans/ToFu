@@ -30,6 +30,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -37,11 +38,15 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
-ESCAPE_HTML = os.path.join(JS_DIR, 'core', 'escape_html.js')
-SAFE_HTML = os.path.join(JS_DIR, 'core', 'safe_html.js')
-BRANDING = os.path.join(JS_DIR, 'settings', 'branding.js')
-CHAT_RENDER = os.path.join(JS_DIR, 'ui', 'chat_render.js')
+sys.path.insert(0, HERE)
+from _runtime_sections import runtime_section_path  # noqa: E402
+
+ESCAPE_HTML = runtime_section_path('core/escape_html.js')
+SAFE_HTML = runtime_section_path('core/safe_html.js')
+BRANDING = runtime_section_path('settings/branding.js')
+CHAT_RENDER = runtime_section_path('ui/chat_render.js')
+TRANSLATION_MODEL = runtime_section_path('core/translation_model.js')
+TRANSLATION_INDICATOR = runtime_section_path('ui/translation_indicator.js')
 
 
 def _node_available() -> bool:
@@ -129,8 +134,8 @@ function loadAll(chatRenderSrc, brandingSrc) {
   (0, eval)(fs.readFileSync(process.argv[2], 'utf8'));  // escape_html.js
   (0, eval)(fs.readFileSync(process.argv[3], 'utf8'));  // safe_html.js
   (0, eval)(brandingSrc);                               // branding.js (registry)
-  (0, eval)(fs.readFileSync(process.argv[2].replace('escape_html.js', 'translation_model.js'), 'utf8'));
-  (0, eval)(fs.readFileSync(process.argv[2].replace('core/escape_html.js', 'ui/translation_indicator.js'), 'utf8'));
+  (0, eval)(fs.readFileSync(process.argv[6], 'utf8'));
+  (0, eval)(fs.readFileSync(process.argv[7], 'utf8'));
   (0, eval)(chatRenderSrc);                             // chat_render.js
 }
 
@@ -290,7 +295,8 @@ def test_brain_dispatch_card():
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, ESCAPE_HTML, SAFE_HTML, CHAT_RENDER, BRANDING],
+            ['node', harness, ESCAPE_HTML, SAFE_HTML, CHAT_RENDER, BRANDING,
+             TRANSLATION_MODEL, TRANSLATION_INDICATOR],
             capture_output=True, text=True, timeout=60,
         )
     finally:

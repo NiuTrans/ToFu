@@ -63,6 +63,9 @@ _ALLOW = {
         "reads the engine's OWN normalised accumulator (usage_total is fed "
         'exclusively from normalize_usage in report_engine/__init__'
         '._accumulate_usage)',
+    'lib/tasks_pkg/compaction/_layer2/_compact.py':
+        "reads the compaction planner's OWN canonical economics projection, "
+        'built by _proactive_cache_economics rather than provider usage',
 }
 
 

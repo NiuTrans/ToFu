@@ -56,7 +56,10 @@ def test_every_builtin_spec_appears_in_its_category_group():
         if spec.source != 'builtin':
             continue
         gid = spec.category or 'other'
-        if (gid, spec.key) not in fams:
+        # Data-backed families may deliberately stay out of the global panel
+        # until they have a live callable surface. Their feature tests pin
+        # both the absent and active catalogue states.
+        if (gid, spec.key) not in fams and not spec.catalog_active_only:
             missing.append(f'{gid}/{spec.key}')
     assert not missing, (
         f'built-in specs missing from the inventory: {missing} — the panel '
@@ -80,7 +83,7 @@ def test_full_provides_surface_listed_even_when_gated_off():
 
 # ── Two-phase evaluation semantics (the naive-evaluation regression) ────
 
-@pytest.mark.parametrize('key', ['memory', 'scheduler', 'todo', 'skills'])
+@pytest.mark.parametrize('key', ['memory', 'scheduler', 'todo'])
 def test_capability_families_attach_on_has_base_tools(key):
     """read_files is always on ⇒ has_base_tools=True ⇒ the always-on
     capability families must report ON under the reference context."""
@@ -94,8 +97,32 @@ def test_capability_families_attach_on_has_base_tools(key):
     assert any(t['enabled'] for t in fam['tools'])
 
 
+def test_skills_family_reflects_installed_eligible_packages(monkeypatch):
+    """Do not advertise ``load_skill`` when there is nothing it can load."""
+    import lib.skills
+
+    monkeypatch.setattr(lib.skills, 'list_skills', lambda *a, **k: [])
+    skills = next(
+        family for (_group, key), family in _families(_inventory()).items()
+        if key == 'skills')
+    assert skills['gate_state'] == 'off'
+    assert skills['gate_reason'] == 'gate_closed'
+    assert not any(tool['enabled'] for tool in skills['tools'])
+
+    monkeypatch.setattr(lib.skills, 'list_skills', lambda *a, **k: [{
+        'id': 'review', 'enabled': True, 'eligible': True,
+    }])
+    skills = next(
+        family for (_group, key), family in _families(_inventory()).items()
+        if key == 'skills')
+    assert skills['gate_state'] == 'on'
+    assert any(tool['name'] == 'load_skill' and tool['enabled']
+               for tool in skills['tools'])
+
+
 def test_reference_context_is_plain_chat_defaults():
     inv = _inventory()
+    assert inv['scope'] == 'global_registry'
     ref = inv['reference']
     assert ref['search_mode'] == 'multi'
     assert ref['project_attached'] is False
@@ -135,7 +162,10 @@ def test_plugin_spec_reported_as_not_allowlisted():
     spec = ToolSpec(
         key='_inv_fake_plugin',
         build=lambda ctx: [{'type': 'function',
-                            'function': {'name': '_inv_fake_tool'}}],
+                            'function': {
+                                'name': '_inv_fake_tool',
+                                'description': 'Search the fake plugin',
+                            }}],
         phase='base', category='testplug',
         provides=frozenset({'_inv_fake_tool'}),
         source='plugin', plugin_name='_inv_fake',
@@ -148,6 +178,9 @@ def test_plugin_spec_reported_as_not_allowlisted():
         assert fam['gate_state'] == 'off'
         assert fam['gate_reason'] == 'plugin_not_allowlisted'
         assert fam['source'] == 'plugin' and fam['plugin_name'] == '_inv_fake'
+        row = next(t for t in fam['tools'] if t['name'] == '_inv_fake_tool')
+        assert row['enabled'] is False
+        assert row['description'] == 'Search the fake plugin'
     finally:
         _reg._TOOL_SPECS[:] = [s for s in _reg._TOOL_SPECS
                                if s.key != '_inv_fake_plugin']
@@ -171,6 +204,59 @@ def test_write_badge_follows_the_partition():
     by_name = {t['name']: t for t in memory['tools']}
     assert by_name['create_memory']['write'] is True
     assert by_name['search_memories']['write'] is False
+
+
+def test_connected_inline_mcp_tool_is_listed_once(monkeypatch):
+    """The live MCP index enriches inline schemas with a server badge; it
+    must replace, not duplicate, the same row returned by spec.build()."""
+    import threading
+    import lib.mcp as mcp
+
+    schema = {
+        'type': 'function',
+        'function': {
+            'name': 'mcp__wiki__search',
+            'description': 'Search the connected wiki',
+            'parameters': {'type': 'object', 'properties': {}},
+        },
+    }
+
+    class _Bridge:
+        connected = True
+        server_count = 1
+        _lock = threading.RLock()
+        _tool_index = {
+            'mcp__wiki__search': {
+                'server_name': 'wiki',
+                'tool_name': 'search',
+                'openai_def': schema,
+            },
+        }
+
+        def get_openai_tool_defs(self):
+            return [schema]
+
+        def get_tool_safety(self):
+            return {'mcp__wiki__search': True}
+
+        def _disabled_tools_for(self, _server):
+            return set()
+
+        def list_servers(self):
+            return [{'name': 'wiki', 'tools_count': 1}]
+
+    bridge = _Bridge()
+    monkeypatch.setattr(mcp, 'get_bridge', lambda: bridge)
+    monkeypatch.setenv('TOFU_MCP_TOOL_EXPOSURE', 'inline')
+
+    fam = next(f for (_g, key), f in _families(_inventory()).items()
+               if key == 'mcp')
+    names = [t['name'] for t in fam['tools'] + fam['mcp_tools']]
+    assert names.count('mcp__wiki__search') == 1
+    row = next(t for t in fam['mcp_tools']
+               if t['name'] == 'mcp__wiki__search')
+    assert row['server'] == 'wiki'
+    assert fam['counts']['total'] == len(names)
 
 
 # ── capabilities derivation (the drift repair) ──────────────────────────
@@ -218,3 +304,5 @@ def test_tools_route_serves_payload_via_test_client():
         body = asyncio.run(resp.get_json())
         data = body.get('data', body)
         assert data['groups'] and data['totals']['tools'] > 0
+        assert data['scope'] == 'global_registry'
+        assert resp.headers['Cache-Control'] == 'private, no-store'

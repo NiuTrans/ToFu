@@ -27,6 +27,8 @@ turns and crash-resume are simulated WITHOUT a DB. Double-neuter tests defuse
 each guard on the real module and prove the relevant test then fails.
 """
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {'lib/config.py', 'lib/parser.py'}
+
 import importlib
 
 import pytest

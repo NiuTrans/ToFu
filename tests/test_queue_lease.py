@@ -81,6 +81,22 @@ def _db():
     return mq.get_thread_db(mq.DOMAIN_CHAT)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_global_reaper_rows():
+    """The reaper is intentionally global, so each test owns the whole queue.
+
+    Other queue modules leave durable rows behind to assert their read-side
+    behaviour.  Without this boundary, a later reaper test records those rows
+    as additional (perfectly valid) redispatches and becomes order-dependent.
+    The pytest database is throwaway and background workers are disabled.
+    """
+    from lib.database import db_execute_with_retry
+
+    db_execute_with_retry(_db(), 'DELETE FROM message_queue')
+    yield
+    db_execute_with_retry(_db(), 'DELETE FROM message_queue')
+
+
 # ── 1. spawn failure keeps the row + lease released → re-dispatch works ──
 
 def test_spawn_failure_keeps_row_and_redispatches(monkeypatch):

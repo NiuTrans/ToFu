@@ -27,7 +27,11 @@ import os
 
 import pytest
 
-from tests._jsdom import JS_DIR, run_harness
+from tests._jsdom import run_harness
+from tests._runtime_sections import runtime_section_path
+
+TOOL_ROUNDS_RICH = runtime_section_path('ui/tool_rounds_rich.js')
+STREAMING_SWARM_PANEL = runtime_section_path('ui/streaming_swarm_panel.js')
 
 pytestmark = pytest.mark.unit
 
@@ -177,9 +181,9 @@ def test_conv_digest_render():
     # _renderConvDigest moved to the DEFERRED tool_rounds_rich.js (Epic-E
     # split 2026-08-01) — drive it there.
     run_harness(
-        target_js=os.path.join(JS_DIR, "ui", "tool_rounds_rich.js"),
+        target_js=TOOL_ROUNDS_RICH,
         body_js=_BODY,
-        extra_targets=[os.path.join(JS_DIR, "ui", "streaming_swarm_panel.js")],
+        extra_targets=[STREAMING_SWARM_PANEL],
         min_pass=25,
         label="conv digest render",
     )
@@ -210,7 +214,7 @@ def test_NC_tool_arg_is_load_bearing(tmp_path):
     """NEUTER: drop the tool descriptor `arg` from the chip → the primary-arg
     text vanishes (arg-absent PASSes) while the name stays. Shipped
     tool_rounds_rich.js is byte-identical afterwards."""
-    src = os.path.join(JS_DIR, "ui", "tool_rounds_rich.js")
+    src = TOOL_ROUNDS_RICH
     with open(src, encoding="utf-8") as f:
         original = f.read()
     anchor = 'const arg = isObj ? (tl.arg || "") : "";'
@@ -223,7 +227,7 @@ def test_NC_tool_arg_is_load_bearing(tmp_path):
         out = run_harness(
             target_js=str(nc_path),
             body_js=_NEUTER_BODY,
-            extra_targets=[os.path.join(JS_DIR, "ui", "streaming_swarm_panel.js")],
+            extra_targets=[STREAMING_SWARM_PANEL],
             min_pass=2,
             label="conv digest NEUTER",
         )
@@ -261,7 +265,7 @@ def test_NC_raw_branch_is_load_bearing(tmp_path):
     """NEUTER: force `isRaw` off in _renderConvDigest → the RAW badge and every
     metadata chip disappear even for a raw:true digest, proving the cd.raw gate
     is load-bearing. Shipped tool_rounds_rich.js is byte-identical afterwards."""
-    src = os.path.join(JS_DIR, "ui", "tool_rounds_rich.js")
+    src = TOOL_ROUNDS_RICH
     with open(src, encoding="utf-8") as f:
         original = f.read()
     anchor = "const isRaw = !!cd.raw;"
@@ -274,7 +278,7 @@ def test_NC_raw_branch_is_load_bearing(tmp_path):
         out = run_harness(
             target_js=str(nc_path),
             body_js=_NEUTER_RAW_BODY,
-            extra_targets=[os.path.join(JS_DIR, "ui", "streaming_swarm_panel.js")],
+            extra_targets=[STREAMING_SWARM_PANEL],
             min_pass=3,
             label="conv digest RAW NEUTER",
         )

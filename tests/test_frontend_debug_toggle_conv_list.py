@@ -45,6 +45,7 @@ import re
 import pytest
 
 from tests._jsdom import JS_DIR, run_harness
+from tests._runtime_sections import RUNTIME
 
 pytestmark = pytest.mark.unit
 
@@ -138,17 +139,11 @@ def test_boot_load_feature_flags_rerenders_conv_list_wiring():
     message HTML under _featureFlags.debug_mode by finish_info.js). The jsdom
     harness cannot execute index.html's inline script, so pin the wiring here.
     """
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    with open(os.path.join(root, 'index.html'), encoding='utf-8') as fh:
-        html = fh.read()
-    m = re.search(
-        r'loadFeatureFlags\(\)\s*\{(?P<body>.*?)\}\s*\)\(\);',
-        html,
-        re.DOTALL,
-    )
-    assert m, 'loadFeatureFlags IIFE not found in index.html'
-    body = m.group('body')
-    assign = body.find('_featureFlags = flags;')
+    source = RUNTIME.read_text(encoding='utf-8')
+    start = source.index('export async function loadFeatureFlags()')
+    end = source.index('// BEGIN GENERATED RUNTIME ACTIONS', start)
+    body = source[start:end]
+    assign = body.find('_featureFlags = await response.json();')
     assert assign != -1, 'loadFeatureFlags no longer assigns _featureFlags'
     rerender = body.find('renderConversationList()', assign)
     assert rerender != -1, (

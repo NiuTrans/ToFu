@@ -42,7 +42,7 @@ users via redemption codes (admin mints code → customer redeems on
 
 from __future__ import annotations
 
-from flask import Blueprint, request
+from quart import Blueprint, request
 
 from lib.api_keys import create_key, revoke_key
 from lib.api_response import (
@@ -207,7 +207,7 @@ def signup_route():
             logger.warning('[Users] welcome credit failed: %s', e)
     # Auto-login on signup.
     row, token = _mint_session_key(user)
-    audit_log('user_signup', user_id=user.id, email=email)
+    audit_log('user_signup', user_id=user.id)
     resp = api_created(user=_user_payload(user), token=token,
                         key=row, welcome_credit_micro=welcome)
     _set_session_cookie(resp, token)

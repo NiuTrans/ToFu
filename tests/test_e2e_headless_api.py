@@ -261,7 +261,7 @@ class E2EHeadlessApiTest(unittest.TestCase):
             self.assertEqual(spec['openapi'], '3.1.0')
             # Components include all schemas
             schemas = spec['components']['schemas']
-            for s in ('ErrorEnvelope', 'ChatMessage', 'ChatCompletionRequest',
+            for s in ('ErrorEnvelope', 'TypedErrorEnvelope', 'ChatMessage', 'ChatCompletionRequest',
                        'ChatCompletionResponse', 'TofuConfig', 'TaskState',
                        'ApiKey'):
                 self.assertIn(s, schemas, f'missing schema: {s}')

@@ -21,6 +21,11 @@ demoted below a disjoint one → the ordering assertion fails.
 """
 from __future__ import annotations
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {
+    'lib/a.py', 'lib/b.py', 'lib/other.py', 'lib/shared.py', 'lib/x.py',
+    'static/a.js', 'static/js/y.js',
+}
+
 import os
 
 import pytest

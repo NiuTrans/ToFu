@@ -13,10 +13,10 @@ This module is the ONLY seam that knows that key scheme. Consumers:
   as satisfied when it is set in the process environment OR configured in
   the vault (so a key the user pasted in Settings unlocks the skill).
 * subprocess execution (``run_command`` / ``code_exec``) —
-  :func:`exec_env_overlay` merges every ENABLED skill's configured values
-  into the child-process environment, so a skill's documented
-  ``os.environ['SOME_KEY']`` lookup just works without restarting the
-  server or pasting keys into chat.
+  :func:`exec_env_overlay` projects only each ENABLED skill's declared process
+  variables plus its configured vault values into the child environment, so a
+  skill's documented ``os.environ['SOME_KEY']`` lookup works without exposing
+  unrelated machine credentials.
 * ``routes/api_v1/skills.py`` — the Settings → Skills configuration UI.
 
 Values are NEVER logged and never returned by any list/status API — only
@@ -25,6 +25,7 @@ the vault's redacted hint crosses the wire.
 
 from __future__ import annotations
 
+import os
 import re
 
 from lib.log import get_logger
@@ -221,6 +222,9 @@ def exec_env_overlay(project_path: str | None = None,
         for skill in list_skills(project_path, extra_paths=extra_paths):
             if not skill.get('enabled', True):
                 continue
+            for name in declared_env(skill):
+                if name in os.environ:
+                    overlay[name] = os.environ[name]
             overlay.update(get_skill_env(skill['id']))
         return overlay
     except Exception as e:

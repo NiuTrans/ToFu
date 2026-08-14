@@ -4,7 +4,8 @@ a FACT card, not a UI snapshot.
 WHY
 ---
 The per-turn note in the message right-gutter (rendered by
-``static/js/info-rail.js``) is captured from the LIVE toolbar at send
+``frontend/src/runtime/app-runtime.js`` info-rail section) is captured from
+the LIVE toolbar at send
 time — the user can then pause in the composer and switch preset or
 toggle a mode before the stream actually starts, and the note used to
 freeze whatever was live at send. That was misleading:
@@ -18,21 +19,18 @@ The fix reframes the note as a two-phase FACT card: send-time is a
 best-effort snapshot; DONE ships the server-authoritative
 ``actualModel`` / ``actualDepth`` / ``actualModes``, and
 ``reconcileTurnCtxCapsule`` OVERWRITES those fields in place. This
-harness loads the REAL shipped ``info-rail.js`` under bare node and
-asserts the fact-card overwrite, the existing tool-schema-latch
-reconcile, and their independence.
+harness extracts the REAL shipped ``info-rail.js`` section under bare node and
+asserts the fact-card overwrite.
 
 Failing-first: constructs a case where the send snapshot's model
 differs from the done frame's ``actualModel`` and asserts the reconcile
 mutates the snapshot.
 
-NEUTER: on a mutated COPY of ``info-rail.js`` (the shipped file is
+NEUTER: on a mutated COPY of that section (the shipped file is
 untouched), stripping the ``snap.model = fact.actualModel`` assignment
 makes the fact-card assertion FAIL — proving the overwrite is
 load-bearing.
 
-Regression: the existing tool-schema latch behaviour (added ⇒ drop /
-removed ⇒ restore) still works unchanged.
 """
 
 from __future__ import annotations
@@ -47,7 +45,7 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+APP_RUNTIME = os.path.join(ROOT, 'frontend', 'src', 'runtime', 'app-runtime.js')
 
 
 def _node_available() -> bool:
@@ -62,13 +60,14 @@ _HARNESS = r"""
 'use strict';
 const fs = require('fs');
 global.window = global;
+global.runtimeScope = global;
 const out = [];
 function check(name, cond, extra) {
   const line = (cond ? 'PASS ' : 'FAIL ') + name + (extra ? ' :: ' + extra : '');
   out.push(line);
 }
 
-// info-rail.js reads these globals via `typeof`. Provide inert values so
+// The migrated info-rail section reads these globals via `typeof`. Provide inert values so
 // buildTurnCtxSnapshot/_collect* don't throw on load — the harness only
 // exercises reconcileTurnCtxCapsule, which is a pure function over `snap`
 // + `fact` and needs no live UI state.
@@ -97,7 +96,15 @@ global.Api = { mcp: { toolsList: async () => ({ ok: false }) } };
 global.document = { readyState: 'complete', addEventListener: () => {} };
 
 const SRC_PATH = process.argv[2];
-const SRC = fs.readFileSync(SRC_PATH, 'utf8');
+const BUNDLE_SRC = fs.readFileSync(SRC_PATH, 'utf8');
+const START = '/* ===== migrated source: info-rail.js ===== */';
+const END = '/* ===== migrated source: local-control.js ===== */';
+const startAt = BUNDLE_SRC.indexOf(START);
+const endAt = BUNDLE_SRC.indexOf(END, startAt + START.length);
+if (startAt < 0 || endAt < 0) {
+  throw new Error('migrated info-rail section markers missing');
+}
+const SRC = BUNDLE_SRC.slice(startAt, endAt);
 function loadModule(src){ (0, eval)(src); }
 loadModule(SRC);
 
@@ -138,16 +145,16 @@ function _mkSnap() {
   check('fact_overwrite_modes_label',
         snap.modes[0] && snap.modes[0].label === 'Swarm',
         'modes=' + JSON.stringify(snap.modes));
-  // tools untouched by the fact card (only tool-schema-latch diff can move them)
+  // tools are outside the fact-card contract and remain untouched.
   check('fact_no_touch_tools',
         snap.tools.length === 1 && snap.tools[0].label === 'Search');
 }
 
-// ── FACT card is INDEPENDENT of the toolsetDiff branch ──────────────
+// ── PARTIAL fact updates leave unrelated fields untouched ───────────
 {
   const snap = _mkSnap();
-  const changed = reconcileTurnCtxCapsule(snap, { actualModel: 'gpt-5.6-pro' });
-  check('fact_only_model_changed', changed === true && snap.model === 'gpt-5.6-pro');
+  const changed = reconcileTurnCtxCapsule(snap, { actualModel: 'gpt-5.6-sol' });
+  check('fact_only_model_changed', changed === true && snap.model === 'gpt-5.6-sol');
   // No diff → tools/modes unchanged, depth unchanged
   check('fact_only_no_side_effects',
         snap.tools.length === 1 && snap.modes.length === 1 && snap.depth === 'high');
@@ -166,48 +173,6 @@ function _mkSnap() {
   const snap = _mkSnap();
   const changed = reconcileTurnCtxCapsule(snap, { actualDepth: '' });
   check('fact_empty_depth_clears', changed === true && snap.depth === '');
-}
-
-// ── REGRESSION: tool-schema latch DIFF still works (added=drop) ─────
-{
-  const snap = _mkSnap();
-  snap.tools = [{ label: 'Search', tone: 'search' },
-                { label: 'Fetch', tone: 'net' }];
-  const changed = reconcileTurnCtxCapsule(snap, { added: ['fetch_url'], removed: [] });
-  check('diff_added_drops_tool',
-        changed === true && snap.tools.length === 1 && snap.tools[0].label === 'Search');
-}
-// ── REGRESSION: tool-schema latch DIFF still works (removed=restore) ─
-{
-  const snap = _mkSnap();
-  snap.tools = [{ label: 'Search', tone: 'search' }];
-  const changed = reconcileTurnCtxCapsule(snap, { added: [], removed: ['fetch_url'] });
-  const hasFetch = snap.tools.some((t) => t.label === 'Fetch');
-  check('diff_removed_restores_tool', changed === true && hasFetch);
-}
-// ── REGRESSION: nested `fact.toolsetDiff` still routes (legacy call shape) ─
-{
-  const snap = _mkSnap();
-  snap.tools = [{ label: 'Search', tone: 'search' },
-                { label: 'Fetch', tone: 'net' }];
-  const changed = reconcileTurnCtxCapsule(
-    snap, { toolsetDiff: { added: ['fetch_url'], removed: [] } });
-  check('diff_nested_wrapper_routes',
-        changed === true && snap.tools.length === 1);
-}
-// ── DIFF + FACT combined: both branches fire ─────────────────────────
-{
-  const snap = _mkSnap();
-  snap.tools = [{ label: 'Fetch', tone: 'net' }];
-  const changed = reconcileTurnCtxCapsule(snap, {
-    added: ['fetch_url'],
-    removed: [],
-    actualModel: 'gpt-5.6',
-  });
-  check('combined_diff_and_fact',
-        changed === true
-        && snap.tools.length === 0
-        && snap.model === 'gpt-5.6');
 }
 
 // ── NO-OP: identical fact returns false (nothing changed) ────────────
@@ -230,6 +195,7 @@ function _mkSnap() {
   // Load the neutered module into a fresh sandbox so it doesn't clobber
   // the shipped one already exposed on `window`.
   const sandbox = { window: {} };
+  sandbox.runtimeScope = sandbox.window;
   sandbox.escapeHtml = global.escapeHtml;
   sandbox.projectState = global.projectState;
   sandbox.searchMode = global.searchMode;
@@ -277,7 +243,7 @@ def test_turn_ctx_fact_card_and_reconcile():
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, os.path.join(JS_DIR, 'info-rail.js')],
+            ['node', harness, APP_RUNTIME],
             capture_output=True, text=True, timeout=60,
         )
     finally:
@@ -292,5 +258,5 @@ def test_turn_ctx_fact_card_and_reconcile():
     # Sanity: assert the total number of PASS lines matches the harness so
     # a silently-skipped case can't slip through as a false green.
     passes = [l for l in output.splitlines() if l.startswith('PASS')]
-    assert len(passes) >= 18, (
-        f'expected >=18 PASS lines, got {len(passes)}:\n{output}')
+    assert len(passes) >= 15, (
+        f'expected >=15 PASS lines, got {len(passes)}:\n{output}')

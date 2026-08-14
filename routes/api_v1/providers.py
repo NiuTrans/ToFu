@@ -21,7 +21,7 @@ dispatcher mints an ephemeral slot scoped to that single request.
 
 from __future__ import annotations
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.api_response import (
     api_bad_request, api_created, api_internal_error, api_not_found, api_ok,
@@ -80,8 +80,11 @@ def list_providers_route():
         '`<model_id>@<prov_id>`.\n\n'
         'When `auto_discover=true` (default) and `models` is empty, '
         'we synchronously hit `<base_url>/v1/models` and ingest the '
-        'served list. Pass `models=[{model_id, capabilities?}]` to '
-        'skip discovery.'),
+        'served list. Pass the canonical model registration '
+        '`models=[{model_id, capabilities, rpm, context_window, pricing}]` '
+        'to skip discovery. `pricing.input` and `pricing.output` are the '
+        'billable per-million-token rates; the old blended `cost` routing '
+        'hint is not accepted.'),
     tags=['providers'], scope='providers',
     request_body={'required': True, 'content': {'application/json': {
         'schema': {
@@ -107,7 +110,29 @@ def list_providers_route():
                                     'model_id': {'type': 'string'},
                                     'capabilities': {
                                         'type': 'array',
-                                        'items': {'type': 'string'}}}}},
+                                        'items': {'type': 'string'}},
+                                    'rpm': {
+                                        'type': 'integer', 'minimum': 1},
+                                    'context_window': {
+                                        'type': 'integer', 'minimum': 1,
+                                        'description': 'Maximum input context '
+                                                       'window in tokens'},
+                                    'pricing': {
+                                        'type': 'object',
+                                        'required': ['input', 'output'],
+                                        'properties': {
+                                            'input': {'type': 'number',
+                                                      'minimum': 0},
+                                            'output': {'type': 'number',
+                                                       'minimum': 0},
+                                            'currency': {
+                                                'type': 'string',
+                                                'enum': ['USD', 'CNY'],
+                                                'default': 'USD'},
+                                        },
+                                        'description': 'Billable rates per '
+                                                       'million tokens'},
+                                }}},
                 'extra_headers': {
                     'type': 'object',
                     'description': (

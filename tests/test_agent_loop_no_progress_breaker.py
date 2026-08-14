@@ -9,9 +9,8 @@ logs/app.log (96% of the whole file). Every round looked like:
     Round N LLM done in 0.0s — stop=tool_calls content_len=0 ... total_tokens=2N
 
 i.e. the model asked for the SAME tool call every round, forever, and the
-loop had nothing to stop it: `max_rounds=0` (unlimited) collapses to the
-`2**30` ceiling and `timeout_seconds=0` (also the dataclass default) disables
-the only wall-clock guard.
+the loop had no semantic no-progress guard, while the optional wall-clock
+guard was disabled.
 
 MEASURED NON-SIGNATURE (do not "fix" this by watching empty content):
 across the 07-24..07-26 logs, EXCLUDING the runaway, `content_len == 0`
@@ -71,11 +70,9 @@ class TestNoProgressBreaker(unittest.TestCase):
 
         outcome = run_agent_loop(
             abort=AbortSignal.never(),
-            max_tool_rounds=2 ** 30,            # "unlimited", as swarm passes
             round_tools=None,
             dispatch=dispatch,
             execute_tools=lambda rnd, tcs: None,
-            tools_terminal_round=False,
             max_consecutive_no_progress_rounds=5,
         )
 
@@ -107,11 +104,9 @@ class TestNoProgressBreaker(unittest.TestCase):
 
         outcome = run_agent_loop(
             abort=AbortSignal.never(),
-            max_tool_rounds=2 ** 30,
             round_tools=None,
             dispatch=dispatch,
             execute_tools=lambda rnd, tcs: None,
-            tools_terminal_round=False,
             max_consecutive_no_progress_rounds=2,
         )
 
@@ -143,11 +138,9 @@ class TestNoProgressBreaker(unittest.TestCase):
 
         outcome = run_agent_loop(
             abort=AbortSignal.never(),
-            max_tool_rounds=2 ** 30,
             round_tools=None,
             dispatch=dispatch,
             execute_tools=lambda rnd, tcs: None,
-            tools_terminal_round=False,
             max_consecutive_no_progress_rounds=3,
         )
 
@@ -169,11 +162,9 @@ class TestNoProgressBreaker(unittest.TestCase):
 
         outcome = run_agent_loop(
             abort=AbortSignal.never(),
-            max_tool_rounds=50,
             round_tools=None,
             dispatch=dispatch,
             execute_tools=lambda rnd, tcs: None,
-            tools_terminal_round=False,
         )
 
         self.assertTrue(outcome.completed)

@@ -12,8 +12,6 @@ package facade), so the two never diverge on eligibility / notranslate /
 already-Chinese handling.
 """
 
-import json
-
 from lib.database import DOMAIN_CHAT
 from lib.log import get_logger
 from lib.text_lang import is_predominantly_chinese
@@ -35,14 +33,12 @@ def _read_message_segments(conv_id, msg_id, msg_idx):
     """
     try:
         from lib.database import get_thread_db
+        from lib.database.conversation_repository import load_conversation
         db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT messages FROM conversations WHERE id=? AND user_id=?',
-            (conv_id, DEFAULT_USER_ID)
-        ).fetchone()
-        if not row:
+        snapshot = load_conversation(db, conv_id, user_id=DEFAULT_USER_ID)
+        if snapshot is None:
             return None
-        messages = json.loads(row['messages'] or '[]')
+        messages = snapshot.messages
     except Exception as e:
         logger.warning('[Translate] segment read failed for conv=%s: %s',
                        (conv_id or '?')[:8], e)

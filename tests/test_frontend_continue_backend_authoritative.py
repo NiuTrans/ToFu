@@ -35,6 +35,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -42,8 +43,10 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
-SRC_JS = os.path.join(JS_DIR, 'main', 'main_regen_continue.js')
+sys.path.insert(0, HERE)
+from _runtime_sections import runtime_section_path  # noqa: E402
+
+SRC_JS = runtime_section_path('main/main_regen_continue.js')
 
 
 def _node_available() -> bool:
@@ -55,9 +58,16 @@ def _node_available() -> bool:
 # self-contained _applyContinueCheckpoint + its window assignment.
 def _extract_reducer(src: str) -> str:
     start = src.index('function _applyContinueCheckpoint(')
-    end_marker = 'window._applyContinueCheckpoint = _applyContinueCheckpoint;'
-    end = src.index(end_marker) + len(end_marker)
-    return src[start:end]
+    brace = src.index('{', start)
+    depth = 0
+    for end in range(brace, len(src)):
+        if src[end] == '{':
+            depth += 1
+        elif src[end] == '}':
+            depth -= 1
+            if depth == 0:
+                return src[start:end + 1]
+    raise AssertionError('unbalanced _applyContinueCheckpoint body')
 
 
 _HARNESS = r"""

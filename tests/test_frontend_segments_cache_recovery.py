@@ -43,11 +43,11 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = os.path.join(ROOT, 'frontend', 'src', 'runtime')
 # Located by SYMBOL: this predicate was extracted out of core/conversations.js
 # in pt_3879f00e slice 3, which is what broke the hard-coded-path version.
 CONV_JS = sources_defining('_serverHasSegmentsLocalLacks')[0]
-SSE_JS = os.path.join(JS_DIR, 'ui', 'sse_pipeline.js')
+SSE_JS = os.path.join(JS_DIR, 'app-runtime.js')
 
 
 def _node_available() -> bool:

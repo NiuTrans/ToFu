@@ -188,28 +188,22 @@ def persist_snapshot_to_conversation(conv_id: str, agent_ids,
     if not conv_id:
         return False
     try:
-        from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
+        from lib.database import DOMAIN_CHAT, get_thread_db
     except Exception as e:  # pragma: no cover - import guard
         logger.debug('[SwarmSnapshot] DB layer import failed: %s', e)
         return False
 
     import time as _time
+    swarm_snapshot = snapshot
     for attempt in range(_MAX_CAS):
         try:
             db = get_thread_db(DOMAIN_CHAT)
-            row = db.execute(
-                'SELECT messages, updated_at, rev FROM conversations WHERE id=? AND user_id=1',
-                (conv_id,),
-            ).fetchone()
-            if not row or not row[0]:
+            from lib.database.conversation_repository import load_conversation
+            conv_snapshot = load_conversation(db, conv_id)
+            if conv_snapshot is None or not conv_snapshot.messages:
                 return False
-            cur_rev = row[2]  # Phase 4 W5: CAS on rev (loop re-reads each attempt)
-            try:
-                messages = json.loads(row[0] or '[]')
-            except (json.JSONDecodeError, TypeError):
-                logger.warning('[SwarmSnapshot] conv=%s unparseable messages JSON',
-                               conv_id[:8])
-                return False
+            cur_rev = conv_snapshot['rev']
+            messages = conv_snapshot.messages
 
             # #4: stamp EVERY matching spawn round with only the agents its
             # own handle launched — a follow-up wave shares this conversation
@@ -227,7 +221,7 @@ def persist_snapshot_to_conversation(conv_id: str, agent_ids,
                     if not hids:
                         continue
                     matched = True
-                    if stamp_round(r, filter_snapshot(snapshot, hids)):
+                    if stamp_round(r, filter_snapshot(swarm_snapshot, hids)):
                         any_changed = True
                         _stamped_seqs.add(_mi)
             if not matched:
@@ -247,43 +241,24 @@ def persist_snapshot_to_conversation(conv_id: str, agent_ids,
                 # on every matched round — correct no-ops, not failures.
                 return False
 
-            messages_json = json_dumps_pg(messages)
             now_ms = int(_time.time() * 1000)
-            cur = db.execute(
-                'UPDATE conversations SET messages=?, updated_at=? '
-                'WHERE id=? AND user_id=1 AND rev=?',
-                (messages_json, now_ms, conv_id, cur_rev),
-            )
-            db.commit()
-            if (getattr(cur, 'rowcount', 0) or 0) > 0:
-                # Phase 5 dual-write (flag-gated, inert when off): rounds
-                # stamped inside known message positions → seq-hint mirror.
-                # Guarded separately: the CAS UPDATE above already committed,
-                # so a mirror failure must not reach the `except` below and
-                # return False — that would report a landed snapshot as lost
-                # AND skip the cross-device notify.
-                try:
-                    from lib.database.messages_rows import mirror_write_and_commit
-                    mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms,
-                                            changed_seqs=sorted(_stamped_seqs))
-                except Exception as _mirror_err:
-                    logger.warning('[SwarmSnapshot] conv=%s row mirror failed '
-                                   '(non-fatal, snapshot already durable): %s',
-                                   conv_id[:8], _mirror_err, exc_info=True)
+            from lib.database.conversation_repository import replace_messages
+            result = replace_messages(
+                db, conv_id, messages, expected_rev=cur_rev,
+                metadata={'updated_at': now_ms},
+                changed_seqs=sorted(_stamped_seqs))
+            if result.applied:
                 logger.info('[SwarmSnapshot] conv=%s persisted snapshot (%d agents, '
                             'v=%d) onto spawn round', conv_id[:8],
-                            len(snapshot.get('agents') or []),
-                            _snapshot_version(snapshot))
+                            len(swarm_snapshot.get('agents') or []),
+                            _snapshot_version(swarm_snapshot))
                 # Event-driven cross-device sync: the persisted swarm panel is
                 # conversation body state, so push the post-write rev → a
                 # sibling tab with this conv open re-renders the panel without
                 # a manual refresh.
                 try:
                     from lib.conversations import notify_conv_changed
-                    _ss_rev_row = db.execute(
-                        'SELECT rev FROM conversations WHERE id=? AND user_id=1',
-                        (conv_id,)).fetchone()
-                    notify_conv_changed(conv_id, rev=(_ss_rev_row[0] if _ss_rev_row else None))
+                    notify_conv_changed(conv_id, rev=result.rev)
                 except Exception as _ne:
                     logger.debug('[SwarmSnapshot] conv-changed notify skipped conv=%s: %s',
                                  conv_id[:8], _ne)
@@ -302,5 +277,5 @@ def persist_snapshot_to_conversation(conv_id: str, agent_ids,
     # on reload the panel falls back to the (less complete) handle recovery.
     logger.warning('[SwarmSnapshot] conv=%s gave up after %d CAS misses (frontend '
                    'kept winning the row) — snapshot v=%d not persisted this round',
-                   conv_id[:8], _MAX_CAS, _snapshot_version(snapshot))
+                   conv_id[:8], _MAX_CAS, _snapshot_version(swarm_snapshot))
     return False

@@ -67,7 +67,6 @@ sub-modules; this ``__init__`` re-exports EVERY symbol so
 ``from lib.tools.registry import X`` (and ``registry.X`` attribute access)
 keeps working byte-identically. The import path is unchanged.
 
-  * :mod:`._latch`   — multiroot-sticky + tool-schema latch state & helpers.
   * :mod:`._spec`    — ``ToolContext`` / ``ToolSpec``, the single-home
     ``_TOOL_SPECS`` / ``_REGISTERED_KEYS`` registry, ``register_tool_spec`` /
     ``all_specs`` / handler sync, and ``assemble_tool_list``.
@@ -86,32 +85,6 @@ from __future__ import annotations
 from lib.log import get_logger
 
 logger = get_logger(__name__)
-
-
-# ── Prompt-cache stability latches (state single-homed in _latch) ─────
-from lib.tools.registry._latch import (  # noqa: E402,F401
-    _diagnose_byte_drift,
-    _hash_tool_list,
-    _multiroot_sticky,
-    _multiroot_sticky_lock,
-    _tool_latch,
-    _tool_latch_diff,
-    _tool_latch_diverged,
-    _tool_latch_lock,
-    _tool_names,
-    _toolset_latch_enabled,
-    clear_all_tool_list_latches,
-    clear_multiroot_sticky,
-    clear_project_ready_sticky,
-    clear_tool_list_latch,
-    is_multiroot_sticky,
-    is_project_ready_sticky,
-    latch_tool_list,
-    mark_multiroot_sticky,
-    mark_project_ready_sticky,
-    tool_list_diff,
-    tool_list_diverged,
-)
 
 
 # ── ToolContext / ToolSpec + the single-home spec registry ────────────
@@ -139,6 +112,7 @@ from lib.tools.registry._build import (  # noqa: E402,F401
     _build_human_guidance,
     _build_image_gen,
     _build_inspect_image,
+    _build_knowledge,
     _build_mcp,
     _build_memory,
     _build_project_or_code_exec,
@@ -174,14 +148,6 @@ __all__ = [
     # registry core
     'register_tool_spec', 'all_specs', 'sync_spec_handlers',
     'assemble_tool_list',
-    # multiroot sticky latch
-    'mark_multiroot_sticky', 'is_multiroot_sticky', 'clear_multiroot_sticky',
-    # project-ready sticky latch
-    'mark_project_ready_sticky', 'is_project_ready_sticky',
-    'clear_project_ready_sticky',
-    # tool-schema latch
-    'latch_tool_list', 'tool_list_diverged', 'tool_list_diff',
-    'clear_tool_list_latch', 'clear_all_tool_list_latches',
     # plugin discovery + allow-list
     'discover_plugin_specs', 'available_plugins', 'resolve_enabled_plugins',
 ]

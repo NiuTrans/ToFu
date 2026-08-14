@@ -27,7 +27,7 @@ from __future__ import annotations
 import time
 import uuid
 
-from flask import Blueprint, request
+from quart import Blueprint, request
 
 from lib.api_response import (
     api_bad_request, api_created, api_forbidden, api_not_found, api_ok,
@@ -35,7 +35,7 @@ from lib.api_response import (
 from lib.billing import (
     cost as _cost,
     InsufficientFunds,
-    deposit, debit, get_wallet, list_entries, list_prices,
+    deposit, debit, get_wallet, list_entries,
 )
 from lib.billing.users import get_user
 from lib.database import (
@@ -120,17 +120,20 @@ def _wallet_payload(user_id: str) -> dict:
           tags=['billing'], public=True)
 async def get_pricing():
     from lib.relay_config import billing_enabled
-    cfg = list_prices()
+    from lib.billing.pricing import get_default_margin
+    from lib.pricing import build_rate_card, get_pricing_data
+    card = build_rate_card()
     return api_ok(
         billing_enabled=billing_enabled(),
-        currency=cfg.get('currency', 'USD'),
-        default_margin=cfg.get('default_margin', 0.0),
-        default_model=cfg.get('default_model', {}),
-        models=cfg.get('models', {}),
-        version=cfg.get('version', 1),
-        unit='micro_credits_per_mtok',
-        notes=('1 credit = 1,000,000 micro-credits. Final bill = '
-                'base × (1 + margin); margin is applied at request time.'),
+        currency='mixed',
+        usd_to_cny=(get_pricing_data().get('usdToCny')),
+        default_margin=get_default_margin(),
+        models=card['models'], providers=card['providers'],
+        version=2,
+        unit='currency_per_million_tokens',
+        notes=('A tier is selected once from complete prompt tokens; input, '
+               'output, cache write and cache read share that tier. Final '
+               'debit applies the configured relay margin.'),
     )
 
 
@@ -477,7 +480,7 @@ async def list_codes_route():
           tags=['billing'], public=True)
 async def stripe_webhook_route():
     from lib.billing.payments import handle_stripe_webhook
-    payload = request.get_data() or b''
+    payload = await request.get_data() or b''
     sig = request.headers.get('Stripe-Signature', '')
     status, body = handle_stripe_webhook(payload, sig)
     if status >= 400:
@@ -495,8 +498,9 @@ async def stripe_webhook_route():
           tags=['billing'], public=True)
 async def alipay_notify_route():
     from lib.billing.payments import handle_alipay_notify
-    from flask import Response as _Resp
-    form = {k: request.form.get(k, '') for k in request.form.keys()}
+    from quart import Response as _Resp
+    submitted = await request.form
+    form = {k: submitted.get(k, '') for k in submitted.keys()}
     status, text = handle_alipay_notify(form)
     return _Resp(text, status=status, content_type='text/plain; charset=utf-8')
 

@@ -341,6 +341,18 @@ class StreamingToolAccumulator:
         if self._task.get('aborted'):
             return
 
+        # A program item and its children arrive in the same Responses stream.
+        # Defer program-issued calls until post-stream reconciliation so the
+        # canonical program parent + hard call budget exist before any child
+        # is announced or executed. Direct calls keep the latency prefetch.
+        caller = tool_call.get('caller')
+        if isinstance(caller, dict) and caller.get('type') == 'program':
+            logger.debug(
+                '[%s] StreamingToolExec: deferring program child %s '
+                '(tc_id=%s caller=%s) until parent reconciliation',
+                self._tid, fn_name, tc_id[:8], caller.get('caller_id', ''))
+            return
+
         # Note: we do NOT filter empty-args tool calls here.  During streaming
         # we can't tell phantom calls (model started a slot, never sent args)
         # from legitimate no-arg tools.  The post-stream
@@ -358,7 +370,9 @@ class StreamingToolAccumulator:
 
         # ── Emit tool_start SSE event immediately ──
         try:
-            self._emit_tool_start(fn_name, fn_args, tc_id, fn_args_raw or '{}')
+            self._emit_tool_start(
+                fn_name, fn_args, tc_id, fn_args_raw or '{}',
+                caller=tool_call.get('caller'))
         except Exception as e:
             logger.debug('[%s] StreamingToolExec: tool_start emission failed '
                          'for %s: %s', self._tid, fn_name, e)
@@ -378,7 +392,7 @@ class StreamingToolAccumulator:
             self._futures[tc_id] = (future, fn_name, fn_args, t0)
 
     def _emit_tool_start(self, fn_name: str, fn_args: dict, tc_id: str,
-                         tc_args_str: str):
+                         tc_args_str: str, caller=None):
         """Emit a tool_start SSE event + append round entry to task.
 
         Uses the same ``_build_tool_round_entry`` as ``parse_tool_calls``
@@ -404,6 +418,12 @@ class StreamingToolAccumulator:
         # Tag with LLM round (same as parse_tool_calls does)
         round_entry['llmRound'] = self._round_num
         event_payload['llmRound'] = self._round_num
+        if isinstance(caller, dict):
+            round_entry['caller'] = dict(caller)
+            event_payload['caller'] = dict(caller)
+            if caller.get('type') == 'program' and caller.get('caller_id'):
+                round_entry['_programCallId'] = caller['caller_id']
+                event_payload['programCallId'] = caller['caller_id']
 
         # Append to task's toolRounds and emit SSE event
         self._task['toolRounds'].append(round_entry)

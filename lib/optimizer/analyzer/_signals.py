@@ -9,7 +9,6 @@ read via the facade package for test monkeypatching.
 
 from __future__ import annotations
 
-import json
 import re
 from collections import Counter
 from datetime import datetime
@@ -72,22 +71,15 @@ def _collect_scheduler_signals() -> dict:
 def _collect_cost_outliers() -> dict:
     """Surface top-cost conversations from daily_cost_cache (no full scan)."""
     try:
-        from lib.database import DOMAIN_CHAT, get_thread_db
-        db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            "SELECT conversations_json FROM daily_cost_cache "
-            "ORDER BY date DESC LIMIT 1").fetchone()
+        from lib.storage import get_storage_client
+        row = get_storage_client().query(
+            'daily_cost.latest', {'user_id': 1})
     except Exception as e:
         logger.debug('[Optimizer.analyzer] cost cache scan skipped: %s', e)
         return {'top_cost_conversations': []}
     if not row:
         return {'top_cost_conversations': []}
-    raw = row['conversations_json'] if isinstance(row, dict) else row[0]
-    try:
-        data = json.loads(raw or '{}')
-    except (json.JSONDecodeError, TypeError) as e:
-        logger.debug('[Optimizer.analyzer] cost cache json invalid: %s', e)
-        return {'top_cost_conversations': []}
+    data = row.get('conversations') or {}
     if not isinstance(data, dict):
         return {'top_cost_conversations': []}
     def _cost_of(v):
@@ -122,12 +114,14 @@ def _collect_conversation_tool_distribution(cutoff_local: datetime) -> dict:
     Best-effort — on any DB error we return empty counters."""
     try:
         from lib.database import DOMAIN_CHAT, get_thread_db
+        from lib.database.conversation_repository import load_conversation
         db = get_thread_db(DOMAIN_CHAT)
         updated_ms = int(cutoff_local.timestamp() * 1000)
-        rows = db.execute(
-            'SELECT messages FROM conversations '
+        ids = db.execute(
+            'SELECT id FROM conversations '
             'WHERE updated_at >= ? ORDER BY updated_at DESC LIMIT 200',
             [updated_ms]).fetchall()
+        rows = [load_conversation(db, row['id']) for row in ids]
     except Exception as e:
         logger.warning('[Optimizer.analyzer] conversation scan skipped: %s', e)
         return {'tool_counts': {}, 'search_urls': [], 'fetch_urls': []}
@@ -137,17 +131,9 @@ def _collect_conversation_tool_distribution(cutoff_local: datetime) -> dict:
     fetch_urls: Counter = Counter()
 
     for row in rows:
-        raw = row['messages'] if isinstance(row, dict) else row[0]
-        try:
-            if isinstance(raw, (list, dict)):
-                messages = raw
-            else:
-                messages = json.loads(raw or '[]')
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.debug('[Optimizer.analyzer] could not parse messages: %s', e)
+        if row is None:
             continue
-        if not isinstance(messages, list):
-            continue
+        messages = row.messages
         for m in messages:
             if not isinstance(m, dict):
                 continue

@@ -102,7 +102,8 @@ class ChatResult:
 
     @property
     def ok(self) -> bool:
-        return self.status == 'done' and self.error is None
+        return (self.status == 'done' and self.error is None
+                and self.finish_reason != 'incomplete')
 
 
 def _start_task(messages: list, cfg: dict) -> dict:
@@ -201,10 +202,11 @@ def run_chat_stream(
 
     deadline = time.time() + timeout_s
     cursor = 0
+    from lib.task_replay import task_memory_replay_page
     while True:
-        with task['events_lock']:
-            new_events = list(task['events'][cursor:])
-            cursor = len(task['events'])
+        page = task_memory_replay_page(task, cursor)
+        new_events = page.events
+        cursor = page.next_cursor
 
         for ev in new_events:
             yield ev

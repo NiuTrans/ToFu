@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import base64
 import io
+from pathlib import Path
 import re
 
 import pytest
@@ -46,6 +47,23 @@ def _upload(flask_client, b64: str):
     resp = flask_client.post('/api/images/upload',
                              json={'base64': b64, 'mediaType': 'image/png'})
     return resp
+
+
+def test_upload_recreates_missing_runtime_directory(
+        flask_client, monkeypatch, tmp_path):
+    """A cleaned/replaced data mount must not require a server restart."""
+    import routes.upload as upload_mod
+
+    missing = tmp_path / 'recreated' / 'uploads' / 'images'
+    monkeypatch.setattr(upload_mod, 'UPLOAD_DIR', str(missing))
+    b64 = base64.b64encode(_tiny_png_bytes()).decode()
+
+    response = _upload(flask_client, b64)
+
+    assert response.status_code == 200, response.get_data(as_text=True)
+    payload = response.get_json()
+    assert payload.get('ok') is True
+    assert (missing / Path(payload['filename'])).is_file()
 
 
 @pytest.mark.usefixtures('flask_client')

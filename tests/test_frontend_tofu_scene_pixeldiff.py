@@ -13,7 +13,7 @@ image, not merely in the dab-coordinate array.
 
 How it's faithful (not a re-implementation):
   * The ENTIRE geometry/colour/alpha/composite stream comes from the REAL
-    shipped static/js/tofu-scene.js, recorded under node by tests/
+    migrated tofu-scene.js runtime section, recorded under node by tests/
     _scene_pixeldiff.js (base gradient wash + every resolved brush-dab of the
     baked buffer AND the per-frame overlay: glow, sparks, flow-deform, wake).
   * Only the RASTERIZER is ours — and it's `cairocffi` (libcairo), the SAME
@@ -40,11 +40,13 @@ Env gate: requires `node` on PATH + `cairocffi` importable; skipped otherwise
 import json
 import math
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
 
 from tests._jsdom import frontend_module_guard
+from tests._runtime_sections import runtime_section
 
 REPO = Path(__file__).resolve().parent.parent
 HARNESS = REPO / "tests" / "_scene_pixeldiff.js"
@@ -59,9 +61,6 @@ FOOT_X = 180.0            # pet foot-centre px (bar centre)
 MS = 1800.0              # enough frames for the disturbance dome to build
 
 
-SRC_PATH = REPO / "static" / "js" / "tofu-scene.js"
-
-
 def _freeze_field(src: str) -> str:
     """Transform the module source so the disturbance field never presses and
     never lingers — i.e. the pet still exists (glow/wake unchanged) but the
@@ -74,24 +73,22 @@ def _freeze_field(src: str) -> str:
     return a
 
 
-def _record(foot, freeze=False, decor="meadow"):
+def _record(foot, freeze=False, decor="meadow", source=None):
     """Record the real draw stream for a given scene. When freeze=True,
-    temporarily patch the shipped source to inert-disturbance, record, and
-    ALWAYS restore it (guarded + post-restore asserted, so a shipped file is
-    never left neutered)."""
-    original = None
+    transform an isolated runtime-section copy to inert-disturbance. The
+    repository source is never modified, even if node is killed or times out.
+    """
+    scene_source = source if source is not None else runtime_section('tofu-scene.js')
     if freeze:
-        original = SRC_PATH.read_text()
-        SRC_PATH.write_text(_freeze_field(original))
-    try:
+        scene_source = _freeze_field(scene_source)
+    with tempfile.TemporaryDirectory(prefix='tofu-scene-pixeldiff-') as temp_dir:
+        source_path = Path(temp_dir) / 'tofu-scene.js'
+        source_path.write_text(scene_source, encoding='utf-8')
         arg = "none" if foot is None else str(foot)
         out = subprocess.run(
-            ["node", str(HARNESS), str(W), str(H), arg, str(MS), decor],
+            ["node", str(HARNESS), str(W), str(H), arg, str(MS), decor,
+             str(source_path)],
             capture_output=True, text=True, cwd=str(REPO), timeout=30)
-    finally:
-        if original is not None:
-            SRC_PATH.write_text(original)
-            assert SRC_PATH.read_text() == original, "failed to restore tofu-scene.js!"
     assert out.returncode == 0, f"harness failed: {out.stderr}\n{out.stdout[:500]}"
     return json.loads(out.stdout.strip().splitlines()[-1])
 
@@ -337,7 +334,7 @@ def test_NEUTER_pale_foreground_has_no_near_plane_presence():
     translucent blades + near-invisible understory) → the near-band presence in
     MEADOW collapses below the depth floor, proving the shade/alpha seed is what
     creates the plane (not merely the presence of more dabs)."""
-    original = SRC_PATH.read_text()
+    original = runtime_section('tofu-scene.js')
     # near-transparent, no-shade blades (meadow path uses fgShade @ fgMix)
     pale = original.replace(
         "color: _mixHex(fgColors[(R() * fgColors.length) | 0], fgShade, fgMix),",
@@ -350,15 +347,10 @@ def test_NEUTER_pale_foreground_has_no_near_plane_presence():
         "var uc = _mixHex(fgColors[(R() * fgColors.length) | 0], uShadeSeed, 0.02);  /* NEUTER understory */", 1)
     assert "NEUTER understory" in pale, "pale neuter did not match the understory seed line"
     assert pale != original, "pale neuter matched nothing"
-    SRC_PATH.write_text(pale)
-    try:
-        rec = _record(None, decor="meadow")
-        with_fg = _pixels(_replay([rec["buffer"], rec["frame"], rec["fg"]]))
-        without_fg = _pixels(_replay([rec["buffer"], rec["frame"]]))
-        drop = _band_luma(without_fg, 0, W, H - 14, H) - _band_luma(with_fg, 0, W, H - 14, H)
-    finally:
-        SRC_PATH.write_text(original)
-        assert SRC_PATH.read_text() == original, "failed to restore tofu-scene.js!"
+    rec = _record(None, decor="meadow", source=pale)
+    with_fg = _pixels(_replay([rec["buffer"], rec["frame"], rec["fg"]]))
+    without_fg = _pixels(_replay([rec["buffer"], rec["frame"]]))
+    drop = _band_luma(without_fg, 0, W, H - 14, H) - _band_luma(with_fg, 0, W, H - 14, H)
     assert drop < 12.0, \
         f"pale fg still darkened meadow by {drop:.1f}/255 — the depth test would not bite"
 

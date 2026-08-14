@@ -169,13 +169,15 @@ class TestAuthSourceStore:
         assert src['cookies'][0]['value'] == 'tok'
 
     def test_delete_default_resets_not_removes(self):
-        A.upsert_source('xiaohongshu.com', cookie_header='web_session=tok', enabled=True)
+        A.upsert_source('xiaohongshu.com', cookie_header='web_session=tok',
+                        access_strategy='cookies_replay', enabled=True)
         assert A.delete_source('xiaohongshu.com') is True
         rows = {r['domain']: r for r in A.list_sources()}
         # Default domain still listed, but reset.
         assert 'xiaohongshu.com' in rows
         assert rows['xiaohongshu.com']['enabled'] is False
         assert rows['xiaohongshu.com']['has_cookies'] is False
+        assert rows['xiaohongshu.com']['access_strategy'] == 'browser_first'
 
     def test_toggle_unknown_returns_false(self):
         assert A.set_enabled('definitely-not-a-source.example', True) is False

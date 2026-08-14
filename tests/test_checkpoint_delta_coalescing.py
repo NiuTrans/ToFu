@@ -90,6 +90,18 @@ def _set_min_delta(n):
     return prev
 
 
+def _set_blob_cap(n):
+    """Set the large-conversation checkpoint cap at every imported binding."""
+    import lib.tasks_pkg.manager as _mgr
+    import lib.tasks_pkg.manager._sync as _sync
+    import lib.tasks_pkg.manager._state as _st
+    prev = _sync.CHECKPOINT_CONV_BLOB_MAX_BYTES
+    _sync.CHECKPOINT_CONV_BLOB_MAX_BYTES = n
+    _mgr.CHECKPOINT_CONV_BLOB_MAX_BYTES = n
+    _st.CHECKPOINT_CONV_BLOB_MAX_BYTES = n
+    return prev
+
+
 def _cleanup(db, conv_id, task_id):
     from lib.database import db_execute_with_retry
     from lib.tasks_pkg.manager import _conv_latest_task, _conv_latest_task_lock
@@ -254,6 +266,65 @@ def test_terminal_sync_converges_messages_to_full_content():
         assert final == 'Z' * 100 + 'tail', (
             f'terminal sync must converge messages to full content, got {len(final)}')
     finally:
+        _cleanup(db, conv_id, task['id'])
+
+
+def test_large_conversation_uses_task_owned_checkpoint_then_terminal_converges():
+    """A huge history must not be read/re-written on every streaming tick."""
+    from lib.database import DOMAIN_CHAT, get_thread_db
+    import lib.tasks_pkg.manager as mgr
+
+    conv_id = 'ckpt-large-lean'
+    db = get_thread_db(DOMAIN_CHAT)
+    original = [
+        {'role': 'user', 'content': 'U1', 'padding': 'p' * 20_000},
+        {'role': 'assistant', 'content': ''},
+    ]
+    _seed_conv(db, conv_id, original)
+    task = _mk_task(conv_id)
+    prior_cap = _set_blob_cap(1024)
+    try:
+        task['content'] = 'durable partial' * 20
+        mgr.checkpoint_task_partial(task)
+
+        # Conversation mirror stays byte-equivalent: no huge blob rewrite.
+        assert _read_messages(db, conv_id) == original
+        tr = _read_task_results(db, task['id'])
+        assert tr is not None and tr[0] == task['content']
+        assert task.get('_largeConvCheckpointDeferredLogged') is True
+
+        # A real terminal sync still performs the full convergence write.
+        task['status'] = 'done'
+        task['finishReason'] = 'stop'
+        mgr._sync_result_to_conversation(task, mgr.build_result_meta(task))
+        final = _read_messages(db, conv_id)
+        assert final[-1]['content'] == task['content']
+        assert final[-1]['finishReason'] == 'stop'
+    finally:
+        _set_blob_cap(prior_cap)
+        _cleanup(db, conv_id, task['id'])
+
+
+def test_small_conversation_keeps_direct_reload_checkpoint():
+    """Below the cap, preserve the existing direct conversation mirror."""
+    from lib.database import DOMAIN_CHAT, get_thread_db
+    import lib.tasks_pkg.manager as mgr
+
+    conv_id = 'ckpt-small-direct'
+    db = get_thread_db(DOMAIN_CHAT)
+    _seed_conv(db, conv_id, [
+        {'role': 'user', 'content': 'U1'},
+        {'role': 'assistant', 'content': ''},
+    ])
+    task = _mk_task(conv_id)
+    prior_cap = _set_blob_cap(1_000_000)
+    try:
+        task['content'] = 'S' * 200
+        mgr.checkpoint_task_partial(task)
+        assert _read_messages(db, conv_id)[-1]['content'] == 'S' * 200
+        assert not task.get('_largeConvCheckpointDeferredLogged')
+    finally:
+        _set_blob_cap(prior_cap)
         _cleanup(db, conv_id, task['id'])
 
 

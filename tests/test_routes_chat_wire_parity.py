@@ -155,12 +155,13 @@ def test_pure_helper_wire_parity_smoke():
     assert _running_checkpoint_verdict(sharded=True) == ('running', True)
     assert _running_checkpoint_verdict(sharded=False) == ('interrupted', False)
 
-    # _warm_resume_serviceable: pure math on (cursor, n_events).
-    assert _warm_resume_serviceable(None, 10) is False
-    assert _warm_resume_serviceable(-1, 10) is False
-    assert _warm_resume_serviceable(3, 10) is True   # resume_from=4 <= 10
-    assert _warm_resume_serviceable(9, 10) is True   # resume_from=10 <= 10 (boundary)
-    assert _warm_resume_serviceable(10, 10) is False  # resume_from=11 > 10 → resync
+    # Last-Event-ID is checked against an absolute retained window.
+    assert _warm_resume_serviceable(None, 4, 10) is False
+    assert _warm_resume_serviceable(-1, 4, 10) is False
+    assert _warm_resume_serviceable(2, 4, 10) is False  # next=3 was evicted
+    assert _warm_resume_serviceable(3, 4, 10) is True   # next=4 retained
+    assert _warm_resume_serviceable(9, 4, 10) is True   # next=10 boundary
+    assert _warm_resume_serviceable(10, 4, 10) is False  # future → resync
 
 
 @_unit
@@ -722,7 +723,7 @@ def test_plan_warm_resume_none_on_cursor_ahead_of_buffer():
         'events': [{'type': 'delta'}, {'type': 'delta'}],  # len=2
         'events_lock': threading.Lock(),
     }
-    # cursor=10 is way past len(events)=2 → resume_from=11 > 2 → False.
+    # Last-Event-ID=10 requests seq=11, past the producer boundary 2.
     plan = cd.plan_warm_resume(task, '10', 'task-stale')
     assert plan is None, (
         f'cursor ahead of buffer must yield None (resync); got {plan!r}')
@@ -732,11 +733,11 @@ def test_plan_warm_resume_none_on_cursor_ahead_of_buffer():
 def test_plan_warm_resume_serviceable_slices_post_cursor_events():
     """Slice 7: valid cursor in-buffer returns a WarmResumePlan with
     resume_from = cursor + 1 (SSE spec: Last-Event-ID is the id of the
-    last RECEIVED event, resume AFTER it) and replay_events sliced from
-    exactly that index onward.
+    last RECEIVED event, resume AFTER it) and replay frames selected from
+    exactly that absolute sequence onward.
 
-    Wire-parity check: matches the pre-slice inline
-    ``task['events'][cursor+1:]`` behaviour byte-for-byte.
+    Wire-parity check: sequence zero retains the same bytes as the historical
+    physical-list implementation while also working after head eviction.
     """
     import lib.chat_dispatch as cd
     import threading
@@ -753,6 +754,10 @@ def test_plan_warm_resume_serviceable_slices_post_cursor_events():
             {'type': 'delta', 'text': 'd'},   # id 3
         ],
         'events_lock': threading.Lock(),
+        # The warm replay starts AFTER cursor=1, so this already-consumed
+        # current phase would otherwise never reach the reconnecting client.
+        'phase': {'phase': 'working', 'detail': 'Preparing tools…',
+                  'detailKey': 'stream.phase.startupTools'},
     }
     # cursor=1 → resume_from=2 → replay [{c}, {d}]
     plan = cd.plan_warm_resume(task, '1', 'task-warm')
@@ -764,12 +769,59 @@ def test_plan_warm_resume_serviceable_slices_post_cursor_events():
         {'type': 'delta', 'text': 'c'},
         {'type': 'delta', 'text': 'd'},
     ], f'replay_events must slice task[events][resume_from:]; got {plan.replay_events}'
+    assert plan.replay_frames == [
+        (2, {'type': 'delta', 'text': 'c'}),
+        (3, {'type': 'delta', 'text': 'd'}),
+    ]
+    assert plan.next_cursor == 4
     # The leading state must carry content / thinking / status /
     # toolRounds (the resume-snapshot invariant — see the ★ comment
     # in the pre-slice inline code about frontend keep-longer guard).
     assert plan.resume_state['content'] == 'hi'
     assert plan.resume_state['status'] == 'running'
     assert plan.resume_state['toolRounds'] == []
+    # RED without the warm-state phase block: cursor-skipped phase events do
+    # not replay, so omitting task['phase'] here re-opens the bare “等待中…”
+    # placeholder on reconnect.
+    assert plan.resume_state['phase'] == {
+        'phase': 'working', 'detail': 'Preparing tools…',
+        'detailKey': 'stream.phase.startupTools'}
+    # Snapshot isolation: a later append_event rewrite must not mutate the
+    # frame already handed to this connection.
+    assert plan.resume_state['phase'] is not task['phase']
+
+
+@_unit
+def test_plan_warm_resume_uses_absolute_sequences_after_buffer_rollover():
+    """Last-Event-ID is a producer sequence, not a retained-list index."""
+    import lib.chat_dispatch as cd
+    import threading
+
+    task = {
+        'content': 'complete-so-far',
+        'thinking': '',
+        'status': 'running',
+        'error': None,
+        'toolRounds': [],
+        '_eventBaseSeq': 2048,
+        '_eventNextSeq': 2051,
+        'events': [
+            {'type': 'delta', 'seq': 2048, 'text': 'a'},
+            {'type': 'delta', 'seq': 2049, 'text': 'b'},
+            {'type': 'delta', 'seq': 2050, 'text': 'c'},
+        ],
+        'events_lock': threading.Lock(),
+    }
+
+    plan = cd.plan_warm_resume(task, '2048', 'task-roll')
+    assert plan is not None
+    assert plan.resume_from == 2049
+    assert plan.replay_frames == [
+        (2049, task['events'][1]),
+        (2050, task['events'][2]),
+    ]
+    assert plan.next_cursor == 2051
+    assert cd.plan_warm_resume(task, '2046', 'task-roll') is None
 
 
 @_unit
@@ -787,7 +839,7 @@ def test_build_fresh_state_snapshot_carries_full_task_state():
         peerInjects / userSteerInjects — each copied only when present
       * endpoint_mode → endpointMode / endpointPhase / endpointIteration /
         endpointTurns / endpointStopReason
-      * cursor == len(task['events'])
+      * cursor is the absolute next-event sequence at snapshot time
 
     ★ TERMINAL-FIELD ASSERTIONS REVERSED 2026-07-31 (duplicate-bubble root fix).
       This test's fixture is `status='running'` WITH `finishReason='stop'` +
@@ -835,6 +887,8 @@ def test_build_fresh_state_snapshot_carries_full_task_state():
         '_endpoint_iteration': 2,
         '_endpoint_turns': [{'t': 1}],
         '_endpoint_stop_reason': 'critic_approved',
+        'phase': {'phase': 'working', 'detail': 'Reading project files…',
+                  'detailKey': 'stream.phase.startupProjectFiles'},
     }
     state, meta, cursor = cd.build_fresh_state_snapshot(task)
     assert state['content'] == 'hello'
@@ -842,6 +896,12 @@ def test_build_fresh_state_snapshot_carries_full_task_state():
     assert state['status'] == 'running'
     assert state['createdAt'] == int(1_700_000_000.5 * 1000)
     assert state['toolRounds'] == [{'name': 'read_files'}]
+    # RED without the fresh-state phase block: the fresh cursor is the absolute
+    # producer boundary, so no historical phase event replays and the client falls back
+    # to the generic waiting pulse.
+    assert state['phase'] == {
+        'phase': 'working', 'detail': 'Reading project files…',
+        'detailKey': 'stream.phase.startupProjectFiles'}
     # ★ REVERSED: a RUNNING snapshot must not claim the turn has settled.
     assert 'finishReason' not in state, (
         'a status=running `state` snapshot must not carry finishReason — '
@@ -862,7 +922,7 @@ def test_build_fresh_state_snapshot_carries_full_task_state():
     assert state['endpointIteration'] == 2
     assert state['endpointTurns'] == [{'t': 1}]
     assert state['endpointStopReason'] == 'critic_approved'
-    assert cursor == 3  # len(events)
+    assert cursor == 3
     # meta must carry the raw dict extract_task_meta produced, UNGATED —
     # chat_stream reuses it to synthesize the fresh-terminal `done` event,
     # which MUST carry the terminal fields. This is why the gate lives at the
@@ -880,6 +940,30 @@ def test_build_fresh_state_snapshot_carries_full_task_state():
     assert state_done['finishReason'] == 'stop'
     assert state_done['usage'] == {'prompt': 10}
     assert state_done['preset'] == 'default'
+    # Even if a stale phase dict is present, a done task has no current work.
+    assert 'phase' not in state_done
+
+
+@_unit
+def test_fresh_snapshot_cursor_is_absolute_after_buffer_rollover():
+    import lib.chat_dispatch as cd
+    import threading
+
+    task = {
+        'content': 'authoritative', 'thinking': '', 'status': 'running',
+        'error': None, 'toolRounds': [],
+        '_eventBaseSeq': 40, '_eventNextSeq': 43,
+        'events': [
+            {'type': 'delta', 'seq': 40},
+            {'type': 'delta', 'seq': 41},
+            {'type': 'delta', 'seq': 42},
+        ],
+        'events_lock': threading.Lock(),
+    }
+
+    state, _meta, cursor = cd.build_fresh_state_snapshot(task)
+    assert state['content'] == 'authoritative'
+    assert cursor == 43
 
 
 # ── Slice 8: chat_stream LIVE-path tick planner → lib/chat_dispatch.next_live_tick ─
@@ -930,6 +1014,10 @@ def test_chat_stream_delegates_live_loop_to_next_live_tick():
     assert _re.search(r'\bnext_live_tick\s*\(', src), (
         'routes/chat.py must CALL next_live_tick(...) — a bare mention '
         'in a comment does not satisfy slice 8')
+    assert "if _tick.kind == 'resync'" in src, (
+        'the route must turn a cursor-window miss into a full state resync')
+    assert "f'id: {_tick.next_cursor}" not in src, (
+        'synthetic late-done frames must not advance Last-Event-ID')
     # Specific inline call-site markers that USED to live in the LIVE
     # loop are GONE.
     assert 'SSE connection reached maximum duration' not in src, (
@@ -1030,8 +1118,8 @@ def test_next_live_tick_sse_timeout_action():
 @_unit
 def test_next_live_tick_events_action_slices_from_cursor():
     """Slice 8: with new events past the cursor, the tick returns
-    kind='events' with frames = [(event_id, event), ...] indexed from
-    cursor_before onward and next_cursor = new len(events).
+    kind='events' with frames = [(event_id, event), ...] sequenced from
+    cursor_before onward and next_cursor = the new producer boundary.
     """
     from lib.chat_dispatch import next_live_tick
     import threading
@@ -1055,6 +1143,67 @@ def test_next_live_tick_events_action_slices_from_cursor():
         (2, {'type': 'delta', 'text': 'c'}),
     ], f'frames must be [(eid, evt)] from cursor onward; got {v.frames}'
     assert v.next_cursor == 3
+
+
+@_unit
+def test_next_live_tick_keeps_delivering_across_runtime_rollover():
+    """The 2048-event production freeze reproduced with max_events=3."""
+    from lib.agent_core.task_runtime import TaskRuntime
+    from lib.chat_dispatch import next_live_tick
+
+    runtime = TaskRuntime('chat-rollover', max_events=3, push_channel='')
+    task = runtime.create(task_id='chat-rollover-task')
+    task['status'] = 'running'
+    for index in range(3):
+        runtime.append_event(task['id'], {'type': 'delta', 'index': index})
+
+    first = next_live_tick(
+        task=task, cursor=0, sse_gen=1,
+        stream_start=0.0, sse_max_duration=7200,
+        last_t=0.0, now=1.0, task_id_short='rollover',
+    )
+    assert [(seq, event['index']) for seq, event in first.frames] == [
+        (0, 0), (1, 1), (2, 2),
+    ]
+    assert first.next_cursor == 3
+
+    # Two appends evict [0,1]. Physical len stays 3, but absolute next seq is
+    # 5. The old events[cursor:] code returned [] forever here.
+    runtime.append_event(task['id'], {'type': 'delta', 'index': 3})
+    runtime.append_event(task['id'], {'type': 'delta', 'index': 4})
+    second = next_live_tick(
+        task=task, cursor=first.next_cursor, sse_gen=1,
+        stream_start=0.0, sse_max_duration=7200,
+        last_t=1.0, now=2.0, task_id_short='rollover',
+    )
+    assert second.kind == 'events'
+    assert [(seq, event['index']) for seq, event in second.frames] == [
+        (3, 3), (4, 4),
+    ]
+    assert second.next_cursor == 5
+
+
+@_unit
+def test_next_live_tick_resyncs_stale_and_future_absolute_cursors():
+    from lib.chat_dispatch import next_live_tick
+    import threading
+
+    task = {
+        'events': [
+            {'type': 'delta', 'seq': 20},
+            {'type': 'delta', 'seq': 21},
+        ],
+        '_eventBaseSeq': 20,
+        '_eventNextSeq': 22,
+        'events_lock': threading.Lock(),
+        'status': 'running',
+    }
+    common = dict(
+        task=task, sse_gen=1, stream_start=0.0, sse_max_duration=7200,
+        last_t=0.0, now=1.0, task_id_short='resync',
+    )
+    assert next_live_tick(cursor=19, **common).kind == 'resync'
+    assert next_live_tick(cursor=23, **common).kind == 'resync'
 
 
 @_unit
@@ -1084,7 +1233,8 @@ def test_next_live_tick_late_done_when_task_terminal_no_new_events():
     # Baton stamped.
     assert v.late_done_evt.get('autopilotNextTaskId') == 'task-baton'
     assert v.late_done_evt.get('autopilotVuMessage') == {'x': 1}
-    # next_cursor == len(events) so caller uses it as the id: field.
+    # next_cursor remains the absolute producer boundary; synthetic done has
+    # no SSE id and therefore does not mutate Last-Event-ID.
     assert v.next_cursor == 1
 
 
@@ -1449,22 +1599,13 @@ def test_build_cold_replay_response_returns_not_found_when_task_absent():
     row) MUST return api_not_found('Task not found'). Byte-identical to
     the pre-slice inline block's final ``return api_not_found(...)``."""
     import asyncio
+    import uuid
     import lib.chat_dispatch as cd
     from lib.database import DOMAIN_CHAT, get_db
 
     # Direct call with a task_id that has no persisted events and no
     # task_results row. Use a synthetic id unlikely to collide.
-    _task_id = 'cv-cold-not-found-xyz-987'
-
-    # Best-effort: ensure the row really is absent (test isolation on a
-    # shared test DB).
-    try:
-        db = get_db(DOMAIN_CHAT)
-        db.execute('DELETE FROM task_results WHERE task_id=?', (_task_id,))
-        db.commit()
-    except Exception:
-        pass  # DB not available in this test env → build_cold_replay
-              # will still return not_found via the row-is-None path.
+    _task_id = 'cv-cold-not-found-' + uuid.uuid4().hex
 
     async def _run():
         # Empty Last-Event-ID → no persisted-replay branch fires.
@@ -1476,6 +1617,12 @@ def test_build_cold_replay_response_returns_not_found_when_task_absent():
 
     async def _wrapped():
         async with app.test_request_context('/x'):
+            # Ensure the precondition instead of swallowing a broken DB setup:
+            # the subject itself needs this same app-scoped DB to prove its
+            # not-found branch.
+            db = get_db(DOMAIN_CHAT)
+            db.execute('DELETE FROM task_results WHERE task_id=?', (_task_id,))
+            db.commit()
             resp = await _run()
             # api_not_found returns (Response, 404).
             assert isinstance(resp, tuple), (
@@ -1487,6 +1634,8 @@ def test_build_cold_replay_response_returns_not_found_when_task_absent():
 
 
 if __name__ == '__main__':
+    from tests._standalone_guard import guard_standalone_db
+    guard_standalone_db('test_routes_chat_wire_parity.__main__')
     tests = [
         test_routes_chat_symbols_all_importable,
         test_extracted_helpers_are_callable,
@@ -1510,13 +1659,17 @@ if __name__ == '__main__':
         test_plan_warm_resume_none_on_no_cursor,
         test_plan_warm_resume_none_on_cursor_ahead_of_buffer,
         test_plan_warm_resume_serviceable_slices_post_cursor_events,
+        test_plan_warm_resume_uses_absolute_sequences_after_buffer_rollover,
         test_build_fresh_state_snapshot_carries_full_task_state,
+        test_fresh_snapshot_cursor_is_absolute_after_buffer_rollover,
         test_chat_dispatch_exposes_next_live_tick_and_helpers,
         test_chat_stream_delegates_live_loop_to_next_live_tick,
         test_is_task_terminal_pure_over_task,
         test_apply_autopilot_baton_copies_next_task_id_and_vu_msg,
         test_next_live_tick_sse_timeout_action,
         test_next_live_tick_events_action_slices_from_cursor,
+        test_next_live_tick_keeps_delivering_across_runtime_rollover,
+        test_next_live_tick_resyncs_stale_and_future_absolute_cursors,
         test_next_live_tick_late_done_when_task_terminal_no_new_events,
         test_next_live_tick_superseded_when_sse_gen_advanced,
         test_next_live_tick_keepalive_on_15s_gap,

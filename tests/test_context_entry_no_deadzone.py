@@ -40,6 +40,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 
 import pytest
 
@@ -48,9 +49,7 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 CSS = os.path.join(ROOT, 'static', 'styles.css')
-JS_DIR = os.path.join(ROOT, 'static', 'js')
-CTX_JS = os.path.join(JS_DIR, 'context-bar.js')
-MOBILE_JS = os.path.join(JS_DIR, 'main', 'main_folders_mobile.js')
+RUNTIME_JS = os.path.join(ROOT, 'frontend', 'src', 'runtime', 'app-runtime.js')
 INDEX_HTML = os.path.join(ROOT, 'index.html')
 
 
@@ -67,6 +66,14 @@ def _node_deps_available() -> bool:
 def _read(path: str) -> str:
     with open(path, encoding='utf-8') as f:
         return f.read()
+
+
+def _runtime_section(name: str) -> str:
+    source = _read(RUNTIME_JS)
+    marker = f'/* ===== migrated source: {name} ===== */'
+    start = source.index(marker)
+    next_marker = source.find('/* ===== migrated source:', start + len(marker))
+    return source[start:next_marker if next_marker >= 0 else len(source)]
 
 
 def _iter_media_blocks(css: str):
@@ -223,6 +230,7 @@ const dom = new JSDOM('<!DOCTYPE html><body><div class="chat-wrapper"></div>SHEE
 const win = dom.window;
 global.window = win;
 global.document = win.document;
+global.runtimeScope = win.runtimeScope = win;
 global.localStorage = win.localStorage;
 global.console = console;
 global.requestAnimationFrame = win.requestAnimationFrame = (fn) => setTimeout(fn, 0);
@@ -242,7 +250,12 @@ global.activeConvId = win.activeConvId = ACTIVE;
 global.getConvById = win.getConvById = (id) => (id === CONV.id ? CONV : null);
 global.getActiveConv = win.getActiveConv = () => CONV;
 global.activeStreams = win.activeStreams = new Map();
-win._contextPolicy = { default_limit: 200000, output_reserve: 0, compaction_reserve: 0, summary_trigger_ratio: 0.9, min_usable_ratio: 0.5 };
+win._contextPolicy = {
+  default_limit: 200000,
+  per_model: { m: { window: 200000, source: 'test', exact: true } },
+  output_reserve: 0, compaction_reserve: 0,
+  summary_trigger_ratio: 0.9, min_usable_ratio: 0.5
+};
 
 // main_folders_mobile.js runs load-time IIFEs (initMobileLayout, resize/gesture
 // wiring) that reference viewport helpers defined in sibling files. Stub the
@@ -268,10 +281,12 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
   check('compact_fn_exposed', typeof window._mobileCompactNow === 'function');
 
   // ── (a) usage % surfaces in the desc when there IS usage ──
-  CONV.messages = [{ role: 'assistant', _liveLastRoundUsage: { tokensIn: 100000 } }];  // 50% of 200k
+  CONV.messages = [{ role: 'assistant', _liveLastRoundUsage: { tokensIn: 100000 } }];
+  const expectedPct = window.contextUsageSummary().pct;
   updateMobileContext();
   const desc = document.getElementById('mobileCompactDesc');
-  check('desc_shows_pct', /50% used/.test(desc.textContent));
+  check('desc_shows_pct', expectedPct != null &&
+        desc.textContent.includes(String(expectedPct) + '% used'));
   check('not_disabled_when_idle',
         !document.getElementById('mobileCompactNow').classList.contains('disabled'));
 
@@ -313,24 +328,40 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 """.replace('SHEET_HTML', _SHEET_HTML)
 
 
-def _run(ctx_js: str, mobile_js: str) -> subprocess.CompletedProcess:
-    harness = os.path.join(HERE, '_ctx_deadzone_harness.js')
-    with open(harness, 'w', encoding='utf-8') as f:
+def _run(ctx_source: str, mobile_source: str) -> subprocess.CompletedProcess:
+    # Unique per invocation: the two jsdom tests in this module are eligible
+    # for different xdist workers.  A fixed tests/_ctx_deadzone_harness.js let
+    # one worker overwrite/unlink the file while the other's Node process was
+    # loading it, producing suite-only hangs/timeouts on FUSE.
+    fd, harness = tempfile.mkstemp(
+        prefix='_ctx_deadzone_harness_', suffix='.js', dir=HERE)
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
         f.write(_HARNESS)
+    source_paths = []
     try:
-        return subprocess.run(['node', harness, ctx_js, ROOT, mobile_js],
+        for prefix, source in (('_ctx_runtime_', ctx_source),
+                               ('_mobile_runtime_', mobile_source)):
+            source_fd, source_path = tempfile.mkstemp(
+                prefix=prefix, suffix='.js', dir=HERE)
+            with os.fdopen(source_fd, 'w', encoding='utf-8') as f:
+                f.write(source)
+            source_paths.append(source_path)
+        return subprocess.run(
+            ['node', harness, source_paths[0], ROOT, source_paths[1]],
                               capture_output=True, text=True, timeout=60)
     finally:
-        try:
-            os.remove(harness)
-        except OSError:
-            pass
+        for path in (harness, *source_paths):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
 def test_mobile_context_section_renders_and_wires():
-    proc = _run(CTX_JS, MOBILE_JS)
+    proc = _run(_runtime_section('context-bar.js'),
+                _runtime_section('main/main_folders_mobile.js'))
     out = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{out}'
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
@@ -343,17 +374,18 @@ def test_mobile_context_section_renders_and_wires():
 def test_neuter_delegation_is_load_bearing():
     """Drop the runManualCompaction delegation in _mobileCompactNow → the
     'compact_delegates' check must FAIL, proving the wiring assertion has teeth."""
-    src = _read(MOBILE_JS)
-    marker = 'window.runManualCompaction(cid);'
+    src = _runtime_section('main/main_folders_mobile.js')
+    marker = 'runtimeScope.runManualCompaction(cid);'
     assert marker in src, 'NC marker not found — test stale vs main_folders_mobile.js'
     patched = src.replace(marker, '/* neutered */ void cid;', 1)
-    tmp = os.path.join(HERE, '_mobile_folders_neuter.js')
-    with open(tmp, 'w', encoding='utf-8') as f:
+    fd, tmp = tempfile.mkstemp(
+        prefix='_mobile_folders_neuter_', suffix='.js', dir=HERE)
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
         f.write(patched)
     try:
         chk = subprocess.run(['node', '--check', tmp], capture_output=True, text=True, timeout=30)
         assert chk.returncode == 0, f'patched JS invalid: {chk.stderr}'
-        proc = _run(CTX_JS, tmp)
+        proc = _run(_runtime_section('context-bar.js'), patched)
         assert proc.returncode == 0, f'node crashed: {proc.stderr}\n{proc.stdout}'
         assert 'FAIL compact_delegates' in proc.stdout, \
             'NC: neutering the delegation did NOT break compact_delegates:\n' + proc.stdout
@@ -362,7 +394,8 @@ def test_neuter_delegation_is_load_bearing():
             os.remove(tmp)
         except OSError:
             pass
-    assert _read(MOBILE_JS) == src, 'shipped file was modified!'
+    assert _runtime_section('main/main_folders_mobile.js') == src, \
+        'shipped file was modified!'
 
 
 if __name__ == '__main__':

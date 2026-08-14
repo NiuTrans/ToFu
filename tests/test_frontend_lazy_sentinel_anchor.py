@@ -87,11 +87,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_names, runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = runtime_sections_dir()
 ESCAPE_HTML = os.path.join(JS_DIR, 'core', 'escape_html.js')
 SAFE_HTML = os.path.join(JS_DIR, 'core', 'safe_html.js')
 CHAT_RENDER = os.path.join(JS_DIR, 'ui', 'chat_render.js')
@@ -332,7 +334,8 @@ _TAIL_HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
 const ROOT = process.argv[2];
-const NC = process.argv[3] || '';
+const SOURCES = process.argv[3];
+const NC = process.argv[4] || '';
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM('<!DOCTYPE html><body><div id="chatContainer"><div id="chatInner"></div></div></body>', { url: 'http://localhost/' });
 const win = dom.window;
@@ -363,7 +366,7 @@ global._convRenderFingerprint = win._convRenderFingerprint = () => 'fp';
 // The ordered-insert primitive must load BEFORE its consumer, exactly as the
 // bundler orders them.
 let primSrc = '';
-try { primSrc = fs.readFileSync(path.join(ROOT, 'static/js/core/chatinner_dom.js'), 'utf8'); }
+try { primSrc = fs.readFileSync(path.join(SOURCES, 'core/chatinner_dom.js'), 'utf8'); }
 catch (e) {
   console.log('FAIL primitive_missing core/chatinner_dom.js not found');
   console.log(out.join('\n')); process.exit(0);
@@ -378,7 +381,7 @@ if (NC === 'tail_anchor') {
   }
 }
 (0, eval)(primSrc);
-(0, eval)(fs.readFileSync(path.join(ROOT, 'static/js/conv_view.js'), 'utf8'));
+(0, eval)(fs.readFileSync(path.join(SOURCES, 'conv_view.js'), 'utf8'));
 if (!win.ConvView) { console.log('FAIL convview_missing'); console.log(out.join('\n')); process.exit(0); }
 check('convview_loaded', true);
 
@@ -457,7 +460,7 @@ def _run_tail(nc: str = '') -> str:
     with open(harness, 'w') as f:
         f.write(_TAIL_HARNESS)
     try:
-        proc = subprocess.run(['node', harness, ROOT, nc],
+        proc = subprocess.run(['node', harness, ROOT, JS_DIR, nc],
                               capture_output=True, text=True, timeout=60)
     finally:
         try:
@@ -641,20 +644,12 @@ def test_no_file_positionally_writes_chatinner_outside_the_primitive():
 
 
 def _bundler_list(name):
-    """Parse a top-level list literal out of the REAL lib/js_bundler.py, so
-    this invariant can never drift from what the bundler actually ships."""
-    with open(os.path.join(ROOT, 'lib', 'js_bundler.py'), encoding='utf-8') as f:
-        src = f.read()
-    marker = name + ' = ['
-    start = src.index(marker) + len(marker)
-    depth, i = 1, start
-    while i < len(src) and depth:
-        if src[i] == '[':
-            depth += 1
-        elif src[i] == ']':
-            depth -= 1
-        i += 1
-    return re.findall(r"'([^']+\.js)'", src[start:i])
+    """Expose the generated retained-runtime source order used by Vite."""
+    if name == '_BUNDLE_FILES':
+        return list(runtime_section_names())
+    if name == '_CLASSIC_ASSET_FILES':
+        return []
+    return None
 
 
 def test_primitive_loads_before_every_writer():
@@ -665,7 +660,7 @@ def test_primitive_loads_before_every_writer():
     away from its predicate degrades it, quietly.
     """
     bundle = _bundler_list('_BUNDLE_FILES')
-    deferred = _bundler_list('_DEFERRED_FILES') or []
+    deferred = _bundler_list('_CLASSIC_ASSET_FILES') or []
     assert bundle, 'could not parse _BUNDLE_FILES from lib/js_bundler.py'
 
     primitive = 'core/chatinner_dom.js'
@@ -676,7 +671,7 @@ def test_primitive_loads_before_every_writer():
         'furniture-aware insert; without it every writer falls back to a raw '
         'append and message order silently inverts.')
     assert primitive not in deferred, (
-        f'{primitive} was moved into _DEFERRED_FILES. Its writers fall back to '
+        f'{primitive} was moved into _CLASSIC_ASSET_FILES. Its writers fall back to '
         'raw positional appends when it is missing, so deferring it '
         'reintroduces the ordering bug it exists to prevent.')
     p_idx = bundle.index(primitive)
@@ -698,7 +693,8 @@ _INVARIANT_HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
 const ROOT = process.argv[2];
-const NC = process.argv[3] || '';
+const SOURCES = process.argv[3];
+const NC = process.argv[4] || '';
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM('<!DOCTYPE html><body><div id="chatInner"></div></body>', { url: 'http://localhost/' });
 const win = dom.window;
@@ -714,7 +710,7 @@ global.console = { warn: (m) => warned.push(String(m)), log: console.log, error:
  * POST /api/client-error). Capturing it proves the signal LEAVES the page. */
 win.Api = global.Api = { clientError: { report: (p) => { beacons.push(p); } } };
 
-let src = fs.readFileSync(path.join(ROOT, 'static/js/core/chatinner_dom.js'), 'utf8');
+let src = fs.readFileSync(path.join(SOURCES, 'core/chatinner_dom.js'), 'utf8');
 if (NC === 'invariant') {
   const before = src;
   src = src.replace(/function assertChatInnerOrder\(inner, conv, site\) \{/,
@@ -814,7 +810,7 @@ def _run_invariant(nc: str = '') -> str:
     with open(harness, 'w') as f:
         f.write(_INVARIANT_HARNESS)
     try:
-        proc = subprocess.run(['node', harness, ROOT, nc],
+        proc = subprocess.run(['node', harness, ROOT, JS_DIR, nc],
                               capture_output=True, text=True, timeout=60)
     finally:
         try:

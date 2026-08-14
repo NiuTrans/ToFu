@@ -12,6 +12,54 @@ from lib.orchestration_engine import FlowExecutor
 from lib.orchestration_endpoint_adapter import EndpointEventAdapter
 
 
+def test_endpoint_wire_policy_is_physically_separate_from_stateful_adapter():
+    from pathlib import Path
+
+    from lib.orchestration_endpoint_projection import (
+        endpoint_emits_for_role,
+        project_endpoint_next_phase,
+        project_endpoint_phase_event,
+        project_endpoint_turn_metadata,
+    )
+
+    assert EndpointEventAdapter._derive_emits is endpoint_emits_for_role
+    assert project_endpoint_turn_metadata(
+        'virtual_user', '', projection='autopilot',
+        vu_msg_id='msg-1', vu_run_id='run-1',
+    ) == {
+        'flowProjection': 'autopilot',
+        'turnRole': 'virtual_user',
+        'emits': 'user',
+        'vuMsgId': 'msg-1',
+        'autopilotRunId': 'run-1',
+    }
+    assert project_endpoint_next_phase(
+        'continue', pending_replan=True) == 'planner'
+    assert project_endpoint_next_phase('[VERDICT: STOP]') == 'stop'
+    assert project_endpoint_phase_event({
+        'phase': 'retrying',
+        'detail': 'rate limited',
+        'attempt': 2,
+        'status_code': 429,
+        'detailKey': 'stream.phase.retryRateLimited',
+        'detailArgs': {'seconds': 3},
+    }) == {
+        'type': 'phase',
+        'phase': 'retrying',
+        'detail': 'rate limited',
+        'attempt': 2,
+        'statusCode': 429,
+        'detailKey': 'stream.phase.retryRateLimited',
+        'detailArgs': {'seconds': 3},
+    }
+
+    adapter_source = Path(
+        'lib/orchestration_endpoint_adapter.py').read_text()
+    assert 'VERIFIER_ROLES' not in adapter_source
+    assert 'build_phase(' not in adapter_source
+    assert 'def _derive_emits' not in adapter_source
+
+
 def _run(defn, runner):
     adapter = EndpointEventAdapter()
     FlowExecutor(defn, agent_runner=runner, on_event=adapter.on_event).run()
@@ -106,6 +154,110 @@ class AdapterTest(unittest.TestCase):
         self.assertEqual(len(emitted), len(adapter.messages))
         self.assertTrue(any(m.get('_isEndpointPlanner') for m in emitted))
 
+
+class AutopilotProjectionContractTest(unittest.TestCase):
+    """A VU graph uses endpoint transport without inheriting critic meaning."""
+
+    def test_projection_is_derived_from_semantic_roles(self):
+        from lib.orchestration import (
+            build_autopilot_definition,
+            chat_projection_for_flow,
+        )
+
+        self.assertEqual(
+            chat_projection_for_flow(build_autopilot_definition()),
+            'autopilot',
+        )
+        self.assertEqual(
+            chat_projection_for_flow(build_endpoint_definition()),
+            'endpoint',
+        )
+        # A richer VU graph may also contain a planner; VU identity wins.
+        mixed = build_endpoint_definition()
+        mixed['nodes'].append({
+            'id': 'vu-extra', 'type': 'role', 'role': 'virtual_user',
+        })
+        self.assertEqual(chat_projection_for_flow(mixed), 'autopilot')
+        generic = {
+            'nodes': [{'id': 'writer', 'type': 'role', 'role': 'writer'}],
+        }
+        self.assertEqual(chat_projection_for_flow(generic), 'flow')
+        nested = {
+            'nodes': [{
+                'id': 'box', 'type': 'subflow',
+                'params': {'scope': 'isolated', 'definition':
+                           build_autopilot_definition()},
+            }],
+        }
+        self.assertEqual(chat_projection_for_flow(nested), 'autopilot')
+
+    def test_virtual_user_live_identity_matches_persisted_turn(self):
+        streamed = []
+        adapter = EndpointEventAdapter(
+            on_stream=streamed.append,
+            projection='autopilot',
+            vu_flow=True,
+            vu_run_id='run-1',
+        )
+        adapter.on_event({
+            'type': 'step_start', 'node_id': 'vu',
+            'role': 'virtual_user', 'emits': 'user',
+        })
+        start = streamed[-1]
+        self.assertEqual(start['type'], 'endpoint_iteration')
+        self.assertEqual(start['flowProjection'], 'autopilot')
+        self.assertEqual(start['turnRole'], 'virtual_user')
+        self.assertTrue(start['vuMsgId'])
+        self.assertEqual(start['autopilotRunId'], 'run-1')
+
+        adapter.on_event({
+            'type': 'step_delta', 'node_id': 'vu',
+            'role': 'virtual_user', 'emits': 'user',
+            'kind': 'content', 'chunk': 'Keep going',
+        })
+        delta = streamed[-1]
+        self.assertEqual(delta['vuMsgId'], start['vuMsgId'])
+        self.assertEqual(delta['turnRole'], 'virtual_user')
+
+        adapter.on_event({
+            'type': 'step_complete', 'node_id': 'vu',
+            'role': 'virtual_user', 'emits': 'user',
+            'output': '[PROGRESS: resolved=1 remaining=2]\nKeep going',
+        })
+        self.assertEqual(len(adapter.messages), 1)
+        vu_msg = adapter.messages[0]
+        self.assertTrue(vu_msg['_isVirtualUser'])
+        self.assertNotIn('_isEndpointReview', vu_msg)
+        self.assertEqual(vu_msg['_msgId'], start['vuMsgId'])
+        self.assertEqual(vu_msg['_autopilotRunId'], 'run-1')
+        self.assertEqual(vu_msg['content'], 'Keep going')
+
+    def test_task_done_discards_placeholder_and_never_persists_token(self):
+        streamed = []
+        adapter = EndpointEventAdapter(
+            on_stream=streamed.append,
+            projection='autopilot',
+            vu_flow=True,
+            vu_run_id='run-2',
+        )
+        adapter.on_event({
+            'type': 'step_start', 'node_id': 'vu',
+            'role': 'virtual_user', 'emits': 'user',
+        })
+        vu_msg_id = streamed[-1]['vuMsgId']
+        adapter.on_event({
+            'type': 'step_complete', 'node_id': 'vu',
+            'role': 'virtual_user', 'emits': 'user',
+            'output': '[VU: TASK_DONE]',
+        })
+        self.assertEqual(adapter.messages, [])
+        terminal = streamed[-1]
+        self.assertEqual(terminal['type'], 'endpoint_critic_msg')
+        self.assertEqual(terminal['vuMsgId'], vu_msg_id)
+        self.assertEqual(terminal['next_phase'], 'stop')
+        self.assertTrue(terminal['discard'])
+        self.assertEqual(terminal['content'], '')
+
     def test_step_phase_for_producer_becomes_wire_phase(self):
         """Engine ``step_phase`` for an assistant producer → wire ``phase``
         event on the live stream (the "waiting for model…" signal), and is
@@ -171,7 +323,7 @@ class AdapterTest(unittest.TestCase):
             role = node.get('role', 'general')
             spec = SubTaskSpec(role=role,
                                objective=render_role_brief(node) or 'go',
-                               context=ctx, max_rounds=1)
+                               context=ctx)
             nid = node.get('id')
             emits = resolve_emits(node)
 

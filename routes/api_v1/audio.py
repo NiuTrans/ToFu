@@ -18,7 +18,9 @@ caller holding the ``chat`` scope — same tier as the completion it feeds.
 
 from __future__ import annotations
 
-from flask import Blueprint, request
+from quart import Blueprint, request
+
+from lib.quart_sync import request_files, request_form
 
 from lib.api_response import api_bad_request, api_error, api_ok
 from lib.log import get_logger
@@ -85,9 +87,10 @@ def transcribe_audio_v1():
                        request.content_length, cap)
         return api_bad_request(f'Audio too large (max {cap // (1024 * 1024)} MB)')
 
-    if 'file' not in request.files:
+    files = request_files()
+    if 'file' not in files:
         return api_bad_request('No file provided')
-    f = request.files['file']
+    f = files['file']
     filename = f.filename or ''
     if not filename:
         return api_bad_request('No filename')
@@ -100,8 +103,9 @@ def transcribe_audio_v1():
                        len(audio_bytes), cap)
         return api_bad_request(f'Audio too large (max {cap // (1024 * 1024)} MB)')
 
-    language = (request.form.get('language') or '').strip() or None
-    prompt = (request.form.get('prompt') or '').strip() or None
+    form = request_form()
+    language = (form.get('language') or '').strip() or None
+    prompt = (form.get('prompt') or '').strip() or None
 
     try:
         result = transcribe(audio_bytes, filename,

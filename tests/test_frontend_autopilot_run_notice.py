@@ -57,7 +57,7 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _conv_bundle_sources import source_argv  # noqa: E402
+from tests._runtime_sections import runtime_section_path  # noqa: E402
 
 try:
     from tests._jsdom import node_deps_available, skip_or_fail  # noqa: E402
@@ -93,7 +93,9 @@ def _run(dom, summaries, *, override=None):
     # module jsdom' instead of skipping loudly.
     if not node_deps_available():
         skip_or_fail('node + jsdom dev-deps not installed (run `npm install`)')
-    argv = source_argv('_applyAutopilotRunNotices', override=override)
+    if override:
+        raise AssertionError('run-notice overrides must target its migrated section')
+    argv = [runtime_section_path('ui/chat_render.js')]
     harness = r"""
 const fs = require('fs');
 const { JSDOM } = require('jsdom');

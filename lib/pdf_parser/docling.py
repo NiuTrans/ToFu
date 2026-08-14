@@ -65,10 +65,10 @@ def _docling_thread_count() -> int:
     return min(8, _allowed_cpu_count())
 
 
-# NOTE: ORT/OMP thread caps are seeded into the environment in
-# ``lib/pdf_parser/_common.py`` BEFORE ``import docling`` runs — putting
-# them here would be too late if onnxruntime is loaded transitively by
-# the docling import chain.
+# ORT/OMP environment hints are seeded in ``lib/pdf_parser/_common.py``.  The
+# SessionOptions guard is deliberately installed below at first converter use,
+# immediately before the first docling import, so ordinary server boot does not
+# import ONNX merely to patch a capability that may never be requested.
 
 
 # ── Lazy-loaded converter ──
@@ -113,6 +113,8 @@ def _get_converter():
         if _converter is not None:
             return _converter
         try:
+            from lib.onnx_thread_guard import install_onnx_thread_guard
+            install_onnx_thread_guard()
             from docling.document_converter import DocumentConverter
             t0 = _time.time()
             num_threads = _docling_thread_count()

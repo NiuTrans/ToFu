@@ -57,7 +57,7 @@ _agent_executor = None
 
 
 def set_agent_executor(executor) -> None:
-    """Install the dedicated agent-worker ThreadPoolExecutor (server.py)."""
+    """Install, or during shutdown clear, the dedicated agent executor."""
     global _agent_executor
     _agent_executor = executor
 
@@ -70,7 +70,7 @@ _serving_loop = None
 
 
 def set_serving_loop(loop) -> None:
-    """Register the server's main asyncio loop (called once at startup)."""
+    """Register, or during shutdown clear, the server's main asyncio loop."""
     global _serving_loop
     _serving_loop = loop
 
@@ -102,6 +102,21 @@ def spawn_task(task: dict) -> None:
     use this instead of threading.Thread(target=run_task, ...).
     """
     from lib.tasks_pkg.orchestrator import run_task
+
+    # First truthful phase BEFORE the executor/coroutine/thread submission:
+    # every later startup phase rewrites the same task['phase'] snapshot, so
+    # a client that attaches after this event was appended but before the
+    # worker's first beat still restores the real submit state instead of
+    # falling back to the generic waiting pulse. Kept inside try so a test's
+    # bare task dict (no registered runtime) can never break submission.
+    try:
+        from lib.agent_core.events import Phase, emit_phase
+        emit_phase(task, Phase.WORKING,
+                   detail='Submitted to the agent worker…',
+                   detailKey='stream.phase.submittedToWorker')
+    except Exception as exc:
+        _spawn_logger.debug('[Spawn] initial phase emit failed task=%s: %s',
+                            task.get('id', '?')[:8], exc)
 
     try:
         loop = asyncio.get_running_loop()

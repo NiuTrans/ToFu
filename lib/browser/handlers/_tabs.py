@@ -13,6 +13,20 @@ from lib.log import get_logger
 logger = get_logger(__name__)
 
 
+def _result_url_allowed(result) -> bool:
+    """Fail closed when a read completed after a cross-domain redirect."""
+    if not isinstance(result, dict) or not result.get('url'):
+        return False
+    try:
+        from lib.browser.access import is_read_allowed
+        from lib.browser.queue import _get_active_client, client_user_id
+        return is_read_allowed(
+            client_user_id(_get_active_client()), result.get('url') or '')
+    except Exception as exc:
+        logger.debug('read result URL policy check failed closed: %s', exc)
+        return False
+
+
 def _facade():
     """Return the package facade so collaborators resolve at call time.
 
@@ -33,6 +47,18 @@ def _handle_list_tabs(fn_args):
     if error:
         return f'Error listing tabs: {error}'
     if isinstance(result, list):
+        # A read denial applies even to tab enumeration: titles/URLs from a
+        # denied domain are page data and must not leak through this side path.
+        try:
+            from lib.browser.access import is_read_allowed
+            from lib.browser.queue import _get_active_client, client_user_id
+            cid = _get_active_client()
+            uid = client_user_id(cid)
+            result = [t for t in result
+                      if not t.get('url') or is_read_allowed(uid, t.get('url'))]
+        except Exception as exc:
+            logger.debug('tab access filtering failed closed: %s', exc)
+            result = []
         lines = [f'Open tabs ({len(result)} total):\n']
         for t in result:
             active_mark = ' * (active)' if t.get('active') else ''
@@ -114,6 +140,8 @@ def _handle_read_tab(fn_args):
     }, timeout=30)
     if error:
         return f'Error reading tab {tab_id}: {error}'
+    if not _result_url_allowed(result):
+        return 'Error: browser read result was denied by domain policy'
     return _render_read_result(result, tab_id)
 
 

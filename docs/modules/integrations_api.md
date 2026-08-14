@@ -335,8 +335,9 @@ historical `lib→routes` cycle. Confirmed the dependency flows strictly routes�
 6. **Every JS→backend call goes through `Api.*`** (`test_frontend_api_isolation`
    ratchet — CLAUDE.md §3.2.0). The count is monotonic-decreasing; CI fails on a
    new raw `fetch('/api/...')`.
-7. **A new top-level `static/js/*.js` MUST be added to `_BUNDLE_FILES`** (CLAUDE.md
-   §3.2.1) or it silently no-ops in production.
+7. **Frontend code must be reachable from one of the two Vite entries**
+   (`frontend/src/main.ts` or `frontend/src/admin.ts`). Lazy domains use an
+   explicit dynamic `import()`; production never scans a script directory.
 8. **`register_all` mounts plugins fail-soft** via entry-point groups — a vanilla
    install with no plugin is a no-op; a duplicate blueprint name is skipped, logged.
 9. **The single abort handler is `routes/chat.py::chat_abort`** — a second

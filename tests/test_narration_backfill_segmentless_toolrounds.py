@@ -144,6 +144,32 @@ def _install(monkeypatch, conn):
     monkeypatch.setattr(rt, '_translate_freetext', _fake_tf)
     import lib.database as _db
     monkeypatch.setattr(_db, 'get_thread_db', lambda domain=None: conn)
+    import lib.database.conversation_repository as repo
+
+    def _load(_db_conn, conv_id, **_kwargs):
+        return repo.ConversationSnapshot(
+            metadata={
+                'id': conv_id, 'user_id': 1, 'rev': conn.rev,
+                'msg_count': len(json.loads(conn.messages_json)),
+                'messages_rows_rev': None,
+                'updated_at': conn.updated_at, 'settings': '{}',
+            },
+            messages=json.loads(conn.messages_json),
+            source='legacy_blob',
+        )
+
+    def _replace(_db_conn, _conv_id, messages, *, expected_rev=None,
+                 metadata=None, **_kwargs):
+        if expected_rev is not None and int(expected_rev) != conn.rev:
+            return repo.ConversationWriteResult(False, None)
+        conn.messages_json = json.dumps(messages)
+        conn.updated_at = int((metadata or {}).get(
+            'updated_at', conn.updated_at))
+        conn.rev += 1
+        return repo.ConversationWriteResult(True, conn.rev)
+
+    monkeypatch.setattr(repo, 'load_conversation', _load)
+    monkeypatch.setattr(repo, 'replace_messages', _replace)
     import lib.push as _push
     monkeypatch.setattr(_push, 'push_event', lambda *a, **k: None, raising=False)
 
@@ -196,15 +222,12 @@ def test_reuses_translate_partial_by_round_zero_llm(monkeypatch):
         calls['n'] += 1
         return ('ZH:' + text), {'_dispatch': {'model': 'fake-mt'}}
 
-    monkeypatch.setattr(rt, '_translate_freetext', _counting_tf)
-    import lib.database as _db
-    import lib.push as _push
     conn = _FakeConn('conv-reuse', [_segmentless_msg(partial_by_round={
         '0': '我将调查“我的一天”功能。',
         '2': '历史余额指的是成本数据。',
     })])
-    monkeypatch.setattr(_db, 'get_thread_db', lambda domain=None: conn)
-    monkeypatch.setattr(_push, 'push_event', lambda *a, **k: None, raising=False)
+    _install(monkeypatch, conn)
+    monkeypatch.setattr(rt, '_translate_freetext', _counting_tf)
 
     stamped = sb.backfill_message_narration_sync(
         'conv-reuse', 0, 'm1', 'Chinese', source='English')

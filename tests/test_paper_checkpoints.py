@@ -118,28 +118,23 @@ class _Patched:
                     {'prompt_tokens': 80, 'completion_tokens': 30})
 
         ce.dispatch_stream = _fake
-        import lib.database as _dbmod
-        import lib.database._core_schema as _schema
-        self._orig['get_thread_db'] = getattr(_dbmod, 'get_thread_db', None)
-        self._orig['upsert'] = _schema.upsert
+        import lib.storage as _storage_mod
+        self._orig['get_storage_client'] = _storage_mod.get_storage_client
 
-        class _FakeDB:
-            def execute(self, *a, **k):
-                return self
+        class _FakeClient:
+            def command(self, operation, payload, command_id):
+                assert operation == 'paper.report.upsert'
+                assert command_id.startswith('paper.checkpoints.upsert:')
+                rec.persisted = payload
+                return {'saved': True}
 
-        def _fake_upsert(db, table, row, **kw):
-            rec.persisted = row
-
-        _dbmod.get_thread_db = lambda: _FakeDB()
-        _schema.upsert = _fake_upsert
-        self._dbmod = _dbmod
-        self._schema = _schema
+        _storage_mod.get_storage_client = lambda *, write=False: _FakeClient()
+        self._storage_mod = _storage_mod
         return self
 
     def __exit__(self, *exc):
         ce.dispatch_stream = self._orig['dispatch_stream']
-        self._dbmod.get_thread_db = self._orig['get_thread_db']
-        self._schema.upsert = self._orig['upsert']
+        self._storage_mod.get_storage_client = self._orig['get_storage_client']
         return False
 
 
@@ -154,7 +149,7 @@ def test_generate_anchor_persist():
     u = out['usage']
     assert u and u['prompt_tokens'] == 80 and u['completion_tokens'] == 30, f'usage: {u}'
     assert out['persisted'] is True
-    meta = json.loads(p.persisted['meta'])
+    meta = p.persisted['meta']
     assert meta['kind'] == 'checkpoints' and meta['v'] == 2
     assert len(meta['items']) == 2 and meta['usage'] == u
     assert p.persisted['lang'] == 'checkpoints:en'

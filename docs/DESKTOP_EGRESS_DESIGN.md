@@ -483,8 +483,8 @@ token 只在请求的 headers 里由服务器注入）。
 :: ② 办公机装受控端（正式路径，2026-08-02 起；此前的「拷贝 chatui 仓库
 ::    + pip install requests」临时路径退役）
 ::    本地控制 →「这台电脑」→ 受控端·轻量（TofuAgent-Setup-x.y.z-win64.exe，
-::    服务器直连下载，约 53 MB）。首次启动粘贴连接行（本地控制一键生成，
-::    含地址+token），托盘勾选「允许中继订阅流量」（= --allow-egress）；
+::    服务器直连下载，约 53 MB）。下载后直接运行，服务器地址与
+::    连接凭据已内置，无需解压、配对或输入；托盘勾选「允许中继订阅流量」；
 ::    无人值守机器务必再勾「Start with Windows」（重启不断桥）
 
 :: ③ 起 agent（key 在服务器 data/config/.egress_bridge_key，0600）

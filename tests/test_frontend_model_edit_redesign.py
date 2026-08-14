@@ -58,7 +58,7 @@ pytestmark = pytest.mark.unit
 MODEL_EDIT_JS = os.path.join(JS_DIR, 'settings', 'model_edit.js')
 PROVIDER_FACES_JS = os.path.join(JS_DIR, 'settings', 'provider_faces.js')
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-I18N_JS = os.path.join(ROOT, 'static', 'js', 'i18n.js')
+LOCALE_DIR = os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales')
 STYLES_CSS = os.path.join(ROOT, 'static', 'styles.css')
 
 _HTML = ('<!DOCTYPE html><body><div id="list">'
@@ -377,8 +377,8 @@ try {
     pinOpts.some((s) => s.indexOf('— openai') >= 0));
   check('multi_face_has_no_provider_proto_select',
     form.querySelector('.stg-edit-proto') === null);
-  check('cap_buttons_render_all_nine',
-    form.querySelectorAll('.stg-cap-btn').length === 9);
+  check('cap_buttons_render_all_ten',
+    form.querySelectorAll('.stg-cap-btn').length === 10);
 
   // ══ 8. Single-face provider: the wire protocol is editable in-dialog ══
   // (The owner's 2026-08-06 complaint: "nowhere to configure OpenAI /
@@ -580,36 +580,36 @@ def test_edit_grid_is_uniform_two_column():
 
 def test_new_i18n_keys_have_both_languages():
     """A missing key renders as its literal dotted name."""
-    i18n = _read(I18N_JS)
+    locales = {
+        lang: json.loads(_read(os.path.join(LOCALE_DIR, lang + '.json')))
+        for lang in ('zh', 'en')
+    }
     keys = [
         'settings.meFaceAutoResolved', 'settings.meFaceAutoPending',
         'settings.meFaceAutoRefused', 'settings.meFaceAutoSkipped',
         'settings.meFaceAutoDraft', 'settings.meFaceDefaultFace',
     ]
-    missing = []
-    for k in keys:
-        m = re.search(r"^\s*'%s':\s*\{.*$" % re.escape(k), i18n, re.M)
-        if not m:
-            missing.append('%s (absent)' % k)
-        elif 'zh:' not in m.group(0) or 'en:' not in m.group(0):
-            missing.append('%s (missing zh or en)' % k)
+    missing = [k for k in keys
+               if any(not locales[lang].get(k) for lang in locales)]
     assert not missing, 'i18n keys incomplete: %s' % missing
     # The hints must no longer tell the user to type commas.
     for k in ('settings.meAliasesHint', 'settings.meRequestIdsHint'):
-        m = re.search(r"^\s*'%s':\s*\{.*$" % re.escape(k), i18n, re.M)
-        assert m, '%s missing' % k
-        assert '逗号' not in m.group(0) and 'comma-separated' not in m.group(0), (
+        assert all(locales[lang].get(k) for lang in locales), '%s missing' % k
+        joined = ' '.join(locales[lang][k] for lang in locales)
+        assert '逗号' not in joined and 'comma-separated' not in joined, (
             '%s still instructs comma separation' % k)
 
 
 def test_used_auto_note_keys_all_defined():
     """Every settings.* key model_edit.js asks for must exist in i18n.js
     (a typo'd key renders as raw dotted text)."""
-    i18n = _read(I18N_JS)
+    locales = [json.loads(_read(os.path.join(LOCALE_DIR, lang + '.json')))
+               for lang in ('zh', 'en')]
     src = _read(MODEL_EDIT_JS)
     used = set(re.findall(r"t\(\s*'(settings\.[A-Za-z0-9_]+)'", src))
     assert used, 'no i18n keys found — scan is vacuous'
-    missing = [k for k in sorted(used) if ("'%s':" % k) not in i18n]
+    missing = [k for k in sorted(used)
+               if any(k not in locale for locale in locales)]
     assert not missing, 'model_edit.js uses undefined i18n keys: %s' % missing
 
 

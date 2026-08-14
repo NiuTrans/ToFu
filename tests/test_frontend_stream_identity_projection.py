@@ -75,7 +75,9 @@ def _extract_fn(src: str, name: str) -> str:
 
 
 def _run_node(script: str) -> str:
-    proc = subprocess.run(['node', '-e', script], capture_output=True,
+    # Feed source over stdin instead of argv. The SSE module is deliberately
+    # large and can exceed Linux ARG_MAX when embedded in a ``node -e`` string.
+    proc = subprocess.run(['node', '-'], input=script, capture_output=True,
                           text=True, timeout=60, cwd=ROOT)
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{proc.stdout}'
     return proc.stdout.strip()

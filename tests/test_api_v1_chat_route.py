@@ -13,28 +13,6 @@ import tempfile
 import unittest
 
 
-def _install_shim():
-    import quart
-    sys.modules['flask'] = quart
-    for attr in ('json', 'globals', 'helpers', 'wrappers', 'ctx'):
-        qs = f'quart.{attr}'
-        if qs in sys.modules:
-            sys.modules[f'flask.{attr}'] = sys.modules[qs]
-    from quart.wrappers import Request as _QR
-    # If server.py's _install_flask_shim ran first, get_json is already
-    # the sync-safe wrapper. Detect by inspecting the function — a
-    # coroutine function is the unpatched original.
-    import inspect
-    if inspect.iscoroutinefunction(_QR.get_json):
-        _orig = _QR.get_json
-
-        def _sync_get_json(self, *a, **kw):
-            import asyncio as _a
-            coro = _orig(self, *a, **kw)
-            return _a.run(coro)
-        _QR.get_json = _sync_get_json
-
-
 def _new_loop_run(coro):
     loop = asyncio.new_event_loop()
     try:
@@ -47,7 +25,6 @@ class ChatRouteTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        _install_shim()
         cls._tmp = tempfile.TemporaryDirectory()
         from lib import api_keys
         cls._orig = api_keys._STORE_PATH
@@ -57,7 +34,8 @@ class ChatRouteTest(unittest.TestCase):
         os.environ['TUNNEL_TOKEN'] = 'test-tunnel-no-real'
 
         from quart import Quart
-        cls.app = Quart(__name__)
+        cls.app = Quart(__name__, static_folder=None)
+        cls.app.config.setdefault('PROVIDE_AUTOMATIC_OPTIONS', True)
         cls.app.config['TESTING'] = True
         from routes.api_v1.auth import (
             attach_rate_headers, bearer_auth_before_request,

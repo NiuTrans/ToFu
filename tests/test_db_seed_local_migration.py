@@ -363,7 +363,9 @@ def test_migrator_stale_local_parked_then_reseeded(tmp_path, monkeypatch):
     out = _migrate(local, tmp_path)
     assert out == local                        # flip succeeds → serve local
     assert calls == ['seed', 'flip']
-    assert not os.path.exists(local + '/PG_VERSION') or True  # local re-created by fake seed path
+    # The stale directory was moved aside.  The fake seed deliberately does
+    # not create a replacement PG_VERSION, so the original location is empty.
+    assert not os.path.exists(os.path.join(local, 'PG_VERSION'))
     parked = [p for p in os.listdir(os.path.dirname(local))
               if os.path.basename(p).startswith('pgdata.stale.')]
     assert parked, 'the stale local copy was not parked aside before re-seed'
@@ -406,3 +408,80 @@ def test_restore_feeds_psql_via_stdin_with_filter():
     assert 'stdin=subprocess.PIPE' in src
     assert "'-f', '-'" in src
     assert '_filter_dump_head' in src
+
+
+def test_restore_uses_file_backed_stderr_and_reaps_process(tmp_path, monkeypatch):
+    """Large psql diagnostics cannot deadlock the dump writer on a PIPE."""
+    import subprocess
+    from types import SimpleNamespace
+
+    import lib.database._bootstrap._database as d
+
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    dump = data_dir / 'pg_backup.sql'
+    dump.write_bytes(
+        b'DROP ROLE IF EXISTS "dbuser";\n'
+        b'CREATE ROLE "dbuser";\n'
+        b'COPY payload FROM stdin;\nrow\n\\.\n')
+
+    monkeypatch.setattr(d, '_find_pg_binary', lambda _name: '/fake/psql')
+    monkeypatch.setattr(d.shutil, 'which', lambda _path: '/fake/psql')
+    monkeypatch.setattr(
+        d.subprocess, 'run',
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout='0\n', stderr=''))
+
+    captured = {}
+
+    class _Input:
+        def __init__(self):
+            self.data = bytearray()
+            self.closed = False
+
+        def write(self, value):
+            self.data.extend(value)
+            return len(value)
+
+        def close(self):
+            self.closed = True
+
+    class _Process:
+        def __init__(self, stderr):
+            self.stdin = _Input()
+            self.returncode = None
+            self._stderr = stderr
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return 0
+
+    def _popen(*_args, **kwargs):
+        assert kwargs['stdout'] is subprocess.DEVNULL
+        assert kwargs['stderr'] is not subprocess.PIPE
+        # More than a typical OS pipe capacity. A file-backed sink accepts it
+        # before the child consumes stdin; the old PIPE topology could not.
+        kwargs['stderr'].write(b'diagnostic\n' * 100_000)
+        proc = _Process(kwargs['stderr'])
+        captured['proc'] = proc
+        captured['stdin'] = proc.stdin
+        return proc
+
+    monkeypatch.setattr(d.subprocess, 'Popen', _popen)
+    d._restore_from_sql_dump_if_present(
+        str(tmp_path), 5432, 'dbuser', 'tofu')
+
+    proc = captured['proc']
+    stdin = captured['stdin']
+    assert proc.returncode == 0
+    assert stdin.closed is True
+    assert b'DROP ROLE' not in stdin.data
+    assert b'CREATE ROLE' not in stdin.data
+    assert b'COPY payload FROM stdin;' in stdin.data
+    assert not dump.exists()

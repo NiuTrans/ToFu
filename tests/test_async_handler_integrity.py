@@ -152,6 +152,7 @@ class TestConvertedViewsAreCoroutines:
     def test_conversation_views_are_coroutines(self, flask_app):
         names = [
             'api_v1_conversations.get_conv',
+            'api_v1_conversations.get_message_activity',
             'api_v1_conversations.list_convs',
             'api_v1_conversations.save_conv',
             'api_v1_conversations.patch_conv_settings',

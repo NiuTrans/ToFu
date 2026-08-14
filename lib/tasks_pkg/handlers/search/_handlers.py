@@ -133,8 +133,12 @@ def _handle_web_search(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
         append_event(task, {'type': 'tool_result', 'roundNum': rn, 'query': query, 'results': []})
         return tc_id, tool_content, False
 
-    results, search_diag, engine_breakdown, vertical_result = _facade._web_search_one(
-        query, user_question, freshness, vertical=vertical_param)
+    from lib.search_bridge import bind_search_browser
+    with bind_search_browser(
+            user_id=task.get('_userId', '') or '',
+            client_id=cfg.get('browserClientId') or ''):
+        results, search_diag, engine_breakdown, vertical_result = _facade._web_search_one(
+            query, user_question, freshness, vertical=vertical_param)
     display_results = _format_search_display_for_results(results)
 
     round_entry['results'] = display_results
@@ -207,8 +211,12 @@ def _handle_web_search_batch(task, tc, fn_name, tc_id, fn_args, queries, rn, rou
 
     def _worker(spec):
         q, f, v = spec
-        results, search_diag, engine_breakdown, vertical_result = _facade._web_search_one(
-            q, user_question, f, vertical=v)
+        from lib.search_bridge import bind_search_browser
+        with bind_search_browser(
+                user_id=task.get('_userId', '') or '',
+                client_id=cfg.get('browserClientId') or ''):
+            results, search_diag, engine_breakdown, vertical_result = _facade._web_search_one(
+                q, user_question, f, vertical=v)
         formatted = format_search_for_tool_response(results, search_diag=search_diag, query=q)
         if vertical_result:
             formatted = _vertical_header_for_llm(vertical_result) + formatted
@@ -332,7 +340,12 @@ def _handle_fetch_url(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
         _finalize_tool_round(task, rn, round_entry, [dr], query_override=f'📄 {target_url}')
         return tc_id, tool_content, False
 
-    item = _facade._fetch_url_one(target_url, user_question, fetch_reason=fetch_reason)
+    from lib.search_bridge import bind_search_browser
+    with bind_search_browser(
+            user_id=task.get('_userId', '') or '',
+            client_id=cfg.get('browserClientId') or ''):
+        item = _facade._fetch_url_one(
+            target_url, user_question, fetch_reason=fetch_reason)
 
     from lib.tasks_pkg.tool_display import _short_url
     dr = _format_fetch_display(item, _short_url)
@@ -381,7 +394,12 @@ def _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls_specs, rn, r
     n = len(url_list)
 
     def _worker(target_url):
-        return _facade._fetch_url_one(target_url, user_question, fetch_reason='')
+        from lib.search_bridge import bind_search_browser
+        with bind_search_browser(
+                user_id=task.get('_userId', '') or '',
+                client_id=cfg.get('browserClientId') or ''):
+            return _facade._fetch_url_one(
+                target_url, user_question, fetch_reason='')
 
     ordered = run_batch_concurrent(url_list, _worker, max_workers=8, tag='Fetch',
                                    abort=lambda: bool(task.get('aborted')),

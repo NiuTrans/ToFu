@@ -94,6 +94,49 @@ class TestCostMath:
         with mock.patch("lib.database.get_thread_db", side_effect=RuntimeError("no db")):
             assert cost._scan_costs_in_range(0, 10**13) == {}
 
+    def test_cost_scan_projects_usage_from_normalized_rows(self):
+        pg_sql = cost._normalized_usage_projection_sql("pg", 1)
+        sqlite_sql = cost._normalized_usage_projection_sql("sqlite", 1)
+        assert 'FROM conversation_messages' in pg_sql
+        assert 'FROM conversation_messages' in sqlite_sql
+        assert "billing_meta->'usage' AS usage" in pg_sql
+        assert "json_extract(billing_meta,'$.usage') AS usage" in sqlite_sql
+
+    def test_projected_usage_row_preserves_cost_rollup(self):
+        import datetime as _dt
+        ts = int(_dt.datetime(2026, 8, 7, 12).timestamp() * 1000)
+        projected = [{
+            "id": "c-projected", "title": "Projected", "created_at": ts,
+            "updated_at": ts, "conv_model": "fallback-model",
+            "first_content": "", "msg_index": 1, "total_msgs": 2,
+            "usage": {"prompt_tokens": 100, "completion_tokens": 25},
+            "msg_timestamp": ts, "msg_model": "model-x",
+            "msg_provider": "provider-y",
+        }]
+
+        class _Cursor:
+            def fetchall(self):
+                return projected
+
+        class _DB:
+            def execute(self, sql, params):
+                return _Cursor()
+
+        with mock.patch("lib.database.get_thread_db", return_value=_DB()), \
+                mock.patch("lib.database._BACKEND", "pg"), \
+                mock.patch(
+                    "lib.database.messages_rows.rows_read_enabled",
+                    return_value=True), \
+                mock.patch.object(
+                    cost, "_normalized_usage_rows", return_value=projected), \
+                mock.patch.object(cost, "_calc_msg_cost_cny", return_value=1.25):
+            got = cost._scan_costs_in_range(ts - 1, ts + 1, 2026, 8)
+
+        assert got[7]["cost"] == 1.25
+        assert got[7]["conversations"]["c-projected"] == {
+            "name": "Projected", "cost": 1.25, "tokens": 125,
+        }
+
 
 # ═══════════════════════════════════════════════════════════
 #  1b. cost.py — SCOPED cache invalidation (regression: a delete
@@ -153,6 +196,20 @@ class TestScopedCostInvalidation:
         # No usage anywhere → nothing invalidated (and never the whole-table wipe).
         assert touched == set()
         assert calls == []
+
+    @pytest.mark.parametrize("date_str", ["2026-06-10", None])
+    def test_day_cache_invalidator_executes_the_delete(
+            self, date_str):
+        """The public invalidator must issue the named Sidecar command."""
+        client = mock.Mock()
+        with mock.patch("lib.storage.get_storage_client", return_value=client):
+            cost.invalidate_day_cost_cache(date_str)
+        payload = {'user_id': cost.DEFAULT_USER_ID}
+        if date_str is not None:
+            payload['date'] = date_str
+        args = client.command.call_args.args
+        assert args[:2] == ('daily_cost.delete', payload)
+        assert args[2].startswith('daily-cost-delete:')
 
 
 # ═══════════════════════════════════════════════════════════

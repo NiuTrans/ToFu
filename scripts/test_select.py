@@ -47,7 +47,7 @@ CACHE_PATH = os.path.join(ROOT, '.tofu', 'test_select_index.json')
 _REPO_MODULE_ROOTS = ('lib', 'routes', 'tests')
 
 _LITERAL_REF_RE = re.compile(
-    r"""(?x)['"`]((?:static/js|lib|routes|docs|scripts|tests)/[\w.\-]+(?:/[\w.\-]+)*\.(?:js|py|md))['"`]""")
+    r"""(?x)['"`]((?:frontend/src|static/vite|lib|routes|docs|scripts|tests)/[\w.\-]+(?:/[\w.\-]+)*\.(?:js|mjs|ts|py|md))['"`]""")
 
 # Files whose change invalidates whole FAMILIES of tests — their dependents
 # are structural (eval'd, session-wide, or manifest-driven), so no per-file
@@ -58,8 +58,8 @@ BLAST_RADIUS = {
     'tests/_jsdom.py': 'test_frontend_',
     'tests/_jsdom_harness.js': 'test_frontend_',
     'tests/_conv_bundle_sources.py': 'test_frontend_',
-    'static/js/api.js': 'test_frontend_',
-    'lib/js_bundler.py': 'test_frontend_',
+    'frontend/src/api/transport.ts': 'test_frontend_',
+    'lib/vite_assets.py': 'test_frontend_',
 }
 
 # Cross-cutting guards that always run — cheap (seconds), and they are the
@@ -75,6 +75,7 @@ GUARD_CORE_BASENAMES = (
 )
 
 _RUN_ALL_FRACTION = 0.40
+_DEFAULT_MAX_WORKERS = 4
 
 
 # ─── Index (pure) ──────────────────────────────────────────────────────
@@ -204,6 +205,47 @@ def changed_files(base: str | None) -> list[str]:
     return files
 
 
+def _parallel_workers(existing: list[str] | None,
+                      jobs: str | None) -> str | None:
+    """Return the requested/adaptive xdist worker count, or ``None``.
+
+    A pytest controller and every worker import the full test bootstrap.  For
+    a one-file inner loop that startup costs more than the tests, so the
+    implicit default stays serial.  Larger selections are capped at the same
+    conservative four workers used by the Makefile; an explicit ``--jobs``
+    remains authoritative.
+    """
+    if jobs is not None:
+        return None if jobs == '0' else jobs
+    if existing is not None and len(existing) <= 1:
+        return None
+    if existing is None:
+        return str(_DEFAULT_MAX_WORKERS)
+    return str(min(_DEFAULT_MAX_WORKERS, len(existing)))
+
+
+def build_pytest_command(existing: list[str] | None,
+                         jobs: str | None) -> list[str]:
+    """Build the hermetic selected-test command.
+
+    ``main`` disables pytest entry-point autoload to keep host-only plugins
+    out of the inner loop.  Parallel mode must therefore load xdist
+    explicitly *before* using its ``-n`` / ``--dist`` options.
+    """
+    workers = _parallel_workers(existing, jobs)
+    cmd = [sys.executable, '-m', 'pytest', '-p', 'no:napari']
+    if workers is not None:
+        cmd += ['-p', 'xdist.plugin']
+    if existing is not None:
+        cmd += existing
+    else:
+        cmd += ['-m', 'unit']
+    if workers is not None:
+        cmd += ['-n', workers, '--dist', 'worksteal']
+    cmd += ['--timeout=300', '--tb=short', '-q']
+    return cmd
+
+
 def main(argv: list[str]) -> int:
     base = jobs = None
     do_run = '--run' in argv
@@ -241,14 +283,7 @@ def main(argv: list[str]) -> int:
     if not do_run:
         print('[test-select] pass --run to execute, --print to list')
         return 0
-    cmd = [sys.executable, '-m', 'pytest', '-p', 'no:napari']
-    if existing is not None:
-        cmd += existing
-    else:
-        cmd += ['-m', 'unit']
-    if jobs != '0':
-        cmd += ['-n', jobs or '16', '--dist', 'worksteal']
-    cmd += ['--timeout=300', '--tb=short', '-q']
+    cmd = build_pytest_command(existing, jobs)
     print('[test-select] $', ' '.join(cmd))
     env = dict(os.environ, PYTEST_DISABLE_PLUGIN_AUTOLOAD='1')
     return subprocess.run(cmd, cwd=ROOT, env=env).returncode

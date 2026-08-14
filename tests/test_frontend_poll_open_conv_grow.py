@@ -21,8 +21,9 @@ The fix flags the equal-count content-grow on the open conv and routes it
 through the SAME keep-longer, non-destructive ``_verifyActiveConvFromServer``
 the notify path already uses — which adopts a longer trailing turn at equal
 count. This test drives the REAL shipped ``loadConversationsFromServer`` under
-node with the push tier down (``pushIsConnected`` false, no ``rev`` in the
-``?meta=1`` payload) and asserts the grow is adopted. The biting NEUTER strips
+node with the push tier down (``pushIsConnected`` false, simulating a legacy
+server that sent no ``rev`` in the ``?meta=1`` payload) and asserts the grow is
+adopted. The biting NEUTER strips
 the routing flag so the poll falls back to the count-plus-clock path and the
 grow is DROPPED — proving the flag is load-bearing, not incidental.
 """
@@ -54,7 +55,7 @@ def _extract_fn(src: str, name: str) -> str:
 # collaborator the function body touches, and — critically — provides the REAL
 # _verifyActiveConvFromServer keep-longer adopt (so the assertion exercises the
 # actual routing target, not a mock). The scenario: push is DOWN, the ?meta=1
-# payload carries an advanced updatedAt but NO rev (the cache path shape), and
+# payload carries an advanced updatedAt but NO rev (legacy-server shape), and
 # the open conv's single assistant turn grew from "short" → "short + MORE" at
 # the SAME message count with the cache timestamp already TIED to the server's.
 _HARNESS = r"""
@@ -72,7 +73,7 @@ const SERVER_SHORT = 'short reply';   // what the local (stale) copy holds
 const CONV_ID = 'c-open';
 const NOW = 5000000;
 
-// The ?meta=1 list row: advanced updatedAt, NO rev (cache path), equal count.
+// Legacy ?meta=1 list row: advanced updatedAt, NO rev, equal count.
 const META_ROW = { id: CONV_ID, title: 'T', msgCount: 2, msg_count: 2,
   createdAt: 1000, updatedAt: NOW /* advanced */, settings: null };
 // The full GET the keep-longer verify fetches: the grown trailing turn.

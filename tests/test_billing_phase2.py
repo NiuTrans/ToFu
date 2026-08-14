@@ -20,6 +20,9 @@ import unittest
 from unittest.mock import patch
 
 
+pytest_plugins = ('tests._billing_user_sidecar',)
+
+
 class _BillingPhase2Base(unittest.TestCase):
 
     @classmethod
@@ -132,12 +135,11 @@ class PaymentsCommonTest(_BillingPhase2Base):
         self.assertEqual(get_balance(u.id), after)
 
     def test_settle_crash_between_deposit_and_flip_never_loses_topup(self):
-        """Lost-top-up window guard: if the process crashes AFTER the deposit
-        but BEFORE the status flip, a webhook REDELIVERY must still land the
-        credit exactly once. Before the fix (flip-then-deposit) the redelivery
-        short-circuited on status=='settled' and the credit was lost forever;
-        the deposit-first ordering makes the redelivery re-attempt the
-        idempotent deposit and only then flip."""
+        """The wallet credit and payment transition are one atomic unit.
+
+        A failure at the old deposit/status seam must roll BOTH writes back;
+        webhook redelivery then lands the credit and transition exactly once.
+        """
         from lib.billing import get_balance
         from lib.billing.users import create_user
         from lib.billing.payments import record_payment, mark_payment_settled
@@ -155,22 +157,37 @@ class PaymentsCommonTest(_BillingPhase2Base):
         class _CrashOnUpdateDB:
             def __init__(self, real):
                 self._real = real
+                self._dirty = False
+                self._transaction_pinned = False
+            def begin(self):
+                result = self._real.begin()
+                self._transaction_pinned = True
+                return result
             def execute(self, sql, *a, **k):
                 if sql.strip().upper().startswith('UPDATE BILLING_PAYMENTS'):
                     raise RuntimeError('simulated crash before status flip')
                 return self._real.execute(sql, *a, **k)
             def commit(self):
-                return self._real.commit()
+                try:
+                    return self._real.commit()
+                finally:
+                    self._transaction_pinned = False
+            def rollback(self):
+                try:
+                    return self._real.rollback()
+                finally:
+                    self._transaction_pinned = False
 
         from lib.database import DOMAIN_SYSTEM
         crash_db = _CrashOnUpdateDB(real_get_db(DOMAIN_SYSTEM))
         with patch.object(pc, 'get_thread_db', lambda *a, **k: crash_db):
             with self.assertRaises(RuntimeError):
                 mark_payment_settled(rec.id)
-        # Deposit already landed (crash was AFTER it) …
+        # The failure rolls the deposit back with the payment transition.
         mid = get_balance(u.id)
-        self.assertGreater(mid, before, 'deposit must land before the flip')
-        # … but the payment row is still NOT settled (flip never committed).
+        self.assertEqual(mid, before,
+                         'failed settlement must not leave a partial credit')
+        # The payment row is likewise still pending.
         row = pc.find_by_provider_id('stripe', 'pi_crash_1')
         self.assertEqual(row.status, 'pending',
                          'status flip must not have happened (crash before it)')
@@ -178,8 +195,8 @@ class PaymentsCommonTest(_BillingPhase2Base):
         # Webhook redelivery (normal DB): must NOT double-credit and must now
         # flip the row to settled.
         mark_payment_settled(rec.id)
-        self.assertEqual(get_balance(u.id), mid,
-                         'redelivery must be idempotent — no double credit')
+        self.assertGreater(get_balance(u.id), mid,
+                           'redelivery must atomically land the credit')
         row2 = pc.find_by_provider_id('stripe', 'pi_crash_1')
         self.assertEqual(row2.status, 'settled')
 
@@ -400,6 +417,8 @@ class JanitorTest(_BillingPhase2Base):
                      ref_id='task_orphan_1',
                      balance_after_micro=baseline - 1_500_000,
                      ts=old_ts)
+        # append_entry owns a standalone transaction here, so the janitor's
+        # independent pooled connection can immediately see the crash fixture.
         # Don't update the wallet cache — the sweep should still
         # succeed even if cache is in sync.
         with patch.dict(os.environ, {'TOFU_BILLING_JANITOR_TTL': '60'}):

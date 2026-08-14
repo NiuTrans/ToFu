@@ -24,11 +24,11 @@ import hashlib
 import json
 import os
 import random
-import tempfile
 import threading
 import time
 
 from lib.env_compat import getenv_compat
+from lib.json_store import write_json_atomic
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -112,6 +112,13 @@ def get(text: str, source: str, target: str):
         logger.debug('[TranslateCache] read failed for %s: %s', path, e)
         return None
 
+    if (not isinstance(data, dict)
+            or not isinstance(data.get('translated'), str)
+            or not data.get('translated')
+            or not isinstance(data.get('model', ''), str)):
+        logger.debug('[TranslateCache] malformed payload at %s', path)
+        return None
+
     if random.random() < _SWEEP_PROBABILITY:
         _lazy_sweep_shard(key[:2])
 
@@ -121,7 +128,7 @@ def get(text: str, source: str, target: str):
 def put(text: str, source: str, target: str, translated: str, model: str = ''):
     """Store ``translated`` under the key for ``(text, source, target)``.
 
-    Atomic: writes to a tempfile in the same shard dir then ``os.rename()``s.
+    Atomic: uses the repository's unique-temp + fsync + replace primitive.
     Failures are logged at debug level — caching is best-effort.
     """
     if not _ENABLED or not text or not translated:
@@ -144,11 +151,8 @@ def put(text: str, source: str, target: str, translated: str, model: str = ''):
         'ts': int(time.time()),
     }
     try:
-        fd, tmp_path = tempfile.mkstemp(prefix='.tc-', suffix='.tmp', dir=shard)
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            json.dump(payload, f, ensure_ascii=False)
-        os.replace(tmp_path, path)
-    except OSError as e:
+        write_json_atomic(path, payload, indent=None)
+    except (OSError, TypeError, ValueError) as e:
         logger.debug('[TranslateCache] write failed for %s: %s', path, e)
 
 

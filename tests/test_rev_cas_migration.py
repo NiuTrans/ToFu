@@ -60,9 +60,6 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import quart as _quart  # noqa: E402
-sys.modules['flask'] = _quart
-
 import pytest  # noqa: E402
 
 pytestmark = pytest.mark.unit
@@ -494,16 +491,13 @@ def test_neuter_drift_guard_catches_unregistered_field():
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# TEST 5 (step-2, static) — no message writer stamps rev in its SET clause
+# TEST 5 (step-2, static) — only the repository owns transcript revision SQL
 # ──────────────────────────────────────────────────────────────────────────
-# The trigger (conversations_rev_bump_trg) OWNS rev — it advances it in the SAME
-# statement as any messages write. A writer that ALSO wrote ``SET rev=?`` would
-# fight the trigger (double-bump on PG BEFORE; on SQLite the AFTER trigger's
-# nested UPDATE would re-fire on a rev-only write only if it touched messages —
-# it doesn't, but a manual rev in the messages UPDATE still corrupts the
-# monotonic sequence). This static guard asserts NO conversations-messages
-# UPDATE in the two CAS writers sets ``rev`` — the token may only appear in the
-# WHERE clause. It's the invariant behind "trigger is the sole bumper".
+# Transitional blob writes still use the historical trigger. In row-authority
+# mode the archive is frozen, so the centralized repository advances ``rev``
+# explicitly in the same transaction as normalized rows. Business writers may
+# own neither form of SQL; this ratchet pins the repository seam instead of an
+# obsolete requirement that each business module contain an UPDATE literal.
 
 def _conversations_update_statements(path):
     """Return the list of string-literal SQL fragments in ``path`` that UPDATE
@@ -532,26 +526,32 @@ def _conversations_update_statements(path):
 
 
 def test_no_writer_stamps_rev_in_set_clause():
-    """Neither the terminal sync nor the translate commit may write ``rev`` in a
-    messages UPDATE's SET clause — the trigger is the sole bumper. Guards the
-    step-2 token switch from accidentally introducing a manual rev stamp."""
+    """Business writers delegate revision policy to one repository.
+
+    Row authority intentionally advances ``rev`` without rewriting the frozen
+    blob, so the old trigger-only invariant no longer applies.  The durable
+    invariant is stronger: terminal sync and translate own no transcript SQL;
+    ``conversation_repository`` alone owns both the CAS predicate and the
+    authoritative ``rev=rev+1`` transition.
+    """
     import lib.tasks_pkg.manager._sync as _syncmod
     import lib.translate.commit as _commitmod
+    import lib.database.conversation_repository as _repository
 
     for label, path in (('_sync.py', _syncmod.__file__),
                         ('commit.py', _commitmod.__file__)):
         stmts = _conversations_update_statements(path)
-        assert stmts, f'{label}: found NO conversations messages UPDATE — scanner broken'
-        for s in stmts:
-            # Extract the SET…WHERE span and assert 'rev' is not an assigned col.
-            _up = s.upper()
-            _set_i = _up.find('SET ')
-            _where_i = _up.find('WHERE', _set_i)
-            set_clause = s[_set_i:_where_i] if _where_i > _set_i else s[_set_i:]
-            assert 'rev=' not in set_clause.replace(' ', '') and 'REV=' not in set_clause.upper().replace(' ', ''), (
-                f'{label}: a messages UPDATE writes rev in its SET clause — the '
-                f'trigger must be the sole bumper. Offending SQL:\n{s}')
-    _ok('no message writer stamps rev in SET (trigger is sole bumper)')
+        assert stmts == [], (
+            f'{label}: business code regained direct transcript SQL: {stmts}')
+        source = open(path, encoding='utf-8').read()
+        assert 'replace_messages' in source, (
+            f'{label}: writer no longer delegates to conversation_repository')
+
+    repository_source = open(
+        _repository.__file__, encoding='utf-8').read()
+    assert "assignments.append('rev=rev+1')" in repository_source
+    assert "where.append('rev=?')" in repository_source
+    _ok('message writers delegate rev bump + CAS to conversation_repository')
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -713,18 +713,15 @@ def test_creator_path_exempt_from_rev_cas():
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# TEST W2-guard (static) — rev-not-in-SET across ALL messages writers (W2–W5)
+# TEST W2-guard (static) — remaining writers use the repository (W2–W5)
 # ──────────────────────────────────────────────────────────────────────────
-# Extends the W1+W6 rev-not-in-SET guard to the remaining CAS messages writers
-# that Batch 1a will switch. Runs NOW (pre-switch) so it can't regress: it only
-# asserts NO writer writes rev in SET. On HEAD these files carry no rev at all
-# (vacuously pass); after Batch 1a they carry rev ONLY in WHERE — still pass.
-# The moment a switch accidentally puts rev in a SET clause, this goes RED.
+# These paths used to embed their own messages UPDATE and CAS policy. They now
+# delegate both authority selection and revision mechanics to the repository;
+# the static guard must treat zero business SQL as success, not as a broken
+# scanner.
 
 def test_no_writer_stamps_rev_in_set_clause_w2_w5():
-    """No W2–W5 messages writer may write ``rev`` in a SET clause — the trigger
-    is the sole bumper. Guards the Batch-1a token switch the same way the W1+W6
-    guard does. Reuses _conversations_update_statements from the W1+W6 guard."""
+    """Every former W2–W5 writer delegates transcript CAS to the repository."""
     import importlib
     targets = [
         'lib.chat.persistence',
@@ -733,23 +730,15 @@ def test_no_writer_stamps_rev_in_set_clause_w2_w5():
         'lib.swarm.snapshot',
         'lib.tasks_pkg.persistence_store',
     ]
-    scanned = 0
     for modname in targets:
         mod = importlib.import_module(modname)
         stmts = _conversations_update_statements(mod.__file__)
-        for s in stmts:
-            _up = s.upper()
-            _set_i = _up.find('SET ')
-            if _set_i < 0:
-                continue
-            _where_i = _up.find('WHERE', _set_i)
-            set_clause = (s[_set_i:_where_i] if _where_i > _set_i else s[_set_i:])
-            assert 'rev=' not in set_clause.replace(' ', '').lower(), (
-                f'{modname}: a messages UPDATE writes rev in its SET clause — the '
-                f'trigger must be the sole bumper. Offending SQL:\n{s}')
-            scanned += 1
-    assert scanned > 0, 'scanner found no messages UPDATEs across W2–W5 files — broken'
-    _ok(f'W2–W5 files: no messages writer stamps rev in SET ({scanned} UPDATEs scanned)')
+        assert stmts == [], (
+            f'{modname}: business code regained direct transcript SQL: {stmts}')
+        source = open(mod.__file__, encoding='utf-8').read()
+        assert 'conversation_repository' in source, (
+            f'{modname}: no repository delegation found')
+    _ok('W2–W5 files delegate transcript CAS to conversation_repository')
 
 
 # ──────────────────────────────────────────────────────────────────────────

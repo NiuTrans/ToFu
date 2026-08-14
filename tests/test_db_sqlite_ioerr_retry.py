@@ -27,7 +27,11 @@ from lib.database._core import db_execute_with_retry
 
 
 class _FakeSqliteError(Exception):
-    """Stand-in for sqlite3.OperationalError (matched by message substring)."""
+    """SQLite-shaped exception carrying the stable primary result code."""
+
+    def __init__(self, message, code=0):
+        super().__init__(message)
+        self.sqlite_errorcode = code
 
 
 class _FakeDb:
@@ -64,21 +68,25 @@ def _sqlite_backend(monkeypatch):
 class TestSqliteDiskIoErrorRetry:
     def test_disk_io_error_is_retried_then_succeeds(self):
         """A transient 'disk I/O error' must be retried, not raised."""
-        db = _FakeDb([_FakeSqliteError('disk I/O error')])
+        db = _FakeDb([_FakeSqliteError('disk I/O error', core.sqlite3.SQLITE_IOERR)])
         db_execute_with_retry(db, 'UPDATE t SET x=1', ())
         assert db.execute_calls == 2, 'should retry once past the transient IOERR'
         assert db.commit_calls == 1
 
     def test_persistent_disk_io_error_exhausts_and_raises(self):
         """A genuinely broken mount exhausts max_retries and re-raises."""
-        db = _FakeDb([_FakeSqliteError('disk I/O error')] * 10)
+        db = _FakeDb([
+            _FakeSqliteError('disk I/O error', core.sqlite3.SQLITE_IOERR)
+            for _ in range(10)
+        ])
         with pytest.raises(_FakeSqliteError):
             db_execute_with_retry(db, 'UPDATE t SET x=1', (), max_retries=3)
         assert db.execute_calls == 4, 'initial attempt + 3 retries'
 
     def test_database_is_locked_still_retryable(self):
         """The pre-existing locked/busy retry path is unchanged."""
-        db = _FakeDb([_FakeSqliteError('database is locked')])
+        db = _FakeDb([_FakeSqliteError(
+            'database is locked', core.sqlite3.SQLITE_BUSY)])
         db_execute_with_retry(db, 'UPDATE t SET x=1', ())
         assert db.execute_calls == 2
 

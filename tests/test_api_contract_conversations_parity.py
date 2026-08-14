@@ -90,7 +90,7 @@ def _sites():
 def test_envelope_parity():
     """status identical; legacy keys byte-identical; additions ⊆
     {ok, request_id} (+error on error sites); ok flag follows legacy body."""
-    from flask import jsonify
+    from quart import jsonify
     app = _make_app()
 
     async def _t():

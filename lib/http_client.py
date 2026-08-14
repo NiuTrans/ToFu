@@ -7,6 +7,9 @@ project. The unified API:
     URLs bypass the corporate proxy and external URLs use it.
   - **Default timeout** of 30s (override per-call).
   - **Default User-Agent** of ``Tofu/<version>`` (override via headers).
+  - **Connection reuse** through one requests Session per worker thread and
+    one httpx AsyncClient per event-loop/proxy/TLS tuple. Cookie jars are
+    deliberately non-persistent so pooling cannot create ambient auth state.
   - **Single import** — ``from lib.http_client import http_get, http_post``.
   - **Mirrors requests/httpx** — returns the underlying response object
     so callers can use ``.json()``, ``.raise_for_status()``, ``.iter_lines()``,
@@ -37,16 +40,24 @@ Out of scope (NOT migrated)
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import os
+import threading
 import time
+import weakref
 from typing import Any, Optional
 
 import requests
 
 import lib as _lib
 from lib.log import get_logger
-from lib.proxy import async_proxy_for
+from lib.proxy import async_proxy_for, is_subscription_host
 from lib.proxy import proxies_for, report_outcome as _report_outcome
+from lib.proxy import (
+    report_subscription_route,
+    subscription_route_candidates,
+)
 
 logger = get_logger(__name__)
 
@@ -55,6 +66,35 @@ logger = get_logger(__name__)
 
 _DEFAULT_TIMEOUT = 30.0
 _DEFAULT_USER_AGENT = f'Tofu/{getattr(_lib, "__version__", "0.0.0-dev")}'
+
+
+def _env_pool_int(name: str, default: int, low: int, high: int) -> int:
+    try:
+        value = int(os.environ.get(name, '') or default)
+    except (TypeError, ValueError) as exc:
+        logger.debug('[HTTP] invalid pool setting %s; using %d: %s',
+                     name, default, exc)
+        value = default
+    return max(low, min(high, value))
+
+
+_POOL_MAX_CONNECTIONS = _env_pool_int(
+    'TOFU_HTTP_POOL_MAX_CONNECTIONS', 64, 1, 1024)
+_POOL_MAX_KEEPALIVE = min(
+    _POOL_MAX_CONNECTIONS,
+    _env_pool_int('TOFU_HTTP_POOL_MAX_KEEPALIVE', 20, 1, 512))
+
+# requests.Session is stateful and not documented as thread-safe. Keep one per
+# worker thread: urllib3 still reuses TCP/TLS connections across calls on that
+# thread, while concurrent route/agent workers never mutate one shared Session.
+_sync_local = threading.local()
+_sync_sessions: set[requests.Session] = set()
+_sync_sessions_lock = threading.Lock()
+
+# AsyncClient is event-loop-bound. One client per (loop, proxy, TLS policy)
+# preserves connection reuse without ever crossing loop ownership.
+_async_clients = weakref.WeakKeyDictionary()
+_async_clients_lock = threading.Lock()
 
 
 def _build_headers(extra: Optional[dict]) -> dict:
@@ -70,6 +110,123 @@ def _httpx_proxy_url(url: str) -> Optional[str]:
     ``no_proxy`` exactly like the sync one (httpx alone ignores it once an
     explicit ``proxy=`` is set)."""
     return async_proxy_for(url)
+
+
+def _sync_session() -> requests.Session:
+    session = getattr(_sync_local, 'session', None)
+    if session is None:
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=_POOL_MAX_KEEPALIVE,
+            pool_maxsize=_POOL_MAX_CONNECTIONS,
+            pool_block=False)
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
+        _sync_local.session = session
+        with _sync_sessions_lock:
+            _sync_sessions.add(session)
+    return session
+
+
+def _sync_request(method: str, url: str, **kwargs):
+    """Issue through the thread-local pool without persisting response cookies.
+
+    The old top-level ``requests.request`` API did not retain cookies between
+    calls. Pooling must not silently turn unrelated provider calls into one
+    ambient browser session, so the Session jar is cleared on both boundaries;
+    explicit per-request ``cookies=`` continues to work normally.
+    """
+    session = _sync_session()
+    session.cookies.clear()
+    try:
+        return session.request(method, url, **kwargs)
+    finally:
+        session.cookies.clear()
+
+
+def _async_pool_key(proxy, verify):
+    try:
+        hash(verify)
+        verify_key = verify
+    except TypeError as exc:
+        logger.debug('[HTTP] non-hashable TLS verify object; using identity: %s',
+                     exc)
+        verify_key = ('identity', id(verify))
+    return proxy, verify_key
+
+
+def _async_client(proxy=None, verify=True):
+    import httpx
+    loop = asyncio.get_running_loop()
+    key = _async_pool_key(proxy, verify)
+    with _async_clients_lock:
+        per_loop = _async_clients.setdefault(loop, {})
+        client = per_loop.get(key)
+        if client is not None and not client.is_closed:
+            return client
+
+        class _NoPersistCookies(httpx.Cookies):
+            def extract_cookies(self, response) -> None:
+                # Preserve the stateless semantics of one-shot AsyncClient.
+                return None
+
+        client = httpx.AsyncClient(
+            proxy=proxy,
+            verify=verify,
+            limits=httpx.Limits(
+                max_connections=_POOL_MAX_CONNECTIONS,
+                max_keepalive_connections=_POOL_MAX_KEEPALIVE,
+                keepalive_expiry=30.0),
+        )
+        # httpx has no public "do not retain Set-Cookie" switch. Its documented
+        # Cookies hook is the narrowest seam; explicit request cookies are merged
+        # into a temporary jar and remain supported.
+        client._cookies = _NoPersistCookies()  # type: ignore[attr-defined]
+        per_loop[key] = client
+        return client
+
+
+def close_sync_http_clients() -> None:
+    """Close every requests pool created by worker threads (idempotent)."""
+    with _sync_sessions_lock:
+        sessions = list(_sync_sessions)
+        _sync_sessions.clear()
+    for session in sessions:
+        try:
+            session.close()
+        except Exception as e:
+            logger.debug('[HTTP] sync session close failed: %s', e)
+    try:
+        delattr(_sync_local, 'session')
+    except AttributeError as exc:
+        logger.debug('[HTTP] no thread-local sync session to remove: %s', exc)
+
+
+async def close_async_http_clients() -> None:
+    """Close clients owned by the current event loop."""
+    loop = asyncio.get_running_loop()
+    with _async_clients_lock:
+        clients = list((_async_clients.pop(loop, {}) or {}).values())
+    for client in clients:
+        try:
+            await client.aclose()
+        except Exception as e:
+            logger.debug('[HTTP] async client close failed: %s', e)
+
+
+async def close_http_clients() -> None:
+    close_sync_http_clients()
+    await close_async_http_clients()
+
+
+def http_pool_stats() -> dict:
+    with _sync_sessions_lock, _async_clients_lock:
+        return {
+            'sync_sessions': len(_sync_sessions),
+            'async_clients': sum(len(v) for v in _async_clients.values()),
+            'max_connections': _POOL_MAX_CONNECTIONS,
+            'max_keepalive': _POOL_MAX_KEEPALIVE,
+        }
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -112,11 +269,69 @@ def http_request(method: str, url: str, *,
     Caller is responsible for closing streamed responses (use http_stream
     context manager instead).
     """
+    # Server-side POST/PUT/etc. must not silently follow a user-controlled
+    # redirect. Apart from SSRF, requests may rewrite a 301/302 POST into GET
+    # and discard the signed/request body. Public GET helpers retain their
+    # historical redirect behaviour; strict fetches use lib.safe_fetch, which
+    # validates every hop.
+    extra.setdefault('allow_redirects', method.upper() in ('GET', 'HEAD'))
+    route_plan = []
     if use_proxy and 'proxies' not in extra:
-        extra['proxies'] = proxies_for(url)
+        from urllib.parse import urlparse
+        host = (urlparse(url).hostname or '').lower()
+        if is_subscription_host(host):
+            route_plan = subscription_route_candidates(url)
+        if not route_plan:
+            extra['proxies'] = proxies_for(url)
+
+    # Subscription paths are concrete and independently health-tracked.  A
+    # connection-setup failure is safe to move to the next path because no
+    # response headers were received; any delivered HTTP response is final
+    # and is never replayed on another route.
+    if route_plan:
+        attempted = set()
+        for route in route_plan:
+            attempted.add(route.route_id)
+            attempt_extra = dict(extra)
+            attempt_extra['proxies'] = route.requests_proxies()
+            started = time.monotonic()
+            try:
+                response = _sync_request(
+                    method, url, timeout=timeout,
+                    headers=_build_headers(headers), **attempt_extra)
+            except requests.exceptions.ConnectionError as e:
+                from lib.subscription_routes import is_safe_connect_failure
+                if not is_safe_connect_failure(e):
+                    report_subscription_route(url, route, False)
+                    raise
+                report_subscription_route(url, route, False)
+                logger.info('[HTTP] %s connection failed via %s — trying '
+                            'next subscription route', url, route.label)
+                # The cold probe race returns on its first success; sibling
+                # probes keep running.  Refresh now so a just-completed
+                # alternative joins this same request's failover chain.
+                known = {item.route_id for item in route_plan}
+                for candidate in subscription_route_candidates(url):
+                    if (candidate.route_id not in attempted
+                            and candidate.route_id not in known):
+                        route_plan.append(candidate)
+                        known.add(candidate.route_id)
+                continue
+            except Exception:
+                # Read/body timeouts are ambiguous: upstream may have accepted
+                # the request, so do not replay it over a different path.
+                raise
+            report_subscription_route(
+                url, route, True,
+                (time.monotonic() - started) * 1000.0)
+            return response
+        raise requests.exceptions.ConnectionError(
+            'all server subscription routes failed during connection '
+            'setup') from None
+
     _t0 = time.monotonic()
     try:
-        resp = requests.request(
+        resp = _sync_request(
             method, url,
             timeout=timeout,
             headers=_build_headers(headers),
@@ -212,19 +427,18 @@ async def async_http_request(method: str, url: str, *,
     httpx-specific keyword arguments map cleanly: ``json=``, ``params=``,
     ``data=``, ``content=``, ``files=``, ``cookies=``.
     """
-    import httpx
     proxy = _httpx_proxy_url(url) if use_proxy else None
-    async with httpx.AsyncClient(
-        proxy=proxy,
-        timeout=httpx.Timeout(timeout),
-        follow_redirects=extra.pop('follow_redirects', True),
-        verify=extra.pop('verify', True),
-    ) as client:
-        return await client.request(
-            method, url,
-            headers=_build_headers(headers),
-            **extra,
-        )
+    follow_redirects = extra.pop(
+        'follow_redirects', method.upper() in ('GET', 'HEAD'))
+    verify = extra.pop('verify', True)
+    client = _async_client(proxy=proxy, verify=verify)
+    return await client.request(
+        method, url,
+        timeout=timeout,
+        follow_redirects=follow_redirects,
+        headers=_build_headers(headers),
+        **extra,
+    )
 
 
 async def async_http_get(url: str, *, timeout: float = _DEFAULT_TIMEOUT,
@@ -271,25 +485,23 @@ async def async_http_stream(method: str, url: str, *,
             async for line in resp.aiter_lines():
                 ...
     """
-    import httpx
     proxy = _httpx_proxy_url(url) if use_proxy else None
-    follow_redirects = extra.pop('follow_redirects', True)
+    follow_redirects = extra.pop(
+        'follow_redirects', method.upper() in ('GET', 'HEAD'))
     verify = extra.pop('verify', True)
-    async with httpx.AsyncClient(
-        proxy=proxy,
-        timeout=httpx.Timeout(timeout),
-        follow_redirects=follow_redirects,
-        verify=verify,
-    ) as client:
-        async with client.stream(method, url,
-                                  headers=_build_headers(headers),
-                                  **extra) as resp:
-            yield resp
+    client = _async_client(proxy=proxy, verify=verify)
+    async with client.stream(method, url,
+                             timeout=timeout,
+                             follow_redirects=follow_redirects,
+                             headers=_build_headers(headers),
+                             **extra) as resp:
+        yield resp
 
 
 __all__ = [
     'http_request', 'http_get', 'http_post', 'http_put',
     'http_delete', 'http_head', 'http_stream',
     'async_http_request', 'async_http_get', 'async_http_post',
-    'async_http_stream',
+    'async_http_stream', 'close_sync_http_clients',
+    'close_async_http_clients', 'close_http_clients', 'http_pool_stats',
 ]

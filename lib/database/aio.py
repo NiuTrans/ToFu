@@ -70,7 +70,7 @@ logger = get_logger(__name__)
 # duration, so the executor size caps the EXTRA concurrent connection demand
 # this facade adds on top of the request path + background tasks — all of which
 # share the same global ``_conn_semaphore`` (= _MAX_TOTAL_CONNS). Sizing it at
-# the full pool max (~100) on a PG whose server-side max_connections may be far
+# the full pool max on a PG whose server-side max_connections may be far
 # lower (and is shared) risks amplifying connection pressure, so it is
 # env-tunable and defaults conservatively to min(_CONN_POOL_MAX, 25% of the
 # total connection budget) — never larger than the budget itself.
@@ -84,7 +84,11 @@ def _default_executor_workers() -> int:
         except (ValueError, TypeError) as e:
             logger.debug('[DB.aio] Bad TOFU_DB_AIO_WORKERS=%r: %s', env, e)
     budget_quarter = max(4, _MAX_TOTAL_CONNS // 4)
-    return max(4, min(_CONN_POOL_MAX, budget_quarter))
+    # One personal server does not benefit from sixteen simultaneous blocking
+    # DB calls: PostgreSQL/SQLite storage is the bottleneck, and extra workers
+    # amplify connection and detoasted-row memory pressure. Explicit env
+    # overrides still scale multi-user deployments up to the full DB budget.
+    return max(4, min(_CONN_POOL_MAX, budget_quarter, 8))
 
 
 _executor: ThreadPoolExecutor | None = None
@@ -241,6 +245,15 @@ async def async_transaction(*, domain=DOMAIN_CHAT):
         return await loop.run_in_executor(tx_executor, fn)
 
     conn = await _on_tx_thread(_pool_get)
+    # Pin the boundary before yielding.  Without an explicit BEGIN, a
+    # read-first PG transaction would be auto-finished by the clean-read
+    # hygiene belt and the later writes would no longer share one transaction.
+    try:
+        await _on_tx_thread(conn.begin)
+    except Exception:
+        await _on_tx_thread(lambda: _pool_put(conn))
+        tx_executor.shutdown(wait=False)
+        raise
 
     class _Tx:
         """Wraps the borrowed conn so each statement runs on the SAME thread."""

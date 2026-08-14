@@ -13,7 +13,6 @@ shippable source:
   * ``outputs/``         — eval / smoke-test output (transient).
   * ``overleaf_cache/``  — fetched Overleaf projects (regenerable cache).
   * ``lib/.project_sessions/`` — per-project undo/redo history (pre-image blobs).
-  * ``static/js/bundle-``— the auto-generated JS bundle (rebuilt at startup).
   * ``.tofu/`` (+ any ``.tofu*``) — the assistant's own memories / file-history
     in the install tree, delegated to :func:`lib.agent_artifacts.is_agent_artifact`.
 
@@ -50,12 +49,23 @@ any producer or consumer can import this without an import cycle.
 from __future__ import annotations
 
 from collections import namedtuple
+from pathlib import Path
 
-from lib.agent_artifacts import GITIGNORE_PATTERN as _ARTIFACT_GITIGNORE
-from lib.agent_artifacts import is_agent_artifact
+from lib.agent_artifacts import (
+    GITIGNORE_PATTERN as _ARTIFACT_GITIGNORE,
+    is_agent_artifact,
+)
+
+_INSTALL_ROOT = str(Path(__file__).resolve().parent.parent)
+
+
+def install_root() -> str:
+    """Return the source/bundle root containing ``lib/`` and ``server.py``."""
+    return _INSTALL_ROOT
 
 __all__ = [
     'INSTALL_STATE',
+    'install_root',
     'RUNTIME_STATE_PREFIXES',
     'OVERLAY_SKIP_PREFIXES',
     'is_runtime_state',
@@ -66,8 +76,7 @@ __all__ = [
 # A single runtime-state entry.
 #   prefix       — project-root-relative, '/'-separated. A trailing '/' marks a
 #                  directory (matched as ``rel == 'data' or rel.startswith('data/')``);
-#                  no trailing slash marks a literal filename-prefix (e.g.
-#                  ``static/js/bundle-`` matches the hashed bundle files).
+#                  no trailing slash marks a literal filename-prefix.
 #   category     — 'data' | 'logs' | 'uploads' | 'cache' | 'output' | 'build'.
 #   tracked      — whether the path is (or historically was) git-tracked. Purely
 #                  informational today; consumers key on membership, not this.
@@ -99,8 +108,6 @@ INSTALL_STATE = (
     RuntimeEntry('lib/.project_sessions/', 'data', False,
                  'per-project undo/redo history — <session>/modifications.json '
                  'pre-image blobs of edited files (personal conversation content)'),
-    RuntimeEntry('static/js/bundle-', 'build', False,
-                 'auto-generated JS bundle (rebuilt at startup)'),
 )
 
 # Ordered tuple of the raw prefixes — the drop-in replacement for
@@ -188,7 +195,7 @@ def gitignore_lines() -> list[str]:
     lines: list[str] = []
     for e in INSTALL_STATE:
         lines.append(f'# {e.comment}')
-        # Directory entries → 'data/'; filename-prefix entries → 'static/js/bundle-*'.
+        # Directory entries render directly; filename-prefix entries gain '*'.
         lines.append(e.prefix if e.prefix.endswith('/') else e.prefix + '*')
     lines.append('# assistant memories / file-history / trash (any .tofu* artifact)')
     lines.append(_ARTIFACT_GITIGNORE)

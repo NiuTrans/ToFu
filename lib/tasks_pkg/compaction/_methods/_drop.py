@@ -22,7 +22,7 @@ logger = get_logger(__name__)
 # Tools whose tool_call args carry a file path (used to decide whether an
 # old turn's work has been superseded by later edits to the same files).
 _PATH_TOOLS = frozenset({
-    'read_files', 'read_file', 'write_file', 'apply_diff', 'apply_diffs',
+    'read_files', 'read_file', 'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
     'insert_content', 'insert_contents',
 })
 

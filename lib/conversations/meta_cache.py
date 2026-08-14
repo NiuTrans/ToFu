@@ -41,6 +41,28 @@ _meta_cache_lock = threading.Lock()
 _meta_cache_by_user: dict = {}
 _META_TTL = 120  # safety-net TTL; invalidate_meta_cache() is the primary path
 
+# The sidebar is a metadata index, not a conversation-settings transport.  A
+# full settings value can contain project summaries, paths, autopilot history
+# and run reports (tens of KiB for one conversation).  Sending all of that for
+# every row made a bounded 500-row poll exceed 1 MiB on the live single-user
+# database.  Keep only fields that affect the unopened sidebar shell; opening a
+# conversation still loads its complete settings through the body endpoint.
+_SIDEBAR_SETTINGS_KEYS = frozenset({
+    'pinned', 'pinnedAt', 'folderId', 'source',
+    'lastMsgRole', 'lastMsgTimestamp', 'lastFinishReason',
+    'lastMsgError', 'lastMsgHasOutput', '_reconciledAt',
+    'activeTaskId',
+})
+
+
+def _sidebar_settings(value):
+    """Return the bounded settings projection needed by sidebar-only shells."""
+    settings = _safe_json(value, default={}, label='settings') or {}
+    if not isinstance(settings, dict):
+        return {}
+    return {key: settings[key] for key in _SIDEBAR_SETTINGS_KEYS
+            if key in settings}
+
 # ── Cross-replica cache invalidation (Epic D4 §2.4) ──
 # A mutation on replica A must clear replica B's cached sidebar entry, else B
 # serves a stale list for up to the TTL. We reuse the EXISTING push_bus pub/sub
@@ -64,6 +86,10 @@ def _local_invalidate(user_id) -> None:
         e = _meta_cache_by_user.get(user_id)
         if e is not None:
             e['ts'] = 0
+            # A rebuild performs DB I/O without holding the global lock.  The
+            # generation prevents an invalidation that lands during that I/O
+            # from being overwritten by the older snapshot on return.
+            e['generation'] = e.get('generation', 0) + 1
 
 
 def _on_inval_frame(frame) -> None:
@@ -121,7 +147,16 @@ def _sidebar_limit() -> int:
 def _entry(user_id):
     e = _meta_cache_by_user.get(user_id)
     if e is None:
-        e = {'data': None, 'etag': None, 'ts': 0, 'ttl': _META_TTL}
+        e = {
+            'data': None,
+            'etag': None,
+            'ts': 0,
+            'ttl': _META_TTL,
+            'generation': 0,
+            # Serialize only this user's cache misses.  DB work still happens
+            # outside the global lock, so hits and invalidations stay cheap.
+            'rebuild_lock': threading.Lock(),
+        }
         _meta_cache_by_user[user_id] = e
     return e
 
@@ -278,16 +313,8 @@ def notify_conv_changed(conv_id, *, rev=None, deleted: bool = False,
         logger.debug('[meta_cache] conv-changed push skipped conv=%s: %s', conv_id, e)
 
 
-def refresh_meta_cache_if_stale(db, user_id: int = DEFAULT_USER_ID):
-    """Return (json_bytes, etag) for ``user_id``. Re-query DB only if TTL
-    expired. The query is scoped to ``user_id`` AND bounded by a ``LIMIT`` so a
-    huge history doesn't full-scan."""
-    now = time.monotonic()
-    with _meta_cache_lock:
-        e = _entry(user_id)
-        if e['data'] is not None and (now - e['ts']) < e['ttl']:
-            return e['data'], e['etag']
-
+def _query_meta_snapshot(db, user_id):
+    """Build one uncached sidebar snapshot and its authoritative total."""
     # Authoritative total for the sidebar "N earlier not loaded" affordance
     # (C4). Computed ONLY here, at cache-rebuild — the 60s poll that hits the
     # warm cache never reaches this COUNT, so it stays off the hot path. A
@@ -307,14 +334,14 @@ def refresh_meta_cache_if_stale(db, user_id: int = DEFAULT_USER_ID):
     limit = _sidebar_limit()
     if limit > 0:
         rows = db.execute(
-            '''SELECT id, title, created_at, updated_at, settings, msg_count
+            '''SELECT id, title, created_at, updated_at, settings, msg_count, rev
                FROM conversations WHERE user_id=? ORDER BY updated_at DESC
                LIMIT ?''',
             (user_id, limit)
         ).fetchall()
     else:
         rows = db.execute(
-            '''SELECT id, title, created_at, updated_at, settings, msg_count
+            '''SELECT id, title, created_at, updated_at, settings, msg_count, rev
                FROM conversations WHERE user_id=? ORDER BY updated_at DESC''',
             (user_id,)
         ).fetchall()
@@ -322,10 +349,14 @@ def refresh_meta_cache_if_stale(db, user_id: int = DEFAULT_USER_ID):
         total_count = len(rows)
     convs = []
     for r in rows:
-        settings = _safe_json(r['settings'], default=None, label='settings')
+        settings = _sidebar_settings(r['settings'])
         convs.append({
             'id': r['id'], 'title': r['title'],
             'messageCount': r['msg_count'] or 0,
+            # The browser uses this DB-issued monotonic version as both its
+            # staleness referee and the baseRev for the next CAS write.  Do
+            # not make it fall back to cross-device wall-clock comparisons.
+            'rev': int(r['rev'] or 0),
             'createdAt': r['created_at'], 'created_at': r['created_at'],
             'updatedAt': r['updated_at'], 'updated_at': r['updated_at'],
             'settings': settings,
@@ -333,13 +364,51 @@ def refresh_meta_cache_if_stale(db, user_id: int = DEFAULT_USER_ID):
     payload = json.dumps(convs, ensure_ascii=False).encode('utf-8')
     etag = hashlib.md5(payload).hexdigest()[:16]
 
+    return payload, etag, total_count
+
+
+def refresh_meta_cache_if_stale(db, user_id: int = DEFAULT_USER_ID):
+    """Return (json_bytes, etag) for ``user_id``.
+
+    Cache misses are single-flight per user. A generation fence also prevents
+    a DB snapshot started before a mutation from being installed as fresh
+    after that mutation invalidates the cache.
+    """
+    now = time.monotonic()
     with _meta_cache_lock:
         e = _entry(user_id)
-        e['data'] = payload
-        e['etag'] = etag
-        e['ts'] = time.monotonic()
-        e['total'] = total_count
-    return payload, etag
+        if e['data'] is not None and (now - e['ts']) < e['ttl']:
+            return e['data'], e['etag']
+        rebuild_lock = e['rebuild_lock']
+
+    with rebuild_lock:
+        # Another request may have rebuilt while this one waited.
+        with _meta_cache_lock:
+            e = _entry(user_id)
+            now = time.monotonic()
+            if e['data'] is not None and (now - e['ts']) < e['ttl']:
+                return e['data'], e['etag']
+
+        # A mutation may race any individual DB read. Retry a bounded number
+        # of times until the generation is stable; under continuous writes the
+        # last snapshot is returned uncached, so the next poll retries instead
+        # of blessing potentially stale data for the full TTL.
+        for _attempt in range(3):
+            with _meta_cache_lock:
+                generation = _entry(user_id)['generation']
+            payload, etag, total_count = _query_meta_snapshot(db, user_id)
+            with _meta_cache_lock:
+                e = _entry(user_id)
+                if e['generation'] == generation:
+                    e['data'] = payload
+                    e['etag'] = etag
+                    e['ts'] = time.monotonic()
+                    e['total'] = total_count
+                    return payload, etag
+
+        logger.debug('[meta_cache] user=%s changed during three rebuilds; '
+                     'returning uncached snapshot', user_id)
+        return payload, etag
 
 
 def get_cached_total(user_id: int = DEFAULT_USER_ID):

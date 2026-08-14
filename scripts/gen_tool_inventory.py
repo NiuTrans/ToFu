@@ -22,7 +22,7 @@ DESIGN RULES (mirrors scripts/gen_frontend_globals.py — see the charter's
   19th disagreeing copy of the tool list. Editing the generated file is
   pointless: ``--check`` overwrites the argument.
 * **Built-ins only in the checked table.** Third-party ``tofu.tools`` entry
-  points differ per deployment (this host loads ``liantong_resume``), so
+  points differ per deployment (a host may load private plugins), so
   pinning them in a CI-enforced file makes the gate red on any machine with a
   different plugin set. Plugins are reported in a separate DIAGNOSTIC section
   that ``--check`` ignores — visible, but never a false CI failure.
@@ -119,6 +119,17 @@ COLUMNS = [
 
 def _load_registry():
     """Import the app far enough that every built-in handler is registered."""
+    # Handler registration reaches the PDF/search stack, which may construct
+    # pymupdf_layout ONNX sessions as an import side effect.  CLI generators do
+    # not pass through server.py's early boot guard, so without installing it
+    # here a read-only inventory check spawns one ORT worker per host CPU (twice
+    # on this host) and emits a wall of invalid-affinity errors under cpusets.
+    # Inventory generation never performs ONNX inference; two workers keep the
+    # transitive layout-model constructors cheap while preserving an explicit
+    # operator override.
+    os.environ.setdefault('TOFU_ONNX_THREADS', '2')
+    from lib.onnx_thread_guard import install_onnx_thread_guard
+    install_onnx_thread_guard()
     import lib.tasks_pkg.handlers  # noqa: F401 — registration side-effect
     from lib.tasks_pkg.executor import tool_registry
     from lib.tools import all_specs
@@ -508,7 +519,7 @@ def main() -> int:
         # Compare only the CHECKED portion. The trailing plugin section is
         # documented as diagnostic-only ("--check ignores it"), but the naive
         # whole-file compare DID include it — so a host with a third-party
-        # plugin (liantong_resume on the dev box) and a host without (public
+        # plugin on a private dev box and a host without one (public
         # CI) rendered different files and the gate red-filed CI on
         # 2026-08-05 despite a perfectly in-sync built-in table.
         _DIAG = '\n## Plugin tools'

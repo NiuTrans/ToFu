@@ -263,6 +263,21 @@ def _init_system_schema(conn):
     # migration can reap them.
     cur.execute('CREATE INDEX IF NOT EXISTS idx_project_watch_items_path ON project_watch_items(project_path, updated_at DESC)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_project_watch_resp_item_seq ON project_watch_responses(item_id, seq DESC)')
+    # Cross-process monotonic stream counters. Seed/repair from the durable
+    # streams so an upgrade never reuses a legacy sequence number.
+    from lib.database._core_schema import SCOPED_SEQUENCES
+    create_if_absent(conn, SCOPED_SEQUENCES, table_exists=_table_exists)
+    for _ns, _table, _scope_col in (
+        ('project_events', 'project_events', 'project_path'),
+        ('project_status_snapshots', 'project_status_snapshots', 'project_path'),
+        ('project_watch_responses', 'project_watch_responses', 'item_id'),
+    ):
+        cur.execute(
+            f"INSERT INTO scoped_sequences(namespace, scope_key, value) "
+            f"SELECT ?, {_scope_col}, MAX(seq) FROM {_table} "
+            f"WHERE 1 GROUP BY {_scope_col} "
+            "ON CONFLICT(namespace, scope_key) DO UPDATE SET value="
+            "MAX(scoped_sequences.value, excluded.value)", (_ns,))
 
     # ── Daily Optimizer tables (see lib/optimizer/) ──
     # optimizer_proposals + optimizer_action_log: migrated onto Core.
@@ -342,6 +357,13 @@ def _init_system_schema(conn):
     cur.execute('CREATE INDEX IF NOT EXISTS idx_payments_user ON billing_payments(user_id)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_payments_provider ON billing_payments(provider, provider_id)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_payments_status ON billing_payments(status)')
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_billing_payments_provider_id "
+        "ON billing_payments(provider, provider_id) WHERE provider_id <> ''")
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_billing_ledger_idempotency "
+        "ON billing_ledger(user_id, kind, ref_type, ref_id) "
+        "WHERE ref_type <> '' AND ref_id <> ''")
 
     # Migration for existing api_keys store: add user_id column so a
     # multi-tenant deployment can attribute every key to a wallet.

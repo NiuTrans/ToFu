@@ -1,37 +1,29 @@
-"""tests/test_cache_schema_stability.py — Prompt-cache schema-stability fixes.
+"""Contracts for deterministic, request-live tool assembly.
 
-Pins the fixes that keep the tool-schema bytes byte-identical across the
-rounds of a single conversation (so the prompt-cache prefix is not
-invalidated):
-
-  1. **Sticky multi-root hint** (A) — once a conversation goes multi-root, the
-     ``_MULTIROOT_PATH_HINT`` stays on every path-taking tool for the rest of
-     the conversation, even if a later task transiently reports a single
-     ``projectPaths``. Flapping it rewrites ~10 tool schemas and breaks cache.
-  2. **Deterministic MCP ordering** (A) — ``MCPBridge.get_openai_tool_defs``
-     returns tools sorted by namespaced name, so a server reconnect /
-     re-discovery (which changes dict-insertion order) does not reorder the
-     tools array.
-  3. **Per-conversation tool-schema latch** (B) — ``latch_tool_list`` freezes
-     the EXACT tool list a conversation first used and serves it byte-identical
-     every later round, so a mid-conversation user toggle (Swarm/Scheduler/…)
-     cannot break the cache; the change is deferred to the next conversation or
-     an explicit "Apply now" (``clear_tool_list_latch``).
-
-See the cache-miss investigation: fixes (A)+(B) of the tools-array-change
-breaks (48 breaks / 36 convs in production logs).
+The available tools and their schema projection are always rebuilt from the
+current request so conversation toggles take effect on the next model round.
 """
 
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from lib.tools import ToolContext, assemble_tool_list
-from lib.tools import registry as _reg
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+# These paths are intentionally asserted absent after the conversation tool
+# freeze was removed. They are migration tombstones, not live source anchors.
+_AUDIT_SYNTHETIC_REPO_PATHS = {
+    'lib/tools/registry/_latch.py',
+    'static/js/toolset-apply.js',
+}
 
 
 def _names(tool_list):
-    return [t['function']['name'] for t in (tool_list or [])]
+    return [tool['function']['name'] for tool in (tool_list or [])]
 
 
 def _ctx(**overrides):
@@ -47,527 +39,142 @@ def _ctx(**overrides):
     return ToolContext(**base)
 
 
-def _apply_diff_desc(tool_list):
-    """Return the apply_diff tool's path-parameter description (or '')."""
-    for t in (tool_list or []):
-        if t['function']['name'] == 'apply_diff':
-            return t['function']['parameters']['properties']['path'].get('description', '')
+def _edit_file_desc(tool_list):
+    for tool in tool_list or []:
+        if tool['function']['name'] == 'edit_file':
+            item = tool['function']['parameters']['properties']['edits']['items']
+            return item['properties']['path'].get('description', '')
     return ''
 
 
-class TestStickyMultiroot(unittest.TestCase):
-    def setUp(self):
-        # Ensure a clean latch for each test's conv ids.
-        for c in ('_mr_conv', '_mr_conv2', ''):
-            _reg.clear_multiroot_sticky(c)
-
-    def tearDown(self):
-        for c in ('_mr_conv', '_mr_conv2'):
-            _reg.clear_multiroot_sticky(c)
-
+class TestLiveMultirootSchema(unittest.TestCase):
     def _single(self, conv_id):
-        return _ctx(conv_id=conv_id, project_path='/tmp/a', project_enabled=True,
-                    cfg={'projectPaths': ['/tmp/a']})
+        return _ctx(
+            conv_id=conv_id, project_path='/tmp/a', project_enabled=True,
+            cfg={'projectPaths': ['/tmp/a']})
 
     def _multi(self, conv_id):
-        return _ctx(conv_id=conv_id, project_path='/tmp/a', project_enabled=True,
-                    cfg={'projectPaths': ['/tmp/a', '/tmp/b']})
+        return _ctx(
+            conv_id=conv_id, project_path='/tmp/a', project_enabled=True,
+            cfg={'projectPaths': ['/tmp/a', '/tmp/b']})
 
     def test_single_root_has_no_hint(self):
-        tl, _ = assemble_tool_list(self._single('_mr_conv'))
-        self.assertNotIn('rootname:', _apply_diff_desc(tl))
-        self.assertFalse(_reg.is_multiroot_sticky('_mr_conv'))
+        tools, _ = assemble_tool_list(self._single('_mr_conv'))
+        self.assertNotIn('rootname:', _edit_file_desc(tools))
 
-    def test_multi_root_adds_hint_and_latches(self):
-        tl, _ = assemble_tool_list(self._multi('_mr_conv'))
-        self.assertIn('rootname:', _apply_diff_desc(tl))
-        self.assertTrue(_reg.is_multiroot_sticky('_mr_conv'))
+    def test_multi_root_adds_path_hint(self):
+        tools, _ = assemble_tool_list(self._multi('_mr_conv'))
+        self.assertIn('rootname:', _edit_file_desc(tools))
 
-    def test_downgrade_is_sticky_within_conversation(self):
-        # Round 1: multi-root → hint on, latched.
-        tl1, _ = assemble_tool_list(self._multi('_mr_conv'))
-        self.assertIn('rootname:', _apply_diff_desc(tl1))
-        # Round 2: cfg transiently reports single root — hint MUST persist.
-        tl2, _ = assemble_tool_list(self._single('_mr_conv'))
-        self.assertIn('rootname:', _apply_diff_desc(tl2),
-                      'multi-root hint must not flap off mid-conversation')
-
-    def test_latch_is_per_conversation(self):
+    def test_downgrade_removes_path_hint_next_assembly(self):
         assemble_tool_list(self._multi('_mr_conv'))
-        # A DIFFERENT conversation that's single-root is unaffected.
-        tl, _ = assemble_tool_list(self._single('_mr_conv2'))
-        self.assertNotIn('rootname:', _apply_diff_desc(tl))
-
-    def test_clear_releases_latch(self):
-        assemble_tool_list(self._multi('_mr_conv'))
-        self.assertTrue(_reg.is_multiroot_sticky('_mr_conv'))
-        _reg.clear_multiroot_sticky('_mr_conv')
-        self.assertFalse(_reg.is_multiroot_sticky('_mr_conv'))
-
-    def test_stateless_assembly_no_latch(self):
-        # conv_id='' (tests / compat adapters) → raw signal, never latched.
-        tl_multi, _ = assemble_tool_list(
-            _ctx(conv_id='', project_path='/tmp/a', project_enabled=True,
-                 cfg={'projectPaths': ['/tmp/a', '/tmp/b']}))
-        self.assertIn('rootname:', _apply_diff_desc(tl_multi))
-        tl_single, _ = assemble_tool_list(
-            _ctx(conv_id='', project_path='/tmp/a', project_enabled=True,
-                 cfg={'projectPaths': ['/tmp/a']}))
-        self.assertNotIn('rootname:', _apply_diff_desc(tl_single))
+        tools, _ = assemble_tool_list(self._single('_mr_conv'))
+        self.assertNotIn('rootname:', _edit_file_desc(tools))
 
 
 class TestMCPDeterministicOrdering(unittest.TestCase):
-    def _client_with(self, ns_names):
+    def _client_with(self, names):
         from lib.mcp.client import MCPBridge
-        c = MCPBridge()
-        for ns in ns_names:
-            c._tool_index[ns] = {
-                'server_name': ns.split('__')[1] if '__' in ns else 's',
-                'tool_name': ns,
-                'namespaced_name': ns,
+
+        client = MCPBridge()
+        for name in names:
+            client._tool_index[name] = {
+                'server_name': name.split('__')[1] if '__' in name else 's',
+                'tool_name': name,
+                'namespaced_name': name,
                 'description': '',
                 'input_schema': {'type': 'object', 'properties': {}},
-                'openai_def': {'type': 'function', 'function': {'name': ns}},
+                'openai_def': {
+                    'type': 'function', 'function': {'name': name}},
                 'read_only_hint': True,
             }
-        return c
+        return client
 
-    def test_ordering_is_sorted_not_insertion(self):
-        # Insertion order is deliberately reversed-alphabetical.
-        c = self._client_with(['mcp__z__t', 'mcp__a__t', 'mcp__m__t'])
-        defs = c.get_openai_tool_defs()
-        names = [d['function']['name'] for d in defs]
-        self.assertEqual(names, ['mcp__a__t', 'mcp__m__t', 'mcp__z__t'])
-
-    def test_reconnect_reorder_yields_same_sequence(self):
-        # Two clients with the SAME tools inserted in DIFFERENT orders must
-        # produce the identical (sorted) tool sequence — i.e. a reconnect that
-        # changes dict-insertion order does not change the bytes.
-        a = self._client_with(['mcp__hope__a', 'mcp__hope__b', 'mcp__x__c'])
-        b = self._client_with(['mcp__x__c', 'mcp__hope__b', 'mcp__hope__a'])
+    def test_ordering_is_sorted_not_insertion_order(self):
+        client = self._client_with(['mcp__z__t', 'mcp__a__t', 'mcp__m__t'])
         self.assertEqual(
-            [d['function']['name'] for d in a.get_openai_tool_defs()],
-            [d['function']['name'] for d in b.get_openai_tool_defs()],
-        )
+            _names(client.get_openai_tool_defs()),
+            ['mcp__a__t', 'mcp__m__t', 'mcp__z__t'])
+
+    def test_reconnect_order_does_not_change_sequence(self):
+        first = self._client_with(
+            ['mcp__hope__a', 'mcp__hope__b', 'mcp__x__c'])
+        second = self._client_with(
+            ['mcp__x__c', 'mcp__hope__b', 'mcp__hope__a'])
+        self.assertEqual(
+            _names(first.get_openai_tool_defs()),
+            _names(second.get_openai_tool_defs()))
 
 
-class TestToolListLatch(unittest.TestCase):
-    """The per-conversation tool-schema latch (root fix B): freeze the tool
-    list a conversation first used; serve it byte-identical every later round;
-    report divergence when toggles change; clear it on Apply-now / cleanup.
-    """
+class TestLiveToolAvailability(unittest.TestCase):
+    """Feature changes are reflected immediately within one conversation."""
 
-    def setUp(self):
-        from lib.tools import clear_tool_list_latch
-        clear_tool_list_latch('_latch_conv')
+    CONV = '_live_tool_conv'
 
-    def tearDown(self):
-        from lib.tools import clear_tool_list_latch
-        clear_tool_list_latch('_latch_conv')
-
-    def _tool(self, name):
-        return {'type': 'function', 'function': {'name': name, 'parameters': {}}}
-
-    def test_first_round_establishes_snapshot(self):
-        from lib.tools import latch_tool_list
-        fresh = [self._tool('a'), self._tool('b')]
-        eff, diverged = latch_tool_list('_latch_conv', fresh)
-        self.assertEqual([t['function']['name'] for t in eff], ['a', 'b'])
-        self.assertFalse(diverged)
-
-    def test_later_round_serves_frozen_snapshot(self):
-        from lib.tools import latch_tool_list
-        latch_tool_list('_latch_conv', [self._tool('a'), self._tool('b')])
-        # User toggled ON a new tool 'c' — but the frozen list is served.
-        eff, diverged = latch_tool_list(
-            '_latch_conv', [self._tool('a'), self._tool('b'), self._tool('c')])
-        self.assertEqual([t['function']['name'] for t in eff], ['a', 'b'],
-                         'frozen snapshot must be served byte-identical')
-        self.assertTrue(diverged, 'divergence must be reported')
-
-    def test_toggle_then_revert_reports_no_divergence(self):
-        from lib.tools import latch_tool_list
-        latch_tool_list('_latch_conv', [self._tool('a'), self._tool('b')])
-        latch_tool_list('_latch_conv',
-                        [self._tool('a'), self._tool('b'), self._tool('c')])
-        # Reverted back to the original toggles → no divergence.
-        _eff, diverged = latch_tool_list(
-            '_latch_conv', [self._tool('a'), self._tool('b')])
-        self.assertFalse(diverged)
-
-    def test_diff_names_added_and_removed(self):
-        from lib.tools import latch_tool_list, tool_list_diff
-        latch_tool_list('_latch_conv', [self._tool('a'), self._tool('b')])
-        # Toggled OFF 'b', toggled ON 'c'.
-        latch_tool_list('_latch_conv', [self._tool('a'), self._tool('c')])
-        diff = tool_list_diff('_latch_conv')
-        self.assertEqual(diff['added'], ['c'])
-        self.assertEqual(diff['removed'], ['b'])
-
-    def test_diff_cleared_when_reverted(self):
-        from lib.tools import latch_tool_list, tool_list_diff
-        latch_tool_list('_latch_conv', [self._tool('a'), self._tool('b')])
-        latch_tool_list('_latch_conv', [self._tool('a')])  # removed 'b'
-        self.assertEqual(tool_list_diff('_latch_conv')['removed'], ['b'])
-        # Revert → divergence clears → diff empties.
-        latch_tool_list('_latch_conv', [self._tool('a'), self._tool('b')])
-        self.assertEqual(tool_list_diff('_latch_conv'),
-                         {'added': [], 'removed': []})
-
-    def test_clear_latch_rebuilds_from_current(self):
-        from lib.tools import clear_tool_list_latch, latch_tool_list
-        latch_tool_list('_latch_conv', [self._tool('a')])
-        clear_tool_list_latch('_latch_conv')
-        # After Apply-now, the next round re-establishes from current toggles.
-        eff, diverged = latch_tool_list(
-            '_latch_conv', [self._tool('a'), self._tool('b')])
-        self.assertEqual([t['function']['name'] for t in eff], ['a', 'b'])
-        self.assertFalse(diverged)
-
-    def test_empty_conv_id_is_noop(self):
-        from lib.tools import latch_tool_list
-        fresh = [self._tool('a')]
-        eff, diverged = latch_tool_list('', fresh)
-        self.assertIs(eff, fresh)
-        self.assertFalse(diverged)
-
-    def test_kill_switch_disables_latch(self):
-        import os
-        from lib.tools import latch_tool_list
-        old = os.environ.get('TOFU_TOOLSET_LATCH')
-        os.environ['TOFU_TOOLSET_LATCH'] = '0'
-        try:
-            latch_tool_list('_latch_conv', [self._tool('a')])
-            eff, diverged = latch_tool_list(
-                '_latch_conv', [self._tool('a'), self._tool('b')])
-            # With the latch off, the live (changed) list flows through.
-            self.assertEqual([t['function']['name'] for t in eff], ['a', 'b'])
-            self.assertFalse(diverged)
-        finally:
-            if old is None:
-                os.environ.pop('TOFU_TOOLSET_LATCH', None)
-            else:
-                os.environ['TOFU_TOOLSET_LATCH'] = old
-
-
-class TestClearAllToolListLatches(unittest.TestCase):
-    """``clear_all_tool_list_latches`` (the MCP-mutation root fix): an MCP
-    install / connect / uninstall changes the GLOBAL tool surface on purpose,
-    so EVERY conversation's latch is dropped and the new tool set takes effect
-    on the next round of each — not just a brand-new conversation. Routes in
-    ``routes/api_v1/mcp.py`` call this after every MCP mutation.
-    """
-
-    def _tool(self, name):
-        return {'type': 'function', 'function': {'name': name, 'parameters': {}}}
-
-    def setUp(self):
-        from lib.tools import clear_all_tool_list_latches
-        clear_all_tool_list_latches()
-
-    def tearDown(self):
-        from lib.tools import clear_all_tool_list_latches
-        clear_all_tool_list_latches()
-
-    def test_clears_every_conversation_and_returns_count(self):
-        from lib.tools import clear_all_tool_list_latches, latch_tool_list
-        base = [self._tool('web_search'), self._tool('read_files')]
-        latch_tool_list('convA', base)
-        latch_tool_list('convB', base)
-        n = clear_all_tool_list_latches()
-        self.assertEqual(n, 2)
-        # After clear, an MCP-augmented set re-establishes fresh (diverged=False)
-        # on the NEXT round of each conversation — i.e. it actually takes effect.
-        with_mcp = base + [self._tool('mcp__hope__submit_job')]
-        for c in ('convA', 'convB'):
-            eff, diverged = latch_tool_list(c, with_mcp)
-            self.assertIn('mcp__hope__submit_job',
-                          [t['function']['name'] for t in eff])
-            self.assertFalse(diverged)
-
-    def test_unchanged_toolset_relatches_without_divergence(self):
-        # A conversation whose effective tool set is UNCHANGED by the mutation
-        # re-latches byte-identical → diverged=False → no prompt-cache rebuild.
-        from lib.tools import clear_all_tool_list_latches, latch_tool_list
-        base = [self._tool('web_search')]
-        latch_tool_list('convC', base)
-        clear_all_tool_list_latches()
-        _eff, diverged = latch_tool_list('convC', base)
-        self.assertFalse(diverged)
-
-    def test_empty_returns_zero(self):
-        from lib.tools import clear_all_tool_list_latches
-        self.assertEqual(clear_all_tool_list_latches(), 0)
-
-    def test_boot_latch_before_mcp_relatches_without_banner(self):
-        # Reproduce the spurious-banner defect: MCP auto-connect runs on a
-        # background thread AFTER boot, so a conversation opened first latches
-        # the tool schema WITHOUT the not-yet-connected MCP tools.
-        from lib.tools import clear_all_tool_list_latches, latch_tool_list
-        base = [self._tool('web_search'), self._tool('read_files')]
-        # Round 1 (boot, MCP not yet connected): freeze the MCP-less snapshot.
-        _eff, diverged = latch_tool_list('convBoot', base)
-        self.assertFalse(diverged)
-        # MCP finishes connecting on the background thread → auto-connect now
-        # clears every latch (the fix). Without the clear, round 2 below would
-        # diverge and raise the "tools changed" banner.
-        cleared = clear_all_tool_list_latches()
-        self.assertGreaterEqual(cleared, 1)
-        # Round 2: the freshly-assembled list now includes the MCP tools. Since
-        # the latch was cleared, this round RE-ESTABLISHES the snapshot rather
-        # than diverging → no spurious banner.
-        with_mcp = base + [self._tool('mcp__github__search_code'),
-                           self._tool('mcp__hope__submit_job')]
-        eff2, diverged2 = latch_tool_list('convBoot', with_mcp)
-        self.assertFalse(diverged2, 'boot-time latch cleared by MCP '
-                         'auto-connect must re-establish WITH the MCP tools, '
-                         'not report a spurious divergence/banner')
-        names = [t['function']['name'] for t in eff2]
-        self.assertIn('mcp__github__search_code', names)
-        self.assertIn('mcp__hope__submit_job', names)
-
-    def test_without_clear_boot_latch_diverges(self):
-        # NEUTER / negative control: proving the clear is load-bearing. If MCP
-        # auto-connect did NOT clear the boot-time latch, the incomplete frozen
-        # snapshot is served and the MCP-augmented round diverges → banner.
-        from lib.tools import clear_all_tool_list_latches, latch_tool_list
-        clear_all_tool_list_latches()
-        base = [self._tool('web_search')]
-        latch_tool_list('convNoClear', base)
-        # NO clear_all here — mimic the pre-fix boot path.
-        with_mcp = base + [self._tool('mcp__hope__submit_job')]
-        eff, diverged = latch_tool_list('convNoClear', with_mcp)
-        self.assertTrue(diverged, 'without the auto-connect clear, the '
-                        'incomplete boot latch MUST diverge (the defect)')
-        # And the frozen (MCP-less) snapshot is what gets served.
-        self.assertNotIn('mcp__hope__submit_job',
-                         [t['function']['name'] for t in eff])
-        clear_all_tool_list_latches()
-
-
-class TestAssembleToolListByteStability(unittest.TestCase):
-    """Integration: the orchestrator's actual entry point (_assemble_tool_list)
-    must emit byte-identical tool schemas across a multi-root → single-root
-    flap within one conversation. This is the property the prompt cache
-    depends on.
-    """
-
-    def setUp(self):
-        from lib.tools import clear_tool_list_latch
-        _reg.clear_multiroot_sticky('_int_conv')
-        clear_tool_list_latch('_int_conv')
-
-    def tearDown(self):
-        from lib.tools import clear_tool_list_latch
-        _reg.clear_multiroot_sticky('_int_conv')
-        clear_tool_list_latch('_int_conv')
-
-    def _assemble(self, project_paths):
+    def _assemble(self, *, swarm=False, project=False):
         from lib.tasks_pkg.model_config import _assemble_tool_list
-        cfg = {'projectPaths': project_paths, 'mcpEnabled': False}
-        tl, _has, _max = _assemble_tool_list(
-            cfg, project_paths[0], True, 't-int',
-            'off', False, False,
-            False, False, False, False,
-            messages=[], conv_id='_int_conv',
+
+        cfg = {
+            'mcpEnabled': False,
+            'projectPaths': ['/tmp/project'] if project else [],
+        }
+        return _assemble_tool_list(
+            cfg,
+            project_path='/tmp/project' if project else '',
+            project_enabled=project,
+            task_id='t-live-tool',
+            search_mode='off', search_enabled=False, fetch_enabled=False,
+            code_exec_enabled=False, browser_enabled=False,
+            desktop_enabled=False, swarm_enabled=swarm,
+            messages=[], conv_id=self.CONV,
+        )[0]
+
+    def test_swarm_toggle_on_is_visible_next_assembly(self):
+        before = _names(self._assemble(swarm=False))
+        after = _names(self._assemble(swarm=True))
+        self.assertNotIn('spawn_agents', before)
+        self.assertIn('spawn_agents', after)
+
+    def test_swarm_toggle_off_is_visible_next_assembly(self):
+        before = _names(self._assemble(swarm=True))
+        after = _names(self._assemble(swarm=False))
+        self.assertIn('spawn_agents', before)
+        self.assertNotIn('spawn_agents', after)
+
+    def test_project_attach_is_visible_next_assembly(self):
+        before = _names(self._assemble(project=False))
+        after = _names(self._assemble(project=True))
+        self.assertNotIn('run_command', before)
+        self.assertIn('run_command', after)
+
+    def test_project_detach_is_visible_next_assembly(self):
+        before = _names(self._assemble(project=True))
+        after = _names(self._assemble(project=False))
+        self.assertIn('run_command', before)
+        self.assertNotIn('run_command', after)
+
+
+class TestConversationToolFreezeRemoved(unittest.TestCase):
+    def test_state_api_and_frontend_entrypoints_are_absent(self):
+        self.assertFalse((ROOT / 'lib/tools/registry/_latch.py').exists())
+        self.assertFalse((ROOT / 'static/js/toolset-apply.js').exists())
+
+        sources = {
+            'model_config': ROOT / 'lib/tasks_pkg/model_config.py',
+            'finalize': ROOT / 'lib/tasks_pkg/orchestrator/_finalize.py',
+            'conversations_api': ROOT / 'routes/api_v1/conversations.py',
+            'frontend_runtime': ROOT / 'frontend/src/runtime/app-runtime.js',
+            'template': ROOT / 'index.html',
+        }
+        forbidden = (
+            'latch_tool_list', 'tool_list_latch', 'toolsetDiff',
+            'toolsetDiverged', '/toolset/apply', 'toolset-apply.js',
+            'applyToolset', 'syncToolsetBanner',
         )
-        return tl
-
-    def test_multi_then_single_is_byte_identical(self):
-        import json
-        tl_multi = self._assemble(['/tmp/a', '/tmp/b'])
-        tl_single = self._assemble(['/tmp/a'])  # transient single-root snapshot
-        self.assertEqual(
-            json.dumps(tl_multi, sort_keys=True),
-            json.dumps(tl_single, sort_keys=True),
-            'tool schemas must be byte-identical after a multi→single flap '
-            '(sticky multiroot latch); otherwise the prompt cache breaks',
-        )
-        # And the hint is present in BOTH (latched on).
-        self.assertIn('rootname:', _apply_diff_desc(tl_single))
-
-
-class TestMultirootTransitionReestablishesLatch(unittest.TestCase):
-    """Single→multi-root transition: adding a second root mid-conversation is a
-    LEGITIMATE one-time schema change (the model needs the ``rootname:`` hint
-    NOW). The OFF→ON multiroot-sticky transition must re-establish the
-    tool-schema latch so the next assembly re-freezes the snapshot WITH the
-    hint — one deliberate rebuild, then byte-stable — instead of leaving a
-    PERMANENT phantom empty-name-diff divergence (the stuck "apply in a new
-    conversation" banner that this episode diagnosed).
-    """
-
-    CONV = '_mr_trans_conv'
-
-    def setUp(self):
-        from lib.tools import clear_tool_list_latch
-        _reg.clear_multiroot_sticky(self.CONV)
-        clear_tool_list_latch(self.CONV)
-
-    def tearDown(self):
-        from lib.tools import clear_tool_list_latch
-        _reg.clear_multiroot_sticky(self.CONV)
-        clear_tool_list_latch(self.CONV)
-
-    def _assemble_and_latch(self, project_paths):
-        """Mirror the orchestrator: assemble (reads multiroot_active, which may
-        clear the latch on transition) THEN latch_tool_list, in that order."""
-        from lib.tools import latch_tool_list
-        cfg = {'projectPaths': project_paths, 'mcpEnabled': False}
-        ctx = _ctx(conv_id=self.CONV, project_path=project_paths[0],
-                   project_enabled=True, cfg=cfg)
-        tl, _has = assemble_tool_list(ctx)
-        return latch_tool_list(self.CONV, tl)
-
-    def test_transition_reestablishes_without_phantom_divergence(self):
-        from lib.tools import tool_list_diff
-        # Round 1: single-root → freezes the hint-LESS snapshot, no divergence.
-        eff1, div1 = self._assemble_and_latch(['/tmp/a'])
-        self.assertFalse(div1)
-        self.assertNotIn('rootname:', _apply_diff_desc(eff1))
-
-        # Round 2: second root added → OFF→ON transition clears+re-freezes the
-        # latch IN THE SAME ROUND with the hinted list. No phantom divergence.
-        eff2, div2 = self._assemble_and_latch(['/tmp/a', '/tmp/b'])
-        self.assertFalse(div2, 'multiroot transition must re-establish the '
-                               'latch in the same round, not report a phantom '
-                               'empty-name-diff divergence')
-        self.assertIn('rootname:', _apply_diff_desc(eff2),
-                      'the model must get the rootname hint immediately')
-        self.assertEqual(tool_list_diff(self.CONV), {'added': [], 'removed': []})
-
-    def test_stable_after_transition(self):
-        # Rounds 3+ stay byte-stable (diverged=False) on the frozen hinted list.
-        self._assemble_and_latch(['/tmp/a'])
-        self._assemble_and_latch(['/tmp/a', '/tmp/b'])
-        for _ in range(3):
-            eff, div = self._assemble_and_latch(['/tmp/a', '/tmp/b'])
-            self.assertFalse(div)
-            self.assertIn('rootname:', _apply_diff_desc(eff))
-
-    def test_transition_clear_fires_once(self):
-        # The clear must fire ONLY on the first OFF→ON mark, not every round
-        # (mark_multiroot_sticky returns True only on the transition).
-        self.assertTrue(_reg.mark_multiroot_sticky(self.CONV))
-        self.assertFalse(_reg.mark_multiroot_sticky(self.CONV))
-        self.assertFalse(_reg.mark_multiroot_sticky(self.CONV))
-
-
-class TestProjectAttachRestoresTools(unittest.TestCase):
-    """Attaching a project mid-conversation must restore the project tool
-    family (run_command / write_file / apply_diff / grep_search / list_dir /
-    find_files).
-
-    Root cause this pins (DB record mrroj7zr0lso93): a conversation whose FIRST
-    turn had empty roots assembles a tool list WITHOUT the project family
-    (gated on project_enabled); the tool-schema latch then freezes that
-    no-project snapshot for the whole conversation, so attaching a project on a
-    LATER turn was masked forever (only the always-on read_files / inspect_image
-    survived). The fix mirrors the multi-root OFF→ON precedent: the
-    project-ready OFF→ON transition clears the tool-schema latch so the project
-    tools re-freeze in on the same round.
-    """
-
-    CONV = '_proj_attach_conv'
-    _PROJECT_NAMES = frozenset({
-        'list_dir', 'grep_search', 'find_files', 'write_file',
-        'apply_diff', 'run_command',
-    })
-
-    def setUp(self):
-        from lib.tools import clear_project_ready_sticky, clear_tool_list_latch
-        clear_project_ready_sticky(self.CONV)
-        clear_tool_list_latch(self.CONV)
-
-    def tearDown(self):
-        from lib.tools import clear_project_ready_sticky, clear_tool_list_latch
-        clear_project_ready_sticky(self.CONV)
-        clear_tool_list_latch(self.CONV)
-
-    def _assemble_and_latch(self, *, project):
-        """Mirror the orchestrator: assemble (project_ready may clear the latch
-        on the OFF→ON transition) THEN latch_tool_list, in that order."""
-        from lib.tools import latch_tool_list
-        if project:
-            ctx = _ctx(conv_id=self.CONV, project_path='/tmp/proj',
-                       project_enabled=True,
-                       cfg={'projectPaths': ['/tmp/proj'], 'mcpEnabled': False},
-                       search_mode='multi', search_enabled=True)
-        else:
-            # Empty-roots first turn: no project, but a base tool (search) so
-            # the tool list is non-empty (matches the real Autopilot+Swarm turn).
-            ctx = _ctx(conv_id=self.CONV, project_path='', project_enabled=False,
-                       cfg={'mcpEnabled': False},
-                       search_mode='multi', search_enabled=True)
-        tl, _has = assemble_tool_list(ctx)
-        eff, diverged = latch_tool_list(self.CONV, tl)
-        return eff, diverged
-
-    def test_attach_after_empty_first_turn_restores_run_command(self):
-        # Round 1: empty roots → NO project tools frozen.
-        eff1, div1 = self._assemble_and_latch(project=False)
-        self.assertFalse(div1)
-        self.assertNotIn('run_command', _names(eff1),
-                         'empty-roots first turn must not carry run_command')
-        self.assertIn('read_files', _names(eff1),
-                      'read_files is always-on regardless of project')
-        # Round 2: project attached → OFF→ON transition clears + re-freezes the
-        # latch WITH the project family, in the same round.
-        eff2, _div2 = self._assemble_and_latch(project=True)
-        names2 = set(_names(eff2))
-        self.assertTrue(self._PROJECT_NAMES <= names2,
-                        f'project tools must be restored; missing '
-                        f'{sorted(self._PROJECT_NAMES - names2)}')
-
-    def test_stable_after_attach(self):
-        # Rounds 3+ stay byte-stable (diverged=False) on the frozen project list.
-        self._assemble_and_latch(project=False)
-        self._assemble_and_latch(project=True)
-        for _ in range(3):
-            eff, div = self._assemble_and_latch(project=True)
-            self.assertFalse(div, 'post-attach rounds must be byte-stable')
-            self.assertIn('run_command', _names(eff))
-
-    def test_attach_transition_fires_once(self):
-        from lib.tools import registry as _r
-        # First attach marks sticky (transition fires the clear); repeats don't.
-        self.assertTrue(_r.mark_project_ready_sticky(self.CONV))
-        self.assertFalse(_r.mark_project_ready_sticky(self.CONV))
-        self.assertFalse(_r.mark_project_ready_sticky(self.CONV))
-
-    def test_without_project_ready_hook_stays_masked(self):
-        # NEUTER / negative control: proving the OFF→ON latch-clear is
-        # load-bearing. If the project attach did NOT clear the latch, the
-        # frozen no-project snapshot would be served and run_command would stay
-        # absent. Simulate that by NOT letting the transition fire: pre-mark the
-        # conversation sticky BEFORE the empty-roots round, so the later attach
-        # sees mark_project_ready_sticky()==False (no clear).
-        from lib.tools import latch_tool_list, registry as _r
-        _r.mark_project_ready_sticky(self.CONV)  # suppress the OFF→ON clear
-        # Round 1: empty roots freezes the no-project snapshot.
-        eff1, _ = self._assemble_and_latch(project=False)
-        self.assertNotIn('run_command', _names(eff1))
-        # Round 2: attach — but the transition can't fire, so the stale latch
-        # is served and run_command stays masked (the pre-fix defect).
-        eff2, diverged = self._assemble_and_latch(project=True)
-        self.assertNotIn('run_command', _names(eff2),
-                         'without the OFF→ON latch-clear the frozen no-project '
-                         'snapshot masks run_command (the bug)')
-        self.assertTrue(diverged, 'fresh list has project tools but frozen '
-                        'snapshot lacks them → divergence')
-
-    def test_stateless_assembly_no_latch(self):
-        # conv_id='' (tests / compat adapters) → raw project_enabled, no latch.
-        tl_no, _ = assemble_tool_list(
-            _ctx(conv_id='', project_path='', project_enabled=False,
-                 cfg={'mcpEnabled': False}, search_mode='multi',
-                 search_enabled=True))
-        self.assertNotIn('run_command', _names(tl_no))
-        tl_yes, _ = assemble_tool_list(
-            _ctx(conv_id='', project_path='/tmp/proj', project_enabled=True,
-                 cfg={'projectPaths': ['/tmp/proj'], 'mcpEnabled': False},
-                 search_mode='multi', search_enabled=True))
-        self.assertIn('run_command', _names(tl_yes))
+        for label, path in sources.items():
+            text = path.read_text(encoding='utf-8')
+            for needle in forbidden:
+                self.assertNotIn(needle, text, f'{label} retains {needle}')
 
 
 if __name__ == '__main__':

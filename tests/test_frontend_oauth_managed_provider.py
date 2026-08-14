@@ -33,11 +33,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = runtime_sections_dir()
 BRANDING = os.path.join(JS_DIR, 'settings', 'branding.js')
 ICONS = os.path.join(JS_DIR, 'core', 'icons.js')
 PROVIDER_RENDER = os.path.join(JS_DIR, 'settings', 'provider_render.js')
@@ -98,6 +100,13 @@ const NORMAL_CLOUD = {
   enabled: true, api_keys: ['sk-abc'],
   models: [{ model_id: 'gpt-4o', capabilities: ['text'] }],
 };
+const MANAGED_ADAPTER = {
+  id: 'adapter_agent', name: 'Subscription adapter · laptop',
+  base_url: 'http://127.0.0.1:8317/v1', brand: 'adapter',
+  adapter: { agent_id: 'agent-1', port: 8317 }, enabled: true,
+  api_keys: ['ta-secret'],
+  models: [{ model_id: 'gpt-5.6-sol', capabilities: ['text'] }],
+};
 
 (async () => {
   loadAll(fs.readFileSync(process.argv[4], 'utf8'));
@@ -127,6 +136,17 @@ const NORMAL_CLOUD = {
   check('logout_button', h.indexOf('_logoutManagedProvider(0)') !== -1);
   check('logout_label', h.indexOf('settings.oauthLogoutRemove') !== -1);
   check('no_plain_delete', h.indexOf('_deleteProvider(0)') === -1);
+
+  // ══ Managed adapter card: read-only projection + account-management link ══
+  global._stgProviders = [MANAGED_ADAPTER];
+  _renderProvidersTab();
+  const a = _el.innerHTML;
+  check('adapter_badge_label', a.indexOf('settings.adapterManagedBadge') !== -1);
+  check('adapter_note', a.indexOf('settings.adapterManagedNoteDesc') !== -1);
+  check('adapter_manage_accounts', a.indexOf('settings.adapterManageAccounts') !== -1);
+  check('adapter_model_visible', a.indexOf('gpt-5.6-sol') !== -1);
+  check('adapter_read_only', a.indexOf('onchange=') === -1 &&
+                             a.indexOf('_deleteProvider(0)') === -1);
 
   // ══ NO REGRESSION: normal cloud provider ══
   global._stgProviders = [NORMAL_CLOUD];
@@ -183,4 +203,4 @@ def test_managed_oauth_provider_card():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'managed-oauth-card failures:\n' + output
-    assert output.count('PASS') >= 17, f'expected >=17 PASS lines, got:\n{output}'
+    assert output.count('PASS') >= 22, f'expected >=22 PASS lines, got:\n{output}'

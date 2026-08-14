@@ -99,6 +99,7 @@ class ProbePersistenceTest(unittest.TestCase):
         self.assertNotIn('_extra_headers', snap)
         self.assertNotIn('_abort', snap)
         self.assertEqual(snap['provider_id'], 'mt')
+        self.assertEqual(snap['probe_schema_version'], 2)
 
 
 if __name__ == '__main__':

@@ -345,17 +345,15 @@ def test_run_py_imports_the_extracted_prefetch_helper():
 
 
 @_unit
-def test_prefetch_behaviour_flags_gate_the_two_submits():
-    """Slice 3: ``start_prefetches`` MUST reproduce the original
-    behavioural gating:
+def test_prefetch_only_submits_project_rules_io():
+    """``start_prefetches`` owns only the project-rules I/O lane:
       * project_enabled=True + project_path → submits _prefetch_project
         (stashed on task['_prefetch_project'])
       * project_enabled=False (or no project_path) → task['_prefetch_project'] is None
-      * memory_enabled=True → submits _prefetch_memory
-      * memory_enabled=False → task['_prefetch_memory'] is None
+      * memory_enabled does not create a future; local memory selection runs
+        synchronously after tool assembly
       * returned pool is a live ThreadPoolExecutor the caller owns
-    Monkey-patches the two lib functions so no real project/memory IO
-    happens. Uses a synchronous fake pool that just records .submit()
+    Uses a synchronous fake pool that just records .submit()
     calls, so the test is deterministic + doesn't leak threads."""
     import lib.tasks_pkg.orchestrator._prefetch as pf
 
@@ -377,31 +375,12 @@ def test_prefetch_behaviour_flags_gate_the_two_submits():
         def shutdown(self, wait=False):
             pass
 
-    # Stub project + memory lib calls so no real IO fires.
-    import types
-    fake_project_mod = types.ModuleType('lib.project_mod.stub')
-    fake_project_mod.get_context_for_prompt = lambda *a, **kw: 'PROJECT_CTX'
-    fake_memory_mod = types.ModuleType('lib.memory.stub')
-    fake_memory_mod.build_memory_context = lambda *a, **kw: 'MEMORY_CTX'
-
-    import sys
-    orig_project = sys.modules.get('lib.project_mod')
-    orig_memory = sys.modules.get('lib.memory')
     orig_pool = pf._PrefetchPool
     try:
-        # Route the closure's ``from lib.project_mod import
-        # get_context_for_prompt`` to the fake by patching the
-        # attribute on the real module object.
-        if orig_project is not None:
-            _orig_gcfp = getattr(orig_project, 'get_context_for_prompt', None)
-            orig_project.get_context_for_prompt = fake_project_mod.get_context_for_prompt
-        if orig_memory is not None:
-            _orig_bmc = getattr(orig_memory, 'build_memory_context', None)
-            orig_memory.build_memory_context = fake_memory_mod.build_memory_context
         # Force start_prefetches to construct our fake pool.
         pf._PrefetchPool = lambda *a, **kw: _FakePool()
 
-        # Case 1: both project + memory ON → two submits.
+        # Project ON → exactly one project-context submit.
         task = {'id': 'tid-both', 'convId': 'cv1'}
         pool = pf.start_prefetches(
             task, cfg={},
@@ -409,36 +388,31 @@ def test_prefetch_behaviour_flags_gate_the_two_submits():
             memory_enabled=True)
         assert isinstance(pool, _FakePool)
         names = [n for (n, _a, _kw) in pool.submitted]
-        assert '_prefetch_project' in names, (
-            f'expected _prefetch_project submitted; got {names}')
-        assert '_prefetch_memory' in names, (
-            f'expected _prefetch_memory submitted; got {names}')
+        assert names == ['_prefetch_project']
         assert task.get('_prefetch_project') is not None
-        assert task.get('_prefetch_memory') is not None
+        assert '_prefetch_memory' not in task
 
-        # Case 2: project OFF → no project future.
+        # Project OFF → no future, regardless of the memory toggle.
         task2 = {'id': 'tid-nomem-only', 'convId': 'cv2'}
         pool2 = pf.start_prefetches(
             task2, cfg={},
             project_path='', project_enabled=False,
             memory_enabled=True)
         names2 = [n for (n, _a, _kw) in pool2.submitted]
-        assert '_prefetch_project' not in names2
-        assert '_prefetch_memory' in names2
+        assert names2 == []
         assert task2.get('_prefetch_project') is None
-        assert task2.get('_prefetch_memory') is not None
+        assert '_prefetch_memory' not in task2
 
-        # Case 3: memory OFF → no memory future.
+        # Memory OFF does not alter the project prefetch lane.
         task3 = {'id': 'tid-noproj-only', 'convId': 'cv3'}
         pool3 = pf.start_prefetches(
             task3, cfg={},
             project_path='/proj/B', project_enabled=True,
             memory_enabled=False)
         names3 = [n for (n, _a, _kw) in pool3.submitted]
-        assert '_prefetch_project' in names3
-        assert '_prefetch_memory' not in names3
+        assert names3 == ['_prefetch_project']
         assert task3.get('_prefetch_project') is not None
-        assert task3.get('_prefetch_memory') is None
+        assert '_prefetch_memory' not in task3
 
         # Case 4: both OFF → no submits at all, but the pool still exists
         # (the caller expects a shutdown-able return value regardless).
@@ -451,19 +425,9 @@ def test_prefetch_behaviour_flags_gate_the_two_submits():
             f'no prefetch flags enabled must submit nothing; got '
             f'{pool4.submitted}')
         assert task4.get('_prefetch_project') is None
-        assert task4.get('_prefetch_memory') is None
+        assert '_prefetch_memory' not in task4
     finally:
         pf._PrefetchPool = orig_pool
-        if orig_project is not None:
-            if _orig_gcfp is not None:
-                orig_project.get_context_for_prompt = _orig_gcfp
-            else:
-                del orig_project.get_context_for_prompt
-        if orig_memory is not None:
-            if _orig_bmc is not None:
-                orig_memory.build_memory_context = _orig_bmc
-            else:
-                del orig_memory.build_memory_context
 
 
 # ── Slice 4: project setup extraction ─────────────────────────────
@@ -810,7 +774,7 @@ def test_finalize_after_loop_no_assistant_msg_still_dispatches():
             tool_call_happened=False, all_search_results_text=[],
             project_path='', project_enabled=False,
             keep_tool_history=False, conv_id='',
-            loop_exit_reason='max_rounds_exhausted',
+            loop_exit_reason='no_tool_calls_round_0',
             abort_detected_phase=None,
         )
         # task['messages'] MUST have been written back (this is the
@@ -836,7 +800,7 @@ if __name__ == '__main__':
         test_vu_phase_behavior_gated_on_vu_startup_flag,
         test_prefetch_submodule_exists_and_exposes_start_prefetches,
         test_run_py_imports_the_extracted_prefetch_helper,
-        test_prefetch_behaviour_flags_gate_the_two_submits,
+        test_prefetch_only_submits_project_rules_io,
         test_setup_project_context_present_on_vu_startup,
         test_run_py_calls_setup_project_context,
         test_setup_project_context_disabled_path_is_no_op,

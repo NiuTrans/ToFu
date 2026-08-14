@@ -1,22 +1,22 @@
-"""User-context + personal-preference profile placement helpers.
+"""User-context placement helpers.
 
 Extracted from ``lib.tasks_pkg.system_context`` (facade-preserving split).
 
-Holds the Claude-Code-style ``prependUserContext`` inserter and the two
-preference-profile placement primitives (byte-stable CORE tier on the
-``_isMeta`` carrier, relevance-gated DETAIL tier on the true tail).
+Holds the Claude-Code-style ``prependUserContext`` inserter and compatibility
+placement primitives used by older callers.  Structured My Context is one
+byte-stable, always-on block; the detail helper remains only for callers that
+still place other volatile reminders on the true tail.
 """
 
 from lib.log import get_logger
 
 logger = get_logger(__name__)
 
-# Idempotency markers for the personal-preference profile blocks. Mirror the
-# constants in lib/memory/user_profile.py — kept in sync there. The core tier
-# (always-on) carries _PROFILE_MARKER; the relevance-gated detail tier carries
-# the distinct _PROFILE_DETAIL_MARKER so the two never collide.
-_PROFILE_MARKER = '[USER PREFERENCE PROFILE]'
-_PROFILE_DETAIL_MARKER = '[USER PREFERENCE PROFILE — relevant detail]'
+# Idempotency markers mirror ``lib.memory.user_profile``.  The detail marker is
+# retained for wire compatibility, but My Context itself never emits a detail
+# tier: identity, rules, and response preferences are all always-on.
+_PROFILE_MARKER = '[USER CONTEXT]'
+_PROFILE_DETAIL_MARKER = '[USER CONTEXT — relevant detail]'
 
 
 def _insert_user_context_message(messages, body: str) -> None:
@@ -68,7 +68,7 @@ def _insert_user_context_message(messages, body: str) -> None:
 
 def _append_user_profile_block(messages, block: str,
                                marker: str = _PROFILE_MARKER) -> bool:
-    """Append the preference-profile block to the cache-safe tail.
+    """Append the durable user-context block to the cache-safe carrier.
 
     Placement priority (cache-stability matters):
       1. If a prepended ``_isMeta`` user message exists (CLAUDE.md carrier),
@@ -134,7 +134,7 @@ def _refresh_detail_block(messages, block: str | None,
     """Replace (or strip) the relevance-gated DETAIL block on the TRUE tail.
 
     The detail tier rides the LAST user message (the genuine volatile tail) —
-    the SAME cache-safe seam ``inject_relevant_memories`` uses — NOT the
+    the same cache-safe tail seam used by other round evidence — NOT the
     prepended ``_isMeta`` carrier (index 1, CLAUDE.md). The carrier lives
     inside the cached prompt prefix (``messages[0:N-2]`` after the first tool
     round); because the detail selection changes per turn, putting it on the
@@ -163,7 +163,7 @@ def _refresh_detail_block(messages, block: str | None,
     the caller knows whether the tail was mutated (→ ``notify_compaction``).
     """
     # Target the LAST user message (true volatile tail), walking from the end —
-    # mirrors inject_relevant_memories. NEVER the _isMeta carrier (see B4).
+    # Never target the _isMeta carrier (see B4).
     target_idx = None
     for i in range(len(messages) - 1, -1, -1):
         if messages[i].get('role') == 'user':

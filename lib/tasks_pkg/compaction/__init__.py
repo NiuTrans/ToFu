@@ -72,7 +72,10 @@ from lib.tasks_pkg.compaction._constants import (  # noqa: E402,F401
     MICRO_COMPACT_THRESHOLD,
     _THINKING_HOT_TAIL,
     _SUMMARY_TRIGGER_RATIO,
+    _DEFAULT_WORKING_SET_TOKENS,
     _SUMMARY_MAX_TOKENS,
+    _AUTO_COMPACT_MIN_PAYBACK_ROUNDS,
+    _AUTO_COMPACT_MIN_REDUCTION_RATIO,
     _SUMMARY_COOLDOWN,
     _DEFAULT_CONTEXT_LIMIT,
     _OUTPUT_RESERVE,
@@ -183,6 +186,7 @@ from lib.tasks_pkg.compaction._advanced import advanced_compact  # noqa: E402,F4
 # ═══════════════════════════════════════════════════════════════════════════════
 
 from lib.tasks_pkg.compaction._tokens import (  # noqa: E402,F401
+    _compaction_trigger_threshold,
     _count_tokens_authoritative,
     _estimate_msg_tokens,
     _estimate_total_tokens,
@@ -190,11 +194,13 @@ from lib.tasks_pkg.compaction._tokens import (  # noqa: E402,F401
     _get_static_context_limit,
     build_context_policy,
     resolve_model_context_limit,
+    resolve_model_context_profile,
     _human_size,
     _parse_reported_token_count,
     _parse_context_overflow,
     _PROMPT_TOO_LONG_RE,
     _should_force_compact,
+    _working_set_token_limit,
 )
 
 

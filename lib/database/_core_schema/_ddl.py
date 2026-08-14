@@ -147,7 +147,7 @@ _UPSERT_SQL_CACHE: dict = {}
 
 
 def upsert(db, table: sa.Table, row: dict, *, conflict_cols=None,
-           update_cols=None, insert_cols=None, commit=False, retry=False):
+           update_cols=None, insert_cols=None, commit=None, retry=False):
     """Backend-agnostic UPSERT — the single reusable replacement for every
     ``INSERT OR REPLACE INTO <t> … VALUES(?…)`` call-site.
 
@@ -174,9 +174,11 @@ def upsert(db, table: sa.Table, row: dict, *, conflict_cols=None,
             sets some columns and relies on defaults (e.g. ``settings``) and
             the ``search_tsv`` trigger for the rest. Keys of ``row`` must match
             the inserted columns (conflict cols auto-included).
-        commit: if True, commit after executing (kv/one-shot callers); leave
-            False inside a larger transaction (hot-path batch writers commit
-            once at the end).
+        commit: REQUIRED unless ``retry=True``. If True, commit after
+            executing (kv/one-shot callers); pass False explicitly inside a
+            larger transaction (hot-path batch writers commit once at the
+            end). Requiring the choice prevents an omitted keyword from
+            leaking a write transaction until request teardown/watchdog.
         retry: if True, route the write through
             ``lib.database.db_execute_with_retry`` (retries on contention /
             transient connection loss). Use for call-sites that previously
@@ -189,6 +191,10 @@ def upsert(db, table: sa.Table, row: dict, *, conflict_cols=None,
 
     Returns the cursor from ``db.execute`` (or ``None`` when ``retry=True``).
     """
+    if commit is None and not retry:
+        raise TypeError(
+            'upsert() requires an explicit commit=True/False choice unless '
+            'retry=True owns the commit')
     if conflict_cols is None:
         conflict_cols = [c.name for c in table.primary_key.columns]
     from lib.database import _core

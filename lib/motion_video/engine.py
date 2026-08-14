@@ -60,7 +60,8 @@ def _plan_phases(task: dict) -> list:
     phases += ['compose', 'render', 'concat']
     if task.get('burn_in'):
         phases.append('burn_in')
-    if task.get('narration'):
+    if task.get('narration') or task.get('audio_plan') \
+            or task.get('audio_plan_path'):
         phases.append('mux')
     return phases
 
@@ -82,11 +83,8 @@ def _aborted(task: dict) -> bool:
 
 
 def _write(path: str, text: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + '.tmp'
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(text)
-    os.replace(tmp, path)
+    from lib.json_store import write_text_atomic
+    write_text_atomic(path, text)
 
 
 def _scene_gate_findings(mv, scene_dir: str, scene_id: str, *,
@@ -189,11 +187,12 @@ _MANIFEST_FIELDS = (
     'srt_path', 'scenes_path', 'workdir', 'voice', 'speed',
     'alignment', 'narration', 'quality', 'parallel', 'width', 'height',
     'burn_in', 'burn_in_fontsdir', 'topic', 'lang', 'max_scenes', 'paper_hash',
-    'scene_author', 'author_rounds', 'author_token_budget',
+    'scene_author', 'author_token_budget',
+    'audio_plan', 'audio_plan_path', 'audio_base_dir',
     # The user-picked LLM model (paper panels). Persisted so a crash-resume
     # keeps composing with the SAME model instead of silently falling back
     # to the dispatcher default mid-film.
-    'model',
+    'model', 'qa_model',
     # Product-quality axis. Persisted because the paper panel's post-restart
     # re-attach reads job.json and NOTHING else — without it a degraded film
     # is laundered into a clean success by the next process restart.
@@ -486,10 +485,26 @@ def _visual_qa_round(task: dict, sc: dict, scene_dir: str,
         shot_dir = os.path.join(scene_dir, '.tofu-draft')
         os.makedirs(shot_dir, exist_ok=True)
         shot = os.path.join(shot_dir, 'qa-frame.png')
-        vqa.screenshot_composition(scene_dir, shot, width=width,
-                                   height=height)
+        from lib.design_sys.temporal_qa import (
+            DEFAULT_PROGRESS_POINTS,
+            screenshot_timeline_contact_sheet,
+        )
+        progresses = sc.get('qa_progresses') or DEFAULT_PROGRESS_POINTS
+        screenshot_timeline_contact_sheet(
+            scene_dir, shot, width=width, height=height,
+            progresses=progresses)
+        qa_labels = ' / '.join(
+            f'{round(float(point) * 100)}%' for point in progresses)
+        constraints = '; '.join(str(item) for item in
+                                (sc.get('recipe_constraints') or []))
+        subject = (
+            f'视频镜头配方验收接触表（左至右为 {qa_labels}）；'
+            f'镜头配方={sc.get("shot_recipe") or "unspecified"}，'
+            f'运动族={sc.get("motion_family") or "unspecified"}，'
+            f'最低落定停留={sc.get("hold_s") or 0}s。'
+            + (f'验收约束：{constraints}' if constraints else ''))
         res = vqa.qa_frame(shot, theme=theme, label=sc.get('id'),
-                           subject='视频帧',
+                           subject=subject,
                            model=task.get('qa_model') or '')
         if not res.get('ok'):
             _emit(task, {'type': 'scene_visual_qa', 'scene_id': sc.get('id'),
@@ -500,24 +515,31 @@ def _visual_qa_round(task: dict, sc: dict, scene_dir: str,
                       if f.get('severity') in ('blocker', 'major')]
         _emit(task, {'type': 'scene_visual_qa', 'scene_id': sc.get('id'),
                      'ran': True, 'findings': len(res.get('findings') or []),
-                     'actionable': len(actionable)})
+                     'actionable': len(actionable),
+                     'qa_progresses': list(progresses),
+                     'shot_recipe': sc.get('shot_recipe') or ''})
         if not actionable:
             return html
         logger.info('[MotionVideo] %s visual QA: %d actionable finding(s) — '
-                    'entering one author repair round',
+                    'entering an author repair pass',
                     sc.get('id'), len(actionable))
         save_draft(scene_dir, html)   # the repair resumes FROM this frame
         repair = author_scene(
             sc, scene_dir, width=width, height=height, duration=duration,
             scene_index=scene_index, total_scenes=total_scenes,
-            max_rounds=2, token_budget=45000,
+            token_budget=45000,
             model=task.get('model') or None,
             abort_event=task.get('abort_event'), theme=theme,
             extra_findings=[vqa.findings_text(actionable)],
             transient_attempts=1)
         if repair.get('mode') != 'authored':
             return html
-        return _commit_scene_html(index_path, repair['html'], sc, scene_dir,
+        # A QA repair may inherit a CDN example from its draft.  Seal it
+        # *before* the sole guarded commit: writing the localised result after
+        # the commit would bypass the no-regression guarantee.
+        from lib.motion_video._runtime_assets import localise_gsap_html
+        repair_html = localise_gsap_html(repair['html'], scene_dir)
+        return _commit_scene_html(index_path, repair_html, sc, scene_dir,
                                   width=width, height=height,
                                   duration=duration, scene_index=scene_index,
                                   total_scenes=total_scenes, theme=theme)
@@ -560,6 +582,7 @@ def run_motion_task(task: dict) -> None:
                     narration=bool(task.get('narration')),
                     voice=task.get('voice') or '', speed=task.get('speed'),
                     alignment=task.get('alignment') or 'loose',
+                    model=task.get('model') or None,
                     abort_event=task.get('abort_event'),
                     emit=lambda ev: _emit(task, {'type': 'recipe', **ev}))
             scenes_path = tl['scenes_path']
@@ -609,6 +632,31 @@ def run_motion_task(task: dict) -> None:
         if scenes is None:
             from lib.motion_video._storyboard import build_storyboard
             scenes = build_storyboard(entries)
+        from lib.motion_video._creative_plan import normalise_film_plan
+        normalise_film_plan(scenes)
+        from lib.motion_video._shot_recipes import (
+            shot_contract_errors,
+            shot_plan_findings,
+        )
+        shot_errors = shot_contract_errors(scenes)
+        if shot_errors:
+            raise ValueError('normalized shot plan failed its own contract: '
+                             + ' | '.join(shot_errors[:6]))
+        for scene in scenes:
+            scene['plan_findings'] = []
+        plan_findings = shot_plan_findings(scenes)
+        scenes_by_id = {str(scene.get('id') or ''): scene for scene in scenes}
+        for finding in plan_findings:
+            target = scenes_by_id.get(str(finding.get('scene_id') or ''))
+            if target is not None:
+                target['plan_findings'].append(finding)
+        if plan_findings:
+            logger.warning('[MotionVideo] shot plan has %d advisory finding(s): '
+                           '%.400s', len(plan_findings),
+                           ' | '.join(str(item.get('issue') or '')
+                                      for item in plan_findings))
+            _emit(task, {'type': 'shot_plan_findings',
+                         'findings': plan_findings})
         _write(os.path.join(workdir, 'scenes.json'),
                json.dumps(scenes, ensure_ascii=False, indent=1))
         _phase_started(task, phases, 'storyboard')
@@ -673,12 +721,55 @@ def run_motion_task(task: dict) -> None:
         target_by_id = {e['scene_id']: e['target_duration']
                         for e in manifest.get('scenes', [])} if manifest.get('ok') else {}
 
+        # ── Program timeline: spoken/content time is immutable. Overlap edits
+        # receive visual handles so transitions never shorten the narration or
+        # move subtitle clocks.
+        from lib.motion_video._timeline import (
+            normalise_timeline_contract,
+            timeline_contract_errors,
+        )
+        timeline_info = normalise_timeline_contract(
+            scenes, durations=target_by_id, fps=fps)
+        timeline_errors = timeline_contract_errors(scenes)
+        if timeline_errors:
+            raise ValueError('timeline contract failed: '
+                             + ' | '.join(timeline_errors[:6]))
+        _write(os.path.join(workdir, 'scenes.json'),
+               json.dumps(scenes, ensure_ascii=False, indent=1))
+        _emit(task, {'type': 'timeline_contract', **timeline_info})
+
+        # Audio is validated and staged before expensive composition/render.
+        # A missing license or remote runtime URL is therefore an early,
+        # actionable contract failure, not a late ffmpeg surprise.
+        from lib.motion_video._audio_cues import (
+            audio_plan_errors,
+            audio_plan_summary,
+            load_audio_plan,
+            write_audio_attribution,
+        )
+        audio_plan = load_audio_plan(
+            task, scenes, workdir, timeline_info['duration_s'])
+        if audio_plan:
+            audio_errors = audio_plan_errors(audio_plan)
+            if audio_errors:
+                raise ValueError('audio plan failed: '
+                                 + ' | '.join(audio_errors[:6]))
+            from lib.json_store import write_json_atomic
+            write_json_atomic(os.path.join(workdir, 'audio_plan.json'),
+                              audio_plan)
+            write_audio_attribution(
+                audio_plan, os.path.join(workdir, 'audio_attribution.txt'))
+            _emit(task, {'type': 'audio_plan',
+                         **audio_plan_summary(audio_plan)})
+
         # ── 4. compose (per-scene author when enabled, else zero-LLM template) ──
         from lib.motion_video._scene_author import (author_scene,
                                                     scene_author_enabled)
         from lib.motion_video._template import (is_template_composition,
                                                 matches_template,
                                                 render_scene_html)
+        from lib.motion_video._runtime_assets import (ensure_gsap,
+                                                      localise_gsap_html)
         _phase_started(task, phases, 'compose')
         authoring = scene_author_enabled(task)
         # Film-level theme (design-system P1): ONE palette + font pairing +
@@ -705,9 +796,26 @@ def run_motion_task(task: dict) -> None:
         scene_records: list[dict] = []
         total = len(scenes)
         for i, sc in enumerate(scenes, 1):
-            dur = target_by_id.get(sc['id'], round(sc['end'] - sc['start'], 3))
+            content_dur = float(sc['content_duration_s'])
+            dur = float(sc['render_duration_s'])
             scene_dir = os.path.join(workdir, 'scenes', sc['id'])
             os.makedirs(scene_dir, exist_ok=True)
+            # Browser rendering must never depend on its proxy/CDN access.
+            # Stage the pinned runtime before authoring (so its asset gate can
+            # verify the reference) and localise old/resumed compositions too.
+            if not ensure_gsap(scene_dir):
+                raise RuntimeError(
+                    f'could not stage the pinned GSAP runtime for {sc["id"]}')
+            asset_preflight = {'resolved': [], 'findings': []}
+            if authoring:
+                try:
+                    from lib.motion_video._asset_preflight import prepare_scene_assets
+                    asset_preflight = prepare_scene_assets(sc, scene_dir)
+                except Exception as e:
+                    logger.warning('[MotionVideo] %s asset preflight crashed: %s',
+                                   sc.get('id'), e, exc_info=True)
+                    asset_preflight['findings'] = [
+                        f'asset preflight crashed: {e}']
             index_path = os.path.join(scene_dir, 'index.html')
             author_rounds = author_tokens = 0
             author_craft_reads: list = []
@@ -731,8 +839,6 @@ def run_motion_task(task: dict) -> None:
                     res = author_scene(sc, scene_dir, width=width, height=height,
                                        duration=dur, scene_index=i,
                                        total_scenes=total,
-                                       max_rounds=int(task.get('author_rounds') or 0)
-                                       or None,
                                        token_budget=int(task.get('author_token_budget')
                                                         or 0) or None,
                                        model=task.get('model') or None,
@@ -753,6 +859,7 @@ def run_motion_task(task: dict) -> None:
                 html = render_scene_html(sc, width=width, height=height,
                                          duration=dur, scene_index=i,
                                          total_scenes=total, theme=theme)
+            html = localise_gsap_html(html, scene_dir)
             errs = mv.check_composition_html(html)
             if errs:
                 raise ValueError(f"template composition failed its own gate "
@@ -794,7 +901,8 @@ def run_motion_task(task: dict) -> None:
             # Advisory: a finding means the frame is ugly, not unrenderable, so
             # it is reported and counted on the quality axis instead of killing
             # a film that would still play.
-            gate_findings = _scene_gate_findings(
+            gate_findings = list(asset_preflight.get('findings') or [])
+            gate_findings += _scene_gate_findings(
                 mv, scene_dir, sc['id'], abort_event=task.get('abort_event'),
                 scene=sc, html=html, fill=fill)
             # The asset floor. Judged on the composition that is about to
@@ -829,6 +937,7 @@ def run_motion_task(task: dict) -> None:
                 logger.warning('[MotionVideo] scene %s telemetry crashed: %s',
                                sc['id'], e, exc_info=True)
             sc['_duration'] = dur
+            sc['_content_duration'] = content_dur
             scene_dirs.append(scene_dir)
             _emit(task, {'type': 'progress', 'phase': 'compose',
                          'done': i, 'total': total, 'unit': 'scene',
@@ -906,8 +1015,10 @@ def run_motion_task(task: dict) -> None:
         ordered = [mp4s[sc['id']] for sc in scenes]
         silent_final = os.path.join(workdir, 'final_silent.mp4')
         with heartbeat(task, lambda t, ev: _emit(t, ev), 'concat'):
-            res = mv.concat_mp4s(ordered, silent_final,
-                                 abort_event=task.get('abort_event'))
+            res = mv.concat_mp4s(
+                ordered, silent_final,
+                transitions=timeline_info['transitions'],
+                abort_event=task.get('abort_event'))
         if not res.get('ok'):
             raise RuntimeError('concat failed: ' + res.get('detail', ''))
         _emit(task, build_phase(Phase.CONCAT,
@@ -919,7 +1030,7 @@ def run_motion_task(task: dict) -> None:
         cursor = scenes[0]['start']
         lines: list[str] = []
         for i, sc in enumerate(scenes, 1):
-            dur = sc['_duration']
+            dur = sc['_content_duration']
             lines.append(str(i))
             lines.append(f"{mv.format_timestamp(cursor)} --> "
                          f"{mv.format_timestamp(cursor + dur)}")
@@ -955,6 +1066,7 @@ def run_motion_task(task: dict) -> None:
 
         # ── 8. mux (optional) ──
         final_path = os.path.join(workdir, 'final.mp4')
+        narration_wav = ''
         if narration:
             _phase_started(task, phases, 'mux')
             wavs = [e['wav'] for e in manifest['scenes'] if e.get('wav')]
@@ -964,10 +1076,27 @@ def run_motion_task(task: dict) -> None:
                 if not cn.get('ok'):
                     raise RuntimeError('narration concat failed: '
                                        + cn.get('detail', ''))
-                mx = mv.mux_audio_video(video_final, narration_wav, final_path,
-                                        abort_event=task.get('abort_event'))
+                if audio_plan:
+                    mx = mv.mix_audio_timeline(
+                        video_final, narration_wav, audio_plan, final_path,
+                        abort_event=task.get('abort_event'))
+                else:
+                    mx = mv.mux_audio_video(
+                        video_final, narration_wav, final_path,
+                        abort_event=task.get('abort_event'))
             if not mx.get('ok'):
                 raise RuntimeError('mux failed: ' + mx.get('detail', ''))
+            _emit(task, build_phase(Phase.MUX,
+                                    duration_s=mx.get('duration')))
+        elif audio_plan:
+            _phase_started(task, phases, 'mux')
+            with heartbeat(task, lambda t, ev: _emit(t, ev), 'mux'):
+                mx = mv.mix_audio_timeline(
+                    video_final, '', audio_plan, final_path,
+                    abort_event=task.get('abort_event'))
+            if not mx.get('ok'):
+                raise RuntimeError('audio mix failed: '
+                                   + mx.get('detail', ''))
             _emit(task, build_phase(Phase.MUX,
                                     duration_s=mx.get('duration')))
         else:
@@ -994,6 +1123,13 @@ def run_motion_task(task: dict) -> None:
             'gate_failed_scenes': sorted(scene_gate_issues),
             'scene_quality': scene_records,
             'quality_summary': quality_summary,
+            'timeline': timeline_info,
+            'audio': audio_plan_summary(audio_plan),
+            'audio_plan_path': (os.path.join(workdir, 'audio_plan.json')
+                                if audio_plan else ''),
+            'audio_attribution_path': (
+                os.path.join(workdir, 'audio_attribution.txt')
+                if audio_plan else ''),
         }
         task['result'] = result
         # ★ Computed BEFORE the manifest write, not after: job.json is the ONLY
@@ -1151,7 +1287,8 @@ def resume_interrupted_jobs() -> int:
             scenes_path=m.get('scenes_path') or '')
         for k in ('burn_in', 'burn_in_fontsdir', 'topic', 'lang',
                   'max_scenes', 'paper_hash', 'kind', 'scene_author',
-                  'author_rounds', 'author_token_budget', 'model'):
+                  'author_token_budget', 'model', 'qa_model', 'audio_plan',
+                  'audio_plan_path', 'audio_base_dir'):
             if m.get(k) is not None:
                 task[k] = m[k]
         # Restore the ORIGINAL start so the resumed job's elapsed clock
@@ -1231,9 +1368,14 @@ def run_scene_regen_task(task: dict) -> None:
                                  'cannot re-assemble')
             ordered.append(p)
         silent_final = os.path.join(workdir, 'final_silent.mp4')
+        from lib.motion_video._timeline import transition_plan
+        transitions = (transition_plan(scenes)
+                       if all(sc.get('timeline_contract_version')
+                              for sc in scenes) else None)
         with heartbeat(task, lambda t, ev: _emit(t, ev), 'regen'):
-            res = mv.concat_mp4s(ordered, silent_final,
-                                 abort_event=task.get('abort_event'))
+            res = mv.concat_mp4s(
+                ordered, silent_final, transitions=transitions,
+                abort_event=task.get('abort_event'))
         if not res.get('ok'):
             raise RuntimeError('re-concat failed: ' + res.get('detail', ''))
 
@@ -1251,8 +1393,21 @@ def run_scene_regen_task(task: dict) -> None:
             video_final = burned
 
         final_path = os.path.join(workdir, 'final.mp4')
-        if task.get('narration'):
-            narration_wav = os.path.join(workdir, 'audio', 'narration.wav')
+        audio_plan = None
+        audio_plan_path = os.path.join(workdir, 'audio_plan.json')
+        if os.path.isfile(audio_plan_path):
+            from lib.json_store import read_json
+            audio_plan = read_json(audio_plan_path, default=None)
+        narration_wav = (os.path.join(workdir, 'audio', 'narration.wav')
+                         if task.get('narration') else '')
+        if audio_plan:
+            with heartbeat(task, lambda t, ev: _emit(t, ev), 'regen'):
+                mx = mv.mix_audio_timeline(
+                    video_final, narration_wav, audio_plan, final_path,
+                    abort_event=task.get('abort_event'))
+            if not mx.get('ok'):
+                raise RuntimeError('re-mix failed: ' + mx.get('detail', ''))
+        elif task.get('narration'):
             with heartbeat(task, lambda t, ev: _emit(t, ev), 'regen'):
                 mx = mv.mux_audio_video(video_final, narration_wav, final_path,
                                         abort_event=task.get('abort_event'))

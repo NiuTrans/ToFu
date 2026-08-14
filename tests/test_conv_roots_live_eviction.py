@@ -59,9 +59,6 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import quart as _quart  # noqa: E402
-sys.modules['flask'] = _quart
-
 _THIS = os.path.abspath(__file__)
 _ROOT = os.path.dirname(os.path.dirname(_THIS))
 _TARGET = os.path.join(_ROOT, 'lib', 'project_mod', 'config.py')

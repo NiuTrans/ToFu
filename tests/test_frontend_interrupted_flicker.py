@@ -32,6 +32,8 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -48,7 +50,8 @@ _HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
 const ROOT = process.argv[2];
-const NC = process.argv[3] === 'NC';
+const SOURCES = process.argv[3];
+const NC = process.argv[4] === 'NC';
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM('<!DOCTYPE html><body></body>', { url: 'http://localhost/' });
 const win = dom.window;
@@ -58,8 +61,8 @@ global.document = win.document;
 // conv_reducers.js is where pollWriteWouldClobberSettledTail lives after the
 // conversations.js decomposition; conversations.js is eval'd too for any
 // cross-file references the reducer touches at load.
-eval(fs.readFileSync(path.join(ROOT, 'static', 'js', 'core', 'conv_reducers.js'), 'utf8'));
-eval(fs.readFileSync(path.join(ROOT, 'static', 'js', 'core', 'conversations.js'), 'utf8'));
+eval(fs.readFileSync(path.join(SOURCES, 'core', 'conv_reducers.js'), 'utf8'));
+eval(fs.readFileSync(path.join(SOURCES, 'core', 'conversations.js'), 'utf8'));
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -113,7 +116,7 @@ def _run(nc: bool):
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     try:
-        argv = ['node', harness, ROOT]
+        argv = ['node', harness, ROOT, runtime_sections_dir()]
         if nc:
             argv.append('NC')
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=60)

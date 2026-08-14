@@ -42,12 +42,12 @@ def test_vu_startup_exposes_factory():
 
 
 # ---------------------------------------------------------------------------
-# 2. _run.py delegates (one line replaces the closure block)
+# 2. _run.py uses the universal localized startup emitter
 # ---------------------------------------------------------------------------
-def test_run_task_delegates_vu_phase_factory():
+def test_run_task_uses_shared_startup_phase_emitter():
     src = RUN_PY.read_text()
-    assert '_vu_phase = make_vu_phase(task)' in src, (
-        '_run.py must obtain the closure from make_vu_phase(task)')
+    for stage in ('config', 'tools', 'history', 'context'):
+        assert f"_emit_startup_phase(task, '{stage}')" in src
 
 
 def test_run_py_no_inline_vu_closure():
@@ -64,11 +64,11 @@ def test_run_py_no_inline_vu_closure():
 def test_leaf_factory_binds_subtask_flag_and_forwards():
     src = LEAF_PY.read_text()
     assert "bool(task.get('_vu_subtask'))" in src
-    assert 'def _bound(detail):' in src, (
+    assert 'def _bound(detail, *, detail_key=None, detail_args=None):' in src, (
         'the factory must return the closure (internally named _bound so '
         'the module-level _vu_phase stays resolvable — an inner '
         'def _vu_phase would shadow it across the whole factory scope)')
-    assert '_vu_phase(task, detail, vu_startup=' in src, (
+    assert 'detail_key=detail_key' in src and 'detail_args=detail_args' in src, (
         'the closure must forward to the module-level _vu_phase through '
         'the module namespace (resolved at call time)')
 
@@ -81,13 +81,18 @@ def test_behaviour_gate_and_forwarding(monkeypatch):
     VU subtask → vu_startup=True. Detail forwards verbatim."""
     import lib.tasks_pkg.orchestrator._vu_startup as leaf
     calls = []
-    monkeypatch.setattr(leaf, '_vu_phase',
-                        lambda task, detail, *, vu_startup: calls.append(
-                            (task['id'], detail, vu_startup)))
+    monkeypatch.setattr(
+        leaf, '_vu_phase',
+        lambda task, detail, *, vu_startup, detail_key=None, detail_args=None:
+            calls.append((task['id'], detail, vu_startup,
+                          detail_key, detail_args)))
     plain = leaf.make_vu_phase({'id': 'a'})
     plain('step-1')
     vu = leaf.make_vu_phase({'id': 'b', '_vu_subtask': True})
-    vu('step-2')
-    assert calls == [('a', 'step-1', False), ('b', 'step-2', True)], (
+    vu('step-2', detail_key='stream.phase.startup', detail_args={'step': 2})
+    assert calls == [
+        ('a', 'step-1', False, None, None),
+        ('b', 'step-2', True, 'stream.phase.startup', {'step': 2}),
+    ], (
         'the gate must read _vu_subtask once at factory time and forward '
         'detail verbatim with it')

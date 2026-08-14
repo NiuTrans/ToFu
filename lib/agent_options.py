@@ -115,6 +115,16 @@ _FIELDS: list[tuple[str, str, type, Any, Optional[tuple], str]] = [
     ('maxBudgetUsd',          'max_budget_usd',        float, 0.0,    None,
         'Hard $ ceiling on accumulated token cost; 0 = no budget gate. '
         'Inspired by Claude Agent SDK\'s max_budget_usd.'),
+    ('maxPromptTokens',       'max_prompt_tokens',      int,   0,      None,
+        'Hard ceiling on accumulated prompt/input tokens; 0 disables.'),
+    ('maxApiRounds',          'max_api_rounds',         int,   0,      None,
+        'Hard ceiling on model API rounds per task; 0 disables.'),
+    ('maxToolOutputBytes',    'max_tool_output_bytes',  int,   0,      None,
+        'Hard ceiling on settled tool-output bytes per task; 0 disables.'),
+    ('maxTaskSeconds',        'max_task_seconds',       float, 0.0,    None,
+        'Hard wall-clock task duration in seconds; 0 disables.'),
+    ('taskBudgetSoftRatio',   'task_budget_soft_ratio', float, 0.8,    None,
+        'Visible warning threshold as a fraction of each enabled hard limit.'),
     ('disableModelFallback',  'disable_model_fallback', bool, False,  None,
         'Opt OUT of automatic model fallback for THIS request. The server '
         'admin configures a global fallback model (Settings → model '
@@ -230,6 +240,11 @@ class TofuOptions:
 
     # Safety / limits
     max_budget_usd: float = 0.0
+    max_prompt_tokens: int = 0
+    max_api_rounds: int = 0
+    max_tool_output_bytes: int = 0
+    max_task_seconds: float = 0.0
+    task_budget_soft_ratio: float = 0.8
     disable_model_fallback: bool = False
 
     # Misc / advanced

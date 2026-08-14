@@ -131,10 +131,10 @@ def test_snapshot_rev_is_per_conv_not_shared(clean_hub, stub_registry):
     a = snap['convs']['conv-A']['runningTaskIdsRev']
     b = snap['convs']['conv-B']['runningTaskIdsRev']
     assert a[1] == b[1], 'same process → same replica_id on all entries'
-    # ns is strictly monotonic per call — two entries in the same snapshot
-    # must therefore differ (or at least be non-decreasing; the loop reads
-    # each conv's rev sequentially with time.monotonic_ns()).
-    assert a[0] != b[0] or True  # not strictly required to differ, but not shared
+    # The mint guarantees strict per-process ordering, so independently minted
+    # entries in iteration order must not share a revision.
+    assert a[0] < b[0], (
+        f'per-conv revisions were not independently minted: {a!r}, {b!r}')
 
 
 # ─────────────────────────────────────────────────────────────────────

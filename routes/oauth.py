@@ -10,7 +10,7 @@ Browser-centric flow:
   7. POST /api/oauth/logout   → delete tokens
 """
 
-from flask import Blueprint, request
+from quart import Blueprint, request
 
 from lib.log import get_logger
 from lib.api_response import (
@@ -195,6 +195,11 @@ def oauth_logout():
             return api_bad_request('Invalid provider')
 
         result = logout_oauth(provider)
+        if not result.get('ok'):
+            return api_internal_error(result.get('error', 'internal_error'))
+        if provider == 'codex':
+            from lib.subscription_quota import clear_subscription_quota
+            clear_subscription_quota(provider, cache_key='oauth_codex')
         return api_ok(result)
 
     except Exception as e:

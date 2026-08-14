@@ -56,6 +56,7 @@ def _unit(fn):
 
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from tests._runtime_sections import runtime_section, runtime_section_names
 
 
 _HELPERS = (
@@ -70,8 +71,7 @@ _HELPERS = (
 
 
 def _read(rel_path: str) -> str:
-    with open(os.path.join(_ROOT, rel_path), encoding='utf-8') as f:
-        return f.read()
+    return runtime_section(rel_path.removeprefix('static/js/'))
 
 
 @_unit
@@ -84,7 +84,7 @@ def test_conv_persist_helpers_leaf_module_exists_and_declares_family():
             f'core/conv_persist_helpers.js must define `function {name}(...)` '
             f'— extraction incomplete'
         )
-        assert f'window.{name} = {name}' in src, (
+        assert f'runtimeScope.{name} = {name}' in src, (
             f'core/conv_persist_helpers.js must expose window.{name} = {name} '
             f'so downstream typeof-guarded reads resolve'
         )
@@ -123,14 +123,14 @@ def test_conversations_js_no_longer_declares_persist_helpers():
 def test_bundle_manifest_loads_persist_helpers_before_conversations():
     """Slice 3: lib/js_bundler.py must list 'core/conv_persist_helpers.js'
     BEFORE 'core/conversations.js'."""
-    src = _read('lib/js_bundler.py')
-    persist_idx = src.find("'core/conv_persist_helpers.js'")
-    conv_idx = src.find("'core/conversations.js'")
-    assert persist_idx > 0, (
+    owners = runtime_section_names()
+    persist_idx = owners.index('core/conv_persist_helpers.js')
+    conv_idx = owners.index('core/conversations.js')
+    assert persist_idx >= 0, (
         "lib/js_bundler.py::_BUNDLE_FILES must include "
         "'core/conv_persist_helpers.js' — bundler ratchet skipped"
     )
-    assert conv_idx > 0, (
+    assert conv_idx >= 0, (
         "lib/js_bundler.py::_BUNDLE_FILES must still include "
         "'core/conversations.js'"
     )

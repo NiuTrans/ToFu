@@ -31,13 +31,18 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import threading
 import time
+import weakref
 from typing import Optional
 
 from lib.log import get_logger
 
 logger = get_logger(__name__)
+
+_pressure_warn_lock = threading.Lock()
+_last_pressure_warn = 0.0
 
 
 # ── Admission control ───────────────────────────────────────────────
@@ -46,18 +51,76 @@ logger = get_logger(__name__)
 def _default_max_inflight() -> int:
     """Resolve the concurrent-task ceiling from env, with a safe default.
 
-    Default 64 sits comfortably below the sync route executor
-    (``TOFU_SYNC_WORKERS``, default ``min(128, cpu*8)``) so admitted tasks
-    plus their pollers cannot exhaust the pool. Override via
+    The personal-server default is 16, leaving headroom in the dedicated
+    agent executor (16 workers by default) for terminalisation and recovery work instead
+    of admitting hundreds of tasks that all retain history/model buffers.
+    Override via
     ``TOFU_MAX_INFLIGHT_TASKS``; ``0`` disables the ceiling entirely
     (legacy unbounded behaviour — not recommended).
     """
     try:
-        n = int(os.environ.get('TOFU_MAX_INFLIGHT_TASKS', '') or '64')
+        n = int(os.environ.get('TOFU_MAX_INFLIGHT_TASKS', '') or '16')
     except (ValueError, TypeError) as e:
         logger.debug('[Admission] TOFU_MAX_INFLIGHT_TASKS parse failed, using default: %s', e)
-        n = 64
+        n = 16
     return max(0, n)
+
+
+def _memory_pressure_allows_admission() -> bool:
+    """Fail closed before spawning more resident work near cgroup OOM.
+
+    The cgroup is shared with editors, browser renderers, PostgreSQL, and other
+    user processes.  A fixed task-count ceiling cannot see that those siblings
+    have already consumed the remaining headroom.  Reading two cgroupfs scalar
+    files at task admission is cheap and avoids starting a history/model-buffer
+    heavy agent while the kernel is already choosing an OOM victim.
+
+    Off-cgroup/unreadable environments fail open. Set
+    ``TOFU_ADMISSION_CGROUP_PCT=0`` to disable this independent safety gate.
+    """
+    # Never let a host's unrelated test-runner cgroup pressure make otherwise
+    # deterministic unit tests return 503. Tests that exercise this gate opt in
+    # by setting the knob explicitly.
+    if ('pytest' in sys.modules
+            and 'TOFU_ADMISSION_CGROUP_PCT' not in os.environ):
+        return True
+    raw = os.environ.get('TOFU_ADMISSION_CGROUP_PCT', '96')
+    try:
+        threshold = float(raw or '96')
+    except (TypeError, ValueError):
+        logger.debug('[Admission] invalid TOFU_ADMISSION_CGROUP_PCT=%r; '
+                     'using 96', raw)
+        threshold = 96.0
+    if threshold <= 0:
+        return True
+    threshold = max(50.0, min(100.0, threshold))
+    try:
+        from lib.cgroup_guard import pressure
+        snap = pressure()
+    except Exception as e:
+        logger.debug('[Admission] cgroup pressure probe failed open: %s', e)
+        return True
+    if not snap:
+        return True
+    try:
+        pct = float(snap.get('pct', 0) or 0)
+    except (TypeError, ValueError) as e:
+        logger.debug('[Admission] malformed cgroup pressure snapshot %r: %s',
+                     snap, e)
+        return True
+    if pct < threshold:
+        return True
+    global _last_pressure_warn
+    now = time.monotonic()
+    with _pressure_warn_lock:
+        should_log = now - _last_pressure_warn >= 30.0
+        if should_log:
+            _last_pressure_warn = now
+    if should_log:
+        logger.warning('[Admission] refusing new agent: shared cgroup %.1f%% full '
+                       '(threshold %.0f%%); retry after memory pressure subsides',
+                       pct, threshold)
+    return False
 
 
 def _admit_slot_ttl() -> float:
@@ -104,6 +167,9 @@ class AdmissionController:
         self._lock = threading.Lock()
         self._held: list[str] = []  # this replica's minted slot keys (LIFO)
         self._ttl = _admit_slot_ttl()
+        self._last_refusal_reason = ''
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread = None
 
     def _store(self):
         from lib.runtime_state_store import get_store
@@ -114,8 +180,13 @@ class AdmissionController:
 
         Returns True if a slot was granted (caller MUST later call
         :meth:`release`), False if the server is at capacity (503). Always
-        True when unbounded. Atomic — no check-then-act overshoot.
+        True when task-count admission is unbounded and the independent memory
+        pressure gate is open. Atomic — no check-then-act overshoot.
         """
+        if not _memory_pressure_allows_admission():
+            with self._lock:
+                self._last_refusal_reason = 'memory_pressure'
+            return False
         import uuid
         slot_key = uuid.uuid4().hex
         ok = self._store().acquire_slot(
@@ -124,7 +195,64 @@ class AdmissionController:
         if ok:
             with self._lock:
                 self._held.append(slot_key)
+                self._last_refusal_reason = ''
+            self._ensure_heartbeat()
+        else:
+            with self._lock:
+                self._last_refusal_reason = 'capacity'
         return ok
+
+    def _ensure_heartbeat(self) -> None:
+        """Start one lease-heartbeat thread for this controller, lazily.
+
+        Admission leases are crash-reclaim metadata, never a task lifetime.
+        Refreshing the exact locally-held slot set guarantees that an active
+        multi-hour LLM task remains counted no matter how many lease TTL windows
+        it crosses.  A weak reference lets short-lived test/controllers vanish
+        without a daemon thread retaining them forever.
+        """
+        with self._lock:
+            if (self._heartbeat_thread is not None
+                    and self._heartbeat_thread.is_alive()):
+                return
+            self._heartbeat_stop.clear()
+            interval = min(30.0, max(0.25, self._ttl / 3.0))
+            controller_ref = weakref.ref(self)
+            stop_event = self._heartbeat_stop
+
+            def _loop():
+                while not stop_event.wait(interval):
+                    ctrl = controller_ref()
+                    if ctrl is None:
+                        return
+                    ctrl.refresh_held_slots()
+                    # Do not retain the controller across the blocking wait.
+                    del ctrl
+
+            self._heartbeat_thread = threading.Thread(
+                target=_loop, name='tofu-admission-heartbeat', daemon=True)
+            self._heartbeat_thread.start()
+
+    def refresh_held_slots(self) -> None:
+        """Re-arm leases for every task this living replica still accounts for."""
+        with self._lock:
+            held = tuple(self._held)
+        if not held:
+            return
+        try:
+            self._store().refresh_slots(
+                self._KIND, held, ttl=self._ttl, count_prefix='')
+        except Exception as e:
+            # Admission remains fail-open. A later heartbeat retries, while the
+            # tasks themselves continue completely unaffected.
+            logger.warning('[Admission] slot heartbeat failed: %s', e)
+
+    def shutdown(self, timeout: float = 1.0) -> None:
+        """Stop the heartbeat helper; does not abort or release live tasks."""
+        self._heartbeat_stop.set()
+        thread = self._heartbeat_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=max(0.0, timeout))
 
     def release(self) -> None:
         """Return a slot. Idempotent-safe against over-release (pops one of
@@ -152,11 +280,14 @@ class AdmissionController:
 
     def stats(self) -> dict:
         inflight = self.in_flight
+        with self._lock:
+            refusal_reason = self._last_refusal_reason
         return {
             'in_flight': inflight,
             'capacity': self.max_inflight,
             'available': (max(0, self.max_inflight - inflight)
                           if self.max_inflight > 0 else -1),
+            'last_refusal_reason': refusal_reason,
         }
 
 

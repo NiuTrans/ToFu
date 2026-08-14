@@ -177,10 +177,42 @@ def _ensure_loaded() -> None:
         rows: list[dict] = []
         if isinstance(store, dict) and isinstance(store.get('providers'), list):
             rows = [r for r in store['providers'] if isinstance(r, dict)]
+        # Migrate old rows at the read boundary.  This keeps the public API and
+        # dispatcher on the canonical model shape even before the owner next
+        # updates the provider; the following persistence mutation will write
+        # the cleaned shape back to disk.
+        registrations = []
+        from lib.model_registration import normalize_model_entry
+        for row in rows:
+            normalized_models = []
+            for model in row.get('models') or ():
+                if not isinstance(model, dict):
+                    continue
+                try:
+                    normalized_models.append(normalize_model_entry(model))
+                except ValueError as exc:
+                    # Do not let one historical malformed row hide the whole
+                    # provider.  It remains usable, but the obsolete public
+                    # field is still removed.
+                    fallback = dict(model)
+                    fallback.pop('cost', None)
+                    normalized_models.append(fallback)
+                    logger.warning('[BYOProv] model migration skipped: %s', exc)
+            row['models'] = normalized_models
+            registrations.extend((str(row.get('id') or ''), model)
+                                 for model in normalized_models)
         _cache.clear()
         _cache.extend(rows)
         _cache_loaded = True
         logger.info('[BYOProv] loaded %d row(s) from %s', len(_cache), _STORE_PATH)
+    from lib.model_registration import clear_provider_models, register_model
+    for provider_id in dict.fromkeys(provider_id for provider_id, _ in registrations):
+        clear_provider_models(provider_id)
+    for provider_id, model in registrations:
+        try:
+            register_model(model, provider_id=provider_id)
+        except ValueError as exc:
+            logger.warning('[BYOProv] model registration skipped: %s', exc)
 
 
 def _persist() -> None:
@@ -236,21 +268,11 @@ def _validate_models(models) -> list[dict]:
     for i, m in enumerate(models):
         if not isinstance(m, dict):
             raise ValueError(f'models[{i}] must be an object')
-        mid = (m.get('model_id') or m.get('id') or '').strip()
-        if not mid:
-            raise ValueError(f'models[{i}].model_id is required')
-        entry = {'model_id': mid}
-        caps = m.get('capabilities')
-        if isinstance(caps, list):
-            entry['capabilities'] = [str(c) for c in caps if c]
-        for opt_key in ('rpm', 'cost', 'latency'):
-            if opt_key in m:
-                try:
-                    entry[opt_key] = float(m[opt_key])
-                except (TypeError, ValueError) as e:
-                    raise ValueError(
-                        f'models[{i}].{opt_key} must be numeric: {e}') from e
-        out.append(entry)
+        try:
+            from lib.model_registration import normalize_model_entry
+            out.append(normalize_model_entry(m, reject_legacy_cost=True))
+        except ValueError as e:
+            raise ValueError(f'models[{i}]: {e}') from e
     return out
 
 
@@ -343,6 +365,9 @@ def create_provider(*, owner_key_id: str, name: str, base_url: str,
         }
         _cache.append(row)
         _persist()
+    from lib.model_registration import register_model
+    for model in models_clean:
+        register_model(model, provider_id=prov_id)
     audit_log('byo_provider_created', prov_id=prov_id,
               owner_key_id=owner_key_id, base_url=base_url,
               n_models=len(models_clean))
@@ -364,6 +389,7 @@ def update_provider(prov_id: str, owner_key_id: str, **fields) -> bool:
     columns).
     """
     _ensure_loaded()
+    models_to_register = None
     with _lock:
         for row in _cache:
             if (row.get('id') != prov_id
@@ -401,8 +427,17 @@ def update_provider(prov_id: str, owner_key_id: str, **fields) -> bool:
                           fields=list(changed.keys()))
                 logger.info('[BYOProv] updated %s fields=%s', prov_id,
                             list(changed.keys()))
-            return True
-    return False
+                if 'models' in changed:
+                    models_to_register = list(row.get('models') or [])
+            break
+        else:
+            return False
+    if models_to_register is not None:
+        from lib.model_registration import clear_provider_models, register_model
+        clear_provider_models(prov_id)
+        for model in models_to_register:
+            register_model(model, provider_id=prov_id)
+    return True
 
 
 def delete_provider(prov_id: str, owner_key_id: str) -> bool:
@@ -414,6 +449,8 @@ def delete_provider(prov_id: str, owner_key_id: str) -> bool:
                     and row.get('owner_key_id') == owner_key_id):
                 _cache.pop(i)
                 _persist()
+                from lib.model_registration import clear_provider_models
+                clear_provider_models(prov_id)
                 audit_log('byo_provider_deleted', prov_id=prov_id,
                           owner_key_id=owner_key_id)
                 logger.info('[BYOProv] deleted %s owner=%s', prov_id,

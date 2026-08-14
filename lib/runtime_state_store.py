@@ -54,13 +54,15 @@ of three times.
 
 **Fail-open** (design §4, same discipline as ``rate_limit_store``): if the
 Redis backend cannot connect / errors, it degrades — ``acquire`` returns True,
-``count`` returns 0 — after a one-time WARN, and marks itself unavailable so
-subsequent calls skip the broken attempt. A cap substrate must never take down
-the request path; the worst case is that the cap stops enforcing (today's
-behaviour), never a crash.
+``count`` returns 0 — and schedules a jittered exponential reconnect. Calls
+skip the known-broken pool only until that backoff expires; recovery replaces
+the client and living admission slots are reasserted by their heartbeat. A cap
+substrate must never take down the request path; the worst case is that the cap
+temporarily stops enforcing (today's behaviour), never a crash or task kill.
 """
 from __future__ import annotations
 
+import random
 import threading
 import time
 from typing import Iterable, List, Tuple
@@ -143,6 +145,21 @@ class InProcRuntimeStateStore:
         accepted for interface parity; inproc keys the slot directly."""
         with self._lock:
             self._leases.pop((kind, slot_key), None)
+
+    def refresh_slots(self, kind: str, slot_keys: Iterable[str], ttl: float,
+                      count_prefix: str) -> None:
+        """Refresh already-admitted work without applying admission again.
+
+        A living task must keep its crash-reclaim lease for however long the
+        task actually runs.  This is deliberately not ``acquire_slot``: after a
+        transient store outage, truthful recovery may temporarily restore more
+        live work than the configured cap.  Those tasks already exist and must
+        remain counted; the cap then refuses *new* work until they drain.
+        """
+        now = time.time()
+        with self._lock:
+            for slot_key in slot_keys:
+                self._leases[(kind, slot_key)] = now + ttl
 
     def count_slots(self, kind: str, count_prefix: str) -> int:
         """Live slot count under a prefix — the inproc admission gate. Same
@@ -232,40 +249,109 @@ class RedisRuntimeStateStore:
 
     _KEY_NS = 'tofu:rts'  # keyspace namespace so counts don't collide
 
+    _RETRY_MIN = 0.5
+    _RETRY_MAX = 30.0
+    _WARN_INTERVAL = 30.0
+
     def __init__(self):
-        self._available = True
+        # ``_available`` is diagnostic state only.  It must never become a
+        # permanent circuit breaker: Redis can be restarted independently of
+        # this process and the next request after the backoff must reconnect.
+        self._available = False
         self._client = None
         self._lock = threading.Lock()
+        self._next_retry_at = 0.0
+        self._retry_delay = self._RETRY_MIN
+        self._last_warn_at = 0.0
+        self._last_error = ''
+
+    def _new_client(self):
+        """Construct a client. Split out so reconnect tests need no live Redis."""
+        import redis  # optional dependency — guarded by the caller
+        url = (getenv_compat('TOFU_REDIS_URL')
+               or 'redis://127.0.0.1:6379/0')
+        return redis.Redis.from_url(
+            url, socket_connect_timeout=1.0, socket_timeout=1.0,
+            health_check_interval=15, decode_responses=True)
+
+    def _close_client(self, client) -> None:
+        if client is None:
+            return
+        try:
+            close = getattr(client, 'close', None)
+            if callable(close):
+                close()
+            else:
+                pool = getattr(client, 'connection_pool', None)
+                if pool is not None:
+                    pool.disconnect()
+        except Exception as e:
+            logger.debug('[RuntimeStateStore] redis client close failed: %s', e)
+
+    def _schedule_retry_locked(self, error, operation: str) -> None:
+        """Open the circuit briefly, then allow a later call to reconnect."""
+        now = time.monotonic()
+        delay = self._retry_delay * random.uniform(0.8, 1.2)
+        self._next_retry_at = now + max(0.05, delay)
+        self._retry_delay = min(self._RETRY_MAX,
+                                max(self._RETRY_MIN, self._retry_delay * 2.0))
+        self._available = False
+        self._last_error = '%s: %s' % (operation, error)
+        if now - self._last_warn_at >= self._WARN_INTERVAL:
+            self._last_warn_at = now
+            logger.warning(
+                '[RuntimeStateStore] redis %s failed (%s) — failing open; '
+                'automatic reconnect in %.1fs', operation, error,
+                max(0.0, self._next_retry_at - now))
+
+    def _command_failed(self, error, operation: str) -> None:
+        """Invalidate a possibly-stale pool so the next retry is a clean dial."""
+        with self._lock:
+            old = self._client
+            self._client = None
+            self._schedule_retry_locked(error, operation)
+        self._close_client(old)
 
     def _redis(self):
-        """Lazily connect. Returns the client or None (marks unavailable)."""
-        if not self._available:
-            return None
+        """Lazily connect, with bounded exponential reconnect backoff."""
         if self._client is not None:
             return self._client
+        if time.monotonic() < self._next_retry_at:
+            return None
         with self._lock:
             if self._client is not None:
                 return self._client
+            if time.monotonic() < self._next_retry_at:
+                return None
+            client = None
             try:
-                import redis  # optional dependency — guarded
-                url = (getenv_compat('TOFU_REDIS_URL')
-                       or 'redis://127.0.0.1:6379/0')
-                # short timeouts so a dead Redis fails fast into fail-open
-                client = redis.Redis.from_url(
-                    url, socket_connect_timeout=1.0, socket_timeout=1.0,
-                    decode_responses=True)
+                client = self._new_client()
                 client.ping()
                 self._client = client
-                logger.info('[RuntimeStateStore] redis backend connected (%s)',
-                            url)
+                recovered = bool(self._last_error)
+                self._available = True
+                self._next_retry_at = 0.0
+                self._retry_delay = self._RETRY_MIN
+                self._last_error = ''
+                logger.info('[RuntimeStateStore] redis backend %s',
+                            'reconnected' if recovered else 'connected')
                 return self._client
             except Exception as e:
-                self._available = False
-                logger.warning(
-                    '[RuntimeStateStore] redis unavailable (%s) — failing open; '
-                    'caps/registry will NOT enforce cross-replica until restart',
-                    e)
+                self._schedule_retry_locked(e, 'connect')
+                self._close_client(client)
                 return None
+
+    def health(self) -> dict:
+        """Non-blocking diagnostic snapshot for metrics/readiness surfaces."""
+        now = time.monotonic()
+        with self._lock:
+            return {
+                'backend': 'redis',
+                'available': bool(self._client is not None and self._available),
+                'reconnect_in_s': max(0.0, self._next_retry_at - now),
+                'retry_delay_s': self._retry_delay,
+                'last_error': self._last_error,
+            }
 
     def _k(self, kind: str, key: str) -> str:
         return f'{self._KEY_NS}:{kind}:{key}'
@@ -278,7 +364,7 @@ class RedisRuntimeStateStore:
             r.set(self._k(kind, key), '1', ex=max(1, int(ttl)))
             return True
         except Exception as e:
-            logger.warning('[RuntimeStateStore] acquire failed (%s) — fail-open', e)
+            self._command_failed(e, 'acquire')
             return True
 
     def _zcap_k(self, kind: str, count_prefix: str) -> str:
@@ -361,8 +447,7 @@ class RedisRuntimeStateStore:
                            'exhausted for %s — fail-open', slot_key)
             return True
         except Exception as e:
-            logger.warning('[RuntimeStateStore] acquire_slot failed (%s) — '
-                           'fail-open', e)
+            self._command_failed(e, 'acquire_slot')
             return True
 
     def release_slot(self, kind: str, slot_key: str, count_prefix: str) -> None:
@@ -374,7 +459,33 @@ class RedisRuntimeStateStore:
         try:
             r.zrem(self._zcap_k(kind, count_prefix), slot_key)
         except Exception as e:
-            logger.debug('[RuntimeStateStore] release_slot non-fatal: %s', e)
+            self._command_failed(e, 'release_slot')
+
+    def refresh_slots(self, kind: str, slot_keys: Iterable[str], ttl: float,
+                      count_prefix: str) -> None:
+        """Heartbeat live admission slots in one pipeline.
+
+        Refresh is unconditional: if Redis restarted and lost volatile state,
+        the living replica reconstructs the truthful set of its still-running
+        tasks.  A recovered count above the cap is safe and intentional — it
+        blocks new admissions but never kills existing long work.
+        """
+        keys = list(slot_keys)
+        if not keys:
+            return
+        r = self._redis()
+        if r is None:
+            return
+        zk = self._zcap_k(kind, count_prefix)
+        ttl_i = max(1, int(ttl))
+        now = time.time()
+        try:
+            pipe = r.pipeline()
+            pipe.zadd(zk, {key: now + ttl_i for key in keys})
+            pipe.expire(zk, ttl_i * 2)
+            pipe.execute()
+        except Exception as e:
+            self._command_failed(e, 'refresh_slots')
 
     def count_slots(self, kind: str, count_prefix: str) -> int:
         """Live slot count for a (kind, count_prefix) cap — ``ZCOUNT`` of
@@ -389,7 +500,7 @@ class RedisRuntimeStateStore:
             r.zremrangebyscore(zk, 0, now)
             return int(r.zcount(zk, now, '+inf'))
         except Exception as e:
-            logger.debug('[RuntimeStateStore] count_slots failed (%s) — 0', e)
+            self._command_failed(e, 'count_slots')
             return 0
 
     def live_slot_members(self, kind: str, count_prefix: str) -> List[str]:
@@ -403,7 +514,7 @@ class RedisRuntimeStateStore:
             r.zremrangebyscore(zk, 0, now)
             return list(r.zrangebyscore(zk, now, '+inf'))
         except Exception as e:
-            logger.debug('[RuntimeStateStore] live_slot_members failed (%s)', e)
+            self._command_failed(e, 'live_slot_members')
             return []
 
     def refresh_lease(self, kind: str, key: str, ttl: float) -> bool:
@@ -415,7 +526,7 @@ class RedisRuntimeStateStore:
             r.set(self._k(kind, key), '1', ex=max(1, int(ttl)))
             return True
         except Exception as e:
-            logger.warning('[RuntimeStateStore] refresh failed (%s) — fail-open', e)
+            self._command_failed(e, 'refresh')
             return True
 
     def release_lease(self, kind: str, key: str) -> None:
@@ -428,7 +539,7 @@ class RedisRuntimeStateStore:
             # no-op), so no double-decrement / drift is possible.
             r.delete(self._k(kind, key))
         except Exception as e:
-            logger.debug('[RuntimeStateStore] release non-fatal failure: %s', e)
+            self._command_failed(e, 'release')
 
     def _scan(self, kind: str, key_prefix: str):
         r = self._redis()
@@ -438,7 +549,7 @@ class RedisRuntimeStateStore:
         try:
             return list(r.scan_iter(match=match, count=500))
         except Exception as e:
-            logger.warning('[RuntimeStateStore] scan failed (%s) — fail-open', e)
+            self._command_failed(e, 'scan')
             return None
 
     def count(self, kind: str, key_prefix: str = '') -> int:
@@ -460,7 +571,7 @@ class RedisRuntimeStateStore:
                 pipe.expire(self._k(kind, key), max(1, int(ttl)))
             pipe.execute()
         except Exception as e:
-            logger.warning('[RuntimeStateStore] heartbeat failed (%s) — fail-open', e)
+            self._command_failed(e, 'heartbeat')
 
     def set_value(self, kind: str, key: str, value: str, ttl: float) -> None:
         r = self._redis()
@@ -469,7 +580,7 @@ class RedisRuntimeStateStore:
         try:
             r.set(self._k(kind, key), value, ex=max(1, int(ttl)))
         except Exception as e:
-            logger.warning('[RuntimeStateStore] set_value failed (%s)', e)
+            self._command_failed(e, 'set_value')
 
     def get_value(self, kind: str, key: str):
         r = self._redis()
@@ -478,7 +589,7 @@ class RedisRuntimeStateStore:
         try:
             return r.get(self._k(kind, key))
         except Exception as e:
-            logger.warning('[RuntimeStateStore] get_value failed (%s) - None', e)
+            self._command_failed(e, 'get_value')
             return None
 
     def delete_value(self, kind: str, key: str) -> None:
@@ -488,7 +599,15 @@ class RedisRuntimeStateStore:
         try:
             r.delete(self._k(kind, key))
         except Exception as e:
-            logger.debug('[RuntimeStateStore] delete_value non-fatal: %s', e)
+            self._command_failed(e, 'delete_value')
+
+    def close(self) -> None:
+        """Close the pool. Safe to call repeatedly during server shutdown."""
+        with self._lock:
+            old = self._client
+            self._client = None
+            self._available = False
+        self._close_client(old)
 
     def live_keys(self, kind: str, key_prefix: str = '') -> List[str]:
         keys = self._scan(kind, key_prefix)
@@ -537,8 +656,12 @@ def reset_for_test():
     """Force the next ``get_store()`` to rebuild — test-only."""
     global _store, _store_backend
     with _store_lock:
+        old = _store
         _store = None
         _store_backend = ''
+    close = getattr(old, 'close', None)
+    if callable(close):
+        close()
 
 
 __all__ = [

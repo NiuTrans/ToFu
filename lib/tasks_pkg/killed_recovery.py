@@ -85,8 +85,10 @@ REASON_EXHAUSTED = 'killed_exhausted'
 # Durable-scan recency window. A killed turn is by definition recent (a crash
 # interrupted it in the current operational window); a conv untouched for longer
 # is stale — the user has moved on, and blindly re-firing a billed turn from
-# weeks ago is undesirable. Bounding the scan by updated_at also keeps the
-# (un-indexable ``CAST(messages AS TEXT) LIKE``) full-scan cheap on a large DB.
+# weeks ago is undesirable.  The normal path now reads only the verified tail
+# row from ``conversation_messages``.  A deployment whose row mirror is disabled
+# or still broadly incomplete fails closed to the historical authoritative-blob
+# scan, so rolling upgrades never miss a recovery candidate.
 # Env-tunable; default 7 days.
 KILLED_SCAN_MAX_AGE_SECS = int(
     os.environ.get('TOFU_KILLED_SCAN_MAX_AGE_SECS', str(7 * 24 * 3600)) or (7 * 24 * 3600))
@@ -219,6 +221,128 @@ def decide(messages: list[dict], settings: dict, *, storm: bool) -> dict:
             'settings_patch': patch, 'tag': REASON_KILLED}
 
 
+def _row_value(row, key, index, default=None):
+    """Read a named/positional DB row without assuming one backend wrapper."""
+    try:
+        if hasattr(row, 'keys') and key in row.keys():
+            return row[key]
+        return row[index]
+    except (KeyError, IndexError, TypeError) as e:
+        logger.debug('[KilledRecovery] malformed DB row key=%s index=%s: %s',
+                     key, index, e)
+        return default
+
+
+def _killed_assistant_tail(raw) -> bool:
+    """Whether one serialized/projected message is the recoverable tail."""
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode('utf-8', 'replace')
+    try:
+        tail = json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.debug('[KilledRecovery] malformed tail projection: %s', e)
+        return False
+    return bool(isinstance(tail, dict)
+                and tail.get('role') == 'assistant'
+                and tail.get('interruptedReason') == REASON_KILLED)
+
+
+def _list_killed_turn_convs_from_rows(db, floor_ms: int,
+                                      limit: int) -> list[str] | None:
+    """Use exact row-mirror tails, or return ``None`` for blob fallback.
+
+    The three correlated probes are deliberately narrow primary-key lookups:
+    row count, non-NULL light-projection count, and newest ``meta_light`` row.
+    The authority/mirror revision + exact-count gates are the same invariants as
+    ordinary windowed conversation reads.  A NULL projection or stale revision
+    can never produce a false negative: a small stale residue is checked against
+    its authoritative blob; a broadly incomplete mirror abandons this lane and
+    lets the caller run the legacy whole-window predicate.
+    """
+    try:
+        from lib.database.messages_rows import rows_read_enabled
+        if not rows_read_enabled():
+            return None
+        candidates = db.execute(
+            'SELECT c.id, c.updated_at, c.rev, c.messages_rows_rev, c.msg_count, '
+            '(SELECT COUNT(*) FROM conversation_messages cm '
+            ' WHERE cm.conv_id=c.id) AS row_count, '
+            '(SELECT COUNT(cm2.meta_light) FROM conversation_messages cm2 '
+            ' WHERE cm2.conv_id=c.id) AS light_count, '
+            '(SELECT cm3.meta_light FROM conversation_messages cm3 '
+            ' WHERE cm3.conv_id=c.id ORDER BY cm3.seq DESC LIMIT 1) AS tail_meta '
+            'FROM conversations c WHERE c.user_id=1 AND c.updated_at>=? '
+            'ORDER BY c.updated_at DESC', (floor_ms,)).fetchall()
+    except Exception as e:
+        logger.debug('[KilledRecovery] row-tail inventory unavailable: %s', e)
+        return None
+
+    if not candidates or limit <= 0:
+        return []
+    exact_killed: set[str] = set()
+    stale_ids: list[str] = []
+    ordered_ids: list[str] = []
+    for row in candidates:
+        cid = str(_row_value(row, 'id', 0, '') or '')
+        if not cid:
+            continue
+        ordered_ids.append(cid)
+        try:
+            rev = int(_row_value(row, 'rev', 2, 0) or 0)
+            mirror_raw = _row_value(row, 'messages_rows_rev', 3, None)
+            mirror_rev = -1 if mirror_raw is None else int(mirror_raw)
+            msg_count = int(_row_value(row, 'msg_count', 4, 0) or 0)
+            row_count = int(_row_value(row, 'row_count', 5, 0) or 0)
+            light_count = int(_row_value(row, 'light_count', 6, 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            stale_ids.append(cid)
+            continue
+        if (mirror_rev != rev or row_count != msg_count
+                or light_count != msg_count):
+            stale_ids.append(cid)
+            continue
+        if msg_count and _killed_assistant_tail(
+                _row_value(row, 'tail_meta', 7, None)):
+            exact_killed.add(cid)
+
+    # Avoid transferring every recent blob into Python on a fresh/partial
+    # upgrade.  The old SQL predicate still has to detoast them server-side,
+    # but returns only likely matches and therefore keeps process RSS bounded.
+    if stale_ids and (len(stale_ids) > 32
+                      or len(stale_ids) * 4 > len(ordered_ids)):
+        logger.info('[KilledRecovery] row-tail mirror broadly incomplete '
+                    '(%d/%d stale) — using authoritative blob scan',
+                    len(stale_ids), len(ordered_ids))
+        return None
+
+    # Exact per-conversation authority fallback for a small rolling-upgrade
+    # residue.  Keep the LIKE only as a transfer-reduction prefilter; the tail
+    # predicate below is the actual correctness gate.
+    for offset in range(0, len(stale_ids), 100):
+        ids = stale_ids[offset:offset + 100]
+        if not ids:
+            continue
+        try:
+            from lib.database.conversation_repository import list_conversation_snapshots
+            rows = list_conversation_snapshots(
+                db, user_id=1, ids=ids)
+        except Exception as e:
+            logger.debug('[KilledRecovery] stale-row repository fallback failed: %s', e)
+            return None
+        for row in rows:
+            messages = row.messages
+            if (isinstance(messages, list) and messages
+                    and _killed_assistant_tail(messages[-1])):
+                exact_killed.add(str(row['id'] or ''))
+
+    found = [cid for cid in ordered_ids if cid in exact_killed][:limit]
+    logger.info('[KilledRecovery] durable tail scan used row mirror: '
+                'candidates=%d exact=%d blob_fallback=%d killed=%d',
+                len(ordered_ids), len(ordered_ids) - len(stale_ids),
+                len(stale_ids), len(found))
+    return found
+
+
 def list_killed_turn_convs(limit: int = 500) -> list[str]:
     """DURABLE SCAN: conv ids whose ASSISTANT TAIL is tagged ``killed``.
 
@@ -231,9 +355,11 @@ def list_killed_turn_convs(limit: int = 500) -> list[str]:
     wrote finishReason='error' while KEEPING interruptedReason='killed'). Those
     would be stranded forever. Scanning the durable tag closes that gap.
 
-    A cheap SQL ``LIKE`` prefilter narrows to rows that mention the tag anywhere;
-    Python then verifies the tag is on the TAIL specifically (a mid-history
-    killed tag from an older turn must not re-fire a settled conversation).
+    The preferred lane batch-verifies normalized row mirrors and reads only each
+    conversation's small final ``meta_light`` message.  A cheap SQL ``LIKE``
+    scan remains the fail-closed compatibility lane; Python always verifies the
+    tag is on the TAIL specifically (a mid-history killed tag from an older turn
+    must not re-fire a settled conversation).
     """
     out: list[str] = []
     # Recency floor (ms — conversations.updated_at is epoch-ms). Bounds the
@@ -241,27 +367,25 @@ def list_killed_turn_convs(limit: int = 500) -> list[str]:
     # window (a killed turn is recent by definition).
     _floor_ms = int((time.time() - KILLED_SCAN_MAX_AGE_SECS) * 1000)
     try:
+        limit = max(0, int(limit))
+    except (TypeError, ValueError, OverflowError) as e:
+        logger.debug('[KilledRecovery] invalid scan limit %r; using 500: %s',
+                     limit, e)
+        limit = 500
+    try:
         db = get_thread_db(DOMAIN_CHAT)
-        # Cheap prefilter on the value substring only (separator-agnostic —
-        # ``"interruptedReason":"killed"`` vs ``"interruptedReason": "killed"``
-        # both contain ``"killed"``). The Python tail check below is the real
-        # gate, so an over-broad prefilter is safe, just slightly less
-        # selective. CAST(...AS TEXT) keeps it valid on PG jsonb columns too.
-        # The updated_at>=floor bound uses the index to shrink the scan.
-        rows = db.execute(
-            "SELECT id, messages FROM conversations "
-            "WHERE user_id=1 AND updated_at >= ? AND CAST(messages AS TEXT) LIKE ? "
-            "ORDER BY updated_at DESC LIMIT ?",
-            (_floor_ms, '%"killed"%', limit)
-        ).fetchall()
+        row_result = _list_killed_turn_convs_from_rows(
+            db, _floor_ms, limit)
+        if row_result is not None:
+            return row_result
+        from lib.database.conversation_repository import list_conversation_snapshots
+        rows = list_conversation_snapshots(
+            db, user_id=1, updated_at_gte=_floor_ms, limit=limit)
     except Exception as e:
         logger.warning('[KilledRecovery] durable killed-scan query failed: %s', e)
         return out
     for r in rows:
-        try:
-            messages = json.loads(r['messages'] or '[]')
-        except (json.JSONDecodeError, TypeError):
-            continue
+        messages = r.messages
         if not messages or not isinstance(messages[-1], dict):
             continue
         tail = messages[-1]
@@ -400,19 +524,19 @@ def restamp_killed_after_internal_fatal(task: dict) -> bool:
         return False
     try:
         db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT settings, messages FROM conversations WHERE id=? AND user_id=1',
-            (conv_id,)
-        ).fetchone()
-        if not row:
+        from lib.database.conversation_repository import load_conversation
+        row = load_conversation(db, conv_id, metadata_columns=('settings',))
+        if row is None:
             return False
         try:
             settings = json.loads(row['settings'] or '{}')
         except (json.JSONDecodeError, TypeError):
             settings = {}
         try:
-            messages = json.loads(row['messages'] or '[]')
-        except (json.JSONDecodeError, TypeError):
+            messages = row.messages
+        except (TypeError, AttributeError) as exc:
+            logger.debug('[KilledRecovery] row messages unavailable conv=%s: %s',
+                         conv_id[:8], exc)
             messages = []
         if not messages or not isinstance(messages[-1], dict):
             return False
@@ -432,21 +556,11 @@ def restamp_killed_after_internal_fatal(task: dict) -> bool:
             # Drop any partial/empty error content the FATAL left behind.
             messages[-1].pop('error', None)
             tag = REASON_KILLED
-        db.execute(
-            'UPDATE conversations SET messages=? WHERE id=? AND user_id=1',
-            (json.dumps(messages, ensure_ascii=False), conv_id))
-        db.commit()
-        # Phase 5 dual-write (flag-gated, inert when off): tail re-tag.
-        # Guarded separately: the re-stamp already committed, so a mirror
-        # failure must not reach this function's `except` and return False —
-        # the caller reads False as "the turn was not re-armed".
-        try:
-            from lib.database.messages_rows import mirror_write_and_commit
-            mirror_write_and_commit(db, conv_id, messages)
-        except Exception as _mirror_err:
-            logger.warning('[KilledRecovery] conv=%s row mirror failed '
-                           '(non-fatal, re-stamp already durable): %s',
-                           conv_id[:8], _mirror_err, exc_info=True)
+        from lib.database.conversation_repository import replace_messages
+        result = replace_messages(
+            db, conv_id, messages, expected_rev=row['rev'], full=True)
+        if not result.applied:
+            return False
         audit_log('killed_recovery_internal_fatal_restamp', conv_id=conv_id,
                   task_id=task.get('id', ''), tag=tag, attempts=attempts)
         return True
@@ -469,19 +583,19 @@ def _dispatch_one(conv_id: str, db, *, storm: bool) -> str:
 
     Returns one of ``'redispatched' | 'exhausted' | 'storm_held' | 'skipped'``.
     """
-    row = db.execute(
-        'SELECT settings, messages FROM conversations WHERE id=? AND user_id=1',
-        (conv_id,)
-    ).fetchone()
-    if not row:
+    from lib.database.conversation_repository import load_conversation
+    row = load_conversation(db, conv_id, metadata_columns=('settings',))
+    if row is None:
         return 'skipped'
     try:
         settings = json.loads(row['settings'] or '{}')
     except (json.JSONDecodeError, TypeError):
         settings = {}
     try:
-        messages = json.loads(row['messages'] or '[]')
-    except (json.JSONDecodeError, TypeError):
+        messages = row.messages
+    except (TypeError, AttributeError) as exc:
+        logger.debug('[KilledRecovery] dispatch row messages unavailable conv=%s: %s',
+                     conv_id[:8], exc)
         messages = []
 
     verdict = decide(messages, settings, storm=storm)
@@ -499,28 +613,18 @@ def _dispatch_one(conv_id: str, db, *, storm: bool) -> str:
         settings['_killedRecovery'] = patch
     if verdict.get('tag') == REASON_EXHAUSTED and messages:
         messages[-1]['interruptedReason'] = REASON_EXHAUSTED
-        db.execute(
-            'UPDATE conversations SET settings=?, messages=? WHERE id=? AND user_id=1',
-            (json.dumps(settings, ensure_ascii=False),
-             json.dumps(messages, ensure_ascii=False), conv_id))
+        from lib.database.conversation_repository import replace_messages
+        result = replace_messages(
+            db, conv_id, messages, expected_rev=row['rev'],
+            metadata={'settings': json.dumps(settings, ensure_ascii=False)},
+            full=True)
+        if not result.applied:
+            return 'skipped'
     else:
-        db.execute(
-            'UPDATE conversations SET settings=? WHERE id=? AND user_id=1',
-            (json.dumps(settings, ensure_ascii=False), conv_id))
-    db.commit()
-    # Phase 5 dual-write (flag-gated, inert when off): only the exhausted
-    # branch above rewrote messages (tail degrade tag) — mirror then.
-    if verdict.get('tag') == REASON_EXHAUSTED and messages:
-        # Guarded: the attempt counter is already persisted above, so a mirror
-        # failure must not propagate to run_killed_recovery's handler and be
-        # counted as 'skipped' — that would burn an attempt without dispatching.
-        try:
-            from lib.database.messages_rows import mirror_write_and_commit
-            mirror_write_and_commit(db, conv_id, messages)
-        except Exception as _mirror_err:
-            logger.warning('[KilledRecovery] conv=%s row mirror failed '
-                           '(non-fatal, degrade tag already durable): %s',
-                           conv_id[:8], _mirror_err, exc_info=True)
+        from lib.conversations import set_conversation_settings
+        set_conversation_settings(
+            conv_id, {'_killedRecovery': settings.get('_killedRecovery')},
+            db=db, notify=False)
 
     if action == 'exhausted':
         # verdict['attempts'] is the DECISION counter — it reaches cap+1 on the
@@ -653,11 +757,10 @@ def run_killed_recovery(conv_ids: list[str], *, storm: bool = False,
         if not conv_id:
             continue
         try:
-            row = db.execute(
-                'SELECT settings, messages FROM conversations WHERE id=? AND user_id=1',
-                (conv_id,)
-            ).fetchone()
-            if not row:
+            from lib.database.conversation_repository import load_conversation
+            row = load_conversation(
+                db, conv_id, metadata_columns=('settings',))
+            if row is None:
                 summary['skipped'] += 1
                 continue
             try:
@@ -665,8 +768,11 @@ def run_killed_recovery(conv_ids: list[str], *, storm: bool = False,
             except (json.JSONDecodeError, TypeError):
                 settings = {}
             try:
-                messages = json.loads(row['messages'] or '[]')
-            except (json.JSONDecodeError, TypeError):
+                messages = row.messages
+            except (TypeError, AttributeError) as exc:
+                logger.debug(
+                    '[KilledRecovery] scan row messages unavailable conv=%s: %s',
+                    conv_id[:8], exc)
                 messages = []
 
             verdict = decide(messages, settings, storm=storm)

@@ -88,6 +88,36 @@ def profile_path(scope: str = '') -> str:
     return os.path.join(base, 'profiles', sid, USER_PROFILE_FILE)
 
 
-def _pending_path() -> str:
+def context_path(scope: str = '') -> str:
+    """Absolute path to the structured, per-user context document."""
+    from lib.agent_artifacts import USER_CONTEXT_FILE
+    base = _server_memories_dir()
+    sid = _sanitize_scope(scope)
+    if not sid:
+        return os.path.join(base, USER_CONTEXT_FILE)
+    return os.path.join(base, 'profiles', sid, USER_CONTEXT_FILE)
+
+
+def context_changes_path(scope: str = '') -> str:
+    """Absolute path to the bounded undo log for assistant-learned context."""
+    from lib.agent_artifacts import USER_CONTEXT_CHANGES_FILE
+    base = _server_memories_dir()
+    sid = _sanitize_scope(scope)
+    if not sid:
+        return os.path.join(base, USER_CONTEXT_CHANGES_FILE)
+    return os.path.join(base, 'profiles', sid, USER_CONTEXT_CHANGES_FILE)
+
+
+def _pending_path(scope: str = '') -> str:
+    """Path of the propose/confirm queue for one profile scope.
+
+    Pending preferences contain the same private user facts as the confirmed
+    context.  They must follow the context's tenant boundary instead of using
+    one process-global file for every authenticated user.
+    """
     from lib.agent_artifacts import USER_PROFILE_PENDING_FILE
-    return os.path.join(_server_memories_dir(), USER_PROFILE_PENDING_FILE)
+    base = _server_memories_dir()
+    sid = _sanitize_scope(scope)
+    if not sid:
+        return os.path.join(base, USER_PROFILE_PENDING_FILE)
+    return os.path.join(base, 'profiles', sid, USER_PROFILE_PENDING_FILE)

@@ -14,11 +14,12 @@ The paper-podcast worker package (docs/PAPER_PODCAST_DESIGN.md). Layout:
 
 from __future__ import annotations
 
-import json
 import os
 import time
+import uuid
 
 from lib.agent_core.events import Phase, build_phase
+from lib.json_store import write_bytes_atomic
 from lib.log import audit_log, get_logger
 
 from lib.paper.podcast_engine._audio import (  # noqa: F401
@@ -64,26 +65,24 @@ def _load_source_text(paper_hash: str, lang: str) -> tuple[str, str]:
     presence (report-first UX); the deeper fallbacks exist for headless
     callers and for papers whose report lives in the other language.
     """
-    from lib.database import get_thread_db
-
-    db = get_thread_db()
+    from lib.storage import get_storage_client
+    client = get_storage_client()
     langs = [lang] + (['en'] if lang == 'zh' else ['zh'])
     for lg in langs:
-        row = db.execute(
-            'SELECT report FROM paper_reports WHERE paper_hash = ? AND lang = ?',
-            (paper_hash, lg)).fetchone()
+        row = client.query('paper.report.get', {
+            'paper_hash': paper_hash, 'lang': lg,
+        })
         if row and (row['report'] or '').strip():
             return row['report'], f'report_{lg}'
     for lg in ('zh', 'en'):
-        row = db.execute(
-            'SELECT text FROM paper_translations WHERE paper_hash = ? AND lang = ?',
-            (paper_hash, lg)).fetchone()
+        row = client.query('paper.translation.get', {
+            'paper_hash': paper_hash, 'lang': lg,
+        })
         if row and (row['text'] or '').strip():
             return row['text'], f'translation_{lg}'
     # Parsed full text lives in the paper_library row (not on disk).
-    row = db.execute(
-        'SELECT parsed_text FROM paper_library WHERE paper_hash = ? LIMIT 1',
-        (paper_hash,)).fetchone()
+    row = client.query(
+        'paper.library.identity', {'paper_hash': paper_hash})
     if row and (row['parsed_text'] or '').strip():
         return row['parsed_text'], 'parsed_text'
     return '', 'none'
@@ -97,12 +96,12 @@ def has_source_material(paper_hash: str) -> bool:
 
 def has_report(paper_hash: str) -> bool:
     """True when a report exists in EITHER language (report-first gate)."""
-    from lib.database import get_thread_db
-    db = get_thread_db()
+    from lib.storage import get_storage_client
+    client = get_storage_client()
     for lg in ('zh', 'en'):
-        row = db.execute(
-            'SELECT 1 FROM paper_reports WHERE paper_hash = ? AND lang = ? LIMIT 1',
-            (paper_hash, lg)).fetchone()
+        row = client.query('paper.report.get', {
+            'paper_hash': paper_hash, 'lang': lg,
+        })
         if row:
             return True
     return False
@@ -113,22 +112,18 @@ def _persist_podcast_row(paper_hash: str, mode: str, lang: str, voice: str,
                          file_path: str = '', duration_sec: float = 0.0,
                          model: str = '', tts_model: str = '') -> None:
     """Upsert the paper_podcasts cache row (script + audio metadata)."""
-    from lib.database import get_thread_db
-    from lib.database._core_schema import PAPER_PODCASTS, upsert
-
     now = int(time.time())
-    db = get_thread_db()
-    upsert(db, PAPER_PODCASTS, {
+    from lib.storage import get_storage_client
+    get_storage_client(write=True).command('paper.podcast.upsert', {
         'paper_hash': paper_hash, 'mode': mode, 'lang': lang, 'voice': voice,
         'status': status,
-        'script_json': json.dumps(script or {}, ensure_ascii=False),
+        'script': script or {},
         'file_path': file_path,
         'duration_sec': float(duration_sec or 0),
         'model': model or '', 'tts_model': tts_model or '',
-        'meta': json.dumps(meta or {}, ensure_ascii=False),
+        'meta': meta or {},
         'created_at': now, 'updated_at': now,
-    })
-    db.commit()
+    }, f'paper.podcast.upsert:{uuid.uuid4().hex}')
 
 
 def load_interrupted_podcast(paper_hash: str, mode: str, lang: str,
@@ -142,13 +137,10 @@ def load_interrupted_podcast(paper_hash: str, mode: str, lang: str,
     "被服务器重启打断" + offer a one-click regenerate, instead of
     pretending nothing ever happened.
     """
-    from lib.database import get_thread_db
-
-    db = get_thread_db()
-    row = db.execute(
-        'SELECT status FROM paper_podcasts WHERE paper_hash = ? AND mode = ?'
-        ' AND lang = ? AND voice = ?',
-        (paper_hash, mode, lang, voice)).fetchone()
+    from lib.storage import get_storage_client
+    row = get_storage_client().query('paper.podcast.get', {
+        'paper_hash': paper_hash, 'mode': mode, 'lang': lang, 'voice': voice,
+    })
     return bool(row and (row['status'] or '') == 'interrupted')
 
 
@@ -159,13 +151,12 @@ def mark_interrupted_podcasts() -> int:
     Returns the number of rows flipped. Best-effort, never raises.
     """
     try:
-        from lib.database import get_thread_db
-        db = get_thread_db()
-        cur = db.execute(
-            "UPDATE paper_podcasts SET status = 'interrupted',"
-            ' updated_at = ? WHERE status = ?', (int(time.time()), 'generating'))
-        db.commit()
-        n = cur.rowcount if cur is not None else 0
+        from lib.storage import get_storage_client
+        result = get_storage_client(write=True).command(
+            'paper.podcast.mark_interrupted', {
+                'updated_at': int(time.time()),
+            }, f'paper.podcast.interrupt:{uuid.uuid4().hex}')
+        n = int(result['changed'])
         if n:
             logger.info('[Paper:Podcast] marked %d generating row(s) '
                         'interrupted on startup', n)
@@ -178,24 +169,13 @@ def mark_interrupted_podcasts() -> int:
 def load_cached_podcast(paper_hash: str, mode: str, lang: str,
                         voice: str) -> dict | None:
     """Fetch the cached row for the dedup key; parsed script/meta included."""
-    from lib.database import get_thread_db
-
-    db = get_thread_db()
-    row = db.execute(
-        'SELECT * FROM paper_podcasts WHERE paper_hash = ? AND mode = ?'
-        ' AND lang = ? AND voice = ?',
-        (paper_hash, mode, lang, voice)).fetchone()
+    from lib.storage import get_storage_client
+    row = get_storage_client().query('paper.podcast.get', {
+        'paper_hash': paper_hash, 'mode': mode, 'lang': lang, 'voice': voice,
+    })
     if not row or (row['status'] or '') not in ('done', 'script_only'):
         return None
-    out = dict(row)
-    for col in ('script_json', 'meta'):
-        try:
-            out[col] = json.loads(out.get(col) or '{}')
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.warning('[Paper:Podcast] cached %s unparsable for %s/%s/%s: %s',
-                           col, paper_hash[:8], mode, lang, e)
-            out[col] = {}
-    return out
+    return dict(row)
 
 
 def _voice_slug(voice: str) -> str:
@@ -316,10 +296,7 @@ def _run_podcast_task(task):
         os.makedirs(out_dir, exist_ok=True)
         fname = f'{mode}_{lang}_{_voice_slug(voice)}.{audio["ext"]}'
         fpath = os.path.join(out_dir, fname)
-        tmp = fpath + f'.tmp.{os.getpid()}'
-        with open(tmp, 'wb') as f:
-            f.write(audio['audio_bytes'])
-        os.replace(tmp, fpath)
+        write_bytes_atomic(fpath, audio['audio_bytes'])
 
         script_meta = {**script_meta,
                        'duration_estimated': audio['duration_estimated'],

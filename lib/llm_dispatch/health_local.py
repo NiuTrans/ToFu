@@ -38,6 +38,7 @@ logger = get_logger(__name__)
 
 __all__ = [
     'start_local_health_checker',
+    'stop_local_health_checker',
     'check_once',
 ]
 
@@ -50,6 +51,7 @@ RESYNC_EVERY = int(os.environ.get('TOFU_LOCAL_HEALTH_RESYNC', '10'))
 
 _thread = None
 _stop_event = threading.Event()
+_thread_lock = threading.Lock()
 # Per (provider_id, endpoint_url) counter so RESYNC_EVERY is local to
 # the box, not global.
 _success_streak: dict[tuple, int] = {}
@@ -578,11 +580,37 @@ def _loop():
     logger.info('[HealthLocal] Worker stopped')
 
 
-def start_local_health_checker():
+def start_local_health_checker() -> bool:
     """Idempotent: spawn the background health-check thread (no-op if running)."""
     global _thread
-    if _thread is not None and _thread.is_alive():
-        return
-    _stop_event.clear()
-    _thread = threading.Thread(target=_loop, name='local-health', daemon=True)
-    _thread.start()
+    with _thread_lock:
+        if _thread is not None and _thread.is_alive():
+            return False
+        _stop_event.clear()
+        _thread = threading.Thread(
+            target=_loop, name='local-health', daemon=True)
+        _thread.start()
+    return True
+
+
+def stop_local_health_checker(timeout: float = 2.0) -> bool:
+    """Signal and bounded-join the checker, retaining a live owner on timeout."""
+    global _thread
+    _stop_event.set()
+    with _thread_lock:
+        thread = _thread
+    if thread is None:
+        return True
+    try:
+        wait_seconds = max(0.0, float(timeout))
+    except (TypeError, ValueError, OverflowError) as exc:
+        logger.debug('[HealthLocal] invalid stop timeout; using 2.0: %s', exc)
+        wait_seconds = 2.0
+    if thread is not threading.current_thread():
+        thread.join(timeout=wait_seconds)
+    if thread.is_alive():
+        return False
+    with _thread_lock:
+        if _thread is thread:
+            _thread = None
+    return True

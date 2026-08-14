@@ -28,6 +28,8 @@ What these tests pin, and why each is a RESULT rather than a constant:
   removed feature, not a changed default.
 """
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {'lib/foo.py'}
+
 import json
 import os
 import sys

@@ -14,6 +14,9 @@ from lib.swarm.tools import (
 )
 
 
+pytestmark = pytest.mark.unit
+
+
 def _names(tools):
     return [t.get('function', {}).get('name', '') for t in tools]
 
@@ -92,3 +95,17 @@ def test_coder_role_excludes_denylist_even_when_hint_empty_match():
     assert 'read_files' in names
     assert 'grep_search' in names
     assert names.isdisjoint(SUB_AGENT_DENYLIST)
+
+
+def test_specialist_single_capability_never_expands_to_privileged_tools():
+    """A capability gate leaving one browser tool must remain least-authority."""
+    tools = [
+        {'type': 'function',
+         'function': {'name': 'browser_preview_page', 'parameters': {}}},
+        {'type': 'function',
+         'function': {'name': 'run_command', 'parameters': {}}},
+        {'type': 'function',
+         'function': {'name': 'write_file', 'parameters': {}}},
+    ]
+    names = set(_names(scope_tools_for_role('browser', tools)))
+    assert names == {'browser_preview_page'}

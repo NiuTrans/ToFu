@@ -117,9 +117,9 @@ _FRONTEND_PHASE_EXEMPTIONS: dict[str, str] = {
 
 # Frontend files whose ``.phase ===`` branches consume the chat PHASE event.
 _FRONTEND_FILES = [
-    'static/js/ui/streaming_ui.js',
-    'static/js/ui/sse_pipeline.js',
-    'static/js/ui/streaming_render.js',
+    '@runtime:ui/streaming_ui.js',
+    '@runtime:ui/sse_pipeline.js',
+    '@runtime:ui/streaming_render.js',
 ]
 
 
@@ -138,7 +138,10 @@ def _lib_py_files() -> list[str]:
             ['git', 'ls-files', 'lib/*.py'], cwd=REPO,
             capture_output=True, text=True, timeout=30)
         if out.returncode == 0 and out.stdout.strip():
-            return [ln for ln in out.stdout.splitlines() if ln.endswith('.py')]
+            return [
+                rel for rel in out.stdout.splitlines()
+                if rel.endswith('.py') and os.path.isfile(os.path.join(REPO, rel))
+            ]
     except Exception:
         pass
     out = []
@@ -151,6 +154,9 @@ def _lib_py_files() -> list[str]:
 
 
 def _read(rel: str) -> str:
+    if rel.startswith('@runtime:'):
+        from tests._runtime_sections import runtime_section
+        return runtime_section(rel.removeprefix('@runtime:'))
     with open(os.path.join(REPO, rel), 'r', encoding='utf-8') as f:
         return f.read()
 

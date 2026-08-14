@@ -33,7 +33,8 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 _CHARTER_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_charter.py')
-_SYSCTX_SRC = os.path.join(ROOT, 'lib', 'tasks_pkg', 'system_context', '_inject.py')
+_CONTEXT_PROVIDERS_SRC = os.path.join(
+    ROOT, 'lib', 'tasks_pkg', 'context_composer', '_providers.py')
 
 
 @pytest.fixture(scope='module', autouse=True)
@@ -58,6 +59,16 @@ def _clean(flask_app):
 @pytest.fixture(autouse=True)
 def _stub_push(monkeypatch):
     monkeypatch.setattr('lib.agent_core.push.push_event', lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
+def _stub_derived_background_lanes(monkeypatch):
+    """Charter tests must not launch real status/watch LLM workers."""
+    import lib.conversations.project_status as project_status
+    import lib.conversations.project_watch as project_watch
+    monkeypatch.setattr(
+        project_status, 'build_status_snapshot', lambda *a, **k: None)
+    monkeypatch.setattr(project_watch, 'address_open_items', lambda *a, **k: None)
 
 
 def _charter_rows(flask_app, project_path):
@@ -710,7 +721,8 @@ def test_the_panel_editor_offers_a_summary_field_when_one_exists():
     then satisfied by its own explanation.
     """
     from tests._source_scan import strip_comments
-    js = os.path.join(ROOT, 'static', 'js', 'project-brain.js')
+    from tests._runtime_sections import runtime_section_path
+    js = runtime_section_path('project-brain.js')
     with open(js, encoding='utf-8') as f:
         src = strip_comments(f.read(), lang='js')
 
@@ -1168,16 +1180,23 @@ def test_NC1_propose_writing_table_breaks_isolation(flask_app):
 def test_NC2_injection_noop_breaks_injection(flask_app):
     """NC-2: no-op the charter branch of the injection seam → the injection
     test FAILS (the charter is no longer injected)."""
-    def run():
-        out = _run_inject(flask_app, '/nc2', has_charter=True)
-        assert '[PROJECT CHARTER]' not in out, \
-            'NC-2: with the injection branch no-opped, the charter must NOT appear'
+    def run(neutered):
+        # compose_context re-exports the canonical collector at import time.
+        # Point that one seam at the throwaway provider module for this NC;
+        # the shipped module and filesystem remain untouched.
+        import lib.tasks_pkg.context_composer as composer
+        original = composer.collect_context_blocks
+        composer.collect_context_blocks = neutered.collect_context_blocks
+        try:
+            out = _run_inject(flask_app, '/nc2', has_charter=True)
+            assert '[PROJECT CHARTER]' not in out, \
+                'NC-2: with the provider no-opped, the charter must NOT appear'
+        finally:
+            composer.collect_context_blocks = original
 
     _patch_restore(
-        _SYSCTX_SRC,
-        "        if _charter_block:\n"
-        "            _charter_spliced = _wrap_system_reminder(_charter_block)",
-        "        if False and _charter_block:  # NC-2\n"
-        "            _charter_spliced = _wrap_system_reminder(_charter_block)",
+        _CONTEXT_PROVIDERS_SRC,
+        '        charter = render_charter_injection_block(path)',
+        "        charter = ''  # NC-2: provider no-op",
         run,
     )

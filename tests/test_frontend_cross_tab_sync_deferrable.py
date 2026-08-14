@@ -9,7 +9,7 @@ move the ``_syncChannel = new BroadcastChannel(...)`` creation + its
 ``core/cross_tab_sync.js`` itself.
 
 **Why this matters for deferability**: ``core/cross_tab_sync.js`` is 53KB.
-The audit flagged it as a candidate for ``_DEFERRED_FILES``, blocked by the
+The audit flagged it as a candidate for ``_CLASSIC_ASSET_FILES``, blocked by the
 fact that ``core.js:132`` had ``_handleCrossTabMsg(e.data)`` inside the
 BroadcastChannel callback — if the module is deferred, that symbol is
 undefined at boot and the first cross-tab message throws ReferenceError.
@@ -41,6 +41,8 @@ import os
 import re
 import sys
 
+from tests._runtime_sections import runtime_section_path
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
@@ -54,8 +56,8 @@ def _unit(fn):
 
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_CORE_JS = os.path.join(_ROOT, 'static/js/core.js')
-_CROSS_TAB_JS = os.path.join(_ROOT, 'static/js/core/cross_tab_sync.js')
+_CORE_JS = runtime_section_path('core.js')
+_CROSS_TAB_JS = runtime_section_path('core/cross_tab_sync.js')
 
 
 @_unit
@@ -68,7 +70,7 @@ def test_core_js_does_not_reference_handle_cross_tab_msg():
     assert '_handleCrossTabMsg' not in src, (
         'static/js/core.js must NOT reference _handleCrossTabMsg — a bare '
         'reference at module load would ReferenceError once '
-        'core/cross_tab_sync.js is moved to _DEFERRED_FILES. The audit\'s '
+        'core/cross_tab_sync.js is moved to _CLASSIC_ASSET_FILES. The audit\'s '
         'Option A move relocates the BroadcastChannel listener registration '
         'into cross_tab_sync.js itself so _handleCrossTabMsg only appears '
         'in the module that defines it.'

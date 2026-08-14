@@ -46,9 +46,6 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import quart as _quart  # noqa: E402
-sys.modules['flask'] = _quart
-
 import pytest  # noqa: E402
 
 pytestmark = pytest.mark.unit

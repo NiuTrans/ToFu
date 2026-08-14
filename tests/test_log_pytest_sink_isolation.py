@@ -130,10 +130,7 @@ def test_mock_error_does_not_reach_production_error_log():
 
     logging.getLogger('lib.test_sink_probe').error(marker)
     for h in logging.getLogger().handlers:
-        try:
-            h.flush()
-        except Exception:
-            pass
+        h.flush()
 
     assert _size(prod_error) == before_error, (
         'probe grew the PRODUCTION error.log — isolation broken')

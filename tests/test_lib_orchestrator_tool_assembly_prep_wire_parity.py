@@ -8,23 +8,21 @@ lib.tasks_pkg.orchestrator._tool_assembly_prep.assemble_round_tools().
 The block runs once per run_task invocation, after config resolution
 (Section 1) and prefetch kick:
 
-    1. VU startup phase line (via the passed ``vu_phase`` closure),
-    2. ``_assemble_tool_list`` — builds the per-turn tool schema from
+    1. ``_assemble_tool_list`` — builds the per-turn tool schema from
        cfg + the mcfg feature flags,
-    3. Pending-swarm force-enable guard (the get_agent_result /
+    2. Pending-swarm force-enable guard (the get_agent_result /
        await_agents "非真实工具" rejection-desync root fix): if
        swarm_enabled is False but a live-or-pending swarm exists for
-       this conversation, the follow-up tools are force-added (and the
-       round cap lifted from 0) so the injected <swarm-update> can be
-       acted on. LOGIC BRANCH — pinned by behavioural tests below, not
+       this conversation, the follow-up tools are force-added so the injected
+       <swarm-update> can be acted on. LOGIC BRANCH — pinned by behavioural tests below, not
        just source greps (owner directive 2026-07-31).
-    4. ``task['_tool_schema'] = tool_list`` stash so the compaction
+    3. ``task['_tool_schema'] = tool_list`` stash so the compaction
        token-gate accounts for the tool-schema cost.
 
 Signature shape: all feature flags arrive via the ``mcfg`` dict
 (produced by _resolve_model_config in Section 1) — no 12-kwarg
-re-plumbing. ``vu_phase`` is the run_task-local closure (same pattern
-as restore_tool_history).
+re-plumbing. Startup narration is owned by ``_run.py`` at the real stage
+boundaries, independently of this tool-assembly helper.
 
 Failing-first: written BEFORE the extraction; the module/signature/
 delegation guards turn RED until the leaf exists and _run.py
@@ -55,7 +53,7 @@ def test_leaf_module_exists_and_exposes_assembly_helper():
 
 
 # ---------------------------------------------------------------------------
-# 2. helper signature (positional cfg/task/mcfg + kw-only vu_phase)
+# 2. helper signature (positional cfg/task/mcfg only)
 # ---------------------------------------------------------------------------
 def test_assembly_helper_signature():
     import inspect
@@ -65,10 +63,7 @@ def test_assembly_helper_signature():
     params = sig.parameters
     for name in ('cfg', 'task', 'mcfg'):
         assert name in params, f'{name} must be a parameter'
-    assert 'vu_phase' in params, 'vu_phase must be a parameter'
-    assert params['vu_phase'].kind == inspect.Parameter.KEYWORD_ONLY, (
-        'vu_phase must be keyword-only (same seam style as '
-        'restore_tool_history)')
+    assert tuple(params) == ('cfg', 'task', 'mcfg')
 
 
 # ---------------------------------------------------------------------------
@@ -85,13 +80,13 @@ def test_run_py_imports_assembly_helper():
 
 
 def test_run_task_delegates_to_assembly_helper():
-    """Section 2 must unpack the 3-tuple from a single call to
-    ``assemble_round_tools(cfg, task, mcfg, vu_phase=...)`` — no inline
+    """Section 2 must unpack the 2-tuple from a single call to
+    ``assemble_round_tools(cfg, task, mcfg)`` — no inline
     body left behind."""
     src = RUN_PY.read_text()
-    assert ('tool_list, has_real_tools, max_tool_rounds = '
+    assert ('tool_list, has_real_tools = '
             'assemble_round_tools(' in src), (
-        '_run.py must unpack `tool_list, has_real_tools, max_tool_rounds '
+        '_run.py must unpack `tool_list, has_real_tools '
         '= assemble_round_tools(...)` in Section 2')
 
 
@@ -137,8 +132,7 @@ def test_leaf_carries_swarm_force_enable_guard():
         'leaf must carry the pending-swarm probe')
     assert 'resolve_turn_swarm_tools' in src, (
         'leaf must carry resolve_turn_swarm_tools')
-    assert '999_999_999' in src, (
-        'leaf must carry the round-cap lift (999_999_999) for bare turns')
+    assert 'max_tool_rounds' not in src
 
 
 def test_leaf_stashes_tool_schema_on_task():
@@ -179,22 +173,21 @@ def _mcfg(**overrides):
     return base
 
 
-def test_behaviour_pending_swarm_forces_tools_and_lifts_cap(monkeypatch):
+def test_behaviour_pending_swarm_forces_tools(monkeypatch):
     """swarm_enabled=False + live-or-pending swarm → the follow-up
-    tools land in the schema, has_real_tools flips True, and a 0 round
-    cap is lifted — exactly the inline guard's contract."""
+    tools land in the schema and has_real_tools flips True."""
     import lib.tasks_pkg.orchestrator._tool_assembly_prep as leaf
     import lib.swarm.integration as integ
 
     monkeypatch.setattr(
         leaf, '_assemble_tool_list',
-        lambda *a, **k: ([], False, 0))
+        lambda *a, **k: ([], False))
     monkeypatch.setattr(
         integ, 'has_live_or_pending_swarm', lambda task: True)
 
     task = {'id': 'deadbeef' * 5, 'convId': 'convX', 'messages': []}
-    tool_list, has_real_tools, max_tool_rounds = leaf.assemble_round_tools(
-        {}, task, _mcfg(), vu_phase=lambda detail: None)
+    tool_list, has_real_tools = leaf.assemble_round_tools(
+        {}, task, _mcfg())
 
     names = {
         (t.get('function') or {}).get('name')
@@ -206,27 +199,25 @@ def test_behaviour_pending_swarm_forces_tools_and_lifts_cap(monkeypatch):
         f'got {sorted(n for n in names if n)}')
     assert has_real_tools is True, (
         'forced swarm tools must flip has_real_tools to True')
-    assert max_tool_rounds == 999_999_999, (
-        'a 0 round cap must be lifted so the forced tools are usable')
     assert task['_tool_schema'] is tool_list, (
         "task['_tool_schema'] must be stashed to the returned list")
 
 
 def test_behaviour_no_pending_swarm_leaves_schema_alone(monkeypatch):
     """swarm_enabled=False + NO pending swarm → the assembler's output
-    passes through untouched (no forced tools, cap preserved)."""
+    passes through untouched (no forced tools)."""
     import lib.tasks_pkg.orchestrator._tool_assembly_prep as leaf
     import lib.swarm.integration as integ
 
     monkeypatch.setattr(
         leaf, '_assemble_tool_list',
-        lambda *a, **k: ([], False, 0))
+        lambda *a, **k: ([], False))
     monkeypatch.setattr(
         integ, 'has_live_or_pending_swarm', lambda task: False)
 
     task = {'id': 'deadbeef' * 5, 'convId': 'convX', 'messages': []}
-    tool_list, has_real_tools, max_tool_rounds = leaf.assemble_round_tools(
-        {}, task, _mcfg(), vu_phase=lambda detail: None)
+    tool_list, has_real_tools = leaf.assemble_round_tools(
+        {}, task, _mcfg())
 
     names = {
         (t.get('function') or {}).get('name')
@@ -236,5 +227,4 @@ def test_behaviour_no_pending_swarm_leaves_schema_alone(monkeypatch):
     assert not ({'spawn_agents', 'await_agents', 'get_agent_result'} & names), (
         'no pending swarm → swarm tools must NOT be forced in')
     assert has_real_tools is False
-    assert max_tool_rounds == 0
     assert task['_tool_schema'] == (tool_list or [])

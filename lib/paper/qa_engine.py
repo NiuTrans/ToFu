@@ -31,10 +31,6 @@ from .tools import (
 
 logger = get_logger(__name__)
 
-# Q&A is interactive — fewer tool rounds than a report (which does a deep
-# literature scan). A handful is plenty for "look this up and answer".
-_MAX_QA_TOOL_ROUNDS = 4
-
 
 def _run_qa_task(task, messages):
     """Background worker: run the Q&A tool loop and populate task events.
@@ -176,7 +172,6 @@ def _run_qa_task(task, messages):
     try:
         _outcome = run_agent_loop(
             abort=abort_signal,
-            max_tool_rounds=_MAX_QA_TOOL_ROUNDS,
             round_tools=_QA_TOOLS,
             dispatch=_dispatch,
             execute_tool=_execute_tool,

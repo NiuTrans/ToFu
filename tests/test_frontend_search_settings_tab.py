@@ -2,7 +2,7 @@
 """jsdom test for the Search settings tab redesign (settings/other_tabs.js +
 settings/save_export.js, with the REAL core/safe_html.js beneath).
 
-Pins the three contracts the redesign introduced:
+Pins the contracts the redesign introduced:
 
   * MB display: the backend stores max_bytes in BYTES, the UI shows MB
     (20971520 → "20"); saving converts MB back to bytes (20 → 20971520).
@@ -10,9 +10,9 @@ Pins the three contracts the redesign introduced:
   * Pipeline preview: one sentence says what the backend will DO with the
     current knob values, and live-updates when the user edits the inputs
     (including the filter-off "raw text" phrasing).
-  * Backend status strip: badges reflect cfg.search_status — extension
-    online/offline, tofu-search version, SearXNG count — and degrade to an
-    "unavailable" badge when the server reports ok:false.
+
+(The read-only 搜索诊断 status strip was later removed from the settings
+panel — owner call 2026-08-14 — so its populate/render contract went with it.)
 
 Run: make test-frontend  (skips cleanly when node/jsdom aren't installed)
 """
@@ -30,7 +30,6 @@ const { setup } = require(process.env.JSDOM_HARNESS);
 const { window, document, check, report } = setup({
   root: process.argv[3],
   html: '<!DOCTYPE html><body>' +
-    '<div id="searchBackendStatus"></div>' +
     '<div id="searchPipelinePreview"></div>' +
     '<input type="checkbox" id="settingLlmContentFilter" checked>' +
     '<input id="settingFetchTopN" value="6">' +
@@ -58,12 +57,6 @@ const { window, document, check, report } = setup({
         'settings.searchPipelineTpl': '搜索引擎返回结果 → 抓取前 {n} 个网页（每页 ≤{chars} 字符 · 超时 {timeout}s）→ {filter} → 注入对话',
         'settings.searchFilterOnTpl': 'LLM 过滤杂质',
         'settings.searchFilterOffTpl': '跳过过滤（原文直送）',
-        'settings.searchBackendLive': '后端实况',
-        'settings.searchStatusExtOn': '浏览器扩展在线',
-        'settings.searchStatusExtOff': '扩展离线（浏览器兜底不可用）',
-        'settings.searchStatusUnavailable': '后端状态不可用',
-        'settings.searchStatusFilter': '过滤 {mode} · {model}',
-        'settings.searchStatusDeadline': '限时 整轮 {call}s · 单页 {url}s',
       };
       return dict[key] || '';
     },
@@ -85,7 +78,6 @@ const { window, document, check, report } = setup({
 });
 
 const $ = (id) => document.getElementById(id);
-const statusTxt = () => $('searchBackendStatus').textContent;
 const previewTxt = () => $('searchPipelinePreview').textContent;
 
 (async () => {
@@ -98,22 +90,12 @@ const previewTxt = () => $('searchPipelinePreview').textContent;
         max_bytes: 20971520,
         skip_domains: ['youtube.com'],
       },
-      search_status: {
-        ok: true, tofu_search_version: '0.7.3', searxng_instances: 9,
-        filter_mode: 'gate', filter_model: 'dispatch-default',
-        search_deadline_secs: 45, fetch_url_deadline_secs: 25,
-        extension_connected: true,
-      },
     };
 
-    // ── 1. populate: MB display conversion + status strip + preview ──
+    // ── 1. populate: MB display conversion + preview ──
     _populateSearchTab(cfg);
     check('mb_display_20', $('settingMaxBytesMB').value === '20');
     check('topn_populated', $('settingFetchTopN').value === '8');
-    check('status_ext_on', statusTxt().includes('浏览器扩展在线'));
-    check('status_version', statusTxt().includes('tofu-search v0.7.3'));
-    check('status_searxng', statusTxt().includes('SearXNG ×9'));
-    check('status_filter', statusTxt().includes('gate') && statusTxt().includes('dispatch-default'));
     check('preview_values',
       previewTxt().includes('抓取前 8 个网页') && previewTxt().includes('超时 20s'));
     check('preview_chars_formatted', previewTxt().includes('50,000'));
@@ -130,16 +112,7 @@ const previewTxt = () => $('searchPipelinePreview').textContent;
     check('preview_filter_off_class',
       $('searchPipelinePreview').classList.contains('filter-off'));
 
-    // ── 3. status strip degrades when backend reports failure ──
-    _renderSearchBackendStatus({ ok: false });
-    check('status_unavailable', statusTxt().includes('后端状态不可用'));
-
-    // ── 4. extension offline badge ──
-    _renderSearchBackendStatus({ ok: true, extension_connected: false,
-      tofu_search_version: '0.7.3', searxng_instances: 0 });
-    check('status_ext_off', statusTxt().includes('扩展离线'));
-
-    // ── 5. save path: MB → bytes ──
+    // ── 3. save path: MB → bytes ──
     $('settingMaxBytesMB').value = '20';
     $('settingLlmContentFilter').checked = true;
     await _saveServerConfig();
@@ -177,6 +150,6 @@ def test_search_settings_tab_frontend():
             os.path.join(JS_DIR, 'core', 'safe_html.js'),
             os.path.join(JS_DIR, 'settings', 'save_export.js'),
         ],
-        min_pass=19,
+        min_pass=14,
         label='search-settings-tab',
     )

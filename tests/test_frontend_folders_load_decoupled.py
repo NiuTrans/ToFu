@@ -43,11 +43,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = runtime_sections_dir()
 
 
 def _node_available() -> bool:
@@ -200,14 +202,20 @@ def test_folders_load_decoupled_double_neuter(tmp_path):
     # (2) Restore the OLD coupled 3-leg await + post-await migrate.
     anchor = (
         "    const [, activeResp] = await Promise.all([\n"
-        "      loadConversationsFromServer(prefetchTarget),\n"
+        "      // Metadata only. The old prefetch parameter embeds the archived\n"
+        "      // messages blob; authoritative v2 conversations hydrate their turns\n"
+        "      // below, while pre-cutover conversations retain on-demand fallback.\n"
+        "      loadConversationsFromServer(null),\n"
         "      Api.chat.activeResponse(),\n"
         "    ]);"
     )
     assert anchor in src_no_block, 'boot Promise.all anchor not found — update the neuter target'
     recoupled = (
         "    const [, , activeResp] = await Promise.all([\n"
-        "      loadConversationsFromServer(prefetchTarget),\n"
+        "      // Metadata only. The old prefetch parameter embeds the archived\n"
+        "      // messages blob; authoritative v2 conversations hydrate their turns\n"
+        "      // below, while pre-cutover conversations retain on-demand fallback.\n"
+        "      loadConversationsFromServer(null),\n"
         "      typeof loadFolders === 'function' ? loadFolders() : Promise.resolve(),\n"
         "      Api.chat.activeResponse(),\n"
         "    ]);\n"

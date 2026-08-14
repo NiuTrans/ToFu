@@ -52,7 +52,9 @@ uses [uv](https://github.com/astral-sh/uv):
    stack from prebuilt manylinux wheels (typically ~1–2 min, **zero**
    from-source builds).
 4. Runs an import smoke-test (`lxml`, `fitz`/PyMuPDF, `PIL`/Pillow,
-   `cryptography`, …). **If any import fails — e.g. an old glibc with no
+   `cryptography`, …), then `scripts/verify_pdf_stack.py` checks the exact
+   PyMuPDF trio and performs a real Markdown extraction. **If either check
+   fails — e.g. an old glibc with no
    compatible wheel — it falls back cleanly to the conda path.**
 5. Detects a system `ripgrep`/`fd` (optional speedups; the app degrades
    to a pure-Python search fallback if absent — never a source build).
@@ -69,9 +71,11 @@ The conda path:
 
 1. Locates conda, or installs a private Miniforge as a project sibling.
 2. Creates a `tofu` conda env (Python 3.12).
-3. Installs **all** Python dependencies from conda-forge — never pip.
-   This avoids the `GLIBC_2.25 not found` trap that pip's manylinux
-   wheels (especially `lxml`) hit on CentOS 7 / glibc 2.17.
+3. Installs binary/system-sensitive dependencies from conda-forge. A small
+   pip-only group is then installed into that exact env; the rich PDF trio is
+   exact-pinned and installed together with dependency resolution. This avoids
+   the `GLIBC_2.25 not found` trap for packages such as `lxml` while preventing
+   a conda PyMuPDF + unrelated PyMuPDF4LLM split-brain.
 4. Installs `ripgrep`, `fd-find`, and Chromium shared libs from
    conda-forge — no `sudo`, no system packages.
 5. Installs the Playwright Chromium binary.
@@ -80,24 +84,33 @@ The conda path:
 
 Both paths then configure `.env` and start the server.
 
-## Database: SQLite by default, PostgreSQL opt-in
+To audit or repair PDF parsing after an environment change, run
+`python scripts/verify_pdf_stack.py`. A healthy result reports all three pinned
+versions and `Markdown smoke passed`; the command exits non-zero otherwise.
 
-By default the installer uses **SQLite** — zero configuration, no
-dependencies, and fully supported by the same app code. It is fine for
-single-user use and up to ~100 concurrent users.
+## Database: two equal backends, one sidecar
 
-Installing PostgreSQL is the slowest and most failure-prone part of the
-setup (a layered icu/libxml2/PG-major conda solve, `initdb`, and a
-startup smoke-test), so it is **no longer done by default**. Add
-PostgreSQL only when you need its higher concurrency:
+SQLite and PostgreSQL implement the same storage contract and capacity target.
+SQLite is the zero-configuration default; PostgreSQL is enabled only by the
+explicit `TOFU_DB_BACKEND=postgres` choice (the installer flag below provisions
+its binaries). Neither backend is a fallback, archive tier, or reduced edition.
+If the selected backend fails preflight or becomes unavailable, startup fails
+closed and runtime never switches engines.
+
+All application processes talk to the project-local Storage Sidecar. Only that
+process loads a driver, opens `data/tofu.db` or `data/pgdata`, and owns
+transactions. See [the authoritative storage contract](STORAGE_REDESIGN.md).
+
+PostgreSQL provisioning remains opt-in because it adds its server binaries:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rangehow/ToFu/main/install.sh \
   | bash -s -- --with-postgres
 ```
 
-**Upgrading an existing SQLite install to PostgreSQL, or recovering a
-previous PG dataset:** just re-run the installer with `--with-postgres`.
+**Selecting PostgreSQL or recovering a previous PG dataset:** re-run the
+installer with `--with-postgres`, then explicitly set
+`TOFU_DB_BACKEND=postgres`.
 If you already have a `data/pgdata/` from an earlier install, that data
 is reused (not lost) — the installer detects it and pins the matching PG
 major. Until you pass `--with-postgres`, an existing `pgdata` is left in
@@ -136,13 +149,13 @@ curl -fsSL https://raw.githubusercontent.com/rangehow/ToFu/main/install.sh \
 Your `data/pgdata/` was initialized by a different PG major than the one
 the installer just placed in your env. Two options:
 
-1. **Keep your data, fall back to SQLite** — the default. The installer
-   detects the mismatch and switches to SQLite automatically. Nothing
-   to do.
-2. **Re-initialize PG** — pass `--reinit-pgdata`. The installer renames
+1. **Install the matching PG major** and retry the selected backend. The app
+   must not fall back to SQLite.
+2. **Re-initialize PG** — only after a verified backup, pass `--reinit-pgdata`. The installer renames
    the old `pgdata` to `pgdata.bak.<timestamp>` and creates a fresh one.
 
-If you don't need PG at all, pin SQLite up front:
+To deliberately select SQLite instead, change the explicit selector before
+startup:
 
 ```bash
 curl -fsSL …/install.sh | bash -s -- --force-sqlite
@@ -170,9 +183,11 @@ filing an issue.
 
 | Env var | Effect |
 |---|---|
-| `TOFU_DB_BACKEND=sqlite` | Force SQLite (legacy `CHATUI_DB_BACKEND=sqlite` still works) |
-| `TOFU_DB_PATH` | SQLite file location (default `data/tofu.db`) |
-| `TOFU_PG_HOST` / `TOFU_PG_PORT` / `TOFU_PG_DBNAME` / `TOFU_PG_USER` / `TOFU_PG_PASSWORD` | PG DSN overrides |
+| `TOFU_DB_BACKEND=sqlite|postgres` | The sole backend selector; default `sqlite`, invalid values fail closed |
+| `TOFU_STORAGE_SQLITE_READ_POOL` | SQLite query-only pool size (default 16) |
+| `TOFU_STORAGE_PG_READ_POOL` / `TOFU_STORAGE_PG_WRITE_POOL` | PostgreSQL pool requests (32/16, automatically capped to the 80% server budget) |
+| `TOFU_STORAGE_MIN_FREE_BYTES` | Project-filesystem startup floor |
+| `TOFU_STORAGE_PREFLIGHT_MAX_MS` | Maximum accepted filesystem preflight latency |
 
 ---
 

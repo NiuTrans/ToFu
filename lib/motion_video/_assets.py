@@ -49,6 +49,7 @@ import os
 import re
 import shutil
 
+from lib.json_store import write_bytes_atomic
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -137,10 +138,7 @@ def store_bytes(data: bytes, *, suffix: str) -> str:
         logger.info('[Assets] reuse %s (%d bytes, already in the library)',
                     os.path.basename(dest), len(data))
         return dest
-    tmp = dest + '.tmp'
-    with open(tmp, 'wb') as f:
-        f.write(data)
-    os.replace(tmp, dest)              # atomic: a torn asset is unusable
+    write_bytes_atomic(dest, data)     # atomic: a torn asset is unusable
     logger.info('[Assets] stored %s (%d bytes)', os.path.basename(dest),
                 len(data))
     return dest

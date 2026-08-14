@@ -264,9 +264,12 @@ def test_idea_with_unjudgeable_novelty_cannot_be_accepted():
     import lib.paper.ideate as it
 
     gaps = {'schema_version': 1, 'open_gaps': [
-        {'id': 'gap_1', 'gap': 'g', 'why_open': 'w', 'kind_hint': 'methodology'}]}
+        {'id': 'gap_1', 'gap': 'g', 'why_open': 'w', 'kind_hint': 'methodology',
+         'evidence': ['2305.11111']}]}
     idea = dict(ideas[0])
     idea['linked_gap_id'] = 'gap_1'
+    idea['corpus_anchor_id'] = '2305.11111'
+    idea['corpus_delta'] = 'Change the anchor mechanism at representation level.'
     idea.setdefault('novelty_claim', 'Unlike arXiv:2305.11111 this is new.')
     idea.setdefault('falsifiable_prediction', 'Recall stays >90% at 4x.')
     idea.setdefault('why_not_AB', 'The mechanism is new, not glued.')
@@ -319,9 +322,12 @@ def test_audit_fields_keep_retrieved_and_self_reported_separate():
     import lib.paper.ideate as it
 
     gaps = {'schema_version': 1, 'open_gaps': [
-        {'id': 'gap_1', 'gap': 'g', 'why_open': 'w', 'kind_hint': 'methodology'}]}
+        {'id': 'gap_1', 'gap': 'g', 'why_open': 'w', 'kind_hint': 'methodology',
+         'evidence': ['2305.11111']}]}
     idea = dict(ideas[0])
     idea['linked_gap_id'] = 'gap_1'
+    idea['corpus_anchor_id'] = '2305.11111'
+    idea['corpus_delta'] = 'Change the anchor mechanism at representation level.'
     idea['prior_art'] = ['2305.11111', '2306.22222']
     idea.setdefault('novelty_claim', 'Unlike arXiv:2305.11111 this is new.')
     idea.setdefault('falsifiable_prediction', 'Recall stays >90% at 4x.')

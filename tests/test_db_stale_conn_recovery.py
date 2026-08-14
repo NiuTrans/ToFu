@@ -59,6 +59,9 @@ class _FakeCursor:
     def fetchone(self):
         return (1,)
 
+    def fetchall(self):
+        return [(1,)]
+
     def close(self):
         pass
 
@@ -71,9 +74,13 @@ class _FakeRaw:
         self.fail_probe = fail_probe
         self.probe_count = 0
         self.rollback_count = 0
+        self.commit_count = 0
 
     def rollback(self):
         self.rollback_count += 1
+
+    def commit(self):
+        self.commit_count += 1
 
     def cursor(self):
         return _FakeCursor(self)
@@ -89,6 +96,7 @@ def _make_pgconn(*, monotonic_idle, wall_idle, fail_probe=False):
     conn._conn = raw
     conn._closed = False
     conn._dirty = False
+    conn._transaction_pinned = False
     now_mono = time.monotonic()
     conn._created_at = now_mono - 1.0          # young connection (not age-recycled)
     conn._last_used = now_mono - monotonic_idle
@@ -137,6 +145,87 @@ class TestSuspendStaleGuard:
         assert core._test_pg_connection(conn) is True
         assert raw.probe_count == 1, 'second check within window must not re-probe'
 
+    def test_successful_probe_finishes_its_own_transaction(self):
+        """ROLLBACK; SELECT 1 must end with another ROLLBACK, not an idle tx."""
+        conn, raw = _make_pgconn(monotonic_idle=40.0, wall_idle=40.0)
+        assert core._test_pg_connection(conn) is True
+        assert raw.rollback_count == 2, (
+            'health probe must rollback both prior residue and its SELECT txn')
+
+    @pytest.mark.parametrize('state_attr', ['_dirty', '_transaction_pinned'])
+    def test_health_check_never_rolls_back_caller_owned_transaction(
+            self, state_attr):
+        conn, raw = _make_pgconn(monotonic_idle=40.0, wall_idle=40.0)
+        setattr(conn, state_attr, True)
+
+        assert core._test_pg_connection(conn) is True
+        assert raw.rollback_count == 0
+        assert raw.probe_count == 0
+
+
+@pytest.mark.unit
+class TestReadTransactionHygiene:
+    """Plain reads auto-finish; writes and explicit/locking txns stay pinned."""
+
+    def test_plain_select_is_rolled_back_before_result_is_consumed(self):
+        conn, raw = _make_pgconn(monotonic_idle=0, wall_idle=0)
+        cur = conn.execute('SELECT 1')
+        assert raw.rollback_count == 1
+        assert cur.fetchone() == (1,), 'rollback must not invalidate buffered rows'
+        assert conn._dirty is False
+
+    def test_write_then_read_remains_atomic_until_commit(self):
+        conn, raw = _make_pgconn(monotonic_idle=0, wall_idle=0)
+        conn.execute('UPDATE conversations SET title=title')
+        conn.execute('SELECT 1').fetchone()
+        assert raw.rollback_count == 0, 'read after a write belongs to the write txn'
+        assert conn._dirty is True
+        conn.commit()
+        assert raw.commit_count == 1
+        assert conn._dirty is False
+
+    def test_locking_select_stays_open_until_commit(self):
+        conn, raw = _make_pgconn(monotonic_idle=0, wall_idle=0)
+        conn.execute('SELECT balance_micro FROM billing_wallets FOR UPDATE').fetchone()
+        assert raw.rollback_count == 0
+        assert conn._transaction_pinned is True
+        conn.commit()
+        assert conn._transaction_pinned is False
+
+    def test_explicit_read_first_transaction_is_not_split(self):
+        conn, raw = _make_pgconn(monotonic_idle=0, wall_idle=0)
+        conn.begin()
+        conn.execute('SELECT 1').fetchone()
+        conn.execute('UPDATE conversations SET title=title')
+        assert raw.rollback_count == 0
+        conn.rollback()
+        assert raw.rollback_count == 1
+        assert conn._dirty is False
+        assert conn._transaction_pinned is False
+
+    def test_dead_raw_connection_return_releases_pool_slot(self, monkeypatch):
+        """A PG-killed raw connection still owns the wrapper's semaphore slot."""
+        conn, raw = _make_pgconn(monotonic_idle=0, wall_idle=0)
+        raw.closed = True
+
+        class _Sem:
+            def __init__(self):
+                self.releases = 0
+
+            def release(self):
+                self.releases += 1
+
+        sem = _Sem()
+        conn._semaphore = sem
+        monkeypatch.setattr(core, '_BACKEND', 'pg')
+        monkeypatch.setattr(core, '_conn_count', 1)
+
+        core._pool_put(conn)
+
+        assert conn._closed is True
+        assert sem.releases == 1
+        assert core._conn_count == 0
+
 
 @pytest.mark.unit
 class TestTransparentReconnectBelt:
@@ -149,6 +238,7 @@ class TestTransparentReconnectBelt:
         conn._conn = raw_dead
         conn._closed = False
         conn._dirty = False
+        conn._transaction_pinned = False
         conn._created_at = time.monotonic()
         conn._last_used = time.monotonic()
         conn._last_used_wall = time.time()
@@ -176,6 +266,7 @@ class TestTransparentReconnectBelt:
         conn._conn = raw_dead
         conn._closed = False
         conn._dirty = True  # ← a write already happened in this txn
+        conn._transaction_pinned = False
         conn._created_at = time.monotonic()
         conn._last_used = time.monotonic()
         conn._last_used_wall = time.time()

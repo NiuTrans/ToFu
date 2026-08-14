@@ -1,24 +1,18 @@
 #!/usr/bin/env python3
-"""desktop/connect_ui.py — the shared connect-line dialog + attach imports.
+"""desktop/connect_ui.py — installer attachment imports and legacy repair UI.
 
-BOTH packaged components (the full desktop app and the agent-only build)
-attach a machine to a Tofu server the SAME way: a download-baked
-``tofu-agent-attach.json`` (zero-config: route candidates + a fresh
-bridge token), or the installer-baked ``preseed_server.json`` next to
-the exe, or — as the always-available manual repair path — ONE pasted
-connect line. These functions lived in ``desktop/launcher.py`` until the
-agent build needed them too; they moved here so there is ONE authoring —
-two copies of the dialog or the preseed contract would drift, and the
-dialog's parser (``lib.desktop_agent.config.parse_connect_line``) is the
-single owner of the wire format.
+BOTH packaged components attach a machine to a Tofu server from installer
+data: ``tofu-agent-attach.json`` carries route candidates and a fresh bridge
+token, while ``preseed_server.json`` is the older URL-only fallback. The
+connect-line parser/dialog remains callable only for compatibility with
+already-shipped builds; current launchers expose no token, pairing-code, or
+paste workflow to the user.
 
 The 6-digit PAIRING-CODE dialog was removed 2026-08-05 (owner decree:
 zero configuration burden — the credential rides the download, never the
 user's keyboard). The server-side pair endpoints stay for
 shipped-installer compat; no UI may mint or collect codes again.
 
-``desktop/launcher.py`` keeps thin delegating wrappers under its old
-names — its call sites and test patch points are byte-identical.
 """
 
 import os
@@ -33,7 +27,7 @@ def _noop_log(_msg: str) -> None:
 
 
 def prompt_connect_line(current_url: str = '', log=_noop_log):
-    """Ask for ONE pasted connect line; return (url, secret) or None.
+    """Legacy repair dialog retained for already-shipped callers.
 
     The web UI (Local Control → "This computer", remote case) renders a single
     click-to-copy line carrying BOTH the server address and the token. This
@@ -159,23 +153,23 @@ def prompt_connect_line(current_url: str = '', log=_noop_log):
 
 
 def import_attach_bundle(exe_dir: str, log=_noop_log) -> bool:
-    """Import a download-baked ``tofu-agent-attach.json`` (zero-config).
+    """Import installer-baked ``tofu-agent-attach.json`` (zero-config).
 
-    The per-download ZIP (``/api/v1/desktop/agent-bundle``) carries this
-    file NEXT TO the installer; the NSIS script adopts it next to the
-    installed exe. It carries EVERYTHING the agent needs — an ordered
+    ``/api/v1/desktop/agent-installer`` embeds this record inside the EXE;
+    the NSIS script extracts it into the installation directory. It carries
+    EVERYTHING the agent needs — an ordered
     route-candidate list plus the bridge token minted at download time —
     so first run attaches with zero user input (owner decree 2026-08-05:
     no pairing codes, no pasted lines).
 
     Probe order: the bundle's direct candidates first (a LAN address has
     no SSO edge in between), then the discovery ladder (loopback → LAN
-    broadcast → ssh self-tunnel), the browser-reachable fallback LAST —
-    a cloud-IDE proxy URL is a measured dead end for a cookieless agent
-    (it 401s every /api/* at the edge; access.log showed zero agent
-    requests, 2026-08-05). When NOTHING answers, the first candidate is
-    still saved: the server may simply be off, the poll loop retries by
-    itself, and the tray link line says 'unreachable' honestly.
+    broadcast → ssh self-tunnel), the browser-reachable fallback LAST.
+    A cloud-IDE proxy URL 401s a cookieless direct probe at the edge, but
+    the saved URL remains useful to the browser-assisted transport: the
+    signed-in Tofu tab carries polls without exporting its cookies. When
+    NOTHING answers directly, the first candidate is still saved so that
+    browser handoff and ordinary retry both retain the intended server.
 
     Discipline (mirrors import_preseed):
       * ONE-SHOT — the file carries a bearer token, so it is deleted
@@ -214,9 +208,7 @@ def import_attach_bundle(exe_dir: str, log=_noop_log) -> bool:
         candidates = _urls('candidates')
         fallbacks = [u for u in _urls('fallback_candidates')
                      if u not in candidates]
-        from lib.desktop_agent.config import (load_config, remote_server,
-                                              save_config,
-                                              save_remote_server)
+        from lib.desktop_agent.config import remote_server, save_attachment
         from lib.desktop_agent._probe import probe_server
         existing, existing_secret = remote_server()
         if existing:
@@ -251,18 +243,18 @@ def import_attach_bundle(exe_dir: str, log=_noop_log) -> bool:
         chosen = winner or (candidates[0] if candidates else fallbacks[0])
         # The bundle's token is the freshest credential; when it is absent
         # (open-bridge download) keep whatever secret the attachment had.
-        save_remote_server(chosen, token or existing_secret)
         try:
-            cfg = load_config()
             route_set = list(candidates) + list(fallbacks)
             if (existing and existing != chosen
                     and existing not in route_set):
                 route_set.append(existing)  # may recover — keep as backup
-            cfg['attach_candidates'] = route_set
-            save_config(cfg)
+            save_attachment(
+                chosen, token or existing_secret,
+                attach_candidates=route_set)
         except Exception as e:
-            log('Could not persist attach candidates: %s' % e)
-            logger.warning('Could not persist attach candidates: %s', e)
+            log('Could not persist attachment: %s' % e)
+            logger.warning('Could not persist attachment: %s', e)
+            return False
         if winner:
             log('Attach bundle imported: polling %s (probed alive)' % chosen)
         else:
@@ -292,10 +284,10 @@ def import_preseed(exe_dir: str, log=_noop_log) -> None:
 
       * ONE-SHOT — the file is deleted after any attempt, so a stale
         preseed never overrides an attachment the user has since made.
-      * NEVER overrides an existing attachment — the user's own connect
+      * NEVER overrides an existing attachment — personalized installer data
         wins over the install-time default.
-      * NON-SECRET (the URL only) — the token still comes from the minted
-        connect line or the tray dialog.
+      * NON-SECRET (the URL only) — current controlled-end downloads use the
+        stronger token-bearing attachment instead.
       * Any failure is logged and the file removed — a bad preseed must
         never wedge first run.
     """

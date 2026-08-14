@@ -9,6 +9,8 @@ a restart that arrives while busy. All seams are injected; no real execv.
 """
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 
@@ -42,6 +44,7 @@ def test_enabled_starts_daemon_thread(monkeypatch):
     monkeypatch.setenv('TOFU_AUTO_RESTART', '1')
     import lib.auto_restart as ar
     started = []
+    monkeypatch.setattr(ar, '_watch_thread', None)
 
     class _FakeThread:
         def __init__(self, target=None, kwargs=None, name=None, daemon=None):
@@ -51,11 +54,46 @@ def test_enabled_starts_daemon_thread(monkeypatch):
         def start(self):
             pass
 
+        def is_alive(self):
+            return True
+
     monkeypatch.setattr(ar.threading, 'Thread', _FakeThread)
     assert ar.maybe_start_auto_restart_watch(shutdown_requested='X') is True
     assert started and started[0]['daemon'] is True
     assert started[0]['name'] == 'tofu-auto-restart'
-    assert started[0]['kwargs'] == {'shutdown_requested': 'X'}
+    assert started[0]['kwargs']['shutdown_requested'] == 'X'
+    assert started[0]['kwargs']['stop_event'] is ar._watch_stop
+
+
+@pytest.mark.unit
+def test_stop_wakes_watcher_without_process_shutdown(monkeypatch):
+    monkeypatch.setenv('TOFU_AUTO_RESTART', '1')
+    import lib.auto_restart as ar
+
+    monkeypatch.setattr(ar, '_watch_thread', None)
+    monkeypatch.setattr(ar, 'poll_once', lambda *_args, **_kwargs: 'unchanged')
+    shutdown_requested = threading.Event()
+
+    assert ar.maybe_start_auto_restart_watch(
+        shutdown_requested=shutdown_requested) is True
+    thread = ar._watch_thread
+    assert thread is not None and thread.is_alive()
+    assert shutdown_requested.is_set() is False
+    assert ar.stop_auto_restart_watch(timeout=0.5) is True
+    assert not thread.is_alive()
+    assert ar._watch_thread is None
+
+
+@pytest.mark.unit
+def test_production_entry_registers_auto_restart_shutdown_owner():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1]
+              / 'lib/serving_loop_lifecycle.py').read_text()
+    assert 'def _stop_auto_restart()' in source
+    assert 'stop_auto_restart_watch' in source
+    assert 'stop_auto_restart_watch(timeout=2.0)' in source
+    assert 'await asyncio.to_thread(_stop_auto_restart)' in source
 
 
 @pytest.mark.unit

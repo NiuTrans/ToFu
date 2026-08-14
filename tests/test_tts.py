@@ -97,14 +97,14 @@ def test_taxonomy_registers_tts():
 
 
 def test_js_fallback_parity():
-    """static/js/core/model_caps.js fallback must contain every excluded cap."""
+    """The migrated model-cap owner must contain every excluded cap."""
     from lib.model_info.capability_taxonomy import CHAT_EXCLUDED_CAPS
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        'static', 'js', 'core', 'model_caps.js')
+                        'frontend', 'src', 'runtime', 'app-runtime.js')
     with open(path, encoding='utf-8') as f:
         src = f.read()
     for cap in CHAT_EXCLUDED_CAPS:
-        assert f"'{cap}'" in src, f'model_caps.js fallback missing {cap!r}'
+        assert f"'{cap}'" in src, f'migrated model_caps fallback missing {cap!r}'
     _ok('parity: model_caps.js fallback covers every CHAT_EXCLUDED_CAPS entry')
 
 
@@ -377,13 +377,14 @@ def test_probe_tts_cell_bad_shape_and_404():
     try:
         HC.http_post = lambda *a, **k: _Resp(200, b'{"error":"no audio"}')
         status, detail = PP.probe_tts_cell('https://gw/v1', 'k', 'tts-1', {}, 10)
-        assert status == 'error' and 'non-audio' in detail, (status, detail)
+        assert status == 'invalid_response' and 'non-audio' in detail, \
+            (status, detail)
         HC.http_post = lambda *a, **k: _Resp(404, b'model_not_found')
         status, _d = PP.probe_tts_cell('https://gw/v1', 'k', 'tts-1', {}, 10)
         assert status == 'not_found', status
     finally:
         HC.http_post = orig_hc
-    _ok('probe: non-audio 200 → error shape; 404 → not_found')
+    _ok('probe: non-audio 200 → invalid_response; 404 → not_found')
 
 
 def test_probe_fn_registration():

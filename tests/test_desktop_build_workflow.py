@@ -507,7 +507,7 @@ def test_required_assets_cover_both_components():
     missing an agent asset is as INCOMPLETE as one missing a platform."""
     mod = _asset_mod()
     total = len(mod.PLATFORM_ASSETS) + len(mod.AGENT_PLATFORM_ASSETS)
-    assert len(mod.REQUIRED_PLATFORM_ASSETS) == total
+    assert len(mod.REQUIRED_PLATFORM_ASSETS) == total + 2
     labels = [l for l, _p in mod.REQUIRED_PLATFORM_ASSETS]
     assert any('agent' in l.lower() for l in labels), (
         'the agent component is not in the release gates')

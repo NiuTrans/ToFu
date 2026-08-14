@@ -28,6 +28,7 @@ import os
 import tempfile
 import time
 
+from lib.json_store import write_bytes_atomic, write_text_atomic
 from lib.log import get_logger
 from lib.project_mod.config import (
     SESSIONS_DIR,
@@ -474,15 +475,7 @@ def _undo_modifications_list(base_path, modifications):
                     and fh and fh.is_enabled() and _fh_read_blob):
                 blob = _fh_read_blob(base_path, path, int(v))
                 if blob is not None:
-                    parent_dir = os.path.dirname(target)
-                    if parent_dir and not os.path.isdir(parent_dir):
-                        os.makedirs(parent_dir, exist_ok=True)
-                    tmp = target + '.fh.tmp'
-                    with open(tmp, 'wb') as f:
-                        f.write(blob)
-                        f.flush()
-                        os.fsync(f.fileno())
-                    os.replace(tmp, target)
+                    write_bytes_atomic(target, blob)
                     _nudge_vscode(target)
                     undone.append({'type': 'fh_restore', 'path': path})
                     logger.info('Undo: restored %s via fh@v%s', path, v)
@@ -500,15 +493,9 @@ def _undo_modifications_list(base_path, modifications):
                     if 'originalContent' in mod and os.path.exists(target):
                         original = _decode_original(mod)
                         if isinstance(original, bytes):
-                            with open(target, 'wb') as f:
-                                f.write(original)
-                                f.flush()
-                                os.fsync(f.fileno())
+                            write_bytes_atomic(target, original)
                         else:
-                            with open(target, 'w', newline='') as f:
-                                f.write(original)
-                                f.flush()
-                                os.fsync(f.fileno())
+                            write_text_atomic(target, original)
                         _nudge_vscode(target)
                         undone.append({'type': 'restore', 'path': path})
                         logger.info('Undo: restored original content for %s', path)
@@ -521,11 +508,14 @@ def _undo_modifications_list(base_path, modifications):
                     rev = mod['reversePatch']
                     # rev['search'] = the text currently in file (the replacement)
                     # rev['replace'] = the original text we want to restore
+                    if rev['search'] not in content:
+                        failed.append({
+                            'path': path,
+                            'reason': 'Reverse patch target no longer matches',
+                        })
+                        continue
                     new_content = content.replace(rev['search'], rev['replace'], 1)
-                    with open(target, 'w', newline='') as f:
-                        f.write(new_content)
-                        f.flush()
-                        os.fsync(f.fileno())
+                    write_text_atomic(target, new_content)
                     _nudge_vscode(target)
                     undone.append({'type': 'reverse_patch', 'path': path})
                     logger.info('Undo: reversed patch for %s', path)
@@ -548,15 +538,9 @@ def _undo_modifications_list(base_path, modifications):
                         if parent_dir and not os.path.isdir(parent_dir):
                             os.makedirs(parent_dir, exist_ok=True)
                         if isinstance(original, bytes):
-                            with open(target, 'wb') as f:
-                                f.write(original)
-                                f.flush()
-                                os.fsync(f.fileno())
+                            write_bytes_atomic(target, original)
                         else:
-                            with open(target, 'w', newline='') as f:
-                                f.write(original)
-                                f.flush()
-                                os.fsync(f.fileno())
+                            write_text_atomic(target, original)
                         _nudge_vscode(target)
                         undone.append({'type': 'restore', 'path': path})
                         logger.info('Undo run_command: restored %s', path)

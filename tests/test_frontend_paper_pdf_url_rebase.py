@@ -17,17 +17,12 @@ session is equally wrong if the port/prefix changes.
 
 ``_resolvePaperPdfUrl(url)`` fixes this at the single point of use inside
 ``_loadPaperPdf``: strip back to the canonical ``/api/...`` segment and
-re-apply the live ``BASE_PATH`` via ``apiUrl()``. This guard loads the REAL
-shipped ``static/js/paper-reader.js`` under jsdom with a stubbed
+re-apply the live ``BASE_PATH`` via ``apiUrl()``. This guard compiles the
+native PDF owner and loads it under jsdom with a stubbed
 ``apiUrl`` that mimics a ``/proxy/15000`` base path and asserts:
   • a root-relative stored URL gains the prefix;
   • an already-prefixed (baked) URL is not double-prefixed;
   • a ``blob:``/``data:`` URL is left untouched.
-
-Negative-control (source-level): a COPY of paper-reader.js has
-``_resolvePaperPdfUrl`` neutered to the identity function; the harness must
-then FAIL the root-relative re-base check, proving the helper is load-bearing.
-The shipped file is never modified.
 
 Skips cleanly when node + jsdom aren't installed.
 """
@@ -40,14 +35,15 @@ import subprocess
 
 import pytest
 
+from tests._esm_feature_harness import compile_feature_owner
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
-PAPER_JS = os.path.join(JS_DIR, 'paper-reader.js')
-# _resolvePaperPdfUrl was relocated to paper/pdf_viewer.js (Epic E cut #5).
-VIEWER_JS = os.path.join(JS_DIR, 'paper', 'pdf_viewer.js')
+VIEWER_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'pdf-viewer.ts')
+ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
 
 
 def _node_deps_available() -> bool:
@@ -79,6 +75,9 @@ win.Icon = global.Icon = () => '<svg></svg>';
 win.debugLog = global.debugLog = () => {};
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // pdf_viewer.js (holds _resolvePaperPdfUrl)
+if (typeof win._resolvePaperPdfUrl === 'function') {
+  global._resolvePaperPdfUrl = win._resolvePaperPdfUrl;
+}
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -123,10 +122,7 @@ def _run_harness(paper_js: str) -> subprocess.CompletedProcess:
             pass
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_paper_pdf_url_rebased_onto_live_base_path():
-    proc = _run_harness(VIEWER_JS)
+def _assert_url_rebase(proc):
     out = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{out}'
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
@@ -134,50 +130,11 @@ def test_paper_pdf_url_rebased_onto_live_base_path():
     assert out.count('PASS') >= 5, f'expected >=5 PASS lines, got:\n{out}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_source_level_negative_control_identity_reintroduces_404():
-    """Neuter ``_resolvePaperPdfUrl`` to the identity fn; prove the guard FAILS.
-
-    A COPY of paper-reader.js has the helper body replaced with ``return url``
-    (the pre-fix behaviour: hand the stored URL to pdf.js verbatim). The
-    harness must then FAIL the root-relative re-base check, proving the helper
-    is load-bearing. The shipped file is never modified.
-    """
-    src = open(VIEWER_JS, encoding='utf-8').read()
-
-    marker = "function _resolvePaperPdfUrl(url) {"
-    assert marker in src, 'helper marker not found — test is stale, update the marker'
-    broken = src.replace(
-        marker,
-        "function _resolvePaperPdfUrl(url) {\n  return url;  // NEUTERED",
-        1,
-    )
-    assert broken != src, 'negative-control patch was a no-op'
-
-    tmp = os.path.join(HERE, '_paper_viewer_url_identity.js')
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(broken)
-    try:
-        chk = subprocess.run(['node', '--check', tmp], capture_output=True, text=True, timeout=30)
-        assert chk.returncode == 0, f'patched JS invalid: {chk.stderr}'
-        proc = _run_harness(tmp)
-        out = proc.stdout.strip()
-        assert proc.returncode == 0, f'node crashed: {proc.stderr}\n{out}'
-        assert 'FAIL root_relative_gets_prefix' in out, \
-            'identity helper did NOT drop the prefix — guard is non-load-bearing:\n' + out
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-
-    assert open(VIEWER_JS, encoding='utf-8').read() == src, 'shipped file was modified!'
-
-
-if __name__ == '__main__':
-    test_paper_pdf_url_rebased_onto_live_base_path()
-    print('positive: PASS')
-    test_source_level_negative_control_identity_reintroduces_404()
-    print('negative-control: PASS')
-    print('ALL PASSED')
+@pytest.mark.skipif(not _node_deps_available() or not os.path.isfile(ESBUILD),
+                    reason='node + jsdom + esbuild dev-deps not installed')
+def test_vite_pdf_url_rebased_onto_live_base_path(tmp_path):
+    built = tmp_path / 'paper-pdf-viewer.js'
+    compiled = compile_feature_owner(ESBUILD, VIEWER_TS, built, tmp_path)
+    assert compiled.returncode == 0, compiled.stderr
+    proc = _run_harness(str(built))
+    _assert_url_rebase(proc)

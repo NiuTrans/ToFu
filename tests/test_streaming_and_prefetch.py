@@ -527,7 +527,6 @@ class TestMemoryPrefetch:
 
         task = {
             '_prefetch_project': future,
-            '_prefetch_memory': None,
         }
 
         messages = [{'role': 'system', 'content': 'Base system prompt'}]
@@ -551,7 +550,6 @@ class TestMemoryPrefetch:
 
         task = {
             '_prefetch_project': future,
-            '_prefetch_memory': None,
         }
 
         messages = [{'role': 'system', 'content': 'Base prompt'}]
@@ -576,7 +574,6 @@ class TestMemoryPrefetch:
 
         task = {
             '_prefetch_project': future,
-            '_prefetch_memory': None,
         }
 
         messages = [{'role': 'system', 'content': 'Base prompt'}]
@@ -663,11 +660,11 @@ class TestMemoryPrefetch:
         _, kwargs = mock_digest.call_args
         assert kwargs.get('conv_tools_available') is True
 
-    def test_skills_prefetch_consumed(self):
-        """Memory count hint is injected into the system message by _inject_system_contexts.
+    def test_memory_guidance_composed(self):
+        """Memory guidance is composed into the system message.
 
-        After the refactor, both compact memory instructions AND the dynamic
-        count hint ("You have N memories...") go into the system message.
+        Compact memory instructions and the storage-provided guidance go into
+        one managed system block.
         No listing is injected into the user message (on-demand via
         `search_memories` tool + per-turn memory-prefetch).
         """
@@ -679,7 +676,6 @@ class TestMemoryPrefetch:
 
         task = {
             '_prefetch_project': proj_future,
-            '_prefetch_memory': None,
         }
 
         messages = [
@@ -697,7 +693,7 @@ class TestMemoryPrefetch:
                 task=task,
             )
 
-        # System message should have both compact instructions AND the count hint
+        # System message has compact instructions and storage guidance.
         sys_content = messages[0]['content']
         if isinstance(sys_content, list):
             sys_text = '\n\n'.join(b['text'] for b in sys_content if isinstance(b, dict))
@@ -732,7 +728,7 @@ class TestMemoryPrefetch:
                    '</available_skills>')
         proj_future = Future()
         proj_future.set_result('Proj ctx')
-        task = {'_prefetch_project': proj_future, '_prefetch_memory': None}
+        task = {'_prefetch_project': proj_future}
         messages = [{'role': 'system', 'content': 'Base'},
                     {'role': 'user', 'content': 'Help me'}]
 
@@ -762,64 +758,6 @@ class TestMemoryPrefetch:
             if isinstance(sc2, list) else sc2
         assert st2.count('</available_skills>') == 1, (
             f"skills index double-spliced: {st2.count('</available_skills>')}")
-
-    def test_NC_skills_gate_reverted_to_bare_noun_breaks_the_guard(self, tmp_path):
-        """NEUTER: revert the idempotency gate to the bare noun → the listing
-        is suppressed again and test_skills_index_not_suppressed_by_memory_prose's
-        core assertion fails. Shipped file byte-identical after."""
-        src_path = os.path.join(
-            os.path.dirname(ROOT := os.path.dirname(os.path.abspath(__file__))),
-            'lib', 'tasks_pkg', 'system_context', '_inject.py')
-        with open(src_path, encoding='utf-8') as f:
-            original = f.read()
-        anchor = "        if '</available_skills>' in _existing:"
-        assert anchor in original, 'skills gate anchor not found'
-        patched = original.replace(
-            anchor, "        if '<available_skills>' in _existing:  # NC", 1)
-        assert patched != original
-        try:
-            with open(src_path, 'w', encoding='utf-8') as f:
-                f.write(patched)
-            import importlib
-
-            import lib.tasks_pkg.system_context._inject as _inj
-            importlib.reload(_inj)
-            from concurrent.futures import Future as _F
-            listing = ('<available_skills>\nx\n- fake-skill (project): NC\n'
-                       '</available_skills>')
-            fut = _F(); fut.set_result('Proj ctx')
-            task = {'_prefetch_project': fut, '_prefetch_memory': None}
-            messages = [{'role': 'system', 'content': 'Base'},
-                        {'role': 'user', 'content': 'Help me'}]
-            with patch('lib.memory.build_memory_context',
-                       return_value='You have 42 accumulated memories.'), \
-                 patch('lib.skills.build_skills_index', return_value=listing):
-                _inj._inject_system_contexts(
-                    messages, '/tmp/proj', True, True, False, False,
-                    has_real_tools=True, conv_id='', task=task)
-            sc = messages[0]['content']
-            st = '\n\n'.join(b['text'] for b in sc if isinstance(b, dict)) \
-                if isinstance(sc, list) else sc
-            assert 'fake-skill (project)' not in st, (
-                'NC did not bite: listing landed despite the bare-noun gate')
-        finally:
-            with open(src_path, 'w', encoding='utf-8') as f:
-                f.write(original)
-            import importlib
-
-            import lib.tasks_pkg.system_context._inject as _inj
-            importlib.reload(_inj)
-        with open(src_path, encoding='utf-8') as f:
-            assert f.read() == original, 'shipped _inject.py must be byte-identical'
-
-        # User message should NOT contain the memory count hint (it's in system now)
-        user_msg = messages[-1]
-        assert user_msg['role'] == 'user'
-        user_text = user_msg.get('content', '')
-        if isinstance(user_text, list):
-            user_text = '\n'.join(b.get('text', '') for b in user_text if isinstance(b, dict))
-        assert 'accumulated memories' not in user_text
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Test 6: Callback threading through streaming stack

@@ -29,6 +29,10 @@ import os
 import sys
 import uuid
 
+import pytest
+
+pytestmark = pytest.mark.unit
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import quart as _quart  # noqa: E402
@@ -45,12 +49,13 @@ def _fail(msg): print(' ', _color('\u2717', '31'), msg); sys.exit(1)
 
 def _persist_deltas(task_id, chunks, *, resets=()):
     """Persist a delta stream to task_events; `resets` = {index: 'delta_reset'|'retry_reset'}."""
-    from lib.tasks_pkg.event_log import append_persistent_event
+    from lib.tasks_pkg.event_log import append_persistent_event, flush_pending
     eid = 0
     for i, chunk in enumerate(chunks):
         if i in dict(resets):
             append_persistent_event(task_id, eid, {'type': dict(resets)[i]}); eid += 1
         append_persistent_event(task_id, eid, {'type': 'delta', 'content': chunk}); eid += 1
+    flush_pending(task_id)  # write-behind lane: drain before reading back
     return eid
 
 
@@ -113,9 +118,50 @@ def test_fold_never_shrinks():
     _ok('shorter fold never shrinks a longer checkpoint (server-side keep-longer)')
 
 
+def test_newer_reset_epoch_overrides_longer_checkpoint():
+    from lib.tasks_pkg.event_fold import fold_cold_state
+    from lib.tasks_pkg.event_log import append_persistent_event, flush_pending
+    tid = f'fold-epoch-{uuid.uuid4().hex[:8]}'
+    append_persistent_event(tid, 0, {'type': 'delta', 'content': 'old narration'})
+    append_persistent_event(
+        tid, 1, {'type': 'delta_reset', 'contentEpoch': 1})
+    flush_pending(tid)
+    content, _, epoch = fold_cold_state(
+        tid, checkpoint_content='old narration', checkpoint_epoch=0)
+    assert content == '', (
+        f'newer reset epoch failed to clear longer stale checkpoint: {content!r}')
+    assert epoch == 1, f'effective content epoch lost: {epoch}'
+    _ok('newer reset epoch authorizes cold-fold shrink')
+
+
+def test_newer_reset_epoch_requires_contiguous_event_log(monkeypatch):
+    from lib.tasks_pkg.event_fold import fold_cold_state
+
+    events_with_hole = [
+        {'event_id': 0, 'payload': {
+            'type': 'delta', 'content': 'old narration'}},
+        {'event_id': 1, 'payload': {
+            'type': 'delta_reset', 'contentEpoch': 1}},
+        {'event_id': 3, 'payload': {'type': 'phase', 'phase': 'working'}},
+    ]
+    monkeypatch.setattr(
+        'lib.tasks_pkg.event_log.read_events',
+        lambda task_id, since_event_id=None, limit=10000: events_with_hole)
+
+    content, thinking, epoch = fold_cold_state(
+        'fold-gap', checkpoint_content='old narration',
+        checkpoint_thinking='old thought', checkpoint_epoch=0)
+
+    assert (content, thinking, epoch) == (
+        'old narration', 'old thought', 0), (
+        'a reset from a gapped log must not authorize checkpoint shrink: '
+        f'{content!r} / {thinking!r} / {epoch}')
+
+
 _POSITIVE = [test_fold_reconstructs_exact_buffer, test_fold_honors_delta_reset,
              test_fold_honors_retry_reset, test_fold_falls_back_to_checkpoint,
-             test_fold_never_shrinks]
+             test_fold_never_shrinks,
+             test_newer_reset_epoch_overrides_longer_checkpoint]
 
 
 def _run(fn):

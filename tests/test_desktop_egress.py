@@ -30,6 +30,7 @@ pytestmark = pytest.mark.unit
 
 from lib.desktop import egress
 from lib.desktop.egress import EgressUnavailable
+from lib.subscription_routes import ProbeResult, Route, manager as route_manager
 
 
 def _agent(agent_id='a1', user_id='', egress_cap=True, name='box'):
@@ -107,14 +108,38 @@ class TestRouteRequest(unittest.TestCase):
             self.assertEqual(egress.route_request('https://api.anthropic.com/v1/x', user_id=''), 'a1')
 
     def test_probe_result_cached_per_host(self):
-        # Unique host per run — the module cache is process-global. The cache
-        # lives INSIDE _probe_host, so count the http calls, not the wrapper.
-        ok_resp = mock.Mock(status_code=401)
-        egress._probe_cache.invalidate('api.anthropic.com')
-        with mock.patch('lib.http_client.http_post', return_value=ok_resp) as hp:
+        # The manager, rather than the UI verdict mirror, owns reachability.
+        # A second path on the same host reuses the healthy route without a
+        # second probe.
+        route = Route('direct', 'direct', 'direct')
+        route_manager.reset()
+        with mock.patch('lib.proxy.subscription_route_specs',
+                        return_value=[route]), \
+             mock.patch.object(route_manager, '_probe',
+                               return_value=ProbeResult('ok', 10, 401)) as probe:
             egress.route_request('https://api.anthropic.com/a', user_id='')
             egress.route_request('https://api.anthropic.com/b', user_id='')
-        self.assertEqual(hp.call_count, 1)
+        self.assertEqual(probe.call_count, 1)
+        route_manager.reset()
+
+    def test_network_failure_cache_expires_before_proxy_cooldown_retry(self):
+        """Transient network failure must not poison routing for 300s."""
+        host = 'chatgpt.com'
+        egress._probe_cache.invalidate(host)
+        egress._probe_network_fail_cache.invalidate(host)
+        with mock.patch.object(egress, '_probe_host_paths',
+                               side_effect=['network_fail', 'ok']) as probe, \
+             mock.patch.object(egress._probe_network_fail_cache,
+                               'ttl', 0.001):
+            self.assertEqual(
+                egress._probe_host('https://chatgpt.com/backend-api/codex/responses'),
+                'network_fail')
+            time.sleep(0.005)
+            self.assertEqual(
+                egress._probe_host('https://chatgpt.com/backend-api/codex/responses'),
+                'ok')
+        self.assertEqual(probe.call_count, 2)
+        self.assertEqual(egress._probe_cache.get(host), 'ok')
 
     def test_multi_agent_requires_pinned_choice(self):
         with mock.patch.object(egress, '_probe_host', return_value='geo_blocked'), \

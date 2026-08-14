@@ -43,11 +43,11 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = os.path.join(ROOT, 'frontend', 'src', 'runtime')
 # Located by SYMBOL, not path: the persist-helper family was extracted out of
 # core/conversations.js once already (pt_3879f00e slice 3).
 PRED_JS = sources_defining('_serverHasImagesLocalLacks')[0]
-CONV_JS = os.path.join(JS_DIR, 'core', 'conversations.js')
+CONV_JS = os.path.join(JS_DIR, 'app-runtime.js')
 
 
 def _node_available() -> bool:

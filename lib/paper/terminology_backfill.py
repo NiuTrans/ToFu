@@ -33,9 +33,9 @@ Design (mirrors ``insight_engine`` deliberately — reuse, don't hand-roll):
 
 from __future__ import annotations
 
-import json
 import os
 import time
+import uuid
 
 from lib.llm_json import extract_json
 from lib.log import get_logger
@@ -54,6 +54,11 @@ __all__ = [
     'build_backfill_addendum',
     'run_report_termfill',
 ]
+
+
+def _storage(*, write: bool = False):
+    from lib.storage import get_storage_client
+    return get_storage_client(write=write)
 
 _TERMFILL_LANG_PREFIX = 'termfill'
 # The addendum header intentionally contains "glossary" so the audit's
@@ -374,17 +379,14 @@ def run_report_termfill(report_md, ui_lang='en', *, phash='', model=None,
 
     if persist and addendum:
         try:
-            from lib.database import get_thread_db
-            from lib.database._core_schema import PAPER_REPORTS, upsert
-            db = get_thread_db()
-            upsert(db, PAPER_REPORTS, {
+            _storage(write=True).command('paper.report.upsert', {
                 'paper_hash': phash,
                 'lang': termfill_lang_key(ui_lang),
                 'report': addendum,
                 'model': model or '',
-                'meta': json.dumps({'kind': 'termfill'}, ensure_ascii=False),
+                'meta': {'kind': 'termfill'},
                 'created_at': int(time.time()),
-            }, retry=True)
+            }, f'paper-termfill:{uuid.uuid4().hex}')
             logger.info('[Paper:TermFill] Persisted addendum — hash=%s key=%s %d chars',
                         phash, termfill_lang_key(ui_lang), len(addendum))
         except Exception as e:

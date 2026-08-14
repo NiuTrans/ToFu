@@ -29,7 +29,7 @@
             <!-- Provider selector -->
             <div class="settings-section-title" style="display:flex;align-items:center;gap:8px">
               <span data-i18n="settings.sttProvider">识别服务商</span>
-              <select id="settingSttProvider" class="mt-provider-select" onchange="_switchSttProvider(this.value)">
+              <select id="settingSttProvider" class="mt-provider-select" data-tofu-action-change="_switchSttProvider(this.value)">
                 <option value="openai" data-i18n="settings.sttProviderOpenai">OpenAI (gpt-4o-transcribe)</option>
                 <option value="groq" data-i18n="settings.sttProviderGroq">Groq (Whisper)</option>
                 <option value="omni" data-i18n="settings.sttProviderOmni">Omni 对话模型 (audio_chat)</option>

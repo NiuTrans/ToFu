@@ -12,6 +12,11 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Parser/compaction fixture values, not anchors to shipped repository files.
+_AUDIT_SYNTHETIC_REPO_PATHS = {
+    'lib/a.py', 'lib/b.py', 'lib/c.py', 'lib/other.py', 'lib/server.py',
+}
+
 
 def _read_result(path: str, body_chars: int = 3000) -> str:
     return f'File: {path} (320 lines, 12.1KB)\n' + ('x' * body_chars)

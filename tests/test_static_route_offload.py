@@ -12,8 +12,7 @@ thread under a hard ``asyncio.wait_for`` timeout.
 These tests assert the three sign-off requirements + the offload being
 load-bearing:
   1. Path traversal (``/static/../server.py``) → 404, never a file leak.
-  2. 404 (missing file) vs 503 (read timeout) stay DISTINCT — the stale-bundle
-     self-heal depends on a genuine 404.
+  2. 404 (missing file) vs 503 (read timeout) stay DISTINCT.
   3. Conditional 304 / ETag + long-cache headers preserved.
   4. NEUTER: degrade the offload to run inline → a slow read wedges a
      concurrent request, proving the executor offload is what keeps the loop
@@ -88,29 +87,20 @@ def test_absolute_path_does_not_leak(client):
 
 @pytest.mark.auth_mode("open")
 def test_missing_file_is_404(client):
-    """A genuinely-absent file → 404 (so resolve_stale_bundle self-heal fires),
-    NOT 503."""
+    """A genuinely-absent Vite asset is 404, not a filesystem-timeout 503."""
     async def go():
-        resp = await client.get('/static/js/does-not-exist-xyz.js')
+        resp = await client.get('/static/vite/assets/does-not-exist-xyz.js')
         assert resp.status_code == 404
     _run_async(go())
 
 
 @pytest.mark.auth_mode("open")
-def test_stale_bundle_selfheal_still_reachable(client, async_app):
-    """The 404 handler's stale-bundle redirect depends on a REAL 404 from the
-    static route. A stale bundle-<hash>.js → 302 to the current bundle."""
-    import server
-    from lib.js_bundler import get_bundle_filename
-    current = get_bundle_filename()
-    if not current:
-        pytest.skip('bundler produced no core bundle in this env')
-
+def test_retired_classic_bundle_is_not_redirected_into_the_vite_graph(client):
+    """Classic and Vite owners must never be mixed by a compatibility redirect."""
     async def go():
-        # A stale (different-hash) but well-formed bundle name → self-heal 302.
         resp = await client.get('/static/js/bundle-deadbeef.js')
-        assert resp.status_code == 302
-        assert resp.headers['Location'].endswith('/static/js/' + current)
+        assert resp.status_code == 404
+        assert 'Location' not in resp.headers
     _run_async(go())
 
 
@@ -129,7 +119,7 @@ def test_read_timeout_is_503(client, monkeypatch):
 
     async def go():
         t0 = time.monotonic()
-        resp = await client.get('/static/js/core.js')
+        resp = await client.get('/static/vite/assets/entry.js')
         elapsed = time.monotonic() - t0
         assert resp.status_code == 503, 'expected 503, got %d' % resp.status_code
         assert elapsed < 2.0, 'timeout did not fire fast (%.2fs) — loop blocked?' % elapsed
@@ -139,17 +129,14 @@ def test_read_timeout_is_503(client, monkeypatch):
 # ─────────────────── requirement #3: caching / conditional 304 ────────────────
 
 @pytest.mark.auth_mode("open")
-def test_bundle_served_with_etag_and_immutable_cache(client, async_app):
-    """A real bundle serves 200 with an ETag and the immutable long-cache
-    header (add_cache_headers stamps /bundle-)."""
-    import server
-    from lib.js_bundler import get_bundle_filename
-    current = get_bundle_filename()
-    if not current:
-        pytest.skip('bundler produced no core bundle in this env')
+def test_vite_asset_served_with_etag_and_immutable_cache(client, async_app):
+    """A content-hashed Vite asset has an ETag and immutable long caching."""
+    path, _ = _first_existing_static(client, vite_only=True)
+    if not path:
+        pytest.skip('prebuilt Vite artifact absent in this test lane')
 
     async def go():
-        resp = await client.get('/static/js/' + current)
+        resp = await client.get(path)
         assert resp.status_code == 200
         assert resp.headers.get('ETag')
         cc = resp.headers.get('Cache-Control', '')
@@ -162,8 +149,7 @@ def test_bundle_served_with_etag_and_immutable_cache(client, async_app):
 
     async def go2():
         # Conditional request with the matching ETag → 304, no body.
-        resp = await client.get('/static/js/' + current,
-                                headers={'If-None-Match': etag})
+        resp = await client.get(path, headers={'If-None-Match': etag})
         assert resp.status_code == 304
         body = await resp.get_data()
         assert body == b''
@@ -171,27 +157,36 @@ def test_bundle_served_with_etag_and_immutable_cache(client, async_app):
 
 
 @pytest.mark.auth_mode("open")
-def test_plain_js_served_with_correct_mime(client):
-    """A non-bundle .js still serves 200 with a javascript content-type."""
+def test_vite_javascript_served_with_correct_mime(client):
+    path, _ = _first_existing_static(client, vite_only=True)
+    if not path:
+        pytest.skip('prebuilt Vite artifact absent in this test lane')
+
     async def go():
-        resp = await client.get('/static/js/core.js')
-        if resp.status_code != 200:
-            pytest.skip('core.js absent in test env')
+        resp = await client.get(path)
+        assert resp.status_code == 200
         assert 'javascript' in (resp.content_type or '')
     _run_async(go())
 
 
 # ─────────────── requirement (reviewer): Range / 206 partial content ─────────
 
-def _first_existing_static(client):
+def _first_existing_static(client, *, vite_only=False):
     """Return (path, full_bytes) for a real static file, or (None, None)."""
     async def go():
-        from lib.js_bundler import get_bundle_filename
         candidates = []
-        b = get_bundle_filename()
-        if b:
-            candidates.append('/static/js/' + b)
-        candidates += ['/static/js/core.js', '/static/styles.css']
+        try:
+            from lib.vite_assets import validate_vite_artifact
+            manifest = validate_vite_artifact()
+            candidates.extend(
+                '/static/vite/' + row['file']
+                for row in manifest.values()
+                if str(row.get('file', '')).lower().endswith(('.js', '.mjs'))
+            )
+        except Exception:
+            pass
+        if not vite_only:
+            candidates.append('/static/styles.css')
         for p in candidates:
             r = await client.get(p)
             if r.status_code == 200:

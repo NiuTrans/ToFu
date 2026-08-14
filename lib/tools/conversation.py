@@ -528,7 +528,11 @@ PEER_MESSAGE_TOOL = {
             "NEXT turn — it NEVER interrupts a live turn mid-stream. The peer "
             "acts autonomously on what you send. Rate-limited per target to "
             "prevent message storms — spend it on coordination that changes what "
-            "the peer does, not FYI chatter."
+            "the peer does, not FYI chatter. When you RECEIVE a peer message, "
+            "you may reply exactly once with project_message(to_conv_id=<the "
+            "supplied reply id>) only to confirm a boundary, hand off context, "
+            "or decline. Do not acknowledge just to be polite: this is "
+            "coordination, not a chat channel, and the rate limit is the ceiling."
         ),
         "parameters": {
             "type": "object",

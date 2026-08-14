@@ -20,7 +20,8 @@ for 22 minutes (~700 ``no such table`` errors).
 
 THE FIX
 =======
-Wrap the backfill in its OWN try/except: on ANY failure (import error / syntax
+The implementation now lives at dependency-light ``lib.paper_hash_backfill``
+and is wrapped in its OWN try/except: on ANY failure (import error / syntax
 error in the paper chain / a backfill runtime error) log at ERROR and CONTINUE
 with DDL. The heal is idempotent and re-runs on the next boot; schema init is a
 correctness contract, data heal is not.
@@ -30,6 +31,7 @@ Run:
 """
 from __future__ import annotations
 
+import logging
 import os
 import sys
 
@@ -51,7 +53,9 @@ class _BrokenPaperBackfill:
 
 
 def _broken_import(monkeypatch):
-    """Force ``from lib.paper.hash_backfill import ...`` to raise."""
+    """Force the dependency-light schema import to raise."""
+    monkeypatch.setitem(sys.modules, 'lib.paper_hash_backfill',
+                        _BrokenPaperBackfill())
     monkeypatch.setitem(sys.modules, 'lib.paper.hash_backfill',
                         _BrokenPaperBackfill())
 
@@ -112,5 +116,24 @@ def test_init_db_still_runs_the_backfill_when_healthy(tmp_path, monkeypatch):
     try:
         assert called, 'the healthy backfill was skipped — isolation went too far'
         assert _schema_meta_exists()
+    finally:
+        restore_db_state(snap)
+
+
+def test_fresh_init_does_not_log_expected_missing_tables_as_errors(
+        tmp_path, caplog):
+    """Pre-DDL backfill probes are expected misses, not boot failures."""
+    from lib.database import reset_sqlite_for_tests, restore_db_state
+
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger='lib.database'):
+        snap = reset_sqlite_for_tests(os.path.join(str(tmp_path), 'tofu.db'))
+    try:
+        false_alarms = [
+            record.getMessage() for record in caplog.records
+            if 'no such table: schema_meta' in record.getMessage()
+            or 'no such table: paper_library' in record.getMessage()
+        ]
+        assert false_alarms == []
     finally:
         restore_db_state(snap)

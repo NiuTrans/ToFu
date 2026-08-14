@@ -29,7 +29,7 @@ from __future__ import annotations
 import re
 from urllib.parse import quote as _urlquote
 
-from flask import Blueprint, Response, request
+from quart import Blueprint, Response, request
 
 from lib.artifacts import (
     ArtifactNotFoundError,

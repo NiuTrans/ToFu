@@ -68,10 +68,13 @@ _SURVEY_PER_PAPER_CHARS = 6000
 # is summarized from the most relevant slice, not the entire shelf).
 _SURVEY_MAX_PAPERS = 40
 
-_MAX_SURVEY_TOOL_ROUNDS = 6
 _SURVEY_TEMPERATURE = 0.3      # below insight's 0.45 — survey is descriptive, not divergent
 _SURVEY_MAX_TOKENS = 8000
 _SURVEY_LANG_PREFIX = 'survey'
+# Agentic survey rounds repeatedly carry a large, already-distilled corpus.
+# This is a token envelope, not a round ceiling: after it is reached the next
+# dispatch gets no tools and must synthesize from evidence already collected.
+_SURVEY_AGENT_TOKEN_BUDGET = 240_000
 
 
 def survey_lang_key(lang: str) -> str:
@@ -97,17 +100,8 @@ def _norm_id(arxiv_id) -> str:
     ``{'paper': …}``) — salvage the id from those keys and return '' for
     anything unparseable instead of crashing on ``.split``.
     """
-    if isinstance(arxiv_id, dict):
-        for _k in ('arxiv_id', 'id', 'paper'):
-            _v = arxiv_id.get(_k)
-            if isinstance(_v, str) and _v.strip():
-                arxiv_id = _v
-                break
-        else:
-            return ''
-    if not isinstance(arxiv_id, str):
-        return ''
-    return arxiv_id.split('v')[0].strip()
+    from lib.paper.arxiv import normalize_arxiv_id
+    return normalize_arxiv_id(arxiv_id)
 
 
 # ── Input loading (pin #2: reports/library only, never a re-parse) ─────────
@@ -133,13 +127,9 @@ def _load_paper_inputs(arxiv_ids, *, lang: str = 'en', user_id: int = 1,
     """
     out = []
     seen = set()
-    try:
-        from lib.database._core import _pool_get, _pool_put
-        db = _pool_get()
-    except Exception as e:
-        logger.error('[Paper:Survey] cannot open DB for input load: %s', e, exc_info=True)
-        return out
-    try:
+    from lib.database import DOMAIN_CHAT, pooled_db
+
+    def _load(db):
         for raw in (arxiv_ids or []):
             aid = _norm_id(raw)
             if not aid or aid in seen:
@@ -189,12 +179,12 @@ def _load_paper_inputs(arxiv_ids, *, lang: str = 'en', user_id: int = 1,
                 'arxiv_id': aid, 'paper_hash': phash, 'title': title,
                 'source': source, 'content': content[:per_paper_chars],
             })
-    finally:
-        try:
-            _pool_put(db)
-        except Exception as _e:
-            logger.debug('load paper inputs: failed (%s)', _e)
-            pass
+    try:
+        with pooled_db(DOMAIN_CHAT) as db:
+            _load(db)
+    except Exception as e:
+        logger.error('[Paper:Survey] cannot load DB inputs: %s', e, exc_info=True)
+        return out
     logger.info('[Paper:Survey] loaded %d paper input(s) — %d from reports, %d from parsed_text',
                 len(out), sum(1 for p in out if p['source'] == 'report'),
                 sum(1 for p in out if p['source'] == 'parsed_text'))
@@ -211,9 +201,8 @@ def _library_id_set(user_id: int = 1, folder_id: str = '') -> set:
     outside it is unverifiable and gets stripped."""
     ids = set()
     try:
-        from lib.database._core import _pool_get, _pool_put
-        db = _pool_get()
-        try:
+        from lib.database import DOMAIN_CHAT, pooled_db
+        with pooled_db(DOMAIN_CHAT) as db:
             if folder_id:
                 rows = db.execute(
                     'SELECT arxiv_id FROM paper_library WHERE user_id=? AND folder_id=? '
@@ -222,8 +211,6 @@ def _library_id_set(user_id: int = 1, folder_id: str = '') -> set:
                 rows = db.execute(
                     'SELECT arxiv_id FROM paper_library WHERE user_id=? AND arxiv_id != \'\'',
                     (user_id,)).fetchall()
-        finally:
-            _pool_put(db)
     except Exception as e:
         logger.error('[Paper:Survey] library id-set query failed: %s', e, exc_info=True)
         return ids
@@ -439,7 +426,7 @@ def _fetch_arxiv_title(arxiv_id):
 
 
 def _synthesize_survey(paper_inputs, direction, lang, *, model=None, abort=None,
-                       on_tool_event=None):
+                       on_tool_event=None, usage_meter=None):
     """Agentic fan-in synthesis: research the frontier, then emit the survey.
 
     Returns ``(survey_md, gap_map)`` where ``gap_map`` is the RAW (un-gated)
@@ -479,16 +466,21 @@ def _synthesize_survey(paper_inputs, direction, lang, *, model=None, abort=None,
         def _on_content(text):
             _round['content'] += text
 
+        effective_tools = usage_meter.allowed_tools(tools) if usage_meter else tools
         logger.info('[Paper:Survey] round %d — msgs=%d tools=%s papers=%d',
-                    rnd + 1, len(messages), 'yes' if tools else 'no', len(paper_inputs))
+                    rnd + 1, len(messages), 'yes' if effective_tools else 'no',
+                    len(paper_inputs))
         return _dispatch_stream(
             messages, on_content=_on_content, abort_check=abort_signal.is_set,
             prefer_model=model or None, strict_model=bool(model), capability='text',
-            tools=tools, max_tokens=_SURVEY_MAX_TOKENS, temperature=_SURVEY_TEMPERATURE,
+            tools=effective_tools, max_tokens=_SURVEY_MAX_TOKENS,
+            temperature=_SURVEY_TEMPERATURE,
             thinking_enabled=False, log_prefix='[Paper:Survey]')
 
     def _on_round_result(rnd, msg, finish, usage):
         _last['msg'] = msg
+        if usage_meter:
+            usage_meter.observe_agent_round(usage, msg)
 
     def _begin_tool_round(rnd, msg):
         _round['content'] = ''
@@ -500,7 +492,7 @@ def _synthesize_survey(paper_inputs, direction, lang, *, model=None, abort=None,
         log_prefix='[Paper:Survey]')
 
     run_agent_loop(
-        abort=abort_signal, max_tool_rounds=_MAX_SURVEY_TOOL_ROUNDS,
+        abort=abort_signal,
         round_tools=_REPORT_TOOLS, dispatch=_dispatch, execute_tool=_execute_tool,
         on_round_result=_on_round_result, on_tool_round=_begin_tool_round)
 
@@ -544,6 +536,10 @@ def _survey_system_prompt(lang: str) -> str:
             '2) 综述之后,追加一个 ```json 代码块,严格符合 open_gaps schema(schema_version=1):'
             'clusters / method_matrix / open_gaps 三部分。**所有 papers/paper/evidence 里的 arxiv_id '
             '必须是上面给定库内论文的 id,不得编造库外论文。**\n'
+            'method_matrix 是必填比较表：上面每篇库内论文至少一行，字段为 '
+            '`paper/method/compression_unit/selection_signal/update_timing/system_tradeoff/'
+            'robustness_assumption/evaluation_tasks/limitation`；不能用空数组。用这张表逐论文'
+            '说明为何每个 gap 仍然存在，而不是只做串行摘要。\n'
             'open_gaps 是核心:标出真正没人做的空白,每条附 evidence(证明这确实是空白的库内论文 id)。'
             '可用 web 工具交叉核对,但空白地图的 id 只能来自库内。')
     return (
@@ -556,6 +552,11 @@ def _survey_system_prompt(lang: str) -> str:
         'schema (schema_version=1): clusters / method_matrix / open_gaps. **Every arxiv_id in '
         'papers/paper/evidence MUST be an id of a given library paper — never invent papers '
         'outside the library.**\n'
+        'method_matrix is a REQUIRED comparison table, with at least one row for EVERY given '
+        'library paper and these fields: `paper/method/compression_unit/selection_signal/'
+        'update_timing/system_tradeoff/robustness_assumption/evaluation_tasks/limitation`. '
+        'It may not be empty. Use it to explain, paper by paper, why each gap remains open '
+        'rather than writing serial summaries.\n'
         'open_gaps is the core: mark genuinely unexplored gaps, each with evidence (library '
         'paper ids that prove it is a gap). You may cross-check with web tools, but the gap '
         "map's ids may only come from the library.")
@@ -591,11 +592,17 @@ def build_survey(direction: str, arxiv_ids, *, lang: str = 'en', user_id: int = 
           'error': str,                     # set when ok is False
         }
     """
+    from lib.research.telemetry import ResearchUsageMeter, research_token_budget
+
     direction = (direction or '').strip()
+    usage_meter = ResearchUsageMeter(
+        'survey', fallback_model=model or '',
+        token_budget=research_token_budget(
+            'TOFU_RESEARCH_SURVEY_TOKEN_BUDGET', _SURVEY_AGENT_TOKEN_BUDGET))
     if not direction:
         return {'ok': False, 'error': 'empty direction', 'direction': '',
                 'lang': lang, 'survey_md': '', 'open_gaps': {}, 'citation_audit': None,
-                'inputs_used': 0}
+                'inputs_used': 0, 'usage': usage_meter.snapshot()}
 
     inputs = _load_paper_inputs(arxiv_ids, lang=lang, user_id=user_id)
     if not inputs:
@@ -603,30 +610,53 @@ def build_survey(direction: str, arxiv_ids, *, lang: str = 'en', user_id: int = 
                        direction)
         return {'ok': False, 'error': 'no library papers to survey (run harvest first)',
                 'direction': direction, 'lang': lang, 'survey_md': '',
-                'open_gaps': {}, 'citation_audit': None, 'inputs_used': 0}
+                'open_gaps': {}, 'citation_audit': None, 'inputs_used': 0,
+                'usage': usage_meter.snapshot()}
 
     try:
         survey_md, raw_gap_map = _synthesize_survey(
-            inputs, direction, lang, model=model, abort=abort, on_tool_event=on_tool_event)
+            inputs, direction, lang, model=model, abort=abort,
+            on_tool_event=on_tool_event, usage_meter=usage_meter)
     except Exception as e:
         from lib.llm_errors import AbortedError
         if isinstance(e, AbortedError):
             logger.info('[Paper:Survey] aborted during synthesis')
             return {'ok': False, 'error': 'aborted', 'direction': direction, 'lang': lang,
                     'survey_md': '', 'open_gaps': {}, 'citation_audit': None,
-                    'inputs_used': len(inputs)}
+                    'inputs_used': len(inputs), 'usage': usage_meter.snapshot()}
         logger.error('[Paper:Survey] synthesis failed: %s', e, exc_info=True)
         return {'ok': False, 'error': f'synthesis failed: {e}', 'direction': direction,
                 'lang': lang, 'survey_md': '', 'open_gaps': {}, 'citation_audit': None,
-                'inputs_used': len(inputs)}
+                'inputs_used': len(inputs), 'usage': usage_meter.snapshot()}
 
     # Pin #1 — library-verifiable structural gate (zero LLM).
-    gap_map = _verify_against_library(raw_gap_map, user_id=user_id, folder_id=folder_id)
+    # The stage input list is the authoritative corpus. ``paper_library`` has
+    # one mutable folder_id per paper, so concurrent/repeated research runs can
+    # legitimately move/cache the same row under a different folder between
+    # harvest and survey. Re-querying by folder here downgraded papers we had
+    # just read to merely "grounded" (and made most gaps low-confidence).
+    # Passing the exact loaded ids makes evidence provenance stable under that
+    # race and matches the harvest→survey data contract.
+    surveyed_ids = {_norm_id(p.get('arxiv_id')) for p in inputs if isinstance(p, dict)}
+    surveyed_ids.discard('')
+    gap_map = _verify_against_library(
+        raw_gap_map, user_id=user_id, folder_id=folder_id,
+        lib_ids=surveyed_ids)
     gap_map.setdefault('schema_version', OPEN_GAPS_SCHEMA_VERSION)
     gap_map['direction'] = direction
     gap_map['lang'] = lang
     gap_map['library_folder_id'] = folder_id
     gap_map['surveyed_count'] = len(inputs)
+    gap_map['surveyed_arxiv_ids'] = sorted(surveyed_ids)
+    matrix_ids = {_norm_id(row.get('paper')) for row in
+                  (gap_map.get('method_matrix') or []) if isinstance(row, dict)}
+    matrix_ids.discard('')
+    covered = surveyed_ids & matrix_ids
+    gap_map['method_matrix_coverage'] = {
+        'covered': len(covered), 'total': len(surveyed_ids),
+        'ratio': round(len(covered) / len(surveyed_ids), 3) if surveyed_ids else 0.0,
+        'missing_arxiv_ids': sorted(surveyed_ids - covered),
+    }
 
     # Pin #3 — citation audit on the prose.
     audit = _audit_citations(survey_md)
@@ -639,7 +669,7 @@ def build_survey(direction: str, arxiv_ids, *, lang: str = 'en', user_id: int = 
 
     return {'ok': True, 'direction': direction, 'lang': lang, 'survey_md': survey_md,
             'open_gaps': gap_map, 'citation_audit': audit, 'inputs_used': len(inputs),
-            'error': ''}
+            'usage': usage_meter.snapshot(), 'error': ''}
 
 
 def _extract_survey_ids(gap_map: dict) -> set:

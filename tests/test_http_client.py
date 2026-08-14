@@ -46,6 +46,12 @@ class _MockHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(dict(self.headers)).encode())
             return
+        if self.path == '/set-cookie':
+            self.send_response(200)
+            self.send_header('Set-Cookie', 'ambient-secret=must-not-persist')
+            self.end_headers()
+            self.wfile.write(b'ok')
+            return
         if self.path == '/stream':
             self.send_response(200)
             self.send_header('Content-Type', 'text/plain')
@@ -109,6 +115,17 @@ def _last_request():
 
 def _clear():
     _received_requests.clear()
+
+
+def _run_async(coro):
+    """Run one async assertion and close that loop's pooled clients."""
+    async def _wrapped():
+        try:
+            return await coro
+        finally:
+            from lib.http_client import close_async_http_clients
+            await close_async_http_clients()
+    return asyncio.run(_wrapped())
 
 
 # ─── Sync tests ────────────────────────────────────────────────
@@ -219,6 +236,21 @@ def test_http_proxy_arg_passes_through():
     _ok('http_get(proxies=...) overrides auto-applied proxy')
 
 
+def test_sync_pool_reuses_session_without_persisting_cookies():
+    from lib import http_client
+    http_client.close_sync_http_clients()
+    first = http_client._sync_session()
+    http_client.http_get(f'{_base}/set-cookie', use_proxy=False)
+    _clear()
+    http_client.http_get(f'{_base}/echo-headers', use_proxy=False)
+    second = http_client._sync_session()
+    assert first is second
+    assert 'Cookie' not in _last_request()['headers']
+    assert http_client.http_pool_stats()['sync_sessions'] == 1
+    http_client.close_sync_http_clients()
+    _ok('sync Session is reused without ambient cookie persistence')
+
+
 # ─── Async tests ───────────────────────────────────────────────
 
 def test_async_http_get():
@@ -230,7 +262,7 @@ def test_async_http_get():
         data = resp.json()
         assert data['method'] == 'GET'
 
-    asyncio.run(_t())
+    _run_async(_t())
     _ok('async_http_get returns httpx.Response')
 
 
@@ -244,7 +276,7 @@ def test_async_http_post_json():
         data = resp.json()
         assert data['received'] == {'msg': 'hello'}
 
-    asyncio.run(_t())
+    _run_async(_t())
     _ok('async_http_post(json=) round-trips')
 
 
@@ -257,7 +289,7 @@ def test_async_http_default_user_agent():
         rec = _last_request()
         assert rec['headers'].get('User-Agent', '').startswith('Tofu/')
 
-    asyncio.run(_t())
+    _run_async(_t())
     _ok('async_http_get sets default User-Agent')
 
 
@@ -275,7 +307,7 @@ def test_async_http_stream():
         assert 'first' in received
         assert 'second' in received
 
-    asyncio.run(_t())
+    _run_async(_t())
     _ok('async_http_stream() async context manager + aiter_lines()')
 
 
@@ -287,8 +319,27 @@ def test_async_http_status_codes():
             resp = await async_http_get(f'{_base}/status/{code}', timeout=5)
             assert resp.status_code == code
 
-    asyncio.run(_t())
+    _run_async(_t())
     _ok('async_http_get passes through non-2xx responses')
+
+
+def test_async_pool_reuses_client_without_persisting_cookies():
+    from lib import http_client
+
+    async def _t():
+        first = http_client._async_client(proxy=None, verify=True)
+        await http_client.async_http_get(
+            f'{_base}/set-cookie', use_proxy=False)
+        _clear()
+        await http_client.async_http_get(
+            f'{_base}/echo-headers', use_proxy=False)
+        second = http_client._async_client(proxy=None, verify=True)
+        assert first is second
+        assert 'Cookie' not in _last_request()['headers']
+        assert http_client.http_pool_stats()['async_clients'] == 1
+
+    _run_async(_t())
+    _ok('async client is reused without ambient cookie persistence')
 
 
 def main():
@@ -306,11 +357,13 @@ def main():
         test_http_stream_context_manager,
         test_http_request_method_dispatcher,
         test_http_proxy_arg_passes_through,
+        test_sync_pool_reuses_session_without_persisting_cookies,
         test_async_http_get,
         test_async_http_post_json,
         test_async_http_default_user_agent,
         test_async_http_stream,
         test_async_http_status_codes,
+        test_async_pool_reuses_client_without_persisting_cookies,
     ]
     for fn in tests:
         try:

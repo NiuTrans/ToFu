@@ -49,6 +49,17 @@ except ImportError:
     pytest = None
 
 
+def test_survey_prompt_requires_a_per_paper_comparison_matrix():
+    import lib.paper.survey as survey
+
+    for lang in ('en', 'zh'):
+        prompt = survey._survey_system_prompt(lang)
+        assert 'method_matrix' in prompt
+        for field in ('compression_unit', 'selection_signal',
+                      'robustness_assumption', 'evaluation_tasks'):
+            assert field in prompt
+
+
 _APP = None
 
 

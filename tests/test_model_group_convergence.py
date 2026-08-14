@@ -23,15 +23,22 @@ WHAT IS GUARDED (results, not implementation)
   * Both YourProvider faces (openai + anthropic protocol) fold into ONE
     'yourprovider' group; the dropdown shows a single "YourProvider" section header.
   * The preset tab groups the same models under the same single brand key.
-  * An oauth-branded subscription provider (brand='oauth') resolves to the
-    model's REAL vendor group (claude), never a meaningless "oauth" section.
+  * oauth/adapter-branded subscription providers resolve to the model's REAL
+    vendor group, never a meaningless credential-plumbing section.
   * modelGroupLabel maps the key to the human name ('yourprovider' → 'YourProvider').
+  * A row's brand ICON follows the same rule: 'oauth'/'adapter' is a
+    credential kind with no _BRAND_ICONS entry — rendering it literally gave
+    every ChatGPT-subscription GPT a grey generic box UNDER an "OPENAI"
+    section header (owner screenshot 2026-08-10). The row must resolve the
+    real vendor via the same modelGroupKey inputs the grouping pass used.
 
 NEUTERS (source-level, on mutated copies — shipped files untouched):
   * N1: group by provider_id again (the original leak) → two YourProvider
         sections reappear (red).
   * N2: oauth falls through to the literal 'oauth' brand → an "oauth"
         section appears instead of Claude (red).
+  * N3: row icon uses raw m.brand again → subscription rows render the
+        literal 'oauth' credential kind (grey generic box) (red).
 """
 
 from __future__ import annotations
@@ -63,8 +70,10 @@ const { document, window, check, report } = setup({
   globals: {
     // Real brand detection is what folds the two faces together.
     _detectBrand: (s) => /example-corp|yourprovider|longcat|your-corp|your-mascot/i.test(s) ? 'yourprovider'
-                     : (/claude|anthropic|opus|sonnet|haiku|fable/i.test(s) ? 'claude' : 'generic'),
-    _brandSvg: () => '',
+                     : (/claude|anthropic|opus|sonnet|haiku|fable/i.test(s) ? 'claude'
+                     : (/openai|chatgpt|gpt-/i.test(s) ? 'openai' : 'generic')),
+    // Echo the resolved brand so row-icon assertions can read it back.
+    _brandSvg: (b) => '<i data-b="' + b + '"></i>',
     _modelShortName: (id) => id,
     _modelPricingCache: {},
     isChatModel: () => true,
@@ -103,6 +112,11 @@ const PROVIDERS = [
   { id: 'oauth_claude', name: 'Claude (Pro/Max subscription)', brand: 'oauth',
     base_url: 'https://api.anthropic.com/v1', protocol: 'anthropic', enabled: true,
     models: [ { model_id: 'claude-opus-4-1' } ] },
+  // The owner-screenshot shape (2026-08-10): ChatGPT subscription, bare
+  // codex-* wire id — the vendor signal lives in the provider NAME only.
+  { id: 'oauth_codex', name: 'ChatGPT (Plus subscription)', brand: 'oauth',
+    base_url: 'https://chatgpt.com/backend-api/codex', protocol: 'responses', enabled: true,
+    models: [ { model_id: 'codex-auto-review' } ] },
 ];
 
 /* The registered-models shape the toolbar consumes. */
@@ -147,9 +161,25 @@ try {
       .map((d) => d.textContent);
     const yourproviderCount = labels.filter((s) => /YourProvider/.test(s)).length;
     check('toolbar_one_yourprovider_section', yourproviderCount === 1);
-    // All five models present.
+    // All six models present.
     const items = dd.querySelectorAll('.preset-dropdown-item');
-    check('toolbar_all_models_rendered', items.length === 5);
+    check('toolbar_all_models_rendered', items.length === 6);
+  }
+
+  // ══ 2b. Row brand ICONS resolve the real vendor for subscription rows ══
+  //    (the 2026-08-10 bug: literal 'oauth' → grey generic box under OPENAI) ══
+  {
+    const dd = document.getElementById('presetDropdownList');
+    const rowBrand = (id) => {
+      const r = dd.querySelector('.preset-dropdown-item[data-value="' + id + '"]');
+      const ic = r && r.querySelector('.ps-dd-icon i');
+      return ic ? ic.getAttribute('data-b') : null;
+    };
+    check('rowicon_oauth_claude_is_claude', rowBrand('claude-opus-4-1') === 'claude');
+    check('rowicon_oauth_codex_is_openai', rowBrand('codex-auto-review') === 'openai');
+    check('rowicon_subscription_never_credential_kind',
+      rowBrand('claude-opus-4-1') !== 'oauth' && rowBrand('codex-auto-review') !== 'oauth'
+      && rowBrand('claude-opus-4-1') !== 'generic' && rowBrand('codex-auto-review') !== 'generic');
   }
 
   // ══ 3. Preset tab groups the same models under the same single brand ══
@@ -162,7 +192,7 @@ try {
     const yourproviderCount = brands.filter((s) => /YourProvider/.test(s)).length;
     check('preset_one_yourprovider_section', yourproviderCount === 1);
     const items = cont.querySelectorAll('.stg-dv-item');
-    check('preset_all_models_rendered', items.length === 5);
+    check('preset_all_models_rendered', items.length === 6);
   }
 
   // ══ 4. Toolbar and preset agree on the group of every model ══
@@ -191,10 +221,19 @@ try {
     check('oauth_never_literal_oauth', k !== 'oauth');
   }
 
+  // ══ 6. adapter is also plumbing, not a vendor ══
+  {
+    const p = { brand: 'adapter', name: 'Subscription adapter',
+                models: [{ model_id: 'gpt-5.6-sol' }] };
+    const k = modelGroupKey(p, p.models[0]);
+    check('adapter_resolves_to_openai', k === 'openai');
+    check('adapter_never_literal_adapter', k !== 'adapter');
+  }
+
   // ══ NEUTER 1: group by provider_id again (the original leak) ══
   {
     const n = TB_SRC.replace(
-      "const gkey = _hasGroup\n      ? modelGroupKey(_entryProvider, m)\n      : (m.provider_id || 'default');",
+      "const gkey = _hasGroup\n      ? runtimeScope.modelGroupKey(_entryProvider, m)\n      : (m.provider_id || 'default');",
       "const gkey = (m.provider_id || 'default');");
     check('N1_applied', n !== TB_SRC);
     indirectEval(n);
@@ -217,6 +256,28 @@ try {
     check('N2_oauth_group_appears', k === 'oauth');
     indirectEval(MG_SRC);   // restore
   }
+
+  // ══ NEUTER 3: row icon renders raw m.brand (the 2026-08-10 grey box) ══
+  {
+    const fixed = "      const _rowBrand = (m.brand || '').trim();\n"
+      + "      const _rowCredKind = (_rowBrand === 'oauth' || _rowBrand === 'adapter');\n"
+      + "      const brand = (_rowBrand && !_rowCredKind)\n"
+      + "        ? _rowBrand\n"
+      + "        : (_rowCredKind && _hasGroup)\n"
+      + "          ? runtimeScope.modelGroupKey({ brand: m.brand, name: m.provider_name }, m)\n"
+      + "          : (typeof _detectBrand === 'function' ? _detectBrand(m.model_id) : 'generic');";
+    const n = TB_SRC.replace(fixed,
+      "      const brand = m.brand || (typeof _detectBrand === 'function' ? _detectBrand(m.model_id) : 'generic');");
+    check('N3_applied', n !== TB_SRC);
+    indirectEval(n);
+    window._populateModelDropdown ? window._populateModelDropdown(regModels())
+                                  : _populateModelDropdown(regModels());
+    const dd = document.getElementById('presetDropdownList');
+    const r = dd.querySelector('.preset-dropdown-item[data-value="codex-auto-review"]');
+    const ic = r && r.querySelector('.ps-dd-icon i');
+    check('N3_row_renders_literal_oauth', ic && ic.getAttribute('data-b') === 'oauth');
+    indirectEval(TB_SRC);   // restore
+  }
 } catch (e) {
   check('harness_threw: ' + (e && e.message), false);
 } finally {
@@ -231,7 +292,7 @@ def test_model_group_convergence():
         target_js=MODEL_GROUP_JS,
         body_js=body,
         extra_targets=[TOOLBAR_JS, VISIBILITY_JS],
-        min_pass=15,
+        min_pass=22,
         label='model-group-convergence',
     )
 

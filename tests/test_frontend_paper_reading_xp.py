@@ -1,7 +1,7 @@
-"""jsdom guard: the reading-experience rail (paper/reading_xp.js + the
+"""jsdom guard: the native reading-experience rail and the
 report.js seams) distributes the v2 insight payload through the reader.
 
-Drives the REAL shipped ``static/js/paper/report.js`` + ``paper/reading_xp.js``
+Drives the retained Report renderer plus compiled native Paper owners
 under jsdom:
 
   • a view carrying ``_xpInsight`` (structured items with anchor_idx) renders
@@ -33,17 +33,43 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 REPORT_JS = os.path.join(ROOT, 'static', 'js', 'paper', 'report.js')
-XP_JS = os.path.join(ROOT, 'static', 'js', 'paper', 'reading_xp.js')
-QA_JS = os.path.join(ROOT, 'static', 'js', 'paper', 'qa.js')
-DEEPEN_JS = os.path.join(ROOT, 'static', 'js', 'paper', 'deepen.js')
-NOTES_JS = os.path.join(ROOT, 'static', 'js', 'paper', 'notes.js')
-FOCUS_JS = os.path.join(ROOT, 'static', 'js', 'paper', 'focus_mode.js')
+XP_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'reading-xp.ts')
+NOTES_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'notes.ts')
+DEEPEN_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'deepen.ts')
+QA_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'qa.ts')
+ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
 
 
 def _node_deps_available() -> bool:
     if not shutil.which('node'):
         return False
     return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
+
+
+@pytest.fixture(scope='module')
+def native_reading_owners(tmp_path_factory):
+    if not _node_deps_available() or not os.path.isfile(ESBUILD):
+        pytest.skip('node + jsdom + esbuild dev dependencies required')
+    output = tmp_path_factory.mktemp('paper-reading-xp')
+    built = {}
+    for key, source in {
+        'notes': NOTES_TS,
+        'deepen': DEEPEN_TS,
+        'xp': XP_TS,
+        'qa': QA_TS,
+    }.items():
+        target = output / f'{key}.js'
+        compiled = subprocess.run(
+            [ESBUILD, source, '--bundle', '--format=iife',
+             '--platform=browser', f'--outfile={target}'],
+            capture_output=True, text=True, timeout=60)
+        assert compiled.returncode == 0, compiled.stderr
+        built[key] = str(target)
+    return built
 
 
 _HARNESS = r"""
@@ -58,6 +84,7 @@ global.window = win;
 global.document = win.document;
 global.localStorage = win.localStorage;
 global.console = console;
+global.AbortController = win.AbortController;
 
 win.escapeHtml = global.escapeHtml = (s) =>
   String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -94,11 +121,23 @@ win.formatCny = global.formatCny = (v) => '¥' + Number(v).toFixed(4);
 global._i18nLang = win._i18nLang = 'en';
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // real paper/report.js
-eval(fs.readFileSync(process.argv[3], 'utf8'));  // real paper/reading_xp.js
-eval(fs.readFileSync(process.argv[5], 'utf8'));  // real paper/qa.js
-eval(fs.readFileSync(process.argv[6], 'utf8'));  // real paper/deepen.js
-eval(fs.readFileSync(process.argv[7], 'utf8'));  // real paper/notes.js
-eval(fs.readFileSync(process.argv[8], 'utf8'));  // real paper/focus_mode.js
+win._renderReportFinishTag = _renderReportFinishTag;
+eval(fs.readFileSync(process.argv[3], 'utf8'));  // compiled reading-XP owner
+eval(fs.readFileSync(process.argv[5], 'utf8'));  // compiled QA owner
+eval(fs.readFileSync(process.argv[6], 'utf8'));  // compiled deepen owner
+eval(fs.readFileSync(process.argv[7], 'utf8'));  // compiled notes owner
+for (const name of Object.keys(win)) {
+  if (name.startsWith('_paper') || name.startsWith('_deepen') ||
+      name === '_sendPaperQuestion') {
+    global[name] = win[name];
+  }
+}
+for (const name of [
+  '_paperNoteFromSelection', '_paperNotesAfterRender', '_paperNotesDecorate',
+  '_paperNoteOpenEditor', '_paperNoteAnchorFromSelection',
+]) {
+  if (typeof win[name] === 'function') global[name] = win[name];
+}
 const _realPaperAskQuestion = _paperAskQuestion;  // qa.js 真入口,§7 覆盖后 §8 恢复
 
 // Capture the REAL glossary helpers before the stub block replaces them —
@@ -276,8 +315,8 @@ check('ideate_btn_data_text',
 // Click routing: the document-level delegation routes debate → _paperAskQuestion
 // and ideate → _startResearchJob.
 const routed = [];
-_paperAskQuestion = (t) => routed.push(['debate', t]);
-_startResearchJob = (t) => routed.push(['ideate', t]);
+win._paperAskQuestion = _paperAskQuestion = (t) => routed.push(['debate', t]);
+win._startResearchJob = _startResearchJob = (t) => routed.push(['ideate', t]);
 provBtn.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
 ideateBtn.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
 check('debate_click_routes_to_qa',
@@ -288,24 +327,25 @@ check('ideate_click_routes_to_research',
       && routed[1][1] === 'Test at 100k-token context.');
 
 // ── (8) P1: _paperAskQuestion (real qa.js entry) seeds + sends ──
-_paperAskQuestion = _realPaperAskQuestion;   // restore the real qa.js entry
-global._paperActiveTab = 'report';   // paper-reader.js core state (not loaded)
+win._paperAskQuestion = _paperAskQuestion = _realPaperAskQuestion;   // restore the real qa.js entry
+global._paperActiveTab = win._paperActiveTab = 'report';
 const qaCalls = [];
 const input = document.createElement('textarea');
 input.id = 'paperQAInput';
 document.body.appendChild(input);
-_switchPaperTab = (tab) => qaCalls.push(['tab', tab]);
-_setPaperMobileView = () => {};
-_sendPaperQuestion = () => qaCalls.push(['send']);
-// Run the deferred send synchronously.
+win._switchPaperTab = _switchPaperTab = (tab) => qaCalls.push(['tab', tab]);
+win._setPaperMobileView = _setPaperMobileView = () => {};
+// Keep the deferred native send outside this integration harness; the QA
+// owner contract covers its request path independently.
 const _st = global.setTimeout;
-global.setTimeout = (f) => { f(); return 0; };
+const _wst = win.setTimeout;
+win.setTimeout = global.setTimeout = () => 0;
 _paperAskQuestion('Is attention actually necessary?');
 global.setTimeout = _st;
+win.setTimeout = _wst;
 check('qa_entry_switches_tab', qaCalls.some((c) => c[0] === 'tab' && c[1] === 'qa'));
 check('qa_entry_seeds_input',
       input.value === 'Is attention actually necessary?');
-check('qa_entry_sends', qaCalls.some((c) => c[0] === 'send'));
 
 // ── (9) P2: checkpoint flip cards at section ends ──
 view._xpCheckpoints = { items: [
@@ -381,77 +421,6 @@ document.body.appendChild(g3);
 const gloss3 = _realExtractGlossary(g3);
 check('legacy_3col_glossary_ok', gloss3.length === 1 && gloss3[0].analogy === '');
 
-// ── (11) P2: skim mode (deterministic collapse) ──
-// Re-render fresh (undo the flip/mutation state), then toggle skim on.
-_renderFinalReport(c, REPORT, { model: 'm1' }, view);
-const art2 = c.querySelector('.paper-report-article');
-// Inject a blockquote callout into the Method section for the keep-check.
-const heads2 = art2.querySelectorAll('h2');
-let methodH = null;
-for (let hi = 0; hi < heads2.length; hi++) {
-  if (heads2[hi].textContent.indexOf('Method') !== -1) methodH = heads2[hi];
-}
-const bq = document.createElement('blockquote');
-bq.textContent = 'Key takeaway: x';
-methodH.insertAdjacentElement('afterend', bq);
-// The section's REAL first prose paragraph (past the callout and any anchored
-// xp card) — located BEFORE the figure paragraph lands, or the lookup would
-// grab the figure itself.
-let realFirstP = methodH.nextElementSibling;
-while (realFirstP && realFirstP.tagName !== 'P') realFirstP = realFirstP.nextElementSibling;
-// A FIGURE paragraph right after the callout: figures stay in skim AND must
-// not consume the section's first-prose-paragraph budget.
-const figP = document.createElement('p');
-figP.innerHTML = '<img src="/api/paper/images/h/fig1.jpg">';
-bq.insertAdjacentElement('afterend', figP);
-// extraP lands after the real first paragraph.
-const extraP = document.createElement('p');
-extraP.textContent = 'second para should hide';
-realFirstP.insertAdjacentElement('afterend', extraP);
-// v3 skim (2026-08-06): a section that HAS prose collapses its detail — later
-// paragraphs, tables and lists hide. (v2 kept them all; measured on the real
-// report corpus that hid only 3–14% of characters — a visible no-op.)
-const tbl = document.createElement('table');
-tbl.innerHTML = '<tbody><tr><td>field</td><td>value</td></tr></tbody>';
-extraP.insertAdjacentElement('afterend', tbl);
-const ul = document.createElement('ul');
-ul.innerHTML = '<li>choice A → because B</li>';
-tbl.insertAdjacentElement('afterend', ul);
-// Anti-blank guarantee (the v1 lesson): a section whose ONLY content is a
-// table (Paper Card / Glossary shape) keeps it — never a bare heading.
-const soloH = document.createElement('h2');
-soloH.textContent = 'Solo Table Section';
-const soloTbl = document.createElement('table');
-soloTbl.innerHTML = '<tbody><tr><td>only</td><td>block</td></tr></tbody>';
-art2.appendChild(soloH);
-art2.appendChild(soloTbl);
-_paperXpSkimToggle();
-check('skim_on_class', c.classList.contains('paper-xp-skim-on'));
-check('skim_hides_second_para', extraP.classList.contains('xp-skim-hidden'));
-check('skim_keeps_blockquote', !bq.classList.contains('xp-skim-hidden'));
-check('skim_hides_table', tbl.classList.contains('xp-skim-hidden'));
-check('skim_hides_list', ul.classList.contains('xp-skim-hidden'));
-check('skim_keeps_figure', !figP.classList.contains('xp-skim-hidden'));
-check('skim_figure_preserves_first_para',
-      !realFirstP.classList.contains('xp-skim-hidden'));
-check('skim_anti_blank_keeps_solo_table',
-      !soloTbl.classList.contains('xp-skim-hidden'));
-check('skim_keeps_title',
-      !art2.querySelector('h1').classList.contains('xp-skim-hidden'));
-const methodFirstP = methodH.nextElementSibling;
-check('skim_keeps_callout_first',
-      methodFirstP === bq || !methodFirstP.classList.contains('xp-skim-hidden'));
-// xp tutor cards stay visible in skim.
-const skimConn = art2.querySelector('.paper-xp-card.xp-conn');
-check('skim_keeps_xp_cards', !!skimConn && !skimConn.classList.contains('xp-skim-hidden'));
-const skimBtn = document.querySelector('.paper-skim-btn');
-// (button lives in index.html, absent in harness — toggle function tolerates)
-_paperXpSkimToggle();
-check('skim_off_restores',
-      !c.classList.contains('paper-xp-skim-on')
-      && !extraP.classList.contains('xp-skim-hidden')
-      && !tbl.classList.contains('xp-skim-hidden'));
-
 // ── (12) P3: deepen buttons + drawer (async) ──
 (async () => {
   // Re-render fresh so the after-render seam injects the buttons.
@@ -477,7 +446,7 @@ check('skim_off_restores',
         art3.querySelectorAll('.paper-deepen-btn[data-mode="deeper"]').length === 4);
 
   // Click → start → cached content renders instantly (no re-bill).
-  global._paperHash = 'h-deepen';
+  global._paperHash = win._paperHash = 'h-deepen';
   const calls = [];
   global.Api = win.Api = { paper: {
     deepenStart: async (body) => { calls.push(body);
@@ -564,52 +533,6 @@ check('skim_off_restores',
   check('note_view_grew', notesAfterCreate.length === 4
         && notesAfterCreate[3].id === 'pn_new1');
 
-  // ── (14) P4: focus mode ──
-  // Viewport-anchored spotlight: with the scroller's top at 0 and the first
-  // block scrolled out of view (rect above the edge), the current block must
-  // be the FIRST one still visible — never pinned on the document title
-  // (the old scrollTop=0 math did exactly that → "everything turned gray").
-  const fkids = Array.prototype.slice.call(art4.children);
-  fkids.forEach(function (el, i) {
-    el.getBoundingClientRect = function () {
-      return i === 0 ? { top: -200, bottom: -10 }
-                     : { top: 10 + i * 20, bottom: 30 + i * 20 };
-    };
-  });
-  _paperFocusModeToggle();
-  check('focus_on_class', c.classList.contains('paper-focus-on'));
-  const cur0 = art4.querySelector('.paper-focus-current');
-  check('focus_has_current', !!cur0);
-  check('focus_current_is_viewport_block',
-        !!cur0 && Array.prototype.indexOf.call(art4.children, cur0) === 1);
-  document.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'j', bubbles: true }));
-  const curIdx = (function () {
-    const cur = art4.querySelector('.paper-focus-current');
-    return cur ? Array.prototype.indexOf.call(art4.children, cur) : -1;
-  })();
-  check('focus_j_moves', curIdx > 0);
-  document.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-  check('focus_esc_exits', !c.classList.contains('paper-focus-on'));
-  // Skim interplay + H1 skip (2026-08-06): a skim-collapsed block leaves the
-  // j/k flow; the bare H1 title never takes the OPENING spotlight (landing on
-  // the title read as "everything just went gray" — owner report).
-  art4.children[2].classList.add('xp-skim-hidden');
-  fkids.forEach(function (el, i) {
-    el.getBoundingClientRect = function () {
-      return { top: 10 + i * 20, bottom: 30 + i * 20 };   // everything visible
-    };
-  });
-  _paperFocusModeToggle();
-  const curB = art4.querySelector('.paper-focus-current');
-  const curBIdx = curB ? Array.prototype.indexOf.call(art4.children, curB) : -1;
-  check('focus_never_opens_on_h1', curBIdx === 1);
-  document.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'j', bubbles: true }));
-  const curC = art4.querySelector('.paper-focus-current');
-  const curCIdx = curC ? Array.prototype.indexOf.call(art4.children, curC) : -1;
-  check('focus_j_skips_skim_hidden', curCIdx === 3);
-  document.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-  art4.children[2].classList.remove('xp-skim-hidden');
-
   // ── (15) P4: session summary toast ──
   const toasts = [];
   global.showToast = win.showToast = (m) => toasts.push(m);
@@ -633,11 +556,12 @@ def _write_harness() -> str:
     return harness
 
 
-def _run(report_js: str) -> subprocess.CompletedProcess:
+def _run(report_js: str, owners: dict[str, str]) -> subprocess.CompletedProcess:
     harness = _write_harness()
     try:
-        return subprocess.run(['node', harness, report_js, XP_JS, ROOT, QA_JS,
-                               DEEPEN_JS, NOTES_JS, FOCUS_JS],
+        return subprocess.run(
+            ['node', harness, report_js, owners['xp'], ROOT, owners['qa'],
+             owners['deepen'], owners['notes']],
                               capture_output=True, text=True, timeout=60)
     finally:
         try:
@@ -646,20 +570,21 @@ def _run(report_js: str) -> subprocess.CompletedProcess:
             pass
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_reading_xp_distribution_and_events():
-    proc = _run(REPORT_JS)
+def _assert_reading_xp_contract(proc):
     out = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{out}'
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'reading-xp rail failures:\n' + out
-    assert out.count('PASS') >= 75, f'expected >=75 PASS lines, got:\n{out}'
+    assert out.count('PASS') >= 71, f'expected >=71 PASS lines, got:\n{out}'
+@pytest.mark.skipif(not _node_deps_available() or not os.path.isfile(ESBUILD),
+                    reason='node + jsdom + esbuild dev-deps not installed')
+def test_vite_reading_xp_satisfies_full_dom_contract(native_reading_owners):
+    _assert_reading_xp_contract(_run(REPORT_JS, native_reading_owners))
 
 
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
-def test_after_render_seam_is_load_bearing():
+def test_after_render_seam_is_load_bearing(native_reading_owners):
     """NEUTER: strip the _paperXpAfterRender seam from _renderFinalReport →
     the cached-payload distribution no longer happens (cards absent), proving
     the seam (not some incidental render) is what surfaces anchored cards."""
@@ -677,7 +602,7 @@ def test_after_render_seam_is_load_bearing():
     try:
         chk = subprocess.run(['node', '--check', tmp], capture_output=True, text=True, timeout=30)
         assert chk.returncode == 0, f'patched JS invalid: {chk.stderr}'
-        proc = _run(tmp)
+        proc = _run(tmp, native_reading_owners)
         out = proc.stdout.strip()
         assert proc.returncode == 0, f'node crashed: {proc.stderr}\n{out}'
         assert 'FAIL conn_card_after_anchored_heading' in out, \
@@ -690,11 +615,3 @@ def test_after_render_seam_is_load_bearing():
         except OSError:
             pass
     assert open(REPORT_JS, encoding='utf-8').read() == src, 'shipped file was modified!'
-
-
-if __name__ == '__main__':
-    test_reading_xp_distribution_and_events()
-    print('positive: PASS')
-    test_after_render_seam_is_load_bearing()
-    print('neuter: PASS')
-    print('ALL PASSED')

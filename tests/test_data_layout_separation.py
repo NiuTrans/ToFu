@@ -25,6 +25,10 @@ with a NEUTER proving the populated-check reads the filesystem (an EMPTY
 ``data/`` is NOT "populated") and twin-agreement pins log.py to runtime_paths.
 """
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {
+    'lib/.project_sessions/abc/modifications.json',
+}
+
 import os
 import subprocess
 import sys

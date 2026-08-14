@@ -25,6 +25,9 @@ from lib.database._pg_ownership import _find_pg_binary
 
 logger = get_logger(__name__)
 
+_PROJECT_ENV_PATH = os.path.abspath(os.path.join(
+    os.path.dirname(__file__), '..', '..', '..', '.env'))
+
 
 # ─────────────────────────────────────────────────────────────────────
 #  Managed PostgreSQL tuning block
@@ -33,17 +36,125 @@ logger = get_logger(__name__)
 _MANAGED_BLOCK_BEGIN = '# ── Tofu managed config (auto-generated; do not edit) BEGIN ──'
 _MANAGED_BLOCK_END = '# ── Tofu managed config END ──'
 
-# PG server-side max_connections. Provisioned ABOVE the app-side semaphore
-# ceiling (_MAX_TOTAL_CONNS, default 1000) so the application — not PG's
-# hard FATAL limit — is always the binding constraint. The extra headroom
-# absorbs superuser/maintenance/replication connections. Override via env.
-_MANAGED_PG_MAX_CONNECTIONS = int(
-    getenv_compat('TOFU_PG_MAX_CONNECTIONS', default='1100'))
+
+def _project_config_value(name, default=None):
+    """Read a managed-PG knob with the project ``.env`` as authority.
+
+    ``server.py`` and ``bootstrap.py`` load ``.env`` before importing the
+    database stack, but maintenance scripts import this module directly.  The
+    old environment-only read therefore made those scripts rewrite the NEXT
+    PostgreSQL restart config with defaults (observed: explicit 200 silently
+    became 96).  Managed on-disk config must have one answer regardless of the
+    entry point that happened to import it.
+
+    Modern ``TOFU_*`` wins over its legacy ``CHATUI_*`` alias, matching
+    :func:`getenv_compat`.  If the file has neither, normal process-environment
+    precedence is preserved for advanced/ephemeral deployments.
+    """
+    file_values = {}
+    try:
+        if os.path.isfile(_PROJECT_ENV_PATH):
+            with open(_PROJECT_ENV_PATH, encoding='utf-8') as env_file:
+                for raw_line in env_file:
+                    line = raw_line.strip()
+                    if not line or line.startswith('#') or '=' not in line:
+                        continue
+                    key, _, value = line.partition('=')
+                    file_values[key.strip()] = value.strip()
+    except OSError as exc:
+        logger.debug('[PG-Config] could not read project .env: %s', exc)
+    if name in file_values:
+        return file_values[name]
+    if name.startswith('TOFU_'):
+        legacy = 'CHATUI_' + name[len('TOFU_'):]
+        if legacy in file_values:
+            return file_values[legacy]
+    return getenv_compat(name, default=default)
+
+
+def _bounded_env_int(name, default, minimum, maximum):
+    """Read an integer setting without letting a bad env brick startup."""
+    raw = _project_config_value(name, default=str(default))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning('[DB] Invalid %s=%r; using %d', name, raw, default)
+        value = int(default)
+    return max(int(minimum), min(int(maximum), value))
+
+
+def _detect_memory_limit_mb():
+    """Best-effort effective memory limit (cgroup first, host fallback)."""
+    candidates = []
+    for path in ('/sys/fs/cgroup/memory.max',
+                 '/sys/fs/cgroup/memory/memory.limit_in_bytes'):
+        try:
+            with open(path, encoding='ascii') as f:
+                raw = f.read().strip()
+            if raw and raw != 'max':
+                value = int(raw)
+                # cgroup-v1 commonly exposes a near-LONG_MAX sentinel for
+                # "unlimited"; ignore it rather than sizing against exabytes.
+                if 256 * 1024 * 1024 <= value < (1 << 60):
+                    candidates.append(value // (1024 * 1024))
+        except (OSError, TypeError, ValueError) as exc:
+            logger.debug('[PG-Config] memory-limit probe %s unavailable: %s',
+                         path, exc)
+    try:
+        pages = int(os.sysconf('SC_PHYS_PAGES'))
+        page_size = int(os.sysconf('SC_PAGE_SIZE'))
+        if pages > 0 and page_size > 0:
+            candidates.append((pages * page_size) // (1024 * 1024))
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
+        logger.debug('[PG-Config] host-memory sysconf probe unavailable: %s',
+                     exc)
+    return min(candidates) if candidates else 8192
+
+
+def _memory_tuning_mb(total_mb=None):
+    """Conservative PG memory settings for a personal server.
+
+    ``shared_buffers`` is real reserved memory, so cap it at 2 GiB and only
+    use 1/16 of the effective machine/cgroup limit. ``effective_cache_size``
+    is a planner hint (not an allocation) and can describe more of the OS page
+    cache. Individual env overrides keep advanced installs fully controllable.
+    """
+    detected = _detect_memory_limit_mb() if total_mb is None else int(total_mb)
+    budget = _bounded_env_int(
+        'TOFU_PG_MEMORY_BUDGET_MB', detected, 1024, 1024 * 1024)
+    shared_default = max(256, min(2048, budget // 16))
+    shared = _bounded_env_int(
+        'TOFU_PG_SHARED_BUFFERS_MB', shared_default, 128, 16384)
+    cache_default = max(shared * 2, min(16384, budget // 4))
+    effective_cache = _bounded_env_int(
+        'TOFU_PG_EFFECTIVE_CACHE_MB', cache_default, shared, 262144)
+    maintenance_default = max(128, min(512, budget // 128))
+    maintenance = _bounded_env_int(
+        'TOFU_PG_MAINTENANCE_WORK_MEM_MB', maintenance_default, 64, 4096)
+    work_mem = _bounded_env_int('TOFU_PG_WORK_MEM_MB', 8, 1, 256)
+    return {
+        'shared_buffers': shared,
+        'effective_cache_size': effective_cache,
+        'maintenance_work_mem': maintenance,
+        'work_mem': work_mem,
+    }
+
+
+# PG server max sits above the app semaphore (personal-server default 64), so
+# the application remains the binding constraint while admin/migration slots
+# retain headroom. Avoid the old 200-backend default: it allowed a thread-local
+# leak to consume substantial RAM before PG applied backpressure.
+_APP_CONN_CEILING = _bounded_env_int(
+    'TOFU_DB_MAX_CONNS', 64, minimum=4, maximum=4096)
+_MANAGED_PG_MAX_CONNECTIONS = _bounded_env_int(
+    'TOFU_PG_MAX_CONNECTIONS', max(96, _APP_CONN_CEILING + 24),
+    minimum=32, maximum=4096)
 
 
 def _tier_b_enabled():
     """True when Tier B (WAL archive + PITR) is opted in."""
-    return getenv_compat('TOFU_DB_TIER_B', default='0').lower() in ('1', 'true', 'yes')
+    return _project_config_value(
+        'TOFU_DB_TIER_B', default='0').lower() in ('1', 'true', 'yes')
 
 
 def _pgdata_is_resolved_primary(pgdata):
@@ -79,6 +190,7 @@ def _build_managed_pg_config(archive_enabled=False):
     recovery possible, so a future corrupt primary is recoverable to a
     point-in-time instead of needing a data-losing ``pg_resetwal -f``.
     """
+    memory = _memory_tuning_mb()
     return [
         f'max_connections = {_MANAGED_PG_MAX_CONNECTIONS}',
         'superuser_reserved_connections = 10',
@@ -96,14 +208,52 @@ def _build_managed_pg_config(archive_enabled=False):
         'wal_level = replica',
         'max_wal_senders = 10',
         'wal_compression = on',
-        'max_wal_size = 2GB',
-        'min_wal_size = 160MB',
+        # The live workload spent almost every 5-minute checkpoint window
+        # writing. Fewer, well-spread checkpoints cut FUSE fsync churn without
+        # relaxing commit durability.
+        'checkpoint_timeout = 15min',
+        'max_wal_size = 4GB',
+        'min_wal_size = 512MB',
         'checkpoint_completion_target = 0.9',
-        # ── Memory sizing for a ~1000-connection workload ──
-        'shared_buffers = 512MB',
-        'effective_cache_size = 2GB',
-        'work_mem = 8MB',
-        'maintenance_work_mem = 128MB',
+        # Backend writer hit its page cap ~180k times in the measured cluster;
+        # let it smooth dirty-page eviction before foreground backends must do
+        # the write themselves.
+        'bgwriter_lru_maxpages = 1000',
+        'bgwriter_lru_multiplier = 4.0',
+        # Short OLTP queries dominate; LLVM JIT setup is pure overhead there.
+        'jit = off',
+        # Enables pg_stat_io/statement diagnosis with negligible overhead on
+        # modern Linux, important for distinguishing DB work from FUSE stalls.
+        'track_io_timing = on',
+        # ── Bounded, privacy-preserving native logs ──
+        # pg_ctl's ``-l logs/postgresql.log`` redirects stderr to one append-
+        # only file.  It reached 2.68 GiB in the audited personal install, and
+        # a failed huge JSON statement placed full conversation text in it.
+        # Once the collector starts, stderr becomes a tiny bootstrap log and
+        # PostgreSQL owns an hourly, week-cyclic family under pgdata/log/.
+        'logging_collector = on',
+        "log_directory = 'log'",
+        "log_filename = 'postgresql-%a-%H.log'",
+        'log_rotation_age = 1h',
+        'log_rotation_size = 0',
+        'log_truncate_on_rotation = on',
+        'log_file_mode = 0600',
+        # Preserve ERROR/FATAL metadata while refusing to echo the SQL text or
+        # bound parameter values.  Application slow-query logs identify the
+        # operation shape without copying user conversations to disk.
+        'log_statement = none',
+        'log_min_error_statement = panic',
+        'log_parameter_max_length_on_error = 0',
+        # Connection churn once dominated this log and adds no signal for the
+        # single-user pooled server. Lock waits remain available through app
+        # diagnostics and pg_stat views when an incident is investigated.
+        'log_connections = off',
+        'log_disconnections = off',
+        # ── Adaptive memory sizing (bounded for small/new installations) ──
+        f"shared_buffers = {memory['shared_buffers']}MB",
+        f"effective_cache_size = {memory['effective_cache_size']}MB",
+        f"work_mem = {memory['work_mem']}MB",
+        f"maintenance_work_mem = {memory['maintenance_work_mem']}MB",
     ] + ([
         # ── Tier B: continuous WAL archiving to the DolphinFS durability
         # target (only on the resolved local primary; see B1/B2). The shim is
@@ -166,16 +316,23 @@ def _ensure_managed_pg_config(pgdata):
         return False
 
 
-def _restart_local_pg(pgdata, base_dir):
-    """Restart the locally-owned PG with ``pg_ctl restart -m fast``.
+def _restart_local_pg(pgdata, base_dir, *, maintenance_approved=False):
+    """Restart owned PG only behind an explicit maintenance-window token.
 
-    Used after _ensure_managed_pg_config reports a change to a restart-only
-    setting (max_connections / wal_level). Best-effort: on failure the
-    running PG keeps its previous (still-valid) config.
+    This helper used to be reachable after any managed-config text change,
+    including import-time discovery and health recovery. Keep the low-level
+    operation for an intentional admin flow, but make the unsafe historical
+    two-positional-argument call fail closed. Best-effort: on execution
+    failure the running PG keeps its previous (still-valid) config.
 
     Returns:
         bool: True on a successful restart.
     """
+    if maintenance_approved is not True:
+        logger.error(
+            '[DB] Refusing disruptive PostgreSQL restart without explicit '
+            'maintenance approval')
+        return False
     log_path = os.path.join(base_dir, 'logs', 'postgresql.log')
     try:
         result = subprocess.run(

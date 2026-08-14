@@ -8,7 +8,7 @@ Why this module exists
 Tofu is two products sharing one orchestrator:
 
 * the **interactive Tofu app** (the chat UI), where a single owner's personal
-  state — their accumulated *memory store*, their rolling *preference profile* —
+  state — their accumulated *memory store* and durable *My Context* —
   is exactly what makes the assistant feel personal, and should be ON by
   default; and
 * the **headless agent runtime** (``/api/v1/agent/run``,
@@ -122,12 +122,12 @@ PERSONAL_CAPABILITIES: dict[str, PersonalCapability] = {
         headless_default=False,
         ui_default=True,
         summary=(
-            "Injection of the operator's rolling personal-preference profile "
-            '(the global <data>/memories/.tofu_user_profile.md). Decoupled '
-            'from memoryEnabled so enabling the memory store on the API does '
-            'NOT splice the operator\'s personal preferences into an '
-            'unrelated caller\'s prompt.'),
-        prompt_block='[USER PREFERENCE PROFILE]'),
+            "Injection of the operator's durable My Context document "
+            '(identity facts, conditional work rules, and response '
+            'preferences). Decoupled from memoryEnabled so enabling the '
+            'memory store on the API does NOT splice the operator\'s personal '
+            'context into an unrelated caller\'s prompt.'),
+        prompt_block='[USER CONTEXT]'),
     'langCorrectionEnabled': PersonalCapability(
         cfg_key='langCorrectionEnabled',
         headless_default=False,
@@ -240,28 +240,28 @@ def apply_headless_personal_defaults(cfg: dict) -> dict:
 
 def resolve_preferences_enabled(cfg: dict | None, *,
                                 memory_enabled: bool) -> bool:
-    """Decide whether the personal-preference profile may be injected.
+    """Decide whether durable My Context may be injected.
 
     The preference profile is a DISTINCT personal capability from the memory
     store. Resolution rules:
 
       * If the cfg explicitly carries ``preferencesEnabled`` (set by a headless
         builder via the registry, or by an opt-in caller), honour it verbatim.
-      * Otherwise (the interactive UI never sets it) fall back to
-        ``memory_enabled`` — preserving the historical UI behaviour where the
-        profile rode the Memory toggle.
+      * Otherwise this is the interactive UI, where My Context is always on.
+        Headless builders stamp an explicit fail-closed value before reaching
+        this function.
 
     Args:
         cfg: The task config dict (``task['config']``); may be ``None``.
-        memory_enabled: The already-resolved memory flag, used as the
-            back-compat fallback.
+        memory_enabled: Retained for call compatibility. Experience-memory
+            retrieval is deliberately independent of My Context.
 
     Returns:
         True when the preference profile may be injected this turn.
     """
     if isinstance(cfg, dict) and 'preferencesEnabled' in cfg:
         return bool(cfg['preferencesEnabled'])
-    return bool(memory_enabled)
+    return True
 
 
 def resolve_paper_insight_personal_context(cfg: dict | None) -> bool:

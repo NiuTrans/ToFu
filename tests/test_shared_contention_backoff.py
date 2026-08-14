@@ -39,6 +39,8 @@ import time
 
 import pytest
 
+from tests._runtime_sections import ROOT as FRONTEND_ROOT
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
@@ -166,10 +168,12 @@ class TestWaitLabel:
         from lib.llm_dispatch.retry_i18n import RETRY_REASON_KEYS
         key = RETRY_REASON_KEYS.get('Waiting for model (shared project limit)')
         assert key == 'stream.retryReason.waitingSharedProject'
-        import pathlib
-        src = (pathlib.Path(__file__).resolve().parent.parent
-               / 'static' / 'js' / 'i18n.js').read_text(encoding='utf-8')
-        assert 'stream.retryReason.waitingSharedProject' in src, (
+        import json
+        locales = FRONTEND_ROOT / 'frontend' / 'src' / 'i18n' / 'locales'
+        packs = [json.loads((locales / f'{lang}.json').read_text(encoding='utf-8'))
+                 for lang in ('en', 'zh')]
+        assert all('stream.retryReason.waitingSharedProject' in pack
+                   for pack in packs), (
             'missing i18n strings — the missing-translation tripwire would '
             'fire in production')
 

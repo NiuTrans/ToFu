@@ -131,7 +131,7 @@ def _sites():
 def test_envelope_parity():
     """status identical; legacy keys byte-identical; ZERO added keys
     (request_id stripped — it is the only permitted addition)."""
-    from flask import jsonify
+    from quart import jsonify
     app = _make_app()
 
     async def _t():

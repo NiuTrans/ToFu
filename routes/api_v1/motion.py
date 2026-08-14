@@ -2,6 +2,8 @@
 
 Routes:
   GET  /api/v1/motion/status                     — render-chain env + TTS probe
+  GET  /api/v1/motion/shot-recipes               — renderer-neutral shot catalog
+  GET  /api/v1/motion/audio-contract              — licensed BGM/SFX plan example
   POST /api/v1/motion/videos                     — start (or dedup-join) a video task
   GET  /api/v1/motion/videos/poll/<task_id>      — cursor poll (factory)
   POST /api/v1/motion/videos/abort/<task_id>     — abort (factory)
@@ -18,7 +20,9 @@ Body for POST /videos::
       "alignment": "loose",             // loose | strict
       "quality": "standard",            // draft | standard | high
       "parallel": 2,                    // scene render pool (1..4)
-      "aspect": "1080x1440"             // 1080x1440 | 1080x1920 | 1920x1080 | 1080x1080
+      "aspect": "1080x1440",            // 1080x1440 | 1080x1920 | 1920x1080 | 1080x1080
+      "model": "kimi-k3",               // optional: lock script + scene author
+      "audio_plan_path": "/abs/audio_plan.json" // optional licensed BGM/SFX plan
     }
 
 The engine (:mod:`lib.motion_video.engine`) is the zero-LLM fallback path;
@@ -30,7 +34,7 @@ from __future__ import annotations
 import hashlib
 import os
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.api_response import api_bad_request, api_not_found, api_ok
 from lib.log import get_logger
@@ -54,6 +58,7 @@ _ASPECTS = {
 _QUALITIES = ('draft', 'standard', 'high')
 _ALIGNMENTS = ('loose', 'strict')
 _MAX_SRT_BYTES = 2 * 1024 * 1024
+_MAX_AUDIO_PLAN_BYTES = 256 * 1024
 
 
 @api_v1_motion_bp.route('/api/v1/motion/status', methods=['GET'])
@@ -74,12 +79,50 @@ async def motion_status():
     return api_ok(env)
 
 
+@api_v1_motion_bp.route('/api/v1/motion/shot-recipes', methods=['GET'])
+@require_auth
+@api_meta(summary='List structured motion-video shot recipes',
+          description='Renderer-neutral recipe metadata used for semantic '
+                      'selection, timing, energy shaping and visual QA.',
+          tags=['motion'])
+async def motion_shot_recipes():
+    from lib.motion_video._shot_recipes import (
+        SHOT_CONTRACT_VERSION,
+        shot_recipe_catalog,
+    )
+
+    recipes = shot_recipe_catalog()
+    return api_ok({
+        'contract_version': SHOT_CONTRACT_VERSION,
+        'count': len(recipes),
+        'recipes': recipes,
+    })
+
+
+@api_v1_motion_bp.route('/api/v1/motion/audio-contract', methods=['GET'])
+@require_auth
+@api_meta(summary='Get the motion audio-plan contract and example',
+          description='Copyable licensed BGM/SFX/beat-grid plan. Audio assets '
+                      'remain local and are hashed into the job.',
+          tags=['motion'])
+async def motion_audio_contract():
+    from lib.motion_video._audio_cues import (
+        AUDIO_CONTRACT_VERSION,
+        audio_plan_template,
+    )
+
+    return api_ok({
+        'contract_version': AUDIO_CONTRACT_VERSION,
+        'template': audio_plan_template(),
+    })
+
+
 @api_v1_motion_bp.route('/api/v1/motion/videos', methods=['POST'])
 @require_auth
 @api_meta(summary='Start (or join) a motion-video task',
-          description='Dedup key: (srt sha, voice, alignment, aspect, '
-                      'narration). A second identical POST joins the '
-                      'in-flight task.',
+          description='Dedup key covers source, voice, alignment, aspect, '
+                      'narration, quality, model and audio-plan content. A '
+                      'second identical POST joins the in-flight task.',
           tags=['motion'])
 async def start_motion_task():
     from lib.motion_video.runtime import (
@@ -112,6 +155,36 @@ async def start_motion_task():
     except (TypeError, ValueError):
         return api_bad_request('max_scenes must be an int', field='max_scenes')
     max_scenes = max(3, min(max_scenes, 12))
+    model = str(body.get('model') or '').strip()
+    if len(model) > 200:
+        return api_bad_request('model too long (200 chars max)', field='model')
+    audio_plan = body.get('audio_plan')
+    audio_plan_path = str(body.get('audio_plan_path') or '').strip()
+    audio_base_dir = str(body.get('audio_base_dir') or '').strip()
+    if audio_plan is not None and not isinstance(audio_plan, dict):
+        return api_bad_request('audio_plan must be an object',
+                               field='audio_plan')
+    if audio_plan and audio_plan_path:
+        return api_bad_request(
+            'provide audio_plan or audio_plan_path, not both',
+            field='audio_plan')
+    if audio_plan:
+        import json as _json
+        audio_bytes = _json.dumps(
+            audio_plan, ensure_ascii=False).encode('utf-8')
+        if len(audio_bytes) > _MAX_AUDIO_PLAN_BYTES:
+            return api_bad_request('audio_plan too large (256 KB max)',
+                                   field='audio_plan')
+    if audio_plan_path:
+        if not os.path.isfile(audio_plan_path):
+            return api_bad_request('audio_plan_path is not a file',
+                                   field='audio_plan_path')
+        if os.path.getsize(audio_plan_path) > _MAX_AUDIO_PLAN_BYTES:
+            return api_bad_request('audio_plan_path exceeds 256 KB',
+                                   field='audio_plan_path')
+    if audio_base_dir and not os.path.isdir(audio_base_dir):
+        return api_bad_request('audio_base_dir is not a directory',
+                               field='audio_base_dir')
 
     aspect = (body.get('aspect') or '1080x1440').strip()
     if aspect not in _ASPECTS:
@@ -150,16 +223,17 @@ async def start_motion_task():
     scene_author = body.get('scene_author')
     if scene_author is not None:
         scene_author = bool(scene_author)
-    # 0 = "no preference": the default lives in ONE place
-    # (lib/motion_video/_scene_author._DEFAULT_*). Writing the literals here
-    # is what made the 60000 → 90000 raise dead on this path.
+    if 'author_rounds' in body:
+        return api_bad_request(
+            'author_rounds has been removed; scene tools run until the model '
+            'naturally completes',
+            field='author_rounds')
+    # 0 = "no preference": the token default lives in ONE place.
     try:
-        author_rounds = int(body.get('author_rounds') or 0)
         author_token_budget = int(body.get('author_token_budget') or 0)
     except (TypeError, ValueError):
-        return api_bad_request('author_rounds / author_token_budget must be ints',
-                               field='author_rounds')
-    author_rounds = min(max(author_rounds, 0), 8)
+        return api_bad_request('author_token_budget must be an int',
+                               field='author_token_budget')
     author_token_budget = (0 if author_token_budget <= 0
                            else max(5000, min(author_token_budget, 400000)))
 
@@ -167,7 +241,19 @@ async def start_motion_task():
     _cleanup_stale_motion_tasks()
     srt_material = srt_text or srt_path_in or scenes_path or (f'topic:{lang}:{topic}')
     srt_sha = hashlib.sha256(srt_material.encode('utf-8')).hexdigest()[:16]
-    key = (srt_sha, voice, alignment, aspect, narration, quality, burn_in)
+    if audio_plan:
+        import json as _json
+        audio_material = _json.dumps(
+            audio_plan, ensure_ascii=False, sort_keys=True)
+    elif audio_plan_path:
+        with open(audio_plan_path, 'rb') as _audio_file:
+            audio_material = hashlib.sha256(_audio_file.read()).hexdigest()
+    else:
+        audio_material = ''
+    audio_sha = hashlib.sha256(
+        audio_material.encode('utf-8')).hexdigest()[:12]
+    key = (srt_sha, voice, alignment, aspect, narration, quality, burn_in,
+           model, audio_sha)
     existing = _motion_index_get(key)
     if existing:
         logger.info('[Motion.v1] dedup join: %s', existing)
@@ -197,8 +283,16 @@ async def start_motion_task():
     task['burn_in_fontsdir'] = burn_in_fontsdir
     if scene_author is not None:
         task['scene_author'] = scene_author
-    task['author_rounds'] = author_rounds
     task['author_token_budget'] = author_token_budget
+    if audio_plan:
+        task['audio_plan'] = audio_plan
+    if audio_plan_path:
+        task['audio_plan_path'] = audio_plan_path
+    if audio_base_dir:
+        task['audio_base_dir'] = audio_base_dir
+    if model:
+        task['model'] = model
+        task['qa_model'] = model
     if topic:
         task['topic'] = topic
         task['lang'] = lang
@@ -218,30 +312,42 @@ register_task_routes(api_v1_motion_bp, _motion_runtime,
 @api_v1_motion_bp.route('/api/v1/motion/videos/<task_id>/file', methods=['GET'])
 @require_auth
 def serve_motion_file(task_id):
-    """Serve the final MP4 (or ?part=srt sidecar) with Range support.
+    """Serve MP4/SRT/audio-plan/attribution with Range support.
 
-    SYNC on purpose: pure file serving whose only blocking call is the
-    sync-safe ``send_file`` shim (same carve-out as serve_paper_image).
+    SYNC on purpose: file serving uses the explicit executor-side Quart
+    boundary (same carve-out as serve_paper_image).
     Path safety: we serve exactly the path recorded in the task result —
     never client-supplied path material.
     """
     task = _motion_runtime.get(task_id)
-    from flask import request as _req
+    from quart import request as _req
     part = (_req.args.get('part') or 'mp4').strip()
+    part_files = {
+        'mp4': ('final.mp4', 'video/mp4'),
+        'srt': ('final.srt', 'application/x-subrip'),
+        'audio-plan': ('audio_plan.json', 'application/json'),
+        'audio-attribution': ('audio_attribution.txt', 'text/plain'),
+    }
+    if part not in part_files:
+        return api_not_found('not_found')
     if task:
         result = task.get('result') or {}
-        path = result.get('srt_path') if part == 'srt' else result.get('final_path')
+        path = {
+            'mp4': result.get('final_path'),
+            'srt': result.get('srt_path'),
+            'audio-plan': result.get('audio_plan_path'),
+            'audio-attribution': result.get('audio_attribution_path'),
+        }.get(part)
     else:
         # P-UX4: task gone from memory (restart / TTL) — serve from the
         # on-disk job dir so a finished video stays playable.
         workdir = _disk_job_workdir(task_id)
         if not workdir:
             return api_not_found('not_found')
-        path = os.path.join(workdir, 'final.srt' if part == 'srt'
-                            else 'final.mp4')
+        path = os.path.join(workdir, part_files[part][0])
     if not path or not os.path.isfile(path):
         return api_not_found('file_not_ready')
-    mimetype = 'application/x-subrip' if part == 'srt' else 'video/mp4'
+    mimetype = part_files[part][1]
     from lib.file_serving import send_file_conditional
     return send_file_conditional(path, mimetype=mimetype)
 
@@ -305,6 +411,19 @@ async def list_motion_scenes(task_id):
             'start': sc.get('start'),
             'end': sc.get('end'),
             'text': sc.get('text'),
+            'shot_recipe': sc.get('shot_recipe') or '',
+            'motion_family': sc.get('motion_family') or '',
+            'shot_energy': sc.get('shot_energy'),
+            'qa_progresses': list(sc.get('qa_progresses') or []),
+            'plan_findings': list(sc.get('plan_findings') or []),
+            'timeline_contract_version': sc.get(
+                'timeline_contract_version') or '',
+            'content_duration_s': sc.get('content_duration_s'),
+            'render_duration_s': sc.get('render_duration_s'),
+            'transition_in': sc.get('transition_in') or '',
+            'transition_in_duration_s': sc.get(
+                'transition_in_duration_s'),
+            'outgoing_handle_s': sc.get('outgoing_handle_s'),
             'has_composition': os.path.isfile(
                 os.path.join(scene_dir, 'index.html')),
             'has_video': os.path.isfile(

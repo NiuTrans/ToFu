@@ -6,8 +6,14 @@ bare_string_to_array, and the no-op guarantee on already-valid inputs.
 """
 from __future__ import annotations
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {
+    'lib/server.py', 'lib/swarm/integration.py', 'tests/foo.py',
+}
+
 import os
 import sys
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -355,14 +361,12 @@ def test_salvage_recovers_when_repair_json_gives_up():
     """Unescaped inner quote makes repair_json bail; keys are quoted so the
     schema-guided salvage reconstructs both records by anchoring on
     path/start_line."""
+    import json
     from lib.utils import repair_json
     payload = '[{"path": "a"b.py", "start_line": 10}, {"path": "c.py", "start_line": 99}]'
     # Precondition: repair_json genuinely cannot parse it.
-    try:
+    with pytest.raises(json.JSONDecodeError):
         repair_json(payload)
-        raise AssertionError('repair_json unexpectedly parsed the ambiguous payload')
-    except Exception:
-        pass
     out, log = validate_then_repair('read_files', {'reads': payload})
     assert log == [('reads', 'schema_array_salvage')], log
     assert out['reads'][-1] == {'path': 'c.py', 'start_line': 99}
@@ -382,18 +386,14 @@ def test_salvage_gated_off_for_apply_diffs():
     """Destructive free-text editor: salvage must REFUSE (search/replace can
     contain arbitrary quotes/braces → mis-split would corrupt a code edit).
     The malformed string is left untouched for an honest model retry."""
+    import json
     from lib.tool_input_repair import _try_schema_array_salvage
     from lib.utils import repair_json
     # Unescaped inner quote → repair_json genuinely CANNOT parse it, so the
     # only thing that could recover it is salvage — which must refuse here.
     bad = '[{"path": "a"x.py", "search": "foo", "replace": "bar"}]'
-    try:
+    with pytest.raises(json.JSONDecodeError):
         repair_json(bad)
-        raise AssertionError('repair_json unexpectedly parsed the payload')
-    except AssertionError:
-        raise
-    except Exception:
-        pass
     assert _try_schema_array_salvage('apply_diffs', 'edits', bad) is None
     out, log = validate_then_repair('apply_diffs', {'edits': bad})
     assert out == {'edits': bad}

@@ -38,12 +38,14 @@ import sys
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS = os.path.join(ROOT, 'static', 'js')
+JS = runtime_sections_dir()
 
 
 def _node_deps_available() -> bool:
@@ -366,7 +368,9 @@ def test_source_scan_contract():
         'stream_lifecycle synthetic payloads must forward fallbackModel '
         '(bubble rebuild + deferred repaint)')
 
-    i18n = open(os.path.join(JS, 'i18n.js')).read()
+    locale_root = os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales')
+    i18n = '\n'.join(open(os.path.join(locale_root, name), encoding='utf-8').read()
+                     for name in ('zh.json', 'en.json'))
     for key in ('stream.fallback.banner', 'stream.fallback.bannerTip'):
         assert key in i18n, f'i18n key {key} missing'
 

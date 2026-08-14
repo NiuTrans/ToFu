@@ -36,24 +36,35 @@ logger = get_logger(__name__)
 def _build_search(ctx: ToolContext) -> list[dict]:
     # 'single' is a retired mode kept as a legacy alias for old conversations
     # — it now behaves like 'multi' (the one-shot SEARCH_TOOL_SINGLE schema
-    # was removed). Only 'off' yields no search tool.
+    # was removed). The composer exposure gate decides whether its schema is
+    # visible; the builder describes runtime availability only.
     from lib.tools import build_search_tool
-    if ctx.search_mode in ('single', 'multi'):
-        return [build_search_tool()]
-    return []
+    return [build_search_tool()]
 
 
 def _build_search_settings(ctx: ToolContext) -> list[dict]:
     # update_search_settings tunes the pipeline web_search/fetch_url run on,
-    # so it rides the SAME gate — a conversation with search OFF has no use
-    # for it. Registered as its own spec appended at the END of the base
-    # phase: inserting it into the search spec put it mid-list (position 2),
-    # which broke the cache-stable tool-order ratchet
+    # so its wire exposure rides the SAME gate. Registered as its own spec
+    # appended at the END of the base phase: inserting it into the search spec
+    # put it mid-list (position 2), which broke the cache-stable tool-order ratchet
     # (tests/test_tool_registry.py::TestOrdering).
-    if ctx.search_mode in ('single', 'multi'):
-        from lib.tools import build_update_search_settings_tool
-        return [build_update_search_settings_tool()]
-    return []
+    from lib.tools import build_update_search_settings_tool
+    return [build_update_search_settings_tool()]
+
+
+def _build_knowledge(ctx: ToolContext) -> list[dict]:
+    # The corpus owns its own persisted enable switch. Crucially, an empty or
+    # disabled corpus contributes ZERO schema tokens — no phantom knowledge
+    # tool in fresh installs and no invitation for the model to call a tool
+    # that cannot return evidence.
+    from lib.knowledge.tool import build_tool
+    return build_tool(ctx)
+
+
+def _handle_knowledge(*args, **kwargs):
+    """Lazy dispatch shim; keeps knowledge storage out of registry import."""
+    from lib.knowledge.tool import handle_tool
+    return handle_tool(*args, **kwargs)
 
 
 def _build_fetch(ctx: ToolContext) -> list[dict]:
@@ -61,9 +72,7 @@ def _build_fetch(ctx: ToolContext) -> list[dict]:
     # LLM_CONTENT_FILTER_ENABLED flag — a module-level constant would freeze
     # whatever the import-time snapshot saw (same rationale as build_search_tool).
     from lib.tools import build_fetch_url_tool
-    if ctx.fetch_enabled or ctx.search_enabled:
-        return [build_fetch_url_tool()]
-    return []
+    return [build_fetch_url_tool()]
 
 
 def _build_read_files(ctx: ToolContext) -> list[dict]:
@@ -90,12 +99,11 @@ def _build_inspect_image(ctx: ToolContext) -> list[dict]:
 
 
 def _build_project_or_code_exec(ctx: ToolContext) -> list[dict]:
-    # ``project_ready`` (not the raw ``project_enabled``) so that attaching a
-    # project mid-conversation clears the tool-schema latch on the OFF→ON
-    # transition — otherwise a conversation whose first turn had no project
-    # would freeze a no-project snapshot and never regain run_command / the
-    # write tools even after a project is attached. See ToolContext.project_ready.
-    from lib.tools import CODE_EXEC_TOOL, PROJECT_TOOLS
+    # ``project_ready`` is evaluated from the current request, so attaching or
+    # detaching Project Brain changes the next assembled tool surface directly.
+    from lib.tools import CODE_EXEC_TOOL
+    from lib.tools.project import project_tools_for_runtime
+    project_tools = project_tools_for_runtime()
     if ctx.project_ready:
         if ctx.project_remote:
             # RWA 拍板 3A:同名 schema + 本地执行提示;远程绑定是单一根,
@@ -103,19 +111,15 @@ def _build_project_or_code_exec(ctx: ToolContext) -> list[dict]:
             from lib.tools.project import with_remote_hint
             logger.debug('[Task %s] 🌐 remote worktree bound — project tools '
                          'carry the local-execution hint', ctx.tid)
-            return with_remote_hint(PROJECT_TOOLS)
+            return with_remote_hint(project_tools)
         if ctx.multiroot_active:
             from lib.tools.project import with_multiroot_hint
-            return with_multiroot_hint(PROJECT_TOOLS)
-        return list(PROJECT_TOOLS)
-    if ctx.code_exec_enabled:
-        return [CODE_EXEC_TOOL]
-    return []
+            return with_multiroot_hint(project_tools)
+        return list(project_tools)
+    return [CODE_EXEC_TOOL]
 
 
 def _build_browser(ctx: ToolContext) -> list[dict]:
-    if not ctx.browser_enabled:
-        return []
     from lib.browser import is_extension_connected
     if is_extension_connected():
         from lib.browser.advanced import ADVANCED_BROWSER_TOOLS
@@ -124,30 +128,26 @@ def _build_browser(ctx: ToolContext) -> list[dict]:
         logger.debug('[Task %s] Browser extension connected — browser tools '
                      'enabled (%d tools)', ctx.tid, len(tools))
         return tools
-    logger.warning('[Task %s] Browser requested but extension not connected',
-                   ctx.tid)
+    logger.debug('[Task %s] Browser tools unavailable: extension not connected',
+                 ctx.tid)
     return []
 
 
 def _build_desktop(ctx: ToolContext) -> list[dict]:
-    if not ctx.desktop_enabled:
-        return []
     from lib.desktop import is_desktop_agent_connected
     if is_desktop_agent_connected():
         from lib.desktop_tools import DESKTOP_TOOLS
         logger.debug('[Task %s] 🖥️ Desktop agent connected — %d desktop tools '
                      'enabled', ctx.tid, len(DESKTOP_TOOLS))
         return list(DESKTOP_TOOLS)
-    logger.warning('[Task %s] Desktop requested but agent not connected',
-                   ctx.tid)
+    logger.debug('[Task %s] Desktop tools unavailable: agent not connected',
+                 ctx.tid)
     return []
 
 
 def _build_image_gen(ctx: ToolContext) -> list[dict]:
-    if not ctx.image_gen_enabled:
-        return []
     from lib.tools.image_gen import GENERATE_IMAGE_TOOL
-    logger.debug('[Task %s] 🎨 Image generation tool enabled', ctx.tid)
+    logger.debug('[Task %s] 🎨 Image generation tool available', ctx.tid)
     return [GENERATE_IMAGE_TOOL]
 
 
@@ -166,11 +166,9 @@ def _build_motion_video(ctx: ToolContext) -> list[dict]:
 def _build_produce(ctx: ToolContext) -> list[dict]:
     # High-level "topic → finished video" tool. Deliberately NOT project-gated
     # (owner 拍板 #2: "say one sentence and get a film" cannot require an
-    # attached project) — topic jobs render under the server data dir. Gated on
-    # web research being available, since the recipe grounds every claim in a
-    # real source URL; without search the fact-discipline gate can't be met.
-    if not (ctx.search_mode in ('single', 'multi') or ctx.search_enabled):
-        return []
+    # attached project) — topic jobs render under the server data dir. Its
+    # schema exposure rides the Web Search composer preference; execution does
+    # not, because web_search itself remains available to the grounded recipe.
     from lib.tools.produce import (EDIT_SLIDES_TOOL, PRODUCE_REPORT_TOOL,
                                    PRODUCE_RESEARCH_TOOL, PRODUCE_SLIDES_TOOL,
                                    PRODUCE_VIDEO_TOOL)
@@ -241,37 +239,50 @@ def _build_conv_ref(ctx: ToolContext) -> list[dict]:
 
 
 def _build_human_guidance(ctx: ToolContext) -> list[dict]:
-    if ctx.human_guidance_enabled and ctx.current_count > 0:
+    if ctx.current_count > 0:
         from lib.tools.human_guidance import ASK_HUMAN_TOOL
-        logger.info('[Task %s] 🙋 Human guidance (ask_human) tool enabled',
-                    ctx.tid)
+        logger.debug('[Task %s] 🙋 Human guidance (ask_human) tool available',
+                     ctx.tid)
         return [ASK_HUMAN_TOOL]
-    if ctx.human_guidance_enabled:
-        logger.debug('[Task %s] 🙋 Human guidance requested but no base tools '
-                     '— skipped', ctx.tid)
     return []
 
 
 def _build_memory(ctx: ToolContext) -> list[dict]:
-    # Memory tools attach whenever ANY real tool exists.  Note: this is gated
-    # on has_base_tools, NOT on memoryEnabled — the memoryEnabled flag only
-    # controls the system-prompt memory instructions (see system_context.py).
+    # Memory tools and memory context are one user-facing capability: the
+    # Memory switch controls both. They still require a real base tool.
     # ``ctx.lean`` is a retained seam (chat_mode.is_lean_mode, currently always
     # False after the air/pro merge) for a future auto-retract-tools feature
     # that would ship only the base search/fetch/read tools on a simple turn.
-    if ctx.lean or not ctx.has_base_tools:
+    if (ctx.lean or not ctx.has_base_tools
+            or not bool(ctx.cfg.get('memoryEnabled', True))):
         return []
     from lib.memory import ALL_MEMORY_TOOLS
     return list(ALL_MEMORY_TOOLS)
 
 
 def _build_skills(ctx: ToolContext) -> list[dict]:
-    # Skill activation attaches whenever ANY real tool exists — the same
-    # rule as memory (and NOT gated on memoryEnabled): the
+    # Skill loading attaches whenever ANY real tool exists (independent of
+    # memoryEnabled): the
     # <available_skills> index in the system prompt advertises installed
-    # packages, so the model must be able to activate them. Skills have no
+    # packages, so the model must be able to load them. Skills have no
     # model-side CRUD; the single tool is read-only (idempotent).
     if ctx.lean or not ctx.has_base_tools:
+        return []
+    try:
+        from lib.skills import list_skills
+        extras = [p for p in (ctx.cfg.get('projectPaths') or [])
+                  if p and p != ctx.project_path]
+        visible = [
+            row for row in list_skills(
+                ctx.project_path if ctx.project_enabled else None,
+                extra_paths=extras)
+            if row.get('enabled', True) and row.get('eligible', True)
+        ]
+        if not visible:
+            return []
+    except Exception as exc:
+        logger.warning('[Task %s] skill availability check failed: %s',
+                       ctx.tid, exc)
         return []
     from lib.skills import ALL_SKILL_TOOLS
     return list(ALL_SKILL_TOOLS)
@@ -308,8 +319,6 @@ def _build_scheduler(ctx: ToolContext) -> list[dict]:
 def _build_swarm(ctx: ToolContext) -> list[dict]:
     # NOT gated on has_base_tools — a bare-conversation research swarm is a
     # valid use case (mirrors the read_files decoupling).
-    if not ctx.swarm_enabled:
-        return []
     from lib.swarm.tools import (
         AWAIT_AGENTS_TOOL,
         GET_AGENT_RESULT_TOOL,
@@ -333,7 +342,107 @@ def _build_mcp(ctx: ToolContext) -> list[dict]:
         if bridge.connected:
             mcp_tools = bridge.get_openai_tool_defs()
             if mcp_tools:
-                logger.info('[Task %s] 🔌 MCP tools loaded: %d from %d servers',
+                try:
+                    snapshot = bridge.get_tool_catalog_snapshot()
+                except AttributeError as exc:
+                    logger.debug('[Tools] bridge catalog snapshot unavailable: %s',
+                                 exc)
+                    # Compatibility for lightweight third-party/fake bridges.
+                    snapshot = [{
+                        'openai_def': tool,
+                        'namespaced_name': (
+                            (tool.get('function') or {}).get('name') or ''),
+                        'meta': {},
+                    } for tool in mcp_tools]
+                # The cached full list is the allowed upper bound and becomes
+                # part of the task authority catalog even when only a small
+                # native-schema subset is visible on the initial wire.
+                ctx.cfg['_mcpAllowedToolCatalog'] = list(mcp_tools)
+                # Keep rich MCP discovery metadata beside the schemas. It is
+                # consumed by local retrieval only and must never be copied
+                # into the provider-visible function definitions.
+                _search_text_by_name = {}
+                for _row in snapshot:
+                    if not isinstance(_row, dict):
+                        continue
+                    _definition = _row.get('openai_def') or {}
+                    _function = _definition.get('function') or {}
+                    _name = str(_function.get('name')
+                                or _row.get('namespaced_name') or '')
+                    if not _name:
+                        continue
+                    _meta = _row.get('meta') or {}
+                    _meta = _meta if isinstance(_meta, dict) else {}
+                    _values = [
+                        _row.get('server_id'), _row.get('server_name'),
+                        _row.get('tool_name'), _row.get('description'),
+                        _meta.get('bundle'), _meta.get('profiles'),
+                        _meta.get('intents'), _meta.get('aliases'),
+                    ]
+                    _search_text_by_name[_name] = ' '.join(
+                        ' '.join(str(item) for item in value)
+                        if isinstance(value, (list, tuple, set))
+                        else str(value or '')
+                        for value in _values)
+                ctx.cfg['_mcpToolSearchTextByName'] = _search_text_by_name
+
+                exposure = str(ctx.cfg.get(
+                    'mcpToolExposure', 'auto') or 'auto').strip().lower()
+                if exposure in ('progressive', 'wrapper', 'legacy'):
+                    # Explicit backwards-compatibility only. Auto mode now
+                    # preselects native schemas and never asks the model to
+                    # discover through a generic invoke wrapper.
+                    from lib.mcp.progressive import MCP_PROGRESSIVE_TOOL_DEFS
+                    ctx.cfg['_mcpActiveToolNames'] = [
+                        str((tool.get('function') or {}).get('name') or '')
+                        for tool in MCP_PROGRESSIVE_TOOL_DEFS]
+                    return list(MCP_PROGRESSIVE_TOOL_DEFS)
+                if exposure not in ('inline', 'all', 'full'):
+                    def _message_text(message):
+                        content = message.get('content') \
+                            if isinstance(message, dict) else ''
+                        if isinstance(content, str):
+                            return content
+                        if isinstance(content, list):
+                            return ' '.join(
+                                str(block.get('text') or '')
+                                for block in content if isinstance(block, dict))
+                        return ''
+
+                    query = '\n'.join(
+                        _message_text(message) for message in (
+                            getattr(ctx, 'messages', None) or [])
+                        if isinstance(message, dict)
+                        and message.get('role') in ('user', 'system'))[-12000:]
+                    from lib.mcp.tool_search import select_active_mcp_tools
+                    try:
+                        active = select_active_mcp_tools(
+                            snapshot, task_id=getattr(ctx, 'task_id', ''),
+                            query=query,
+                            used_names=list(
+                                ctx.cfg.get('_mcpUsedToolNames') or []),
+                            limit=ctx.cfg.get('mcpActiveToolLimit', 8))
+                    except Exception as search_exc:
+                        # Discovery is an optimization, never an availability
+                        # gate. A corrupt index or unexpected metadata must
+                        # fail open to the server-cached allowed catalog.
+                        logger.warning('[Task %s] MCP pre-request search '
+                                       'failed: %s; exposing full allowed '
+                                       'catalog', ctx.tid, search_exc,
+                                       exc_info=True)
+                        active = list(mcp_tools)
+                    ctx.cfg['_mcpActiveToolNames'] = [
+                        str((tool.get('function') or {}).get('name') or '')
+                        for tool in active]
+                    logger.info('[Task %s] MCP pre-request Tool Search: %d '
+                                'allowed -> %d active native schemas (%d servers)',
+                                ctx.tid, len(mcp_tools), len(active),
+                                bridge.server_count)
+                    return active
+                ctx.cfg['_mcpActiveToolNames'] = [
+                    str((tool.get('function') or {}).get('name') or '')
+                    for tool in mcp_tools]
+                logger.info('[Task %s] MCP tools loaded inline: %d from %d servers',
                             ctx.tid, len(mcp_tools), bridge.server_count)
                 return list(mcp_tools)
     except Exception as e:
@@ -362,15 +471,23 @@ def _register_builtins() -> None:
                  provides=frozenset({'web_search'}),
                  idempotent_tools=frozenset({'web_search'}),
                  category='search', description='Web search',
-                 gate='输入框 → 搜索模式（联网/multi）'),
+                 gate='输入框 → 搜索模式（联网/multi）',
+                 exposure_gate=lambda ctx: ctx.search_mode in (
+                     'single', 'multi')),
         ToolSpec('fetch', _build_fetch, phase='base',
                  provides=frozenset({'fetch_url'}),
                  idempotent_tools=frozenset({'fetch_url'}),
+                 programmatic_tools=frozenset({'fetch_url'}),
+                 script_safe=True,
                  category='search', description='Fetch a URL',
-                 gate='搜索开启或抓取开关（默认开）'),
+                 gate='搜索开启或抓取开关（默认开）',
+                 exposure_gate=lambda ctx: (
+                     ctx.fetch_enabled or ctx.search_enabled)),
         ToolSpec('read_files', _build_read_files, phase='base',
                  provides=frozenset({'read_files'}),
                  idempotent_tools=frozenset({'read_files'}),
+                 programmatic_tools=frozenset({'read_files'}),
+                 script_safe=True,
                  category='project', description='Read local files',
                  gate='常开（无需项目）'),
         ToolSpec('inspect_image', _build_inspect_image, phase='base',
@@ -381,20 +498,45 @@ def _register_builtins() -> None:
         ToolSpec('project', _build_project_or_code_exec, phase='base',
                  provides=frozenset({
                      'list_dir', 'grep_search', 'find_files',
-                     'write_file', 'apply_diff', 'apply_diffs',
+                     'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
                      'insert_content', 'insert_contents',
                      'create_project', 'run_command',
                  }),
                  write_tools=frozenset({
-                     'write_file', 'apply_diff', 'apply_diffs',
+                     'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
                      'insert_content', 'insert_contents',
                      'create_project', 'run_command',
                  }),
                  idempotent_tools=frozenset({
                      'list_dir', 'grep_search', 'find_files',
                  }),
+                 programmatic_tools=frozenset({
+                     'list_dir', 'grep_search', 'find_files',
+                 }),
+                 search_hints={
+                     'list_dir': 'browse folder directory list files 查看目录',
+                     'grep_search': (
+                         'symbol references usages occurrences who calls '
+                         'code content search 查找引用 谁调用了'),
+                     'find_files': (
+                         'locate filenames glob config files 查找文件 配置文件'),
+                     'write_file': 'create overwrite save file 写入 保存文件',
+                     'edit_file': (
+                         'edit insert before after replace patch source code '
+                         '修改代码 插入内容 替换'),
+                     'apply_diff': (
+                         'edit change modify fix implementation source code '
+                         '修改代码 修复实现'),
+                     'apply_diffs': 'edit modify fix several files 批量修改代码',
+                     'insert_content': 'insert append text into file 插入内容',
+                     'insert_contents': 'insert append several files 批量插入',
+                     'create_project': 'initialize scaffold new project 创建项目',
+                     'run_command': 'shell terminal execute command 运行命令',
+                 },
                  category='project', description='Project file tools / code exec',
-                 gate='挂载项目（输入框 → 项目）或开启代码执行'),
+                 gate='挂载项目（输入框 → 项目）或开启代码执行',
+                 exposure_gate=lambda ctx: (
+                     ctx.project_ready or ctx.code_exec_enabled)),
         ToolSpec('browser', _build_browser, phase='base',
                  # 13 names = BROWSER_TOOLS (11) + ADVANCED_BROWSER_TOOLS (2).
                  # v2 (pt_869e5648403e4745): the ten retired names are NOT
@@ -428,8 +570,11 @@ def _register_builtins() -> None:
                  idempotent_tools=frozenset({
                      'browser_list_tabs',
                  }),
+                 discovery_policy='searchable',
                  category='browser', description='Browser automation tools',
-                 gate='安装并连接浏览器扩展（设置 → 网络）'),
+                 gate='安装并连接浏览器扩展（设置 → 网络）',
+                 exposure_gate=lambda ctx: ctx.browser_enabled,
+                 pin_on_exposure=True),
         ToolSpec('desktop', _build_desktop, phase='base',
                  # provides = LLM 可见的 10 个(desktop_move_file 刻意不
                  # 暴露,见 lib/desktop_tools.py;它仍列在 write_tools 里)。
@@ -450,12 +595,32 @@ def _register_builtins() -> None:
                      'desktop_run_command', 'desktop_open_app',
                      'desktop_open_file',
                  }),
+                 search_hints={
+                     'desktop_screenshot': (
+                         'capture display monitor current screen desktop '
+                         '截屏 屏幕 桌面画面'),
+                     'desktop_clipboard': 'copy paste clipboard 剪贴板 复制 粘贴',
+                     'desktop_list_files': 'list computer files 查看电脑文件',
+                     'desktop_read_file': 'read computer file 读取电脑文件',
+                     'desktop_write_file': 'write save computer file 保存电脑文件',
+                     'desktop_run_command': 'run local command shell 执行本地命令',
+                     'desktop_open_app': 'launch application 打开应用',
+                     'desktop_open_file': 'open local file 打开文件',
+                     'desktop_gui_action': 'mouse keyboard click type 鼠标 键盘',
+                     'desktop_system_info': 'computer system information 系统信息',
+                 },
+                 discovery_policy='searchable',
                  category='desktop', description='Desktop agent tools',
-                 gate='连接桌面 agent（设置 → 设备）'),
+                 gate='连接桌面 agent（设置 → 设备）',
+                 exposure_gate=lambda ctx: ctx.desktop_enabled,
+                 pin_on_exposure=True),
         ToolSpec('image_gen', _build_image_gen, phase='base',
                  provides=frozenset({'generate_image'}),
+                 discovery_policy='searchable',
                  category='image', description='Image generation',
-                 gate='设置 → 显示 → 图像生成开关'),
+                 gate='设置 → 显示 → 图像生成开关',
+                 exposure_gate=lambda ctx: ctx.image_gen_enabled,
+                 pin_on_exposure=True),
         ToolSpec('motion_video', _build_motion_video, phase='base',
                  provides=frozenset({
                      'motion_video_env_check', 'motion_video_storyboard_check',
@@ -471,6 +636,7 @@ def _register_builtins() -> None:
                      'motion_video_env_check', 'motion_video_storyboard_check',
                      'motion_video_check', 'motion_video_probe',
                  }),
+                 discovery_policy='searchable',
                  category='video',
                  description='Motion video (MG animation) generation',
                  gate='挂载项目后可用'),
@@ -478,13 +644,27 @@ def _register_builtins() -> None:
                  provides=frozenset({'produce_video', 'produce_report',
                                      'produce_research', 'produce_slides',
                                      'edit_slides'}),
+                 discovery_policy='searchable',
+                 search_hints={
+                     'produce_video': 'make finished video 制作视频',
+                     'produce_report': 'write complete report 生成报告',
+                     'produce_research': 'deep research study 深度研究',
+                     'produce_slides': (
+                         'deck presentation powerpoint ppt slides '
+                         '演示文稿 幻灯片'),
+                     'edit_slides': 'revise presentation deck 编辑幻灯片',
+                 },
                  category='video',
                  description='High-level topic → finished video / report / research',
-                 gate='搜索开启后可用'),
+                 gate='搜索开启后可用',
+                 exposure_gate=lambda ctx: (
+                     ctx.search_mode in ('single', 'multi')
+                     or ctx.search_enabled)),
         # End of base phase: appending HERE keeps every earlier prefix
         # byte-stable for the prompt cache (the produce note above).
         ToolSpec('page_preview', _build_page_preview, phase='base',
                  provides=frozenset({'browser_preview_page'}),
+                 discovery_policy='searchable',
                  category='browser',
                  description='Server-side rendered page preview',
                  gate='挂载项目后可用'),
@@ -505,12 +685,29 @@ def _register_builtins() -> None:
                  idempotent_tools=frozenset({'list_conversations', 'get_conversation',
                                              'project_charter_read', 'project_board_read',
                                              'project_peer_status', 'project_feed_read'}),
+                 programmatic_tools=frozenset({
+                     'list_conversations', 'get_conversation',
+                     'project_charter_read', 'project_board_read',
+                     'project_peer_status', 'project_feed_read',
+                 }),
+                 discovery_policy='searchable',
+                 search_hints={
+                     'project_board_claim': (
+                         'take ownership assign work item to me volunteer '
+                         '认领任务 我来做 接手'),
+                     'project_board_complete': (
+                         'finish close mark work item done 完成任务'),
+                     'project_message': (
+                         'send direct message to project peer teammate '
+                         '给项目伙伴发消息'),
+                 },
                  category='conversation', description='Conversation reference tools',
                  gate='项目模式 或 @ 提及一个会话'),
         ToolSpec('human_guidance', _build_human_guidance, phase='base',
                  provides=frozenset({'ask_human'}),
                  category='human', description='Ask the human for guidance',
-                 gate='输入框 → 人类指导开关'),
+                 gate='输入框 → 人类指导开关',
+                 exposure_gate=lambda ctx: ctx.human_guidance_enabled),
         # update_search_settings — appended at the END of the base phase so
         # every earlier tool's position stays byte-stable for the prompt
         # cache (the "appending HERE" rule this module's header documents).
@@ -519,8 +716,23 @@ def _register_builtins() -> None:
         ToolSpec('search_settings', _build_search_settings, phase='base',
                  provides=frozenset({'update_search_settings'}),
                  write_tools=frozenset({'update_search_settings'}),
+                 discovery_policy='searchable',
                  category='search', description='Search/fetch pipeline settings',
-                 gate='输入框 → 搜索模式（联网/multi）'),
+                 gate='输入框 → 搜索模式（联网/multi）',
+                 exposure_gate=lambda ctx: ctx.search_mode in (
+                     'single', 'multi')),
+        # Local knowledge is appended at the END of the base phase so existing
+        # tool positions remain prompt-cache-stable when it is available.
+        ToolSpec('knowledge', _build_knowledge, phase='base',
+                 provides=frozenset({'search_knowledge'}),
+                 idempotent_tools=frozenset({'search_knowledge'}),
+                 programmatic_tools=frozenset({'search_knowledge'}),
+                 discovery_policy='searchable', script_safe=True,
+                 category='knowledge',
+                 description='Enabled local knowledge base',
+                 gate='本地知识库存在且已开启',
+                 handler=_handle_knowledge,
+                 catalog_active_only=True),
         # ── capability phase ──
         ToolSpec('memory', _build_memory, phase='capability',
                  provides=frozenset({
@@ -532,14 +744,24 @@ def _register_builtins() -> None:
                      'delete_memory', 'merge_memories',
                  }),
                  idempotent_tools=frozenset({'search_memories'}),
+                 programmatic_tools=frozenset({'search_memories'}),
+                 search_hints={
+                     'search_memories': (
+                         'recall remember previous decision past conversation '
+                         '回忆 找回之前决定 拍板'),
+                     'create_memory': 'remember save durable fact 记住 保存记忆',
+                     'update_memory': 'correct revise saved memory 修改记忆',
+                     'delete_memory': 'forget remove saved memory 忘记 删除记忆',
+                     'merge_memories': 'combine duplicate memories 合并记忆',
+                 },
                  category='memory', description='Memory CRUD tools',
-                 gate='常开（有任意基础工具即挂载）'),
+                 gate='Memory 开关开启且有任意基础工具'),
         ToolSpec('skills', _build_skills, phase='capability',
-                 provides=frozenset({'activate_skill'}),
-                 idempotent_tools=frozenset({'activate_skill'}),
+                 provides=frozenset({'load_skill'}),
+                 idempotent_tools=frozenset({'load_skill'}),
                  category='skills',
-                 description='Skill activation (progressive disclosure)',
-                 gate='常开（有任意基础工具即挂载）'),
+                 description='Skill loading (progressive disclosure)',
+                 gate='存在已启用且满足依赖的技能，并有任意基础工具'),
         ToolSpec('todo', _build_todo, phase='capability',
                  provides=frozenset({'todo_write'}),
                  category='task', description='Structured task checklist',
@@ -558,6 +780,20 @@ def _register_builtins() -> None:
                      'timer_create', 'timer_manage',
                  }),
                  idempotent_tools=frozenset({'schedule_list'}),
+                 programmatic_tools=frozenset({'schedule_list'}),
+                 discovery_policy='searchable',
+                 search_hints={
+                     'schedule_create': (
+                         'create recurring reminder cron scheduled agent '
+                         '创建定时任务 提醒'),
+                     'schedule_list': 'show scheduled jobs reminders 查看定时任务',
+                     'schedule_manage': (
+                         'cancel stop disable remove scheduled job reminder '
+                         '取消提醒 停止定时任务'),
+                     'timer_create': 'countdown timer remind later 创建计时器',
+                     'timer_manage': 'cancel stop timer 取消计时器',
+                     'await_task': 'wait poll background task 等待后台任务',
+                 },
                  category='scheduler', description='Scheduler / proactive agent tools',
                  gate='常开（有任意基础工具即挂载）'),
         ToolSpec('swarm', _build_swarm, phase='capability',
@@ -588,10 +824,31 @@ def _register_builtins() -> None:
                  # here so it reads as a decision rather than an omission.
                  idempotent_tools=frozenset({'list_artifacts'}),
                  category='swarm', description='Async multi-agent swarm',
-                 gate='输入框 → 多智能体开关'),
+                 gate='输入框 → 多智能体开关',
+                 exposure_gate=lambda ctx: ctx.swarm_enabled),
         ToolSpec('mcp', _build_mcp, phase='capability',
+                 provides=frozenset({
+                     'search_mcp_tools', 'call_mcp_read_tool',
+                     'call_mcp_write_tool',
+                 }),
+                 write_tools=frozenset({'call_mcp_write_tool'}),
+                 idempotent_tools=frozenset({'search_mcp_tools'}),
+                 discovery_policy='searchable',
                  category='mcp', description='External MCP-server tools',
                  gate='设置 → MCP（默认开，需已连接服务器）'),
+        # The discovery schema is injected at the final wire boundary
+        # according to the resolved provider/search strategy, not during
+        # ordinary registry assembly. Declaring it here keeps ownership,
+        # idempotency and custom-tool collision checks authoritative.
+        # ``execute_tools`` is declared for ownership/collision/admission and
+        # is injected only alongside local Tool Search at the wire boundary;
+        # nested calls remain bounded by the executable task catalog.
+        ToolSpec('tool_gateway', lambda _ctx: [], phase='capability',
+                 provides=frozenset({'search_tools', 'execute_tools'}),
+                 idempotent_tools=frozenset({'search_tools'}),
+                 category='tools',
+                 description='Local tool discovery and stable execution gateway',
+                 gate='工具搜索启用时出现'),
         # ── per-request custom tools (always last; handlers are task-local) ──
         ToolSpec('custom', _build_custom, phase='capability',
                  category='custom',

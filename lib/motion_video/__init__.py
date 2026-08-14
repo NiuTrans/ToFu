@@ -30,6 +30,16 @@ from lib.motion_video._audio import (
     mux_audio_video,
     synthesize_scene_narrations,
 )
+from lib.motion_video._audio_cues import (
+    AUDIO_CONTRACT_VERSION,
+    audio_plan_errors,
+    audio_plan_summary,
+    audio_plan_template,
+    load_audio_plan,
+    mix_audio_timeline,
+    normalise_audio_plan,
+    write_audio_attribution,
+)
 from lib.motion_video._concat import burn_in_subtitles, concat_mp4s
 from lib.motion_video._env import (
     PINNED_HYPERFRAMES,
@@ -103,6 +113,12 @@ from lib.motion_video._template import (
     render_scene_html,
     scene_on_screen,
 )
+from lib.motion_video._timeline import (
+    TIMELINE_CONTRACT_VERSION,
+    normalise_timeline_contract,
+    timeline_contract_errors,
+    transition_plan,
+)
 
 __all__ = [
     'PINNED_HYPERFRAMES',
@@ -155,6 +171,18 @@ __all__ = [
     'synthesize_scene_narrations',
     'concat_narrations',
     'mux_audio_video',
+    'AUDIO_CONTRACT_VERSION',
+    'normalise_audio_plan',
+    'load_audio_plan',
+    'audio_plan_errors',
+    'audio_plan_summary',
+    'audio_plan_template',
+    'write_audio_attribution',
+    'mix_audio_timeline',
+    'TIMELINE_CONTRACT_VERSION',
+    'normalise_timeline_contract',
+    'timeline_contract_errors',
+    'transition_plan',
     'build_storyboard',
     'SubtitleStyle',
     'style_for_frame',

@@ -364,6 +364,116 @@ check('empty_rounds_blank', renderToolRoundsHTML([], false) === '' &&
   check('error_batch_reason', html.includes('Tool execution error: boom'));
 }
 
+// ── 13. local knowledge uses the grounded-search card, not a bare tool row ──
+{
+  const html = renderToolRoundsHTML([
+    { roundNum: 1, toolName: 'search_knowledge', status: 'done',
+      query: 'Searching local knowledge: 报销制度',
+      results: [{ title: '差旅政策.pdf', source: '第 3 节',
+        snippet: '差旅发票应在三十天内提交。', fetched: true, fetchedChars: 15 }] },
+  ], false);
+  const d = frag(html);
+  check('knowledge_search_result_card', !!d.querySelector('.search-result-item'));
+  check('knowledge_search_source_visible', html.includes('差旅政策.pdf') && html.includes('第 3 节'));
+  check('knowledge_search_excerpt_visible', html.includes('差旅发票应在三十天内提交'));
+  check('knowledge_search_book_glyph', html.includes('M4 19.5A2.5 2.5'));
+}
+
+// ── 14. todo revisions project to one live checklist card ──
+{
+  const todoRound = (n, done, extra = {}) => ({
+    roundNum: n, llmRound: n, toolName: 'todo_write', status: 'done',
+    toolCallId: `todo-${n}`, query: `Checklist revision ${n}`,
+    results: [{ toolName: 'todo_write', source: 'Checklist', badge: `${done}/2`,
+      todos: [
+        { id: 'a', content: 'A', status: done >= 1 ? 'completed' : 'in_progress' },
+        { id: 'b', content: 'B', status: done >= 2 ? 'completed' : 'pending' },
+      ], ...extra }],
+  });
+  const html = renderToolRoundsHTML([
+    todoRound(1, 0),
+    { roundNum: 2, llmRound: 2, toolName: 'read_files', status: 'done',
+      toolCallId: 'read-2', query: 'Read config', results: [{ title: 'ok' }] },
+    todoRound(3, 1, { todoRevision: 2 }),
+    todoRound(4, 2, { todoRevision: 3, rootCompleted: true }),
+  ], false);
+  const d = frag(html);
+  check('todo_revisions_one_card', d.querySelectorAll('.ptool-todo-block').length === 1);
+  check('todo_revisions_latest_state', html.includes('2/2'));
+  check('todo_revisions_counted_once', d.querySelector('.ptool-panel-body')
+    && d.querySelector('.ptool-panel-body').getAttribute('data-full-count') === '2');
+  check('todo_revision_history_chip', !!d.querySelector('.ptool-todo-revisions'));
+  check('todo_revision_history_details', !!d.querySelector('.ptool-todo-history'));
+  check('todo_non_todo_round_kept', html.includes('Read config'));
+}
+
+// ── 15. batch-edit rows carry per-edit operation pills ──
+// The header summarizes ops as text ("(2 edits: replace, …)"); each sub-row
+// must carry a DESIGNED indicator: an icon + enum-label pill, amber for
+// replace, green for pure insertions. Data source is the server-stamped
+// editSummaries[].operation (index-aligned by construction), with the
+// legacy batch tools deriving the op from the tool itself.
+{
+  const html = renderToolRoundsHTML([
+    { roundNum: 1, toolName: 'edit_file', status: 'done',
+      query: 'Edit a.py (2 edits: replace, insert_after)',
+      toolArgs: JSON.stringify({ edits: [
+        { path: 'a.py', operation: 'replace', anchor: 'old', content: 'new' },
+        { path: 'a.py', operation: 'insert_after', anchor: 'x', content: 'y' },
+      ] }),
+      results: [{ toolName: 'edit_file', badge: '2/2 edits', writeOk: true,
+        editOperations: ['replace', 'insert_after'],
+        editSummaries: [
+          { path: 'a.py', description: '', status: 'ok', detail: '', operation: 'replace' },
+          { path: 'a.py', description: '', status: 'ok', detail: '', operation: 'insert_after' },
+        ] }] },
+  ], false);
+  const d = frag(html);
+  const pills = d.querySelectorAll('.ptool-op');
+  check('op_pill_per_row', pills.length === 2);
+  check('op_pill_replace_kind', !!d.querySelector('.ptool-op--replace'));
+  check('op_pill_insert_kind', !!d.querySelector('.ptool-op--insert'));
+  check('op_pill_enum_labels', html.includes('>replace</span>') &&
+    html.includes('>insert_after</span>'));
+  check('op_pill_has_icon', d.querySelector('.ptool-op svg') !== null);
+  check('op_pill_title_attr', !!d.querySelector('[title="operation: insert_after"]'));
+}
+
+// ── 15b. legacy batch tools derive the pill from the tool itself ──
+{
+  const html = renderToolRoundsHTML([
+    { roundNum: 1, toolName: 'insert_contents', status: 'done',
+      query: 'Insert into a.py (2 insertions)',
+      toolArgs: JSON.stringify({ edits: [
+        { path: 'a.py', anchor: 'x', content: 'y', position: 'after' },
+        { path: 'a.py', anchor: 'z', content: 'w', position: 'before' },
+      ] }),
+      results: [{ toolName: 'insert_contents', badge: '2/2 inserted', writeOk: true,
+        editSummaries: [
+          { path: 'a.py', description: '', status: 'ok', detail: '' },
+          { path: 'a.py', description: '', status: 'ok', detail: '' },
+        ] }] },
+    { roundNum: 2, toolName: 'apply_diffs', status: 'done',
+      query: 'Patch b.py (2 edits)',
+      toolArgs: JSON.stringify({ edits: [
+        { path: 'b.py', search: 's1', replace: 'r1' },
+        { path: 'b.py', search: 's2', replace: 'r2' },
+      ] }),
+      results: [{ toolName: 'apply_diffs', badge: '2/2 edits', writeOk: true,
+        editSummaries: [
+          { path: 'b.py', description: '', status: 'ok', detail: '' },
+          { path: 'b.py', description: '', status: 'ok', detail: '' },
+        ] }] },
+  ], false);
+  const d = frag(html);
+  check('legacy_insert_directions', html.includes('>insert_after</span>') &&
+    html.includes('>insert_before</span>'));
+  check('legacy_apply_diffs_replace_pill',
+    d.querySelectorAll('.ptool-op--replace').length === 2);
+  check('legacy_no_pill_spillover',
+    d.querySelectorAll('.ptool-op').length === 4);
+}
+
 report();
 """
 

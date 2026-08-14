@@ -37,10 +37,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_RENDER = os.path.join(_ROOT, 'static', 'js', 'settings', 'provider_render.js')
+_RENDER = runtime_section_path('settings/provider_render.js')
 _CSS = os.path.join(_ROOT, 'static', 'styles.css')
 
 _HARNESS = r'''
@@ -167,16 +169,15 @@ def test_banner_carries_the_actionable_hint():
 
 def test_i18n_keys_are_defined_in_both_languages():
     """A banner that renders the raw key name is the same defect as no banner."""
-    src = open(os.path.join(_ROOT, 'static', 'js', 'i18n.js'), encoding='utf-8').read()
+    locale_dir = os.path.join(_ROOT, 'frontend', 'src', 'i18n', 'locales')
+    locales = [
+        json.loads(open(os.path.join(locale_dir, f'{lang}.json'),
+                        encoding='utf-8').read())
+        for lang in ('zh', 'en')
+    ]
     for key in ('settings.faceRefusedTitle', 'settings.faceRefusedHint'):
-        # The value object spans one line but contains braces/quotes of its own,
-        # so match to END OF LINE rather than to the first '}' — an earlier
-        # `[^}]*` form could not see past a nested brace and reported a
-        # correctly-defined key as missing.
-        m = re.search(r"'%s':\s*\{(.*)$" % re.escape(key), src, re.MULTILINE)
-        assert m, '%s is not defined in i18n.js — t() would emit the bare key' % key
-        body = m.group(1)
-        assert 'zh:' in body and 'en:' in body, '%s missing zh or en' % key
+        assert all(key in locale and locale[key] for locale in locales), \
+            '%s missing zh or en' % key
 
 
 def test_the_stylesheet_actually_paints_the_banner():

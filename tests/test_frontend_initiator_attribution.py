@@ -33,11 +33,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = runtime_sections_dir()
 ESCAPE_HTML = os.path.join(JS_DIR, 'core', 'escape_html.js')
 SAFE_HTML = os.path.join(JS_DIR, 'core', 'safe_html.js')
 BRANDING = os.path.join(JS_DIR, 'settings', 'branding.js')

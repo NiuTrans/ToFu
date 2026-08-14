@@ -1,7 +1,7 @@
-"""jsdom contract test for the Paper Reading-Mode Q&A tab cluster.
+"""jsdom contract test for the native Paper Reading-Mode Q&A owner.
 
 Covers the pure/near-pure Q&A functions that Epic E cut #3 extracts from
-static/js/paper-reader.js into static/js/paper/qa.js:
+``features/paper/qa.ts``:
   • _qaMsgInnerHtml(msg)   — build one bubble's innerHTML (user escaped;
     assistant markdown; running → thinking pulse; toolRounds panel).
   • _renderPaperQA()       — reconcile the #paperQAMessages list in place from
@@ -28,12 +28,17 @@ Skips cleanly when node + jsdom aren't installed.
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 
 import pytest
 
-from tests._jsdom import JS_DIR, run_harness
+from tests._jsdom import JS_DIR, ROOT, run_harness
 
 pytestmark = pytest.mark.unit
+
+QA_TS = os.path.join(ROOT, 'frontend', 'src', 'features', 'paper', 'qa.ts')
+ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
 
 
 _BODY = r"""
@@ -68,6 +73,17 @@ const { check, report } = setup({
     Icon: () => '<svg></svg>',
   },
 });
+// Native modules install compatibility functions on the browser Window. The
+// classic core is indirect-eval'd onto Node's global object in this harness;
+// make both names and state share that object after module initialization.
+for (const name of [
+  '_qaMsgInnerHtml', '_renderPaperQA', '_sendPaperQuestion', '_pollQATask',
+  '_applyQAEvent', '_paperAskQuestion', '_quotePaperSelection',
+  '_askAboutPaperSelection', '_hidePaperQuoteBar', '_handlePaperTextSelection',
+]) {
+  if (window[name]) globalThis[name] = window[name];
+}
+global.window = globalThis;
 // QA state vars live in the CORE file's State block; the eval'd source declares
 // them. We only need _paperQAHistory addressable here — set via the global the
 // source `var` creates. (var at top level → global in this eval scope.)
@@ -143,14 +159,24 @@ const { check, report } = setup({
 """
 
 
-def test_paper_qa_contract():
+def _run_qa_contract(qa_js: str) -> None:
     # argv[4] = the extracted sibling (present post-split; absent pre-split →
     # harness still evals the monolith and passes).
-    qa_js = os.path.join(JS_DIR, 'paper', 'qa.js')
-    extra = [qa_js] if os.path.exists(qa_js) else []
     run_harness(
         target_js=os.path.join(JS_DIR, 'paper-reader.js'),
         body_js=_BODY,
         min_pass=13,
-        extra_targets=extra,
+        extra_targets=[qa_js],
     )
+
+
+@pytest.mark.skipif(not shutil.which('node') or not os.path.isfile(ESBUILD),
+                    reason='node + esbuild dev dependency required')
+def test_vite_paper_qa_contract(tmp_path):
+    built = tmp_path / 'paper-qa.js'
+    compiled = subprocess.run(
+        [ESBUILD, QA_TS, '--bundle', '--format=iife', '--platform=browser',
+         f'--outfile={built}'],
+        capture_output=True, text=True, timeout=60)
+    assert compiled.returncode == 0, compiled.stderr
+    _run_qa_contract(str(built))

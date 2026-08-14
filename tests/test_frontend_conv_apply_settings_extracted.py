@@ -52,10 +52,11 @@ def _unit(fn):
 
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_LEAF = os.path.join(_ROOT, 'static/js/core/conv_apply_settings.js')
-_CONV = os.path.join(_ROOT, 'static/js/core/conversations.js')
-_CTS = os.path.join(_ROOT, 'static/js/core/cross_tab_sync.js')
-_BUNDLER = os.path.join(_ROOT, 'lib/js_bundler.py')
+from tests._runtime_sections import runtime_section_names, runtime_section_path
+
+_LEAF = runtime_section_path('core/conv_apply_settings.js')
+_CONV = runtime_section_path('core/conversations.js')
+_CTS = runtime_section_path('core/cross_tab_sync.js')
 
 
 @_unit
@@ -85,17 +86,10 @@ def test_bundler_lists_leaf_before_conversations_and_cross_tab_sync():
     ``_handleConvNotifyPush`` (cross_tab_sync.js:387) would see the
     function as undefined at load time.
     """
-    with open(_BUNDLER, encoding='utf-8') as f:
-        src = f.read()
-    leaf_idx = src.find("'core/conv_apply_settings.js'")
-    conv_idx = src.find("'core/conversations.js'")
-    cts_idx = src.find("'core/cross_tab_sync.js'")
-    assert leaf_idx != -1, (
-        "lib/js_bundler.py::_BUNDLE_FILES must list "
-        "'core/conv_apply_settings.js' after slice 5"
-    )
-    assert conv_idx != -1, "sanity: 'core/conversations.js' entry missing"
-    assert cts_idx != -1, "sanity: 'core/cross_tab_sync.js' entry missing"
+    owners = runtime_section_names()
+    leaf_idx = owners.index('core/conv_apply_settings.js')
+    conv_idx = owners.index('core/conversations.js')
+    cts_idx = owners.index('core/cross_tab_sync.js')
     assert leaf_idx < conv_idx, (
         f'conv_apply_settings.js at pos {leaf_idx} must come BEFORE '
         f'conversations.js at pos {conv_idx} in _BUNDLE_FILES.'
@@ -136,7 +130,7 @@ def test_conversations_js_no_longer_declares_apply_settings_inline():
     call_pattern = r'_applySettingsToConv\s*\('
     total_hits = len(re.findall(call_pattern, conv_src))
     migrated_leaves = [
-        os.path.join(_ROOT, 'static/js/core/conv_disaster_recovery.js'),
+        runtime_section_path('core/conv_disaster_recovery.js'),
     ]
     for leaf in migrated_leaves:
         if os.path.exists(leaf):

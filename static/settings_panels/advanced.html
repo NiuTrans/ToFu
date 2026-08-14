@@ -1,33 +1,146 @@
         <div class="settings-tab-panel" id="settingsTab_advanced">
-          <div class="settings-section-title" data-i18n="settings.importExport">导入 / 导出</div>
+          <div class="settings-section-title" data-i18n="settings.responsesExperiments">工具发现与 Responses 能力</div>
+          <p class="settings-desc" data-i18n="settings.responsesExperimentsDesc">Tool Search 适用于所有 Provider；工具是否发送 schema 与是否允许执行彼此独立。</p>
+          <div class="tool-discovery-card" aria-labelledby="toolDiscoveryPolicyTitle">
+            <div class="tool-discovery-head">
+              <span class="tool-discovery-icon" aria-hidden="true">⌘</span>
+              <div>
+                <div class="tool-discovery-title" id="toolDiscoveryPolicyTitle" data-i18n="settings.toolDiscoveryTitle">工具发现策略</div>
+                <div class="tool-discovery-sub" data-i18n="settings.toolDiscoverySub">少发 schema，但不让模型因为没搜索过就失去能力。</div>
+              </div>
+            </div>
+            <div class="tool-discovery-flow" aria-hidden="true">
+              <span><b data-i18n="settings.toolFlowAvailable">可执行目录</b><small data-i18n="settings.toolFlowAvailableSub">环境与策略允许</small></span>
+              <i>→</i>
+              <span><b data-i18n="settings.toolFlowSearch">按需发现</b><small data-i18n="settings.toolFlowSearchSub">名称、描述与私有提示</small></span>
+              <i>→</i>
+              <span><b data-i18n="settings.toolFlowWire">精简 Schema</b><small data-i18n="settings.toolFlowWireSub">保持缓存稳定</small></span>
+            </div>
+            <div class="settings-row two-col tool-discovery-controls">
+              <div class="settings-field"><span class="settings-field-label" data-i18n="settings.toolExecutionScope">准确工具名的执行规则</span><div class="tool-execution-policy"><span class="tool-state-dot is-visible"></span><strong data-i18n="settings.toolExecutionAvailable">全部当前可用工具</strong><em data-i18n="settings.toolExecutionFixed">固定规则</em></div></div>
+              <div class="settings-field"><label for="settingToolSearch" data-i18n="settings.responsesToolSearch">Tool Search</label><select id="settingToolSearch"><option value="auto">auto</option><option value="native">native</option><option value="local">local</option><option value="off">off</option></select></div>
+            </div>
+            <div class="tool-discovery-note"><span class="tool-state-dot is-visible"></span><span data-i18n="settings.toolStateVisible">常驻可见</span><span class="tool-state-dot is-searchable"></span><span data-i18n="settings.toolStateSearchable">隐藏 Schema，名称可调用</span><span class="tool-state-dot is-blocked"></span><span data-i18n="settings.toolStateBlocked">环境或策略禁止</span></div>
+          </div>
+          <div class="settings-group">
+            <div class="settings-row two-col">
+              <div class="settings-field"><label for="settingProgrammaticCalling" data-i18n="settings.responsesPtc">Programmatic Tool Calling</label><select id="settingProgrammaticCalling"><option value="auto">auto</option><option value="off">off</option></select></div>
+              <div class="settings-field"><label for="settingResponsesPromptProfile">GPT-5.6 提示词档位</label><select id="settingResponsesPromptProfile"><option value="auto">auto</option><option value="lean">lean</option><option value="full">full</option></select></div>
+            </div>
+            <div class="settings-row two-col">
+              <div class="settings-field"><label for="settingResponsesTransport" data-i18n="settings.responsesTransport">传输</label><select id="settingResponsesTransport"><option value="sse">SSE</option><option value="websocket">WebSocket</option></select></div>
+              <div class="settings-field"><label for="settingResponsesReasoning" data-i18n="settings.responsesReasoning">推理模式</label><select id="settingResponsesReasoning"><option value="standard">standard</option><option value="pro">pro</option></select></div>
+            </div>
+            <div class="settings-row two-col">
+              <div class="settings-field"><label for="settingResponsesVerbosity" data-i18n="settings.responsesVerbosity">输出详细度</label><select id="settingResponsesVerbosity"><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></div>
+              <div class="settings-field"><label for="settingResponsesImageDetail" data-i18n="settings.responsesImageDetail">图像细节</label><select id="settingResponsesImageDetail"><option value="auto">auto</option><option value="original">original</option></select></div>
+            </div>
+            <div class="settings-row two-col">
+              <div class="settings-field"><label for="settingResponsesMultiAgent" data-i18n="settings.responsesMultiAgent">原生 Multi-agent</label><select id="settingResponsesMultiAgent" data-tofu-action-change="_syncResponsesExperimentUi()"><option value="auto">auto</option><option value="off">off</option><option value="read_only">read_only</option></select></div>
+              <div class="settings-field"><label for="settingResponsesMaxSubagents" data-i18n="settings.responsesMaxSubagents">最大并发子代理</label><input type="number" id="settingResponsesMaxSubagents" min="1" max="8" value="3"></div>
+            </div>
+          </div>
+          <p class="settings-desc" data-i18n="settings.responsesExperimentsSafety">Tool Search 只改变模型可见 schema，不改变任务允许执行的工具；Multi-agent 的 auto 仅对适合拆分的复杂任务开启，并始终限制为只读分析。</p>
+
+          <details class="settings-disclosure">
+            <summary><strong data-i18n="settings.costExperiment">成本优化 A/B 实验</strong></summary>
+            <div class="settings-disclosure-body">
+          <p class="settings-desc" data-i18n="settings.costExperimentDesc">按对话稳定分流，对比兼容基线与当前优化策略。默认 enabled=false；关闭时不改变任何请求。</p>
+          <div class="settings-group cost-exp-controls">
+            <div class="settings-toggle-row">
+              <div>
+                <span class="settings-toggle-label" data-i18n="settings.costExperimentEnable">启用实验分流</span>
+                <div class="settings-toggle-desc" data-i18n="settings.costExperimentEnableDesc">只作用于新发起的轮次；同一对话始终留在同一组，显式请求参数不会被覆盖。</div>
+              </div>
+              <label class="stg-toggle">
+                <input type="checkbox" id="settingCostExperimentEnabled" data-tofu-action-change="_syncCostExperimentUi()">
+                <span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span>
+              </label>
+            </div>
+            <div class="settings-row two-col cost-exp-fields">
+              <div class="settings-field">
+                <label for="settingCostExperimentId" data-i18n="settings.costExperimentId">实验 ID</label>
+                <input type="text" id="settingCostExperimentId" value="context-cost-v1" maxlength="80">
+              </div>
+              <div class="settings-field">
+                <label for="settingCostExperimentMinSample" data-i18n="settings.costExperimentMinSample">每组最小对话数</label>
+                <input type="number" id="settingCostExperimentMinSample" min="1" max="10000" value="20">
+              </div>
+            </div>
+            <div class="settings-row two-col cost-exp-fields">
+              <div class="settings-field">
+                <label for="settingCostExperimentTraffic" data-i18n="settings.costExperimentTraffic">纳入流量</label>
+                <div class="range-row"><input type="range" id="settingCostExperimentTraffic" min="0" max="100" step="1" value="10" data-tofu-action-input="_syncRangeOutput(this,'costExperimentTrafficVal','%')"><span class="range-value" id="costExperimentTrafficVal">10%</span></div>
+              </div>
+              <div class="settings-field">
+                <label for="settingCostExperimentTreatment" data-i18n="settings.costExperimentTreatment">纳入流量中的优化组</label>
+                <div class="range-row"><input type="range" id="settingCostExperimentTreatment" min="0" max="100" step="1" value="50" data-tofu-action-input="_syncRangeOutput(this,'costExperimentTreatmentVal','%')"><span class="range-value" id="costExperimentTreatmentVal">50%</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="cost-exp-arms" aria-label="A/B arm definitions">
+            <div class="cost-exp-arm"><strong>Control</strong><span data-i18n="settings.costExperimentControl">完整内联 MCP 工具定义 · 仅按上下文窗口压缩</span></div>
+            <div class="cost-exp-arm optimized"><strong>Optimized</strong><span data-i18n="settings.costExperimentOptimized">按需披露 MCP 工具 · 128K 经济工作集</span></div>
+          </div>
+          <p class="settings-desc" data-i18n="settings.costExperimentVersioning">已保存的实验如需调整流量或组间比例，请先更换实验 ID；服务端会拒绝可能让旧对话换组的修改。</p>
+          <div class="cost-exp-report-head">
+            <div>
+              <strong data-i18n="settings.costExperimentReport">最近 14 天真实成本报表</strong>
+              <div class="settings-toggle-desc" data-i18n="settings.costExperimentMethod">提供商 usage × 当轮价格快照；无定价轮次单列，不按 0 计算。成功率仅为无错误结束代理指标。</div>
+            </div>
+            <button type="button" class="btn btn-secondary btn-sm" data-tofu-action="_refreshCostExperimentReport()" data-i18n="settings.costExperimentRefresh">刷新</button>
+          </div>
+          <div id="costExperimentReport" class="cost-exp-report" aria-live="polite">
+            <div class="cost-exp-empty" data-i18n="settings.costExperimentLoading">正在读取实验数据…</div>
+          </div>
+            </div>
+          </details>
+
+          <details class="settings-disclosure">
+            <summary><strong data-i18n="settings.importExport">导入 / 导出</strong></summary>
+            <div class="settings-disclosure-body">
           <p class="settings-desc" data-i18n="settings.importExportDesc">将所有服务器端配置导出为 JSON，或从文件导入。</p>
           <div class="settings-row" style="gap:10px;">
-            <button class="btn btn-secondary btn-sm" onclick="exportServerConfig()" data-i18n="settings.exportJson">⬇ 导出 JSON</button>
-            <button class="btn btn-secondary btn-sm" onclick="document.getElementById('settingsImportFile').click()" data-i18n="settings.importJson">⬆ 导入 JSON</button>
-            <input type="file" id="settingsImportFile" accept=".json" style="display:none" onchange="importServerConfig(event)">
+            <button class="btn btn-secondary btn-sm" data-tofu-action="exportServerConfig()" data-i18n="settings.exportJson">⬇ 导出 JSON</button>
+            <button class="btn btn-secondary btn-sm" data-tofu-action="document.getElementById('settingsImportFile').click()" data-i18n="settings.importJson">⬆ 导入 JSON</button>
+            <input type="file" id="settingsImportFile" accept=".json" style="display:none" data-tofu-action-change="importServerConfig(event)">
           </div>
+            </div>
+          </details>
 
-          <div class="settings-divider"></div>
-          <div class="settings-section-title" data-i18n="settings.pricingOverride">价格覆盖</div>
+          <details class="settings-disclosure">
+            <summary><strong data-i18n="settings.pricingOverride">价格覆盖</strong></summary>
+            <div class="settings-disclosure-body">
           <p class="settings-desc" data-i18n="settings.pricingOverrideDesc">模型定价（美元 / 每百万 Token）。编辑以下 JSON 进行自定义。</p>
           <textarea id="settingPricing" class="settings-textarea settings-mono" rows="8" placeholder="正在加载价格数据..." data-i18n-placeholder="settings.loadingPricing"></textarea>
+            </div>
+          </details>
 
-          <div class="settings-divider"></div>
-          <div class="settings-section-title" data-i18n="settings.localCache">本地缓存</div>
+          <details class="settings-disclosure">
+            <summary><strong data-i18n="settings.localCache">本地缓存</strong></summary>
+            <div class="settings-disclosure-body">
           <p class="settings-desc" data-i18n="settings.localCacheDesc">对话缓存在 IndexedDB 中以实现即时加载。服务器始终是数据的唯一来源。</p>
           <div class="settings-row" style="gap:10px; align-items:center;">
             <span class="settings-info-value" id="settingsCacheStats" style="font-size:13px;opacity:0.7;">—</span>
-            <button class="btn btn-secondary btn-sm" id="settingsClearCacheBtn" onclick="_clearConvCacheFromSettings()" data-i18n="settings.clearCache">清除缓存</button>
+            <button class="btn btn-secondary btn-sm" id="settingsClearCacheBtn" data-tofu-action="_clearConvCacheFromSettings()" data-i18n="settings.clearCache">清除缓存</button>
           </div>
+            </div>
+          </details>
 
-          <div class="settings-divider"></div>
-          <div class="settings-section-title" data-i18n="settings.serverInfo">服务器信息</div>
+          <details class="settings-disclosure">
+            <summary><strong data-i18n="settings.serverInfo">服务器信息</strong></summary>
+            <div class="settings-disclosure-body">
           <div class="settings-server-info" id="settingsServerInfo">
             <div class="settings-info-row"><span class="settings-info-label" data-i18n="settings.status">状态</span><span class="settings-info-value" id="settingsSrvStatus">—</span></div>
           </div>
+            </div>
+          </details>
 
-          <div class="settings-divider"></div>
-          <div class="settings-section-title" data-i18n="settings.credentialsVault">凭证保管库</div>
+          <details class="settings-disclosure">
+            <summary><strong data-i18n="settings.credentialsVault">凭证保管库</strong></summary>
+            <div class="settings-disclosure-body">
           <p class="settings-desc" data-i18n="settings.credentialsVaultDesc">凭证集中保管：加密落盘在本机服务器，永不进代码仓、永不随导出外发；GitHub PAT / PyPI token 等。</p>
           <div id="credentialsVaultList"></div>
+            </div>
+          </details>
         </div>

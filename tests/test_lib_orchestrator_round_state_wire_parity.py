@@ -4,8 +4,7 @@
 Scope: run_task's stream main loop historically carried 14 cross-iteration
 locals as bare function locals. Slice 1 moves them onto ONE flat dataclass,
 ``lib/tasks_pkg/orchestrator/_round_state.py::RoundState``, as a PURE
-CONTAINER SWAP (byte-identical behavior — no loop-shape change, no event
-change; the while loop, its ceiling and every break path stay put).
+CONTAINER SWAP (the fields and event contract stay centralized here).
 
 Owner rulings baked into the shape (2026-07-27):
   * FLAT fields — no control/llm/usage/tools sub-objects.
@@ -96,7 +95,7 @@ def test_inline_loop_state_initializers_gone():
               encoding='utf-8') as f:
         src = f.read()
     for pivot in (
-        "_loop_exit_reason = 'max_rounds_exhausted'",
+        "_loop_exit_reason = 'running'",
         '_abort_detected_phase = None',
         '_consecutive_tool_timeouts = 0',
         '_last_checkpoint = 0.0',
@@ -123,7 +122,7 @@ def test_round_state_defaults_match_pre_slice_initializers():
         'lib.tasks_pkg.orchestrator._round_state')
     rs = mod.RoundState(model='m1', preset='p1', thinking_enabled=True)
     assert rs.model == 'm1' and rs.preset == 'p1' and rs.thinking_enabled is True
-    assert rs.exit_reason == 'max_rounds_exhausted'
+    assert rs.exit_reason == 'running'
     assert rs.abort_phase is None
     assert rs.consecutive_tool_timeouts == 0
     assert rs.last_checkpoint_ts == 0.0

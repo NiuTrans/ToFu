@@ -33,7 +33,11 @@ import subprocess
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RESEARCH_JS = os.path.join(ROOT, 'static', 'js', 'paper', 'research.js')
+RESEARCH_RUNTIME_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'research-runtime.ts')
+RESEARCH_VIEW_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'research-view.ts')
+ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
 
 pytestmark = pytest.mark.unit
 
@@ -41,17 +45,18 @@ pytestmark = pytest.mark.unit
 def _node_deps_available():
     if not shutil.which('node'):
         return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
+    return (os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
+            and os.path.isfile(ESBUILD))
 
 
 requires_node = pytest.mark.skipif(
     not _node_deps_available(), reason='node/jsdom dev-deps not installed')
 
 
-# The harness evals the REAL research.js in global scope (indirect eval), the
-# same way the concatenated bundle behaves in a browser. Api/push are stubbed
-# at the seam so the test is offline, but every line of logic under assertion
-# is the shipped one.
+# The harness evals the compiled Vite runtime, then the rollback renderer in
+# the same order as the real domain loader. Api/push are stubbed at the seam so
+# the test is offline, but every line of lifecycle logic under assertion is
+# the shipped TypeScript owner rather than a hand-copied reducer.
 _HARNESS = r"""
 const fs = require('fs'), path = require('path');
 const ROOT = process.argv[2];
@@ -60,7 +65,7 @@ const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM(
   '<!DOCTYPE html><body><div id="paperPdfViewer"></div></body>',
   { url: 'http://localhost/' });
-global.window = dom.window;
+global.window = global;
 global.document = dom.window.document;
 global.requestAnimationFrame = (fn) => setTimeout(fn, 0);
 global.escapeHtml = (s) => String(s == null ? '' : s)
@@ -70,7 +75,7 @@ global.t = (k) => k;
 global.debugLog = () => {};
 global.Icon = () => '<svg></svg>';
 
-const calls = { start: [], get: [], abort: [], subscribed: [] };
+const calls = { start: [], get: [], events: [], abort: [], subscribed: [] };
 
 // Scenario-driven task snapshot returned by Api.tasks.get.
 const SNAPSHOTS = {
@@ -97,10 +102,16 @@ global.Api = {
       return { ok: true, taskId: 'research_t1', kind, deduped: false };
     },
     get: async (taskId) => { calls.get.push(taskId); return SNAPSHOTS[SCENARIO]; },
-    events: async () => ({ ok: true, events: [], next_cursor: 0 }),
+    events: async (taskId, cursor) => {
+      calls.events.push({ taskId, cursor });
+      const snapshot = SNAPSHOTS[SCENARIO];
+      return { ...snapshot, events: [], next_cursor: cursor,
+               done: snapshot.status !== 'running' && snapshot.status !== 'pending' };
+    },
     abort: async (taskId) => { calls.abort.push(taskId); return { ok: true }; },
     list: async () => ({ ok: true, tasks: [], total: 0 }),
   },
+  research: { lookup: async () => ({ found: false }) },
 };
 global.pushSubscribe = (ch, id) => { calls.subscribed.push(ch + ':' + id); };
 global.pushUnsubscribe = () => {};
@@ -110,8 +121,8 @@ global.pushUnsubscribe = () => {};
 global._paperHash = '';
 global._activePaperId = '';
 
-const src = fs.readFileSync(path.join(ROOT, 'static/js/paper/research.js'), 'utf8');
-(0, eval)(src);
+const nativeSrc = fs.readFileSync(process.argv[4], 'utf8');
+(0, eval)(nativeSrc);
 
 (async () => {
   const out = { calls };
@@ -144,20 +155,25 @@ const src = fs.readFileSync(path.join(ROOT, 'static/js/paper/research.js'), 'utf
 
 
 def _run(scenario):
-    harness = os.path.join(ROOT, 'tests', '_tmp_research_entry_harness.js')
-    with open(harness, 'w', encoding='utf-8') as f:
-        f.write(_HARNESS)
-    try:
-        r = subprocess.run(['node', harness, ROOT, scenario],
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix='tofu-research-test-') as temp_dir:
+        harness = os.path.join(temp_dir, 'research-entry-harness.js')
+        built = os.path.join(temp_dir, 'research-runtime.js')
+        with open(harness, 'w', encoding='utf-8') as f:
+            f.write(_HARNESS)
+        compiled = subprocess.run(
+            [ESBUILD, RESEARCH_VIEW_TS, '--bundle', '--format=iife',
+             '--platform=browser', f'--outfile={built}'],
+            capture_output=True, text=True, timeout=60)
+        assert compiled.returncode == 0, compiled.stderr
+        r = subprocess.run(['node', harness, ROOT, scenario, built],
                            capture_output=True, text=True, timeout=90)
         if r.returncode != 0:
             pytest.fail(f'harness failed ({scenario}):\n{r.stdout}\n{r.stderr}')
         line = [x for x in r.stdout.strip().splitlines() if x.startswith('{')]
         assert line, f'no JSON from harness:\n{r.stdout}\n{r.stderr}'
         return json.loads(line[-1])
-    finally:
-        if os.path.exists(harness):
-            os.remove(harness)
 
 
 # ── 1. Start with NO paper open ───────────────────────────────────
@@ -193,15 +209,16 @@ def test_start_goes_through_the_generic_task_api_not_a_bespoke_route():
     """
     import re as _re
 
-    raw = open(RESEARCH_JS, encoding='utf-8').read()
-    assert 'Api.tasks.start' in raw, 'must start via the generic task API'
+    raw = open(RESEARCH_RUNTIME_TS, encoding='utf-8').read()
+    assert "tasks().start('research'" in raw, (
+        'must start via the generic task API')
     # Strip /* … */ and // … comments before scanning.
     code = _re.sub(r'/\*[\s\S]*?\*/', '', raw)
     code = _re.sub(r'^\s*//.*$', '', code, flags=_re.M)
     for forbidden in ('_paperHash', 'videoLookup', 'produce_research',
                       "fetch('/api", 'fetch(`/api'):
         assert forbidden not in code, (
-            f'research.js CODE references {forbidden!r} — the landing entry '
+            f'research-runtime.ts CODE references {forbidden!r} — the landing entry '
             'must be paper-scope-free and route every call through window.Api')
 
 
@@ -226,7 +243,7 @@ def test_elapsed_comes_from_the_server_clock_not_a_local_stopwatch():
 @requires_node
 def test_running_job_is_polled_and_subscribed_for_live_progress():
     out = _run('running')
-    assert out['calls']['get'], 'the job was never polled for its state'
+    assert out['calls']['events'], 'the job was never polled for event replay'
     assert any(s.startswith('research:') for s in out['calls']['subscribed']), (
         "no pushSubscribe('research', …) — progress would only advance on the "
         f"poll fallback. Subscribed: {out['calls']['subscribed']}")

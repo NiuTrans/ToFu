@@ -266,17 +266,17 @@ def _ensure_summary_blocking(conv_id: str, *, force: bool = False) -> str | None
     """Inline generate-if-stale + persist. Returns the (possibly new) text."""
     try:
         db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT title, messages, settings FROM conversations '
-            'WHERE id=? AND user_id=?',
-            (conv_id, DEFAULT_USER_ID)).fetchone()
+        from lib.database.conversation_repository import load_conversation
+        row = load_conversation(
+            db, conv_id, user_id=DEFAULT_USER_ID,
+            metadata_columns=('title', 'settings'))
     except Exception as e:
         logger.warning('[ProjSummary] load failed conv=%s: %s', conv_id[:8], e)
         return None
     if not row:
         return None
 
-    messages = safe_json(row['messages'], default=[], label='projsummary-msgs')
+    messages = row.messages
     settings = safe_json(row['settings'], default={}, label='projsummary-settings')
     if not isinstance(settings, dict):
         settings = {}

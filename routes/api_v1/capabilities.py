@@ -16,7 +16,7 @@ hardcoding. Inferred at request time from runtime state:
 
 from __future__ import annotations
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.api_response import api_ok
 from lib.log import get_logger
@@ -61,7 +61,7 @@ def _models_summary() -> list[dict]:
     to config do not appear here.
     """
     out: list[dict] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     try:
         from lib import _SAVED_CONFIG  # type: ignore
         providers = _SAVED_CONFIG.get('providers', []) or []
@@ -80,9 +80,15 @@ def _models_summary() -> list[dict]:
             if not isinstance(m, dict):
                 continue
             mid = m.get('model_id') or ''
-            if not mid or mid in seen:
+            identity = (str(prov_id), mid)
+            if not mid or identity in seen:
                 continue
-            seen.add(mid)
+            seen.add(identity)
+            from lib.model_info import resolved_context_profile
+            from lib.model_profiles import build_model_profile
+            context = resolved_context_profile(mid, str(prov_id))
+            profile = build_model_profile(
+                mid, provider_id=str(prov_id), model_entry=m)
             caps = list(m.get('capabilities') or [])
             out.append({
                 'id': mid,
@@ -97,6 +103,8 @@ def _models_summary() -> list[dict]:
                 'audio_chat': 'audio_chat' in caps,
                 'cheap': 'cheap' in caps,
                 'aliases': list(m.get('aliases') or []),
+                'context': context,
+                'capability_profile': profile,
                 'rpm': m.get('rpm'),
                 'cost_per_1k': m.get('cost'),
                 'input_price_per_1m': m.get('input_price'),
@@ -455,7 +463,7 @@ async def capabilities():
                       'tools (bool) — match the preview to the user\'s mode.',
           tags=['capabilities'], public=True)
 async def system_prompt_default():
-    from flask import request
+    from quart import request
 
     def _flag(name: str, default: bool) -> bool:
         v = (request.args.get(name) or '').strip().lower()
@@ -474,7 +482,7 @@ async def system_prompt_default():
         _preview_tool_names = {'web_search', 'fetch_url', 'read_files'}
         if project:
             _preview_tool_names |= {
-                'write_file', 'apply_diff', 'insert_content',
+                'write_file', 'edit_file',
                 'find_files', 'grep_search', 'run_command',
             }
     def _build():
@@ -509,7 +517,7 @@ async def system_prompt_default():
                       'mode or when tools are on).',
           tags=['capabilities'], public=True)
 async def system_prompt_blocks():
-    from flask import request
+    from quart import request
 
     def _flag(name: str, default: bool) -> bool:
         v = (request.args.get(name) or '').strip().lower()
@@ -524,7 +532,7 @@ async def system_prompt_blocks():
         _preview_tool_names = {'web_search', 'fetch_url', 'read_files'}
         if project:
             _preview_tool_names |= {
-                'write_file', 'apply_diff', 'insert_content',
+                'write_file', 'edit_file',
                 'find_files', 'grep_search', 'run_command',
             }
     def _build():

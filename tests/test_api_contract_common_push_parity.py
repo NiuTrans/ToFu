@@ -37,7 +37,7 @@ import quart as _quart
 sys.modules.setdefault('flask', _quart)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_API_JS = os.path.join(_ROOT, 'static', 'js', 'api.js')
+_API_JS = os.path.join(_ROOT, 'frontend', 'src', 'runtime', 'app-runtime.js')
 
 pytestmark = pytest.mark.unit
 
@@ -113,7 +113,7 @@ def _sites():
 
 
 def test_envelope_parity():
-    from flask import jsonify
+    from quart import jsonify
     app = _make_app()
 
     async def _t():

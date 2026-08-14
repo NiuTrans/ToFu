@@ -140,17 +140,15 @@ def _read_message(conv_id, msg_id, msg_idx):
     ``segments`` list; here we need the whole message so the segment-less path
     can reach ``toolRounds`` and ``_translatePartialByRound``.
     """
-    import json
     from lib.database import DOMAIN_CHAT, get_thread_db
+    from lib.database.conversation_repository import load_conversation
     from lib.translate.constants import DEFAULT_USER_ID
     try:
         db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT messages FROM conversations WHERE id=? AND user_id=?',
-            (conv_id, DEFAULT_USER_ID)).fetchone()
-        if not row:
+        row = load_conversation(db, conv_id, user_id=DEFAULT_USER_ID)
+        if row is None:
             return None
-        messages = json.loads(row['messages'] or '[]')
+        messages = row.messages
     except Exception as e:
         logger.warning('[narration-backfill] message read failed for conv=%s: %s',
                        (conv_id or '?')[:8], e)
@@ -510,9 +508,6 @@ async def backfill_conv_narration_segments(conv_id: str, *, log_tag: str = '') -
     wrote}``. Never raises: per-row failures are logged and folded into the
     summary so a bad conversation cannot break the caller.
     """
-    from lib.database import async_fetchone
-    from lib.database.aio import async_transaction
-    from lib.database._wrappers import json_dumps_pg
     from lib.translate.prompt import _build_translate_prompt
 
     tag = log_tag or (conv_id or '?')[:8]
@@ -529,13 +524,15 @@ async def backfill_conv_narration_segments(conv_id: str, *, log_tag: str = '') -
         return summary
     _INFLIGHT.add(conv_id)
     try:
-        row = await async_fetchone(
-            'SELECT messages, rev FROM conversations WHERE id=?', (conv_id,))
-        if not row:
+        def _load_offloop():
+            from lib.database import DOMAIN_CHAT, get_thread_db
+            from lib.database.conversation_repository import load_conversation
+            return load_conversation(get_thread_db(DOMAIN_CHAT), conv_id)
+
+        row = await asyncio.to_thread(_load_offloop)
+        if row is None:
             return summary
-        import json
-        raw = row['messages']
-        messages = raw if isinstance(raw, list) else json.loads(raw or '[]')
+        messages = row.messages
         eligible = [m for m in messages
                     if needs_segment_narration_translation(m)]
         if not eligible:
@@ -572,31 +569,21 @@ async def backfill_conv_narration_segments(conv_id: str, *, log_tag: str = '') -
             logger.debug('[SegmentBackfill] rev int parse failed, using fallback: %s', e)
             expected_rev = 0
 
-        messages_json = json_dumps_pg(messages)
-        async with async_transaction() as conn:
-            cur = await conn.execute(
-                'UPDATE conversations SET messages=? WHERE id=? AND rev=?',
-                (messages_json, conv_id, expected_rev))
-            if getattr(cur, 'rowcount', 0) == 0:
-                summary['skipped'] = True
-                logger.info('[segment-xlate-onopen] conv=%s skipped — concurrent '
-                            'writer moved rev; next open retries', tag)
-                return summary
-            # Reset rev so the messages UPDATE does not bump it (no client CAS 409).
-            await conn.execute(
-                'UPDATE conversations SET rev=? WHERE id=?', (expected_rev, conv_id))
+        def _persist_offloop():
+            from lib.database import DOMAIN_CHAT, get_thread_db
+            from lib.database.conversation_repository import replace_messages
+            return replace_messages(
+                get_thread_db(DOMAIN_CHAT), conv_id, messages,
+                expected_rev=expected_rev,
+                changed_seqs=eligible_seqs,
+                preserve_rev=True,
+            ).applied
 
-        # Phase 5 dual-write (flag-gated, inert when off): the stamp landed —
-        # mirror the stamped positions. The mirror uses the SYNC db layer, so
-        # it runs off the event loop (this file's own blocking-I/O rule).
-        from lib.database.messages_rows import (
-            mirror_write_and_commit as _mwc, rows_write_enabled as _rwe)
-        if _rwe():
-            def _mirror_offloop():
-                from lib.database import DOMAIN_CHAT, get_thread_db
-                _mwc(get_thread_db(DOMAIN_CHAT), conv_id, messages,
-                     changed_seqs=eligible_seqs)
-            await asyncio.to_thread(_mirror_offloop)
+        if not await asyncio.to_thread(_persist_offloop):
+            summary['skipped'] = True
+            logger.info('[segment-xlate-onopen] conv=%s skipped — concurrent '
+                        'writer moved rev; next open retries', tag)
+            return summary
 
         summary.update(messagesStamped=msgs_stamped, segmentsStamped=segs_stamped,
                        wrote=True)

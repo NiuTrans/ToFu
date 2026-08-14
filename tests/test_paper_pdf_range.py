@@ -149,9 +149,9 @@ def test_neuter_without_conditional_falls_back_to_200():
 
     def _no_conditional(filepath, **kw):
         # Simulate the pre-fix call: no conditional machinery at all.
-        import quart
+        from lib.quart_sync import send_file
         kw['conditional'] = False
-        return quart.send_file(filepath, **kw)
+        return send_file(filepath, **kw)
 
     fs.send_file_conditional = _no_conditional
     try:

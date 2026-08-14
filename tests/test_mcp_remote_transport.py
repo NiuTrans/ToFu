@@ -42,13 +42,13 @@ SECRET = 'sk-tofu-rollinggo-SUPERSECRET-9f3a'
 
 _SERVER_SRC = textwrap.dedent('''
     import sys
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
     from starlette.responses import JSONResponse
 
     PORT = int(sys.argv[1])
     SECRET = sys.argv[2]
 
-    mcp = FastMCP('authcheck', host='127.0.0.1', port=PORT)
+    mcp = MCPServer('authcheck')
 
     @mcp.tool()
     def whoami() -> str:
@@ -104,7 +104,10 @@ def auth_server(tmp_path_factory):
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     url = f'http://127.0.0.1:{port}/mcp'
-    for _ in range(100):
+    # MCP SDK 2 imports the split mcp-types/httpx2 stack on first start.  Cold
+    # network filesystems can take >10s just to import it, so keep the fixture
+    # bounded but give a real v2 server enough time to bind its socket.
+    for _ in range(300):
         if proc.poll() is not None:
             out, err = proc.communicate()
             pytest.skip(f'MCP test server died: {err.decode()[:400]}')

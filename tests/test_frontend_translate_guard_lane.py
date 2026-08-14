@@ -104,6 +104,7 @@ global.applyRunningTaskIdsFrame = () => {};
 global._dispatchableQueueCount = () => 0;
 global._restoreConvToolState = () => {};
 global.reconnectToTask = () => {};
+global.convWindowParam = () => '2';
 
 let cachePuts = [];
 let replaceAllCalls = [];
@@ -117,8 +118,10 @@ global.ConvView = {
 };
 
 let getCalls = 0;
+let lastGetOpts = null;
 let SERVER = null;
-global.Api = { conversations: { get: async () => { getCalls++;
+global.Api = { conversations: { get: async (_id, opts) => { getCalls++;
+  lastGetOpts = opts;
   return JSON.parse(JSON.stringify(SERVER)); } } };
 
 global.conversations = [];
@@ -134,6 +137,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * server has just translated. msg[2] is the RECENT turn. */
 function seed(extra) {
   cachePuts = []; replaceAllCalls = []; applyMsgCalls = []; getCalls = 0;
+  lastGetOpts = null;
   global.conversations = [Object.assign({
     id: 'c1', _serverRev: 8, updatedAt: 1000,
     messages: [
@@ -177,9 +181,30 @@ const zh2 = () => conversations[0].messages[2].translatedContent;
     check('A1_selfecho_narration_delivered',
       conversations[0].messages[2].segments[0].translatedText === '旁白中文');
     check('A1_selfecho_fetched_once', getCalls === 1);
+    check('A1_selfecho_requested_tail_window',
+      lastGetOpts && lastGetOpts.query && lastGetOpts.query.window === '2');
     check('A1_selfecho_content_untouched',
       conversations[0].messages[1].content === 'First settled answer.');
     check('A1_selfecho_repainted', applyMsgCalls.length >= 1);
+  }
+
+  // ══ A1w. A windowed body is aligned by ID / absolute firstLoadedSeq ══
+  // The old positional loop incorrectly merged this tail into local msg[0..1]
+  // and therefore delivered neither translation.
+  {
+    seed({ _localWriteAt: Date.now() - 1000 });
+    SERVER = Object.assign({}, SERVER, {
+      windowed: true, totalCount: 3, firstLoadedSeq: 1, lastLoadedSeq: 2,
+      messages: SERVER.messages.slice(1),
+    });
+    _onConvNotifyPush({ type: 'conv_changed', convId: 'c1', rev: 9, userId: 1 });
+    await sleep(250);
+    check('A1w_tail_msg1_aligned', zh1() === '第一个已完成回答。');
+    check('A1w_tail_msg2_aligned', zh2() === '第二个已完成回答。');
+    check('A1w_absolute_repaint_indices',
+      applyMsgCalls.some((c) => c.idx === 1) && applyMsgCalls.some((c) => c.idx === 2));
+    check('A1w_prefix_not_corrupted',
+      conversations[0].messages[0].translatedContent === undefined);
   }
 
   // ══ A2. LIVE STREAM on this conv ══
@@ -294,7 +319,7 @@ def test_translation_survives_all_three_frame_guards():
     out = _run('main', CTS)
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'guard-lane failures:\n' + out
-    assert out.count('PASS') >= 20, f'expected >=20 PASS, got:\n{out}'
+    assert out.count('PASS') >= 25, f'expected >=25 PASS, got:\n{out}'
     print(out)
 
 

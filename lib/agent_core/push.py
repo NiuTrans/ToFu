@@ -18,6 +18,7 @@ Channels in use:
   - ``paper``      — report generation events (progress, section, done)
   - ``translate``  — translation status (running, done, error)
   - ``notify``     — server notifications (config change, health, etc.)
+  - ``timer``      — timer-list invalidations (created/progress/terminal)
   - ``chat``       — chat task lifecycle (kept as a future hook;
                      browser sessions still receive chat via SSE
                      ``/api/chat/stream/<task_id>`` for Last-Event-ID
@@ -75,6 +76,37 @@ class PushHub:
             except Exception as e:
                 logger.warning('[Push] bus start failed (%s) - local-only', e)
 
+    def clear_loop(self, expected: asyncio.AbstractEventLoop | None = None) -> bool:
+        """Drop a closing serving loop without starting or stopping the bus."""
+        if expected is not None and self._loop is not expected:
+            return False
+        self._loop = None
+        return True
+
+    def stop(self) -> None:
+        """Stop the fan-out transport during server shutdown (idempotent)."""
+        bus = self._bus
+        if bus is None:
+            return
+        try:
+            bus.stop()
+        except Exception as e:
+            logger.warning('[Push] bus stop failed: %s', e)
+        finally:
+            self._bus_started = False
+
+    def bus_health(self) -> dict:
+        """Return a non-blocking transport snapshot for metrics/support data."""
+        bus = self._bus
+        if bus is None:
+            return {'backend': 'not_started', 'publisher_available': True,
+                    'subscriber_available': True, 'reconnect_in_s': 0.0}
+        health = getattr(bus, 'health', None)
+        if callable(health):
+            return health()
+        return {'backend': 'inproc', 'publisher_available': True,
+                'subscriber_available': True, 'reconnect_in_s': 0.0}
+
     # ── In-process observers ───────────────────────────────────
     # Listeners receive every event the hub processes. Used by the
     # webhooks worker to deliver events to external HTTP subscribers
@@ -108,12 +140,18 @@ class PushHub:
         emptied = []
         with self._lock:
             self._clients.discard(client)
-            for channel, channel_subs in self._subscriptions.items():
-                for task_id, task_clients in channel_subs.items():
+            # Iterate snapshots because empty task/channel buckets are removed
+            # in place. Keeping one empty Set for every task ever viewed made
+            # the process-lifetime subscription registry grow monotonically.
+            for channel, channel_subs in list(self._subscriptions.items()):
+                for task_id, task_clients in list(channel_subs.items()):
                     if client in task_clients:
                         task_clients.discard(client)
                         if not task_clients:
                             emptied.append((channel, task_id))
+                            channel_subs.pop(task_id, None)
+                if not channel_subs:
+                    self._subscriptions.pop(channel, None)
         # Release the registry lease for any (channel, task) this replica no
         # longer has a local subscriber for (release-on-last-unsubscribe).
         for channel, task_id in emptied:
@@ -193,8 +231,20 @@ class PushHub:
 
     def unsubscribe(self, client: 'PushClient', channel: str, task_id: str = '*'):
         with self._lock:
-            self._subscriptions[channel][task_id].discard(client)
-            emptied = not self._subscriptions[channel][task_id]
+            # ``defaultdict`` indexing an unknown unsubscribe used to CREATE a
+            # permanent empty tombstone. Read with .get(), and eagerly prune
+            # both levels when the last real subscriber leaves.
+            channel_subs = self._subscriptions.get(channel)
+            task_clients = channel_subs.get(task_id) if channel_subs else None
+            if task_clients is None:
+                emptied = False
+            else:
+                task_clients.discard(client)
+                emptied = not task_clients
+                if emptied:
+                    channel_subs.pop(task_id, None)
+                    if not channel_subs:
+                        self._subscriptions.pop(channel, None)
         if emptied:
             self._deregister_subscription(channel, task_id)
 
@@ -234,15 +284,20 @@ class PushHub:
         channel = frame.get('channel', '')
         task_id = frame.get('taskId', '*')
         with self._lock:
-            if frame.get('_bcast'):
+            target_socket = frame.get('_socketReqId', '')
+            if target_socket:
+                targets = {c for c in self._clients
+                           if getattr(c, 'req_id', '') == target_socket}
+            elif frame.get('_bcast'):
                 targets = set(self._clients)
             else:
                 targets = set()
                 targets.update(self._subscriptions[channel].get(task_id, set()))
                 targets.update(self._subscriptions[channel].get('*', set()))
         # Never ship the internal routing marker to the client.
-        if '_bcast' in frame:
-            frame = {k: v for k, v in frame.items() if k != '_bcast'}
+        if '_bcast' in frame or '_socketReqId' in frame:
+            frame = {k: v for k, v in frame.items()
+                     if k not in ('_bcast', '_socketReqId')}
         if not targets:
             logger.debug('[Push] no local subscriber for channel=%s task=%s type=%s',
                          channel, task_id, frame.get('type'))
@@ -274,13 +329,11 @@ class PushHub:
         repaired, since a healthy tab absorbing the frame looks identical to a
         stalled tab being fixed.
 
-        Returns True iff a matching LOCAL socket was found and enqueued.
-        Cross-replica is deliberately NOT attempted: the digest POST is an HTTP
-        request that, in a sticky-session deployment, lands on the replica
-        holding that socket; and when it does not, returning False lets the
-        caller log an honest "could not reach" rather than silently doing
-        nothing. Enqueue only — ``_sender`` stays the sole writer of the
-        WebSocket.
+        Returns True when a matching local socket was enqueued OR a healthy
+        Redis fan-out bus accepted the targeted frame for fleet delivery. This
+        closes the HTTP/WS affinity gap: the digest POST need not land on the
+        same replica as the browser socket. Other replicas receive the internal
+        marker but discard it unless they own that exact ``req_id``.
         """
         if not req_id:
             return False
@@ -288,7 +341,19 @@ class PushHub:
             targets = [c for c in self._clients
                        if getattr(c, 'req_id', '') == req_id]
         if not targets:
-            return False
+            bus = self._get_bus()
+            health = getattr(bus, 'health', None)
+            if not callable(health):
+                return False  # inproc: there is nowhere else to look
+            targeted = dict(frame)
+            targeted['_socketReqId'] = req_id
+            try:
+                bus.publish(targeted)
+                state = health()
+                return bool(state.get('publisher_available'))
+            except Exception as e:
+                logger.warning('[Push] targeted fleet delivery failed: %s', e)
+                return False
         loop = self._loop
         if loop and loop.is_running():
             loop.call_soon_threadsafe(self._deliver, set(targets), frame)
@@ -404,17 +469,27 @@ class PushClient:
                     (get_fut, waiter), timeout=30,
                     return_when=asyncio.FIRST_COMPLETED)
             except Exception as e:
-                get_fut.cancel()
                 logger.debug('[Push] drain failed (signaling disconnect): %s', e)
                 return None
             finally:
                 self._ctl_waiter = None
+                # ``asyncio.Queue.get()`` owns an internal waiter. Merely
+                # calling cancel() and returning leaves that waiter pending
+                # until a later loop turn; if the WebSocket loop is shutting
+                # down at the same time it is destroyed alive (and repeated
+                # reconnects accumulate orphan tasks). Always cancel *and
+                # drain* it before this coroutine can exit, including when
+                # drain() itself is cancelled by the duplex-socket joiner.
+                if not get_fut.done():
+                    get_fut.cancel()
+                    try:
+                        await get_fut
+                    except asyncio.CancelledError:
+                        pass
             if not done:
-                get_fut.cancel()
                 return {'channel': 'system', 'type': 'ping'}
             if get_fut in done:
                 return get_fut.result()
-            get_fut.cancel()
             # Only the control waiter fired — loop back; the ctl check at the
             # top returns the control frame.
 

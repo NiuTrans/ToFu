@@ -439,8 +439,11 @@ def test_silent_tool_does_not_fake_progress():
 
 def test_notify_outside_a_swarm_is_a_noop():
     """The main chat path must be unaffected — no sink bound, no error."""
-    from lib.swarm.liveness import notify_tool_progress
-    notify_tool_progress('subprocess_output')   # must not raise
+    import lib.swarm.liveness as liveness
+    assert liveness._PROGRESS_SINK.get() is None
+    result = liveness.notify_tool_progress('subprocess_output')
+    assert result is None
+    assert liveness._PROGRESS_SINK.get() is None
 
 
 def test_run_command_emits_the_heartbeat_on_real_output():
@@ -775,10 +778,7 @@ def test_spawn_specs_with_blank_ids_get_distinct_ids():
     finally:
         _t.MasterOrchestrator = _orig
         from lib.swarm.integration._state import _remove_session
-        try:
-            _remove_session('t-blank-ids')
-        except Exception:
-            pass
+        _remove_session('t-blank-ids')
 
     ids = [s.id for s in captured.get('specs', [])]
     assert len(ids) == 2, f'expected 2 specs, got {ids!r}'
@@ -826,10 +826,7 @@ def test_explicit_spawn_ids_are_preserved():
     finally:
         _t.MasterOrchestrator = _orig
         from lib.swarm.integration._state import _remove_session
-        try:
-            _remove_session('t-real-ids')
-        except Exception:
-            pass
+        _remove_session('t-real-ids')
 
     assert [s.id for s in captured.get('specs', [])] == ['tests', 'orphans']
 
@@ -1045,9 +1042,15 @@ def test_panel_maps_the_stalled_status_end_to_end():
     import re
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    panel = open(os.path.join(root, 'static/js/ui/streaming_swarm_panel.js'),
-                 encoding='utf-8').read()
-    i18n = open(os.path.join(root, 'static/js/i18n.js'), encoding='utf-8').read()
+    import json
+    from tests._runtime_sections import runtime_section
+    panel = runtime_section('ui/streaming_swarm_panel.js')
+    locale_dir = os.path.join(root, 'frontend/src/i18n/locales')
+    catalogs = {
+        lang: json.load(open(os.path.join(locale_dir, f'{lang}.json'),
+                             encoding='utf-8'))
+        for lang in ('zh', 'en')
+    }
     css = open(os.path.join(root, 'static/styles.css'), encoding='utf-8').read()
 
     assert re.search(r'stalled:\s*t\("swarm\.phase\.stalled"', panel), \
@@ -1069,9 +1072,9 @@ def test_panel_maps_the_stalled_status_end_to_end():
         'identifier survives even when the mapping is neutered to undefined)'
     assert 'sw-a-stalled' in panel and '.sw-a-stalled' in css, \
         'no visual class for a stalled card'
-    assert "'swarm.phase.stalled'" in i18n and '已停滞' in i18n, \
+    assert catalogs['zh'].get('swarm.phase.stalled') == '已停滞', \
         'i18n key swarm.phase.stalled missing (zh)'
-    assert "'swarm.phase.stalledSilent'" in i18n and '{seconds}' in i18n, \
+    assert '{seconds}' in catalogs['zh'].get('swarm.phase.stalledSilent', ''), \
         'i18n key swarm.phase.stalledSilent missing (carries the seconds)'
-    assert re.search(r"swarm\.phase\.stalled[^}]*en:\s*'[^']*[Ss]tall", i18n), \
+    assert re.search(r'[Ss]tall', catalogs['en'].get('swarm.phase.stalled', '')), \
         'i18n key swarm.phase.stalled missing (en)'

@@ -8,6 +8,11 @@ exact label in a hyperlink. These tests cover the URL cache layer
 (``lib.tasks_pkg.tool_display._tool_display_mcp``).
 """
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {
+    'lib/tasks_pkg/tool_display.py', 'lib/x.py', 'static/y.js',
+    'static/js/ui/tool_rounds.js',
+}
+
 import unittest
 
 from lib.mcp.project_names import (

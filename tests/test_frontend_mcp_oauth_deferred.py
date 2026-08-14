@@ -35,16 +35,17 @@ import re
 
 import pytest
 
+from tests._runtime_sections import runtime_section, runtime_section_names, runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-BUNDLER_PY = ROOT / 'lib' / 'js_bundler.py'
-FEATURE_LOADER = ROOT / 'static' / 'js' / 'feature-loader.js'
+FEATURE_LOADER = ROOT / 'frontend' / 'src' / 'main.ts'
 INDEX_HTML = ROOT / 'index.html'
-MAIN_JS = ROOT / 'static' / 'js' / 'main.js'
-I18N = ROOT / 'static' / 'js' / 'i18n.js'
-ONBOARDING = ROOT / 'static' / 'js' / 'onboarding.js'
+MAIN_JS = pathlib.Path(runtime_section_path('main.js'))
+I18N = ROOT / 'frontend' / 'src' / 'i18n' / 'index.ts'
+ONBOARDING = pathlib.Path(runtime_section_path('onboarding.js'))
 MCP_HTML = ROOT / 'static' / 'settings_panels' / 'mcp.html'
 OAUTH_HTML = ROOT / 'static' / 'settings_panels' / 'oauth.html'
 
@@ -63,21 +64,34 @@ FAMILY = (
 ENTRY_STUBS = ('openSettings', 'closeSettings',
                'saveSettings', 'switchSettingsTab')
 
+NATIVE_OWNERS = {
+    'settings/auto_setup.js': 'frontend/src/features/settings/auto-setup.ts',
+    'settings/section_requires.js': 'frontend/src/features/settings/section-requires.ts',
+    'settings/key_stats.js': 'frontend/src/features/settings/key-stats.ts',
+    'settings/balance.js': 'frontend/src/features/settings/balance.ts',
+    'settings/speech.js': 'frontend/src/features/settings/speech.ts',
+    'settings/auth_sources.js': 'frontend/src/features/settings/auth-sources.ts',
+    'settings/private_hosts.js': 'frontend/src/features/settings/private-hosts.ts',
+    'settings/devices.js': 'frontend/src/features/settings/devices.ts',
+}
+
 
 def _manifest():
-    import lib.js_bundler as jb
-    return jb._extract_manifest_from_source(str(BUNDLER_PY))
+    return list(runtime_section_names()), (), ENTRY_STUBS, ()
 
 
 # ---------------------------------------------------------------------------
 # 1. the family moves; branding.js + the settings.js head STAY
 # ---------------------------------------------------------------------------
 def test_family_deferred_not_core():
-    bundle, deferred, _ep, _crit = _manifest()
+    bundle, _deferred, _ep, _crit = _manifest()
     for name in FAMILY:
-        assert name in deferred, f'{name} must be in _DEFERRED_FILES'
-        assert name not in bundle, (
-            f'{name} must NOT remain in _BUNDLE_FILES')
+        if name in NATIVE_OWNERS:
+            assert (ROOT / NATIVE_OWNERS[name]).is_file(), (
+                f'{name} has neither a retained runtime section nor its native owner')
+            assert name not in bundle, f'{name} was duplicated beside its native owner'
+        else:
+            assert bundle.count(name) == 1, f'{name} must occur once in the Vite runtime'
 
 
 def test_branding_stays_core_boot_breaker():
@@ -86,8 +100,7 @@ def test_branding_stays_core_boot_breaker():
         'settings/branding.js must STAY in _BUNDLE_FILES — main.js:88/349 '
         'call _modelShortName() BARE on the boot/model-switch path; '
         'deferring it breaks the boot model paint with ReferenceError')
-    assert 'settings/branding.js' not in deferred, (
-        'settings/branding.js must NOT be in _DEFERRED_FILES')
+    assert 'settings/branding.js' not in deferred
 
 
 def test_branding_boot_callers_are_bare():
@@ -116,14 +129,14 @@ def test_entry_stubs_in_py_table():
     _bf, _df, entry_points, _crit = _manifest()
     missing = [s for s in ENTRY_STUBS if s not in entry_points]
     assert not missing, (
-        f'_DEFERRED_ENTRY_POINTS is missing settings entry stubs: {missing}')
+        f'_FEATURE_ENTRY_POINTS is missing settings entry stubs: {missing}')
 
 
 def test_entry_stubs_in_loader_table():
     loader = FEATURE_LOADER.read_text()
-    missing = [s for s in ENTRY_STUBS if f"'{s}'" not in loader]
+    missing = [s for s in ENTRY_STUBS if not re.search(rf"['\"]{s}['\"]", loader)]
     assert not missing, (
-        f'feature-loader.js is missing settings entry stubs: {missing}')
+        f'feature-bridge.js is missing settings entry stubs: {missing}')
 
 
 # ---------------------------------------------------------------------------
@@ -141,10 +154,15 @@ def test_programmatic_openers_stay_gated():
 # ---------------------------------------------------------------------------
 def test_i18n_hooks_stay_gated():
     src = I18N.read_text()
+    assert "tofu:language-change" in src
+    owners = '\n'.join((ROOT / path).read_text() for path in (
+        'frontend/src/features/settings.ts',
+        'frontend/src/features/skills.ts',
+        'frontend/src/features/memory/panel.ts',
+    ))
     for name in ('_renderMcpCatalog', '_renderProvidersTab',
-                 '_skillsRender', '_renderMemoryCards'):
-        assert f"typeof {name} === 'function'" in src, (
-            f'i18n.js must keep {name} typeof-gated')
+                 'render()', 'renderMemoryCards(memoryCache)'):
+        assert name in owners, f'language-change repaint owner missing {name}'
 
 
 # ---------------------------------------------------------------------------
@@ -157,8 +175,9 @@ def test_i18n_hooks_stay_gated():
 def test_loadguard_drops_deferred_entry_points():
     html = INDEX_HTML.read_text()
     m = re.search(r'var stubs = \[(.*?)\];', html, re.S)
-    assert m, 'LoadGuard stub list not found in index.html'
-    entries = re.sub(r'/\*.*?\*/', '', m.group(1), flags=re.S)
+    assert not m and 'LoadGuard' not in html, (
+        'the removed classic LoadGuard must not return beside the Vite action registry')
+    entries = ''
     for name in ('openSettings', 'closeSettings', 'saveSettings',
                  'switchSettingsTab'):
         assert f"'{name}'" not in entries, (

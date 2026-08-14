@@ -12,8 +12,11 @@ translate 1:1 to module-level functions taking their captures as arguments.
     startup window (silent no-op on ordinary worker/endpoint turns).
   * :func:`_probe_external_edits` — the daemon-thread target that runs
     the FUSE external-edit probe after ``ensure_project_state``; on
-    detection of committed off-Tofu edits, appends a
-    ``PROJECT_EXTERNAL_EDIT`` event so the UI can prompt the user.
+    detection of committed off-Tofu edits, snapshots them into
+    file-history and appends a ``PROJECT_EXTERNAL_EDIT`` event. The
+    event is a stream audit record ONLY — the frontend deliberately
+    ignores it (the drift toast advertised an undo the UI had no path
+    for; the snapshot's real consumer is the file-history timeline).
 
 Kept OUT of ``_finalize`` (post-loop helpers) and ``_turn`` (per-round
 primitives) because they run ONCE at task startup and are neither
@@ -38,7 +41,14 @@ from lib.tasks_pkg.manager import append_event
 logger = get_logger(__name__)
 
 
-def _vu_phase(task: dict[str, Any], detail: str, *, vu_startup: bool) -> None:
+def _vu_phase(
+    task: dict[str, Any],
+    detail: str,
+    *,
+    vu_startup: bool,
+    detail_key: str | None = None,
+    detail_args: dict | None = None,
+) -> None:
     """Emit a PHASE event during the VU sub-task's startup window.
 
     The VU sub-task carries ``_vu_event_transform`` (the append_event
@@ -63,7 +73,12 @@ def _vu_phase(task: dict[str, Any], detail: str, *, vu_startup: bool) -> None:
     if not vu_startup:
         return
     try:
-        append_event(task, build_phase(Phase.WORKING, detail=detail))
+        fields: dict[str, Any] = {'detail': detail}
+        if detail_key:
+            fields['detailKey'] = detail_key
+        if detail_args:
+            fields['detailArgs'] = detail_args
+        append_event(task, build_phase(Phase.WORKING, **fields))
     except Exception as _e:
         _tid = (task.get('id') or '')[:8]
         logger.debug('[Task %s] vu startup phase emit failed: %s', _tid, _e)
@@ -272,8 +287,14 @@ def make_vu_phase(task: dict[str, Any]):
     """
     _vu_startup = bool(task.get('_vu_subtask'))
 
-    def _bound(detail):
-        _vu_phase(task, detail, vu_startup=_vu_startup)
+    def _bound(detail, *, detail_key=None, detail_args=None):
+        _vu_phase(
+            task,
+            detail,
+            vu_startup=_vu_startup,
+            detail_key=detail_key,
+            detail_args=detail_args,
+        )
 
     return _bound
 

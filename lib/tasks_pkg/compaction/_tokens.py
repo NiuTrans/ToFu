@@ -16,6 +16,7 @@ from lib.tasks_pkg.compaction._constants import (
     _COMPACTION_RESERVE,
     _cooldown_lock,
     _DEFAULT_CONTEXT_LIMIT,
+    _DEFAULT_WORKING_SET_TOKENS,
     _IMAGE_TOKENS_DEFAULT,
     _OUTPUT_RESERVE,
     _SUMMARY_COOLDOWN,
@@ -26,6 +27,8 @@ from lib.tasks_pkg.compaction._constants import (
 )
 
 logger = get_logger(__name__)
+
+_WORKING_SET_AUDITED: set[int] = set()
 
 
 def _estimate_msg_tokens(msg: dict) -> int:
@@ -139,8 +142,8 @@ def _count_tokens_authoritative(messages: list, task: dict | None = None) -> tup
     #   force-compact fired at ~22% real window usage). Cap the floor at
     #   heuristic_floor_max_ratio() × the estimate-tier count.
     heuristic_tokens = _estimate_total_tokens(messages)
-    if heuristic_tokens > auth_tokens:
-        if _is_estimate and auth_tokens > 0:
+    if _is_estimate and heuristic_tokens > auth_tokens:
+        if auth_tokens > 0:
             _ratio = heuristic_floor_max_ratio()
             _floor_cap = int(auth_tokens * _ratio)
             if heuristic_tokens > _floor_cap:
@@ -289,61 +292,16 @@ def _human_size(byte_count: int) -> str:
 
 
 def _get_static_context_limit(task: dict | None = None) -> int:
-    """Static (preset) context window for the model in *task*.
-
-    Pure name-based heuristic — does NOT consult auto-learned values.
-    Use :func:`_get_context_limit` for the operational lookup that
-    layers learned overrides on top.
-    """
-    if task:
-        model_raw = (task.get('config', {}) or {}).get('model', '') or ''
-        model = model_raw.lower()
-
-        try:
-            # 1M window: Opus & Sonnet ≥ 4.6 (including the 5-series bare
-            # aliases), Fable ≥ 5. ONE parser (claude_line_version) — a
-            # bare-major alias like claude-sonnet-5 can no longer slip
-            # through while dated snapshots (claude-opus-4-20250514)
-            # correctly stay at 200K.
-            from lib.model_info import claude_line_version
-            for line, floor in (('opus', (4, 6)), ('sonnet', (4, 6)),
-                                ('fable', (5, 0))):
-                v = claude_line_version(model_raw, line)
-                if v is not None and v >= floor:
-                    return 1_000_000
-        except Exception as e:
-            logger.debug('[Compact] claude_line_version probe failed: %s', e)
-
-        limits = {
-            'claude-opus-4.6':   1_000_000,
-            'claude-sonnet-4.6': 1_000_000,
-            'claude':   200_000,
-            'gpt-4':    128_000,
-            'gpt-4o':   128_000,
-            'o1':       200_000,
-            'o3':       200_000,
-            'o4':       200_000,
-            'gemini':   1_000_000,
-            'qwen':     128_000,
-            # DeepSeek V4 family (pro + flash) is a true 1M-context model.
-            # These MUST precede the generic 'deepseek' key below: lookup is
-            # substring-match in dict-insertion order, so the specific V4
-            # entries win while older deepseek-chat/v3.x/reasoner still fall
-            # through to the 128k default.
-            'deepseek-v4-pro':   1_000_000,
-            'deepseek-v4-flash': 1_000_000,
-            'deepseek': 128_000,
-            'doubao':   128_000,
-            # kimi-k3: true 1M window (owner-confirmed 2026-07-26; also
-            # recorded in model_info/_max_output.py + pricing/_tables.py).
-            # NOTE: only the k3 generation — k2.x ships 256k and must NOT
-            # get a blanket 'kimi' key here.
-            'kimi-k3':  1_000_000,
-            'minimax':  1_000_000,
-        }
-        for key, limit in limits.items():
-            if key in model:
-                return limit
+    """Operational static window; unknown knowledge gets a safety fallback."""
+    model = ((task or {}).get('config', {}) or {}).get('model', '') or ''
+    try:
+        from lib.model_info import context_profile
+        window = context_profile(model).get('window')
+        if window is not None:
+            return int(window)
+    except Exception as e:
+        logger.debug('[Compact] model context profile failed: %s', e)
+    # Runtime safety only: this value is never exposed as model knowledge.
     return _DEFAULT_CONTEXT_LIMIT
 
 
@@ -391,16 +349,16 @@ def _get_context_limit(task: dict | None = None) -> int:
     return static_limit
 
 
-def resolve_model_context_limit(model: str, provider_id: str = '') -> int:
-    """Effective context window for a bare ``(model, provider_id)`` pair.
+def resolve_model_context_profile(model: str, provider_id: str = '') -> dict:
+    """Knowledge profile composed with provider-scoped learned evidence."""
+    from lib.model_info import resolved_context_profile
+    return resolved_context_profile(model or '', provider_id or '')
 
-    Frontend-facing sibling of :func:`_get_context_limit` that doesn't need a
-    full task dict — used to build the per-model limit map served in
-    ``/api/v1/server-config`` so the Context Health Bar reads exact numbers
-    (static preset + any auto-learned override) instead of re-deriving them.
-    """
-    synthetic = {'config': {'model': model or ''}, 'provider_id': provider_id or ''}
-    return _get_context_limit(synthetic)
+
+def resolve_model_context_limit(model: str, provider_id: str = '') -> int:
+    """Backward-compatible operational integer context limit."""
+    profile = resolve_model_context_profile(model, provider_id)
+    return int(profile['window']) if profile['window'] is not None else _DEFAULT_CONTEXT_LIMIT
 
 
 def build_context_policy() -> dict:
@@ -424,22 +382,86 @@ def build_context_policy() -> dict:
 
     Returns:
         Dict with ``default_limit``, ``output_reserve``, ``compaction_reserve``,
-        ``summary_trigger_ratio`` and ``min_usable_ratio``.
+        ``summary_trigger_ratio``, ``working_set_tokens`` and
+        ``min_usable_ratio``.
     """
     return {
-        'default_limit': _DEFAULT_CONTEXT_LIMIT,
+        'runtime_fallback_limit': _DEFAULT_CONTEXT_LIMIT,
+        'default_limit': None,  # compatibility key; unknown is not model knowledge
         'output_reserve': _OUTPUT_RESERVE,
         'compaction_reserve': _COMPACTION_RESERVE,
         'summary_trigger_ratio': _SUMMARY_TRIGGER_RATIO,
+        'working_set_tokens': _working_set_token_limit(None),
         'min_usable_ratio': _MIN_USABLE_RATIO,
     }
+
+
+def _working_set_token_limit(task: dict | None = None) -> int:
+    """Resolve the economic prompt working-set ceiling.
+
+    A per-request ``config.compaction.workingSetTokens`` override wins over
+    ``TOFU_WORKING_CONTEXT_TOKENS``.  Zero disables the economic ceiling.
+    Invalid values fail open to the default; positive values are clamped so a
+    typo cannot cause constant tiny-context compactions or remove all bounds.
+    """
+    import os
+
+    comp_cfg = ((task or {}).get('config', {}) or {}).get('compaction')
+    raw = comp_cfg.get('workingSetTokens') if isinstance(comp_cfg, dict) else None
+    if raw is None:
+        raw = os.environ.get('TOFU_WORKING_CONTEXT_TOKENS',
+                             str(_DEFAULT_WORKING_SET_TOKENS))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as e:
+        logger.debug('[Compact] invalid workingSetTokens=%r (%s) — using %d',
+                     raw, e, _DEFAULT_WORKING_SET_TOKENS)
+        value = _DEFAULT_WORKING_SET_TOKENS
+    if value <= 0:
+        return 0
+    return max(32_000, min(2_000_000, value))
+
+
+def _compaction_trigger_threshold(
+    task: dict | None = None,
+    *,
+    context_limit: int | None = None,
+) -> tuple[int, int, int]:
+    """Return ``(effective, window_safety, economic_working_set)`` thresholds."""
+    if context_limit is None:
+        context_limit = _get_context_limit(task)
+    usable = _usable_context(context_limit)
+    window_threshold = int(usable * _SUMMARY_TRIGGER_RATIO)
+    working_set = _working_set_token_limit(task)
+    effective = (min(window_threshold, working_set)
+                 if working_set > 0 else window_threshold)
+    return effective, window_threshold, working_set
+
+
+def _audit_working_set_once(working_set: int) -> None:
+    """Record each effective working-set tuning value once per process."""
+    if working_set <= 0 or working_set in _WORKING_SET_AUDITED:
+        return
+    _WORKING_SET_AUDITED.add(working_set)
+    try:
+        from lib.log import audit_log
+        audit_log(
+            'config_change',
+            change='economic_context_working_set',
+            working_set_tokens=working_set,
+            previous='context-window-only',
+            reason='bound repeated agent-loop input cost and latency',
+            approved_by='user',
+        )
+    except Exception as e:
+        logger.debug('[Compact] working-set config audit skipped: %s', e)
 
 
 def _should_force_compact(messages: list, task: dict | None = None) -> bool:
     """Decide whether force-compact should fire.
 
-    Returns True when estimated token count exceeds
-    ``_SUMMARY_TRIGGER_RATIO`` of usable context.
+    Returns True when estimated token count exceeds the lower of the model's
+    context-safety threshold and the economic working-set ceiling.
     """
     conv_id = task.get('convId', '') if task else ''
     log_id = conv_id[:8] if conv_id else '?'
@@ -454,21 +476,43 @@ def _should_force_compact(messages: list, task: dict | None = None) -> bool:
 
     context_limit = _get_context_limit(task)
     usable = _usable_context(context_limit)
-    trigger_threshold = int(usable * _SUMMARY_TRIGGER_RATIO)
+    trigger_threshold, window_threshold, working_set = (
+        _compaction_trigger_threshold(task, context_limit=context_limit))
+    if working_set > 0 and trigger_threshold < window_threshold:
+        _audit_working_set_once(working_set)
 
     total_tokens, method = _count_tokens_authoritative(messages, task)
 
+    # A proactive candidate that was recently declined as low-yield or
+    # cache-negative records a message-token retry floor. Do not reconsider
+    # the identical hot tail every round; wait for meaningful prompt growth.
+    # Window safety always wins, so a request approaching the actual context
+    # ceiling bypasses this economic hysteresis immediately.
+    retry_after = int((task or {}).get('_autoCompactRetryAfterTokens') or 0)
+    if retry_after > 0 and total_tokens < window_threshold:
+        message_tokens = _estimate_total_tokens(messages)
+        if message_tokens < retry_after:
+            logger.debug(
+                '[Compact] conv=%s proactive retry deferred: messages=%d '
+                '< retry_after=%d (authoritative=%d, window=%d)',
+                log_id, message_tokens, retry_after, total_tokens,
+                window_threshold)
+            return False
+        if task is not None:
+            task.pop('_autoCompactRetryAfterTokens', None)
+
     logger.debug('[Compact] conv=%s  tokens=%d (via %s)  threshold=%d  '
-                 'limit=%d  usable=%d',
+                 'window_threshold=%d working_set=%d limit=%d usable=%d',
                  log_id, total_tokens, method, trigger_threshold,
-                 context_limit, usable)
+                 window_threshold, working_set, context_limit, usable)
 
     if total_tokens > trigger_threshold:
         logger.info('[Compact] Force-compact TRIGGERED  conv=%s  '
                     'tokens=%d (via %s) > threshold=%d  '
-                    '(limit=%d, usable=%d, ratio=%.0f%%)',
+                    '(limit=%d, usable=%d, window_threshold=%d, '
+                    'working_set=%d, ratio=%.0f%%)',
                     log_id, total_tokens, method, trigger_threshold,
-                    context_limit, usable,
+                    context_limit, usable, window_threshold, working_set,
                     _SUMMARY_TRIGGER_RATIO * 100)
         return True
 

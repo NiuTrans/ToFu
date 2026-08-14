@@ -39,12 +39,14 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-_BRAIN_SRC = os.path.join(ROOT, 'static', 'js', 'project-brain.js')
-_I18N_SRC = os.path.join(ROOT, 'static', 'js', 'i18n.js')
+_BRAIN_SRC = runtime_section_path('project-brain.js')
+_LOCALE_DIR = os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales')
 _CSS_SRC = os.path.join(ROOT, 'static', 'styles.css')
 
 
@@ -499,7 +501,7 @@ def test_NC_FE_goto_focus_delegation_is_load_bearing():
     lands on the tab top and hunts, the exact gap the focus channel closes)."""
     with open(_BRAIN_SRC, encoding='utf-8') as f:
         original = f.read()
-    anchor = '        window.ProjectBrainAttention.focusItem(taskId);'
+    anchor = '        runtimeScope.ProjectBrainAttention.focusItem(taskId);'
     assert anchor in original, 'focus-delegation anchor not found (source changed?)'
     patched = original.replace(
         anchor, '        // NC (focus hand-off stripped)', 1)
@@ -538,8 +540,9 @@ def test_no_window_prompt_anywhere_in_panel():
 def test_i18n_keys_present_zh_and_en():
     """Every new UI string must exist in BOTH languages (the '自动重试于 ~850m'
     mixed-locale complaint)."""
-    with open(_I18N_SRC, encoding='utf-8') as f:
-        src = f.read()
+    import json
+    locales = [json.load(open(os.path.join(_LOCALE_DIR, name), encoding='utf-8'))
+               for name in ('zh.json', 'en.json')]
     for key in (
         'projectBrain.kind.answered', 'projectBrain.blockedCount',
         'projectBrain.laneAwaiting', 'projectBrain.awaitingAnswerMeta',
@@ -549,9 +552,8 @@ def test_i18n_keys_present_zh_and_en():
         'projectBrain.yourAnswer', 'projectBrain.blockNoteSubmit',
         'projectBrain.blockNoteCancel',
     ):
-        m = re.search(re.escape("'" + key + "'") +
-                      r":\s*\{\s*zh:\s*'[^']+',\s*en:\s*'[^']+'\s*\}", src)
-        assert m, f'i18n key missing or not bilingual: {key}'
+        assert all(key in locale and locale[key] for locale in locales), (
+            f'i18n key missing or empty in a locale: {key}')
 
 
 def test_css_unified_primitives_present():

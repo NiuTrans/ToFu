@@ -17,7 +17,7 @@ can render the vault without a value ever crossing the wire.
 
 from __future__ import annotations
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.api_response import api_bad_request, api_error, api_ok
 from lib.log import audit_log, get_logger

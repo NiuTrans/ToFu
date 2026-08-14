@@ -273,6 +273,45 @@ class TestStrictBranchPassesPreferModel:
         assert spy.kw.get('prefer_model') is None
 
 
+@pytest.mark.unit
+def test_dispatch_chat_excludes_stream_only_model_on_first_pick(monkeypatch):
+    """A Responses subscription slot must never receive stream=false.
+
+    The permanent stream-only exclusion used to be assembled before attempt
+    one but not passed to ``pick_and_reserve`` until a prior failure existed,
+    causing a deterministic upstream ``Stream must be set to true`` 400.
+    """
+    from lib.llm_dispatch import api
+
+    slot = _make_slot(model='gpt-5.4', key='codex')
+    slot.stream_only = True
+
+    class _StreamOnlySpy:
+        slots = [slot]
+
+        def __init__(self):
+            self.seen = []
+
+        def pick_and_reserve(self, **kw):
+            excluded = set(kw.get('exclude_models') or set())
+            self.seen.append(excluded)
+            return None if slot.model in excluded else slot
+
+        def has_capable_slots(self, *args, **kw):
+            return slot.model not in set(kw.get('exclude_models') or set())
+
+        def summarize_slots(self, *args, **kw):
+            return 'stream-only-spy'
+
+    spy = _StreamOnlySpy()
+    monkeypatch.setattr(api, 'get_dispatcher', lambda: spy)
+    with pytest.raises(Exception):
+        api.dispatch_chat(
+            [{'role': 'user', 'content': 'hi'}],
+            prefer_model='gpt-5.4', strict_model=True, max_retries=1)
+    assert spy.seen == [{'gpt-5.4'}]
+
+
 # ── D: a durable-dead pool must EXIT the cooldown cycle, not spin ──────
 
 @pytest.mark.unit

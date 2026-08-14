@@ -16,7 +16,11 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from lib.config_dir import config_path
-from lib.database import DOMAIN_SYSTEM, get_thread_db
+from lib.database import (
+    DOMAIN_SYSTEM,
+    get_thread_db,
+    write_transaction,
+)
 from lib.ids import short_id
 from lib.json_store import read_json
 from lib.log import audit_log, get_logger
@@ -135,6 +139,8 @@ def record_payment(
     """Insert a payment row. Idempotent on (provider, provider_id):
     re-call with the same id returns the existing record.
     """
+    if not provider_id:
+        raise ValueError('provider_id is required for an idempotent payment')
     existing = find_by_provider_id(provider, provider_id)
     if existing is not None:
         return existing
@@ -143,14 +149,22 @@ def record_payment(
     credit_micro = minor_to_micro(amount_minor)
     raw_str = json.dumps(raw or {}, ensure_ascii=False, sort_keys=True)
     db = get_thread_db(DOMAIN_SYSTEM)
-    db.execute(
-        'INSERT INTO billing_payments '
-        '  (id, user_id, provider, provider_id, amount_minor, currency, '
-        '   credit_micro, status, created_at, settled_at, raw) '
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)',
-        (pid, user_id, provider, provider_id, amount_minor, currency,
-         credit_micro, status, now, raw_str))
-    db.commit()
+    try:
+        with write_transaction(db, label='record provider payment'):
+            db.execute(
+                'INSERT INTO billing_payments '
+                '  (id, user_id, provider, provider_id, amount_minor, currency, '
+                '   credit_micro, status, created_at, settled_at, raw) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)',
+                (pid, user_id, provider, provider_id, amount_minor, currency,
+                 credit_micro, status, now, raw_str))
+    except Exception:
+        # UNIQUE(provider, provider_id) is the cross-process idempotency
+        # verdict. A concurrent winner is success, not an API error.
+        existing = find_by_provider_id(provider, provider_id)
+        if existing is not None:
+            return existing
+        raise
     audit_log('payment_recorded', payment_id=pid, user_id=user_id,
               provider=provider, provider_id=provider_id,
               amount_minor=amount_minor, status=status)
@@ -168,61 +182,53 @@ def mark_payment_settled(payment_id: str, *, raw: Optional[dict] = None) -> None
     this AFTER the provider confirms successful settlement.
     """
     db = get_thread_db(DOMAIN_SYSTEM)
-    row = db.execute(
-        'SELECT id, user_id, provider, provider_id, amount_minor, '
-        '       currency, credit_micro, status '
-        '  FROM billing_payments WHERE id = ?',
-        (payment_id,)).fetchone()
-    if row is None:
-        logger.warning('[Payments] settle: unknown payment %s', payment_id)
-        return
-    if hasattr(row, 'keys'):
-        user_id = row['user_id']
-        provider = row['provider']
-        provider_id = row['provider_id'] or ''
-        credit_micro = int(row['credit_micro'])
-        status = row['status']
-    else:
-        user_id = row[1]
-        provider = row[2]
-        provider_id = row[3] or ''
-        credit_micro = int(row[6])
-        status = row[7]
-    if status == 'settled':
-        return  # already done; idempotent
     now = int(time.time())
-    # ★ Ordering fix (lost-top-up window): deposit BEFORE flipping status.
-    #   The old order (flip status=settled + commit, THEN deposit in a separate
-    #   txn) had a crash window — a crash between the two lost the credit
-    #   FOREVER, because on webhook redelivery the `status == 'settled'`
-    #   short-circuit above returns BEFORE re-attempting the deposit. The
-    #   deposit is idempotent on (user_id, kind=topup, ref_type=payment,
-    #   ref_id), so doing it FIRST is safe to repeat, and the status flip only
-    #   happens once the credit is durably in the wallet. New crash windows:
-    #     • crash after deposit, before flip → redelivery: status≠settled →
-    #       deposit repeats (idempotent no-op) → flip. Credit preserved.
-    #     • crash before deposit → redelivery: status≠settled → deposit + flip.
-    #   Either way the top-up is never lost.
-    if credit_micro > 0:
-        from lib.billing import deposit
-        deposit(user_id, credit_micro, kind='topup',
-                ref_type='payment', ref_id=provider_id or payment_id,
-                note=f'{provider} payment settled')
-    raw_update = ''
-    if raw is not None:
-        raw_update = json.dumps(raw, ensure_ascii=False, sort_keys=True)
-        db.execute(
-            'UPDATE billing_payments '
-            '   SET status = ?, settled_at = ?, raw = ? '
-            ' WHERE id = ?',
-            ('settled', now, raw_update, payment_id))
-    else:
-        db.execute(
-            'UPDATE billing_payments '
-            '   SET status = ?, settled_at = ? '
-            ' WHERE id = ?',
-            ('settled', now, payment_id))
-    db.commit()
+    raw_str = (json.dumps(raw, ensure_ascii=False, sort_keys=True)
+               if raw is not None else None)
+    with write_transaction(db, label='settle provider payment'):
+        row = db.execute(
+            'SELECT id, user_id, provider, provider_id, amount_minor, '
+            '       currency, credit_micro, status '
+            '  FROM billing_payments WHERE id = ?',
+            (payment_id,)).fetchone()
+        if row is None:
+            logger.warning('[Payments] settle: unknown payment %s', payment_id)
+            return
+        if hasattr(row, 'keys'):
+            user_id = row['user_id']
+            provider = row['provider']
+            provider_id = row['provider_id'] or ''
+            credit_micro = int(row['credit_micro'])
+            status = row['status']
+        else:
+            user_id = row[1]
+            provider = row[2]
+            provider_id = row[3] or ''
+            credit_micro = int(row[6])
+            status = row[7]
+        if status == 'settled':
+            return
+
+        # Deposit and payment transition share ONE outer transaction. deposit()
+        # nests via a savepoint on the same thread connection; its ledger
+        # idempotency constraint remains the duplicate-webhook verdict.
+        if credit_micro > 0:
+            from lib.billing import deposit
+            deposit(user_id, credit_micro, kind='topup',
+                    ref_type='payment', ref_id=provider_id or payment_id,
+                    note=f'{provider} payment settled')
+        if raw_str is not None:
+            cursor = db.execute(
+                'UPDATE billing_payments SET status=?, settled_at=?, raw=? '
+                "WHERE id=? AND status<>'settled'",
+                ('settled', now, raw_str, payment_id))
+        else:
+            cursor = db.execute(
+                'UPDATE billing_payments SET status=?, settled_at=? '
+                "WHERE id=? AND status<>'settled'",
+                ('settled', now, payment_id))
+    if getattr(cursor, 'rowcount', 0) == 0:
+        return
     audit_log('payment_settled', payment_id=payment_id,
               user_id=user_id, provider=provider,
               credit_micro=credit_micro)

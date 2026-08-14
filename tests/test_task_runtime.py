@@ -147,6 +147,21 @@ def test_finish_error_dict():
     assert isinstance(env2.get('message'), str) and env2['message']
     _ok('finish(error=incomplete dict) completes it into a full envelope')
 
+    # A domain extension may travel with the envelope, but it must not expand
+    # the closed error-kind vocabulary.
+    task3 = rt.create()
+    rt.finish(task3['id'], error={
+        'kind': 'unregistered_domain_error',
+        'message': 'domain failure',
+        'detail': 'bad state',
+        'outcome': {'format': 'domain.outcome/v1'},
+    })
+    env3 = task3['error']
+    assert env3['kind'] == 'generic'
+    assert env3['message'] == 'domain failure'
+    assert env3['outcome'] == {'format': 'domain.outcome/v1'}
+    _ok('finish(error=dict) validates kind and retains domain extensions')
+
 
 def test_finish_idempotent():
     rt = TaskRuntime('test')
@@ -202,6 +217,8 @@ def test_poll_cursor_replay():
     # First poll from cursor=0
     r0 = rt.poll(task['id'], cursor=0)
     assert r0['ok'] is True
+    assert r0['format'] == 'tofu.task-replay/v1'
+    assert r0['cursor'] == {'requested': 0, 'next': 5, 'reset': False}
     assert len(r0['events']) == 5
     assert r0['next_cursor'] == 5
     assert r0['done'] is False
@@ -217,6 +234,32 @@ def test_poll_cursor_replay():
     assert r1['next_cursor'] == 7
     assert r1['events'][0]['i'] == 5
     _ok('poll(cursor=N) returns only new events since cursor')
+
+
+def test_poll_future_cursor_resets_before_later_events_arrive():
+    rt = TaskRuntime('test')
+    task = rt.create()
+    rt.append_event(task['id'], {'type': 'progress', 'i': 0})
+
+    corrected = rt.poll(task['id'], cursor=99)
+    assert corrected['events'] == []
+    assert corrected['next_cursor'] == 1
+    assert corrected['cursor'] == {
+        'requested': 99, 'next': 1, 'reset': True,
+    }
+
+    # A client that accepts the producer-owned reset must receive an event
+    # appended after the correction instead of remaining stranded at 99.
+    rt.append_event(task['id'], {'type': 'progress', 'i': 1})
+    resumed = rt.poll(task['id'], cursor=corrected['next_cursor'])
+    assert [event['i'] for event in resumed['events']] == [1]
+    assert resumed['cursor'] == {
+        'requested': 1, 'next': 2, 'reset': False,
+    }
+
+    assert rt.poll(task['id'], cursor=-8)['cursor']['requested'] == 0
+    assert rt.poll(task['id'], cursor='bad')['cursor']['requested'] == 0
+    _ok('poll() authoritatively resets a future/untrusted cursor')
 
 
 def test_poll_after_done():
@@ -252,6 +295,8 @@ def test_poll_unknown_task():
     assert r['ok'] is False
     assert r['error'] == 'not_found'
     assert r['done'] is True
+    assert r['format'] == 'tofu.task-replay/v1'
+    assert r['cursor'] == {'requested': 0, 'next': 0, 'reset': False}
     _ok('poll() on unknown task returns ok=False, error=not_found')
 
 
@@ -298,7 +343,10 @@ def test_NEUTER_poll_model_line_loadbearing():
         os.path.abspath(__file__))), 'lib', 'agent_core', 'task_runtime.py')
     with open(real, encoding='utf-8') as f:
         src = f.read()
-    marker = "        if task.get('model'):\n            resp['model'] = task['model']\n"
+    marker = (
+        "        if task.get('model'):\n"
+        "            extras['model'] = task['model']\n"
+    )
     assert marker in src, 'poll model marker not found — test is stale'
     broken = src.replace(marker, '', 1)
     assert broken != src
@@ -351,7 +399,7 @@ def test_spawn_outside_event_loop():
 
 
 def test_spawn_inside_event_loop():
-    """Spawn uses asyncio.to_thread when running inside a loop."""
+    """Spawn uses a tracked executor worker when running inside a loop."""
     rt = TaskRuntime('test')
 
     async def _runner():
@@ -374,7 +422,46 @@ def test_spawn_inside_event_loop():
     task = asyncio.run(_runner())
     assert task['status'] == 'done'
     assert task['result'] == 'loop-result'
-    _ok('spawn() works inside event loop (asyncio.to_thread)')
+    _ok('spawn() works inside event loop (isolated asyncio.to_thread worker)')
+
+
+def test_spawn_does_not_inherit_request_contextvars():
+    """Background workers must not inherit request/app ContextVars.
+
+    Quart stores request-scoped DB connections in ContextVars. Propagating the
+    route context into a long-running worker strands that connection outside
+    request teardown and can retain SQLite's writer lane forever.
+    """
+    import contextvars
+
+    rt = TaskRuntime('context-isolation')
+    request_marker = contextvars.ContextVar(
+        'task_runtime_request_marker', default='no-request')
+
+    async def _runner():
+        completed = threading.Event()
+        observed = {}
+        task = rt.create()
+        token = request_marker.set('request-context')
+        try:
+            def worker():
+                observed['value'] = request_marker.get()
+                rt.finish(task['id'], result='done')
+                completed.set()
+
+            rt.spawn(task['id'], worker)
+            for _ in range(40):
+                if completed.is_set():
+                    break
+                await asyncio.sleep(0.025)
+        finally:
+            request_marker.reset(token)
+        return observed, completed.is_set()
+
+    observed, completed = asyncio.run(_runner())
+    assert completed, 'isolated executor worker did not complete'
+    assert observed.get('value') == 'no-request', (
+        'spawn propagated request ContextVars into a background worker')
 
 
 def test_spawn_holds_strong_ref_under_gc():
@@ -641,6 +728,7 @@ def main():
         test_abort_unknown_task,
         test_abort_already_finished,
         test_poll_cursor_replay,
+        test_poll_future_cursor_resets_before_later_events_arrive,
         test_poll_after_done,
         test_poll_after_error,
         test_poll_unknown_task,

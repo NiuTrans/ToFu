@@ -120,6 +120,8 @@ def _handle_read_page(fn_args):
     }, timeout=30)
     if error:
         return f'Error reading tab {tab_id}: {error}'
+    if not pkg._result_url_allowed(result):
+        return 'Error: browser read result was denied by domain policy'
     if isinstance(result, dict) and not result.get('error') and not result.get('elements'):
         text, _method = pkg._extract_best_text(result)
         if len((text or '').strip()) >= _AUTO_SPARSE_CHARS:

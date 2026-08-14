@@ -39,6 +39,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -46,7 +47,10 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_SRC = os.path.join(ROOT, 'static', 'js', 'conv_sync_push.js')
+sys.path.insert(0, HERE)
+from _runtime_sections import runtime_section_path  # noqa: E402
+
+JS_SRC = runtime_section_path('conv_sync_push.js')
 
 
 def _node_available() -> bool:

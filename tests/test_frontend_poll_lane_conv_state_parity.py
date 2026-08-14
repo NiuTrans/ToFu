@@ -287,6 +287,7 @@ def _reducer_fns() -> str:
         _extract_fn(src, "_busyIdsFrom"),
         _extract_fn(src, "_attachableIdsFrom"),
         _extract_fn(src, "_vuCarrierIdsFrom"),
+        _extract_fn(src, "_withoutTerminalTaskIds"),
         _extract_fn(src, "applyRunningTaskIdsFrame"),
         _extract_fn(src, "applyConvStateSnapshot"),
         # The REAL busy predicate — the thing that actually lights the dot /

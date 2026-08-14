@@ -19,10 +19,10 @@ Patch-safety: cross-submodule constants / helpers (``_OWNER_ID_FILE``,
 ``lib.database._pg_ownership`` facade.
 """
 
-import json
 import os
 import time
 
+from lib.json_store import read_json, write_json_atomic
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -53,16 +53,12 @@ def _read_instance_stamp(pgdata):
     """Return the parsed `.pg_instance_id` dict, or None if absent/invalid."""
     path = _instance_id_path(pgdata)
     try:
-        with open(path) as f:
-            data = json.load(f)
+        data = read_json(path, strict=True)
         if isinstance(data, dict) and data.get('path'):
             return data
         logger.debug('[DB] instance stamp at %s malformed: %r', path, data)
         return None
-    except FileNotFoundError:
-        logger.debug('[DB] instance stamp %s not present', path)
-        return None
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, RuntimeError) as e:
         logger.debug('[DB] Could not read instance stamp at %s: %s', path, e)
         return None
 
@@ -87,11 +83,8 @@ def _write_instance_stamp(pgdata):
         'restamped': time.time() if existing else None,
     }
     path = _instance_id_path(pgdata)
-    tmp = path + '.tmp'
     try:
-        with open(tmp, 'w') as f:
-            json.dump(payload, f)
-        os.replace(tmp, path)
+        write_json_atomic(path, payload, indent=None)
         logger.info('[DB] Stamped pgdata instance identity: path=%s id=%s',
                     canon, payload['id'])
     except OSError as e:

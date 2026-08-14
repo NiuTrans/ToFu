@@ -14,7 +14,7 @@ logger = get_logger(__name__)
 #  Schema Version Cache — Skip redundant DDL on subsequent startups
 # ═══════════════════════════════════════════════════════════════════════
 
-_SCHEMA_VERSION = 45  # Increment when tables/columns/indexes change
+_SCHEMA_VERSION = 55  # v55: authoritative turn / generation-attempt lifecycle
 
 
 def _column_exists(conn, table, column):
@@ -62,11 +62,15 @@ def _read_meta(conn, key):
 
 def _write_meta(conn, key, value):
     """Write a key/value into the core-owned ``schema_meta`` table."""
-    conn._conn.execute(
+    # Stay on the public wrapper: this participates in the process single-
+    # writer lane and the cross-host authority check. A raw write here made
+    # concurrent startup/schema initialization the final bypass around both
+    # guards and could still surface ``database is locked``.
+    conn.execute(
         "INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?, ?)",
         (key, str(value)),
     )
-    conn._conn.commit()
+    conn.commit()
 
 
 def _get_schema_version(conn):

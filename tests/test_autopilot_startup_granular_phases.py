@@ -1,189 +1,211 @@
 #!/usr/bin/env python3
-"""Backend regression: Autopilot startup is DETAILED, not a vague placeholder.
+"""Regression coverage for localized orchestration startup phases.
 
-WHY
----
-Event-dump diagnosis (debug/autopilot_warmup_window_probe.py + a full parent
-event trace) showed the VU bubble sits SILENT for up to ~26s between
-``autopilot_vu_start`` and the first ``llm_thinking`` on a large conversation.
-That whole window is ``run_task``'s pre-LLM prep (tool assembly → tool-history
-rebuild → system-context injection incl. FUSE memory/project prefetch), which
-emitted NO phase. The two coarse ``autopilot.py`` setup phases flash at ~0s and
-then the bubble is static through the real slow window.
-
-The fix instruments that prep with granular ``working`` phases at the REAL
-sub-step boundaries, GATED on ``_vu_subtask`` — so the ordinary worker/endpoint
-startup path stays byte-identical (no new events for it), while the VU sub-task
-forwards each phase into the synthetic-user bubble.
-
-GUARD-DRIFT REWRITE (2026-07-27, "guard-expiry family" case #9)
----------------------------------------------------------------
-The original version of this file asserted against ``orchestrator/_run.py``
-source text with regexes spanning the ``_vu_phase`` closure definition. The
-pt_03f4cdf1 slice chain then SPLIT run_task across a sub-package, and the four
-phases now live in THREE different modules:
-
-    ``_run.py``            — '装配工具、准备工作区…'    (the closure adapter too)
-    ``_tool_history.py``   — '重建工具调用历史…'
-    ``_context_inject.py`` — '注入系统上下文…' + '上下文就绪，正在发送请求…'
-
-The protection was fully intact; only the guard's anchors had rotted, so it
-produced pure FALSE RED — and per charter, a false red is indistinguishable
-from noise and gets ignored, which is how a dead guard becomes worse than no
-guard.
-
-This rewrite follows the charter discipline: assert the RESULT (the phases are
-emitted, in order, gated, as the renderable ``working`` type) by DRIVING the
-real emitter, instead of pattern-matching one file's source. It therefore
-survives the next refactor that moves these call sites again.
+Large conversations can spend many seconds in pre-LLM preparation.  The
+orchestrator therefore emits one canonical ``working`` phase at each real
+boundary: configuration, tools, history, and context.  The same events serve
+ordinary tasks and are transformed into the synthetic-user bubble for VU
+subtasks.
 """
 
 from __future__ import annotations
 
-import os
-import sys
+import inspect
+import json
+from pathlib import Path
+import time
 
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.agent_core.events import Phase
+
+
 pytestmark = pytest.mark.unit
 
 
-# The user-visible startup narration, in the order the prep executes it.
-# This IS the contract — it is what the VU bubble shows instead of a frozen
-# "Autopilot 启动中…" pulse.
-_STARTUP_DETAILS = [
-    'Autopilot：装配工具、准备工作区…',
-    'Autopilot：重建工具调用历史…',
-    'Autopilot：注入系统上下文（项目结构、记忆检索）…',
-    'Autopilot：上下文就绪，正在发送请求…',
+_STARTUP_PHASES = [
+    ('config', 'Resolving model and workspace settings…',
+     'stream.phase.startupConfig'),
+    ('tools', 'Preparing tools and workspace…',
+     'stream.phase.startupTools'),
+    ('history', 'Restoring conversation and tool history…',
+     'stream.phase.startupHistory'),
+    ('context', 'Loading project context and relevant memory…',
+     'stream.phase.startupContext'),
 ]
 
 
 @pytest.fixture
 def emitted(monkeypatch):
-    """Capture events at the real ``append_event`` seam of every emitter module."""
+    """Capture events at the typed phase seam used by the real helper."""
+    import lib.tasks_pkg.orchestrator._run as run
+
     frames = []
 
-    def _cap(task, event):
-        frames.append((task.get('id'), event))
+    def _capture(task, phase, **fields):
+        frames.append((task.get('id'), phase, fields))
 
-    for mod in ('lib.tasks_pkg.orchestrator._vu_startup',
-                'lib.tasks_pkg.orchestrator._tool_history',
-                'lib.tasks_pkg.orchestrator._context_inject'):
-        __import__(mod)
-        monkeypatch.setattr(sys.modules[mod], 'append_event', _cap, raising=True)
+    monkeypatch.setattr(run, 'emit_phase', _capture)
     return frames
 
 
-def _details(frames):
-    return [ (e.get('detail') or '') for _tid, e in frames ]
+def test_vu_subtask_startup_emits_localized_working_phase(emitted):
+    from lib.tasks_pkg.orchestrator._run import _emit_startup_phase
+
+    _emit_startup_phase({'id': 'vu-task', '_vu_subtask': True}, 'config')
+
+    assert emitted == [
+        ('vu-task', Phase.WORKING, {
+            'detail': _STARTUP_PHASES[0][1],
+            'detailKey': _STARTUP_PHASES[0][2],
+        }),
+    ]
 
 
-# ─────────────────────────────────────────────────────────────────────
-#  1. The gate: VU sub-tasks narrate, ordinary worker turns stay silent
-# ─────────────────────────────────────────────────────────────────────
-def test_vu_subtask_startup_emits_a_working_phase(emitted):
-    """A VU sub-task's startup step must reach the bubble as a `working`
-    phase whose detail is the human-readable sub-step."""
-    from lib.tasks_pkg.orchestrator._vu_startup import _vu_phase
+def test_ordinary_worker_gets_the_same_startup_feedback(emitted):
+    from lib.tasks_pkg.orchestrator._run import _emit_startup_phase
 
-    _vu_phase({'id': 'vu-task'}, _STARTUP_DETAILS[0], vu_startup=True)
+    for stage, _detail, _key in _STARTUP_PHASES:
+        _emit_startup_phase({'id': 'worker-task'}, stage)
 
-    assert len(emitted) == 1, 'the VU startup step emitted nothing'
-    _tid, ev = emitted[0]
-    assert ev.get('phase') == 'working', (
-        "must be the `working` phase the frontend renders verbatim — a new "
-        "phase name would be dropped by updateStreamingUI")
-    assert ev.get('detail') == _STARTUP_DETAILS[0]
+    assert [fields['detail'] for _tid, _phase, fields in emitted] == [
+        detail for _stage, detail, _key in _STARTUP_PHASES
+    ]
+    assert [fields['detailKey'] for _tid, _phase, fields in emitted] == [
+        key for _stage, _detail, key in _STARTUP_PHASES
+    ]
+    assert all(phase == Phase.WORKING for _tid, phase, _fields in emitted)
 
 
-def test_ordinary_worker_turn_emits_no_startup_phase(emitted):
-    """NC-equivalent, asserted as behaviour: with the gate off, an ordinary
-    worker/endpoint turn must stay byte-identical (zero new events).
+def test_startup_phase_emit_never_raises_into_the_run(monkeypatch):
+    import lib.tasks_pkg.orchestrator._run as run
 
-    Removing the ``vu_startup`` guard makes this test red — that is the
-    neuter, expressed as an outcome rather than a source pattern."""
-    from lib.tasks_pkg.orchestrator._vu_startup import _vu_phase
+    def _boom(*args, **kwargs):
+        raise RuntimeError('push channel down')
 
-    for d in _STARTUP_DETAILS:
-        _vu_phase({'id': 'worker-task'}, d, vu_startup=False)
-
-    assert emitted == [], (
-        'an ordinary worker turn emitted startup phases — the _vu_subtask '
-        'gate is what keeps the non-autopilot path byte-identical')
+    monkeypatch.setattr(run, 'emit_phase', _boom)
+    run._emit_startup_phase({'id': 'worker-task'}, 'tools')
 
 
-def test_startup_phase_emit_never_raises_into_the_run():
-    """A telemetry failure must never break the task it is narrating."""
-    import lib.tasks_pkg.orchestrator._vu_startup as vs
+def test_all_four_startup_steps_are_wired_in_execution_order():
+    import lib.tasks_pkg.orchestrator._run as run
 
-    orig = vs.append_event
-    try:
-        def _boom(task, event):
-            raise RuntimeError('push channel down')
-        vs.append_event = _boom
-        vs._vu_phase({'id': 'vu-task'}, 'x', vu_startup=True)  # must not raise
-    finally:
-        vs.append_event = orig
+    src = inspect.getsource(run.run_task)
+    positions = [
+        src.index(f"_emit_startup_phase(task, '{stage}')")
+        for stage, _detail, _key in _STARTUP_PHASES
+    ]
+    assert positions == sorted(positions)
+    assert len(set(positions)) == len(_STARTUP_PHASES)
 
 
-# ─────────────────────────────────────────────────────────────────────
-#  2. Coverage: all four sub-steps exist and run in order
-# ─────────────────────────────────────────────────────────────────────
-def test_all_four_startup_steps_are_wired_across_the_prep_modules(emitted):
-    """Every prep sub-step must narrate — driven through the REAL seams.
+def test_context_phase_precedes_the_slow_context_injection():
+    import lib.tasks_pkg.orchestrator._run as run
 
-    Anchored on the emitters (``_tool_history.restore_tool_history`` and
-    ``_context_inject.inject_context_and_emit_chips`` both accept the
-    ``vu_phase`` adapter run_task hands them), so moving a call site between
-    modules keeps this green while DELETING one turns it red.
-    """
-    from lib.tasks_pkg.orchestrator._vu_startup import _vu_phase as raw_phase
-    from lib.tasks_pkg.orchestrator._tool_history import restore_tool_history
-
-    task = {'id': 'vu-task', 'convId': 'c1', '_vu_subtask': True}
-
-    def vu_phase(detail):
-        raw_phase(task, detail, vu_startup=True)
-
-    # Step 1 — tool assembly (emitted directly by run_task's prep).
-    vu_phase(_STARTUP_DETAILS[0])
-
-    # Step 2 — tool-history rebuild, through the real extracted function.
-    import lib.tasks_pkg.orchestrator._tool_history as th
-    th.rebuild_messages_with_history = lambda c, m: (m, {'used_store': False})
-    restore_tool_history(task=task, cfg={'keepToolHistory': True},
-                         messages=[], tid='vu-task', vu_phase=vu_phase)
-
-    # Steps 3 & 4 — context injection brackets its slow work with two phases.
-    import lib.tasks_pkg.orchestrator._context_inject as ci
-    _seen = []
-    for d in (_STARTUP_DETAILS[2], _STARTUP_DETAILS[3]):
-        _seen.append(d)
-        vu_phase(d)
-
-    got = _details(emitted)
-    assert got == _STARTUP_DETAILS, (
-        'the startup narration is incomplete or out of order.\n'
-        f'  expected: {_STARTUP_DETAILS}\n  got:      {got}')
+    src = inspect.getsource(run.run_task)
+    phase_at = src.index("_emit_startup_phase(task, 'context')")
+    inject_at = src.index('inject_context_and_emit_chips(')
+    assert phase_at < inject_at
 
 
-def test_context_inject_brackets_its_work_with_both_phases(emitted):
-    """The slowest prep step (system-context injection + FUSE prefetch) must
-    announce BOTH its entry and its completion.
+def test_vu_context_injection_reports_real_boundaries(monkeypatch):
+    """The two potentially slow context boundaries must reach the VU stream,
+    in order, rather than leaving it on the previous generic phase."""
+    import lib.tasks_pkg.orchestrator._context_inject as context_inject
 
-    This is the ~26s window from the original diagnosis: without the closing
-    '上下文就绪' phase the bubble freezes on '注入系统上下文' with no signal
-    that the request was actually sent.
-    """
-    import inspect
-    from lib.tasks_pkg.orchestrator import _context_inject as ci
+    trace = []
 
-    src = inspect.getsource(ci.inject_context_and_emit_chips)
-    assert _STARTUP_DETAILS[2] in src and _STARTUP_DETAILS[3] in src, (
-        'context injection must emit BOTH the entry and the ready phase — '
-        'it is the longest silent window in VU startup')
+    def _fake_inject(*args, **kwargs):
+        trace.append('inject')
+
+    class _Prefetch:
+        def shutdown(self, wait=False):
+            trace.append(('shutdown', wait))
+
+    def _capture_phase(detail, **fields):
+        trace.append(('phase', detail, fields))
+
+    monkeypatch.setattr(context_inject, '_inject_system_contexts', _fake_inject)
+    task = {'id': 'vu-context', 'convId': 'c1'}
+    context_inject.inject_context_and_emit_chips(
+        task=task,
+        messages=[],
+        cfg={},
+        project_path=None,
+        project_enabled=False,
+        memory_enabled=False,
+        search_enabled=False,
+        swarm_enabled=False,
+        has_real_tools=False,
+        model='test-model',
+        tool_list=[],
+        prefetch_executor=_Prefetch(),
+        tid='vu-conte',
+        t_run_start=time.time(),
+        vu_phase=_capture_phase,
+    )
+
+    phases = [item for item in trace if isinstance(item, tuple)
+              and item[0] == 'phase']
+    assert [item[2]['detail_key'] for item in phases] == [
+        'stream.phase.vuInjectContext',
+        'stream.phase.vuContextReady',
+    ]
+    assert trace.index(phases[0]) < trace.index('inject') < trace.index(phases[1])
+
+
+def test_run_task_wires_vu_context_phase_adapter():
+    import lib.tasks_pkg.orchestrator._run as run
+
+    src = inspect.getsource(run.run_task)
+    assert '_vu_phase = make_vu_phase(task)' in src
+    assert 'vu_phase=_vu_phase' in src
+
+
+def test_vu_round_zero_names_reply_composition(monkeypatch):
+    import lib.tasks_pkg.orchestrator._finalize as finalize
+
+    emitted = []
+    monkeypatch.setattr(finalize, 'append_event',
+                        lambda task, event: emitted.append(event))
+    finalize._emit_tool_round_phase(
+        {'id': 'vu-round', '_vu_subtask': True}, {}, 0)
+
+    assert emitted == [{
+        'type': 'phase',
+        'phase': 'llm_thinking',
+        'detail': 'Autopilot is composing your reply…',
+        'detailKey': 'autopilot.composing',
+        'roundNum': 1,
+    }]
+
+
+def test_vu_phase_keys_exist_in_both_locales():
+    root = Path(__file__).resolve().parents[1]
+    keys = {
+        'stream.phase.vuVerifyAssistant',
+        'stream.phase.vuAssembleContext',
+        'stream.phase.vuInjectContext',
+        'stream.phase.vuContextReady',
+        # Reuse the established Autopilot composing key rather than adding a
+        # duplicate stream-phase translation for the same user-visible state.
+        'autopilot.composing',
+    }
+    locale_dir = root / 'frontend' / 'src' / 'i18n' / 'locales'
+    if locale_dir.is_dir():
+        # Vite-native source after the i18n migration.
+        for locale in ('en', 'zh'):
+            path = locale_dir / f'{locale}.json'
+            data = json.loads(path.read_text(encoding='utf-8'))
+            assert keys <= data.keys(), (
+                f'{locale} is missing {sorted(keys - data.keys())}')
+        return
+
+    # Compatibility while the locale split is landing on shared HEAD: the
+    # classic source stores both languages under each key.
+    legacy = (root / 'static' / 'js' / 'i18n.js').read_text(encoding='utf-8')
+    for key in keys:
+        assert f"'{key}'" in legacy, f'legacy i18n is missing {key}'
 
 
 if __name__ == '__main__':

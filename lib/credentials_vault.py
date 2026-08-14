@@ -41,9 +41,8 @@ Public API
 Model-facing seam (the agent must be able to DISCOVER and USE stored
 credentials without ever seeing them):
 
-  exec_env_overlay()   → {ENV_VAR: plaintext} for run_command subprocess
-                         injection — the model references ``$GITHUB_TOKEN``
-                         in a command, the value rides the child env only
+  resolve_exec_env()   → {ENV_VAR: plaintext} for explicitly selected vault
+                         entries on one run_command invocation
   build_vault_index()  → the ``<credential_vault>`` system-prompt block
                          (NAMES + env vars + notes ONLY — never values),
                          spliced by system_context/_inject.py so the model
@@ -73,6 +72,8 @@ __all__ = [
     'bootstrap_from_legacy',
     'normalize_name',
     'env_var_name',
+    'resolve_run_command_env',
+    'resolve_exec_env',
     'exec_env_overlay',
     'build_vault_index',
 ]
@@ -166,10 +167,14 @@ def _decrypt(ct: str) -> str:
     return _load_fernet().decrypt(ct.encode('ascii')).decode('utf-8')
 
 
-def _read_store() -> dict:
-    store = read_json(_STORE_PATH, default=None)
+def _read_store(*, strict: bool = False) -> dict:
+    store = read_json(_STORE_PATH, default=None, strict=strict)
     if isinstance(store, dict) and isinstance(store.get('entries'), dict):
         return store
+    if strict and _STORE_PATH.exists():
+        from lib.json_store import JsonStoreReadError
+        raise JsonStoreReadError(
+            f'existing credential vault has an invalid shape: {_STORE_PATH}')
     return {'version': _STORE_VERSION, 'entries': {}}
 
 
@@ -281,9 +286,8 @@ def list_entries() -> list[dict]:
 # or logs. Two channels, both derived from the one store:
 #   • build_vault_index() — the <credential_vault> system-prompt block:
 #     NAMES + env vars + notes ONLY (byte-stable, sorted, cache-safe).
-#   • exec_env_overlay()  — {ENV_VAR: plaintext} merged into the run_command
-#     child env, so `curl -H "Authorization: Bearer $GITHUB_TOKEN"` works
-#     while the value never crosses the conversation.
+#   • resolve_exec_env()  — resolves ONLY the entry names selected by one
+#     run_command invocation; no general credential is ambient in every child.
 # Skill-scoped entries (``skill.*``) are owned by lib.skills.env and are
 # excluded from both channels (its overlay maps them with exact env names).
 
@@ -298,31 +302,86 @@ def env_var_name(entry: str) -> str:
     return _ENV_VAR_SANITIZE_RE.sub('_', str(entry or '').upper()).strip('_')
 
 
-def exec_env_overlay() -> dict[str, str]:
-    """Plaintext values of every GENERAL (non-skill) entry, keyed by env var.
+def _general_entry_names() -> list[str]:
+    return [m.get('name') or '' for m in list_entries()
+            if (m.get('name') or '')
+            and not (m.get('name') or '').startswith(SKILL_ENTRY_PREFIX)]
 
-    Never raises — env resolution sits on the subprocess hot path, so any
-    vault trouble (corrupt key, unreadable store) degrades to ``{}`` and the
-    vault's own error log carries the cause. The returned dict is a secret
-    bag: callers merge it into a child env and must NEVER log it.
+
+def resolve_run_command_env(names) -> tuple[set[str], dict[str, str]]:
+    """Return ``(strip_vars, selected_overlay)`` from one strict snapshot.
+
+    Existing-store read/parse/shape failures raise, so the caller can reject
+    execution before spawning instead of inheriting a credential by accident.
+    """
+    if names is None:
+        names = []
+    if not isinstance(names, (list, tuple)):
+        raise ValueError('credentials must be an array of vault entry names')
+    if len(names) > 16:
+        raise ValueError('credentials accepts at most 16 entries')
+
+    requested: list[str] = []
+    for raw in names:
+        if not isinstance(raw, str):
+            raise ValueError('each credential must be a vault entry name string')
+        name = normalize_name(raw)
+        if name.startswith(SKILL_ENTRY_PREFIX):
+            raise ValueError(
+                f'{name!r} is skill-scoped and cannot be requested by run_command')
+        if name not in requested:
+            requested.append(name)
+
+    with _lock:
+        entries = _read_store(strict=True)['entries']
+        available = {name for name in entries
+                     if not name.startswith(SKILL_ENTRY_PREFIX)}
+        strip_vars = {env_var_name(name) for name in available
+                      if env_var_name(name)}
+        overlay: dict[str, str] = {}
+        owners: dict[str, str] = {}
+        for name in requested:
+            if name not in available:
+                raise ValueError(f'vault credential {name!r} does not exist')
+            var = env_var_name(name)
+            previous = owners.get(var)
+            if previous is not None:
+                raise ValueError(
+                    f'vault credentials {previous!r} and {name!r} both map to ${var}')
+            row = entries.get(name) or {}
+            ct = row.get('ct')
+            if not ct:
+                raise ValueError(
+                    f'vault credential {name!r} could not be resolved')
+            try:
+                value = _decrypt(ct)
+            except Exception as e:
+                logger.error('[Vault] decrypt failed for name=%s: %s', name, e)
+                raise ValueError(
+                    f'vault credential {name!r} could not be resolved') from None
+            owners[var] = name
+            overlay[var] = value
+
+    if requested:
+        audit_log('credential_vault_use', names=','.join(requested))
+    return strip_vars, overlay
+
+
+def resolve_exec_env(names) -> dict[str, str]:
+    """Resolve selected entries for trusted callers needing only the overlay."""
+    return resolve_run_command_env(names)[1]
+
+
+def exec_env_overlay() -> dict[str, str]:
+    """Plaintext values of every general entry for trusted internal callers.
+
+    ``run_command`` does not use this broad helper: it calls
+    :func:`resolve_exec_env` with the names explicitly requested by that tool
+    invocation. This compatibility API remains for trusted release/export
+    integrations and never raises.
     """
     try:
-        overlay: dict[str, str] = {}
-        for meta in list_entries():
-            name = meta.get('name') or ''
-            if name.startswith(SKILL_ENTRY_PREFIX):
-                continue
-            var = env_var_name(name)
-            if not var:
-                continue
-            if var in overlay:
-                logger.warning('[Vault] env var collision on %s — entry %s '
-                               'skipped (rename one entry)', var, name)
-                continue
-            value = get_entry(name)
-            if value is not None:
-                overlay[var] = value
-        return overlay
+        return resolve_exec_env(_general_entry_names())
     except Exception as e:
         logger.warning('[Vault] exec env overlay failed: %s', e)
         return {}
@@ -347,9 +406,10 @@ def build_vault_index() -> str:
         '<credential_vault>',
         'The user stores machine credentials (API tokens, PATs, …) in an '
         'encrypted vault on this server. The entries below exist — NAMES '
-        'ONLY; the values are never shown to you. Every value is injected '
-        'into the environment of each run_command shell as the variable '
-        'named after `→`, so use it by REFERENCE (e.g. '
+        'ONLY; the values are never shown to you. To use one, include its '
+        'entry name in run_command\'s `credentials` array; only those selected '
+        'values are injected into that child process under the variable named '
+        'after `→`. Reference the variable, never the value (e.g. '
         '`curl -H "Authorization: Bearer $VAR" …`; tools like `gh`, `pip`, '
         '`twine` read their standard variables natively).',
         '',

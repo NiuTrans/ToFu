@@ -284,10 +284,11 @@ real work, gated on the §7 item-declaration design.
   notion, or is there a new node type for "iterate over a dataset"? This gates
   the résumé dashboard and deserves its own mini-design.
 - **Resume after restart:** durable events make a run *readable* after a server
-  restart, but the in-memory engine thread is gone. Do we re-attach (resume
-  execution from the last durable checkpoint) or only support
-  read/replay + manual re-run? Slice = read/replay; true resume is harder and
-  may need engine checkpointing.
+  restart, but the in-memory engine thread is gone. Startup now retires stale
+  `pending|running|paused` headers to a typed `worker_lost` error, preserving
+  their definition snapshot and event replay instead of polling forever. True
+  continuation from the last durable checkpoint remains open and needs engine
+  checkpointing; this slice is explicit read/replay + manual re-run.
 - **Template ↔ instance versioning:** we pin a snapshot. Do we also stamp the
   template's `updatedAt` into the instance so the UI can warn "the template has
   changed since this run"? Cheap; probably yes.

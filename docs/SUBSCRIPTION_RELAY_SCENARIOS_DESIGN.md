@@ -152,6 +152,14 @@ token_store 多记录化 + dispatcher 集成 + (account×model) 冷却账本 =
 > api-key/mgmt secret 由**服务器**铸（provider 调用必须持有，agent 侧铸钥
 > 只会多一条上传道）——满足 owner「随机、按 agent 存、不裸奔」三要件。
 
+> **✅ 登录与目录闭环补齐（2026-08-08）**：ChatUI 通过带独立 management
+> secret 的 loopback relay 调用 CLIProxyAPI `/v0/management/*`，实现
+> Claude/ChatGPT 分别发起 OAuth、轮询、手工回调兜底、账号清单与删除；OAuth
+> 成功后先刷新 `/v1/models` 并原子更新 `adapter_<agent>` provider，再向前端
+> 报告目录就绪。首启零账号不再被误判为 ensure 失败，而是进入「适配器已启动，
+> 请登录账号」状态。设置页按 provider 分别显示账号数/邮箱/健康状态，明确区分
+> 「本机适配器」与「服务器直连（备用）」两套彼此独立的凭据来源。
+
 **思路**：伪装层整个外包。在能联网的本地机上跑 CLIProxyAPI，tofu 把它当
 一个普通的 OpenAI/Anthropic 兼容上游。订阅 token 从不到服务器——**本机既是
 网络出口，也是凭证边界**，比 egress 中继（token 在服务器、裸奔过 bridge）
@@ -172,9 +180,24 @@ token_store 多记录化 + dispatcher 集成 + (account×model) 冷却账本 =
 |---|---|
 | bridge | 新增 loopback 目标类型（`loopback_http` / `loopback_http_stream`），白名单 = `127.0.0.1:<适配器端口>`，**不复用**订阅域名白名单（语义分离：一个是「放行公网域名」，一个是「只准打我自己脚边」） |
 | agent | adapter 命令族：`adapter_ensure`（定位/启动子进程，崩溃看护）、`adapter_status`、`adapter_stop`；二进制分发见 O1（owner 已拍板，见 §6） |
-| agent（安全，owner 补充③） | 适配器启动时由 agent 生成**随机 api-key** 写入其 config（tofu 侧按 agent_id 存），`/v0/management` 设独立 secret-key 或整体禁掉——8317 绑 loopback 但本机任意进程可打，不能裸奔 |
+| agent（安全，owner 补充③） | 服务器按 agent 生成随机 api-key + management secret，经已认证 bridge 下发并写入 agent 的 0600 config；`/v0/management` 仅允许 loopback + 独立 secret——8317 绑 loopback 但本机任意进程可打，不能裸奔 |
 | 服务器 | 新 provider 类型 `subscription-adapter`：base_url 走 bridge；模型清单从适配器 `/v1/models` 拉； dispatcher 视角它就是一个普通 OpenAI 兼容 slot，fallback/重试全复用 |
-| 设置页 | OAuth 卡片加一行「由本机适配器托管」（状态：适配器在线/版本/账号数） |
+| 设置页 | 适配器为推荐主路径：在线/版本、Claude 与 ChatGPT 独立账号状态、登录/移除、目录同步错误；服务器直连卡片明确标作独立备用路径 |
+
+**目录与所有权不变量（2026-08-08）**：
+
+1. `token/account 已存在` 与 `provider/model catalogue 已就绪` 是两个状态，UI
+   不得用同一个“登录成功”徽标掩盖后者失败。
+2. `oauth_*` 与 `adapter_*` provider 由服务端生命周期拥有。Settings 的浏览器
+   快照无权创建、修改或删除；保存普通 provider 时必须保留锁内最新托管投影。
+3. 直连 token 文件是认证真源；OAuth 状态/配置读取会幂等 reconcile 缺失、重复
+   或过时的 provider，稳态不得重写配置文件。
+4. 适配器 auth-files 是账号真源；运行状态发现已有可用账号但 provider 缺失时，
+   自动重新拉 `/v1/models` 自愈。账号全部删除时必须撤下 provider。
+5. 任一登录/退出/账号变化完成后，同一次前端刷新必须更新 Providers、Preset/
+   模板和顶部模型选择器；只调用 GET 而不应用返回快照不算刷新。
+6. `brand=oauth|adapter` 仅表示凭据管道，模型分组必须继续按 Claude/OpenAI 等
+   实际 vendor 检测，绝不出现 “OAuth/adapter” 伪品牌分组。
 
 **收益**：军备竞赛外包给上游社区（他们跟版本号的速度以天计）；uTLS 免费；
 多账号车队免费（S4 顺带解决）；Gemini/Qwen/Kimi/antigravity 等额外订阅源

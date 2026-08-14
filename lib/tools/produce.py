@@ -79,6 +79,12 @@ PRODUCE_VIDEO_TOOL = {
                                    "looks. A scene whose authoring fails "
                                    "falls back to the template, so the film "
                                    "always completes."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model id that locks both the "
+                                   "script writer and every scene author, "
+                                   "for example 'kimi-k3'."
                 }
             },
             "required": ["topic"],
@@ -137,6 +143,12 @@ PRODUCE_SLIDES_TOOL = {
                     "enum": ["1280x720", "960x540", "720x540"],
                     "description": "Page geometry: 1280x720 (16:9, default), "
                                    "960x540 (16:9 compact), 720x540 (4:3)."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model id that locks the outline, "
+                                   "page authors and repair rounds, for "
+                                   "example 'kimi-k3'."
                 }
             },
             "required": ["topic"],

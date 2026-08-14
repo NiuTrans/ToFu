@@ -70,9 +70,18 @@ def mt(monkeypatch):
 
 
 def _install_db(monkeypatch, mt, rows):
+    from contextlib import contextmanager
+
     db = _FakeDB(rows)
     import lib.database as dbmod
-    monkeypatch.setattr(dbmod, 'get_thread_db', lambda *a, **k: db)
+
+    @contextmanager
+    def _pooled(*_args, **_kwargs):
+        yield db
+
+    # The scanner is background maintenance and must release its connection;
+    # patch the current bounded-scope seam, not the retired thread-local seam.
+    monkeypatch.setattr(dbmod, 'pooled_db', _pooled)
     return db
 
 
@@ -145,20 +154,31 @@ def test_completed_at_predicate_is_wrong(monkeypatch, mt):
 
 
 def test_completed_at_is_stamped_on_running_checkpoints(monkeypatch):
-    """Source-level proof of the above: the shared upsert always stamps it.
+    """Result-level proof: the shared running upsert stamps its write time.
 
     Both the terminal write and the running checkpoint go through
     _upsert_task_row, which sets completed_at unconditionally.
     """
-    import inspect
-
     from lib.tasks_pkg.manager import _persist
-    src = inspect.getsource(_persist._upsert_task_row)
-    assert "'completed_at': int(time.time() * 1000)" in src, (
-        'completed_at is expected to be stamped unconditionally; if this '
-        'changed, re-evaluate find_orphan_running_results()'
-    )
-    assert 'status' in inspect.signature(_persist._upsert_task_row).parameters
+    import lib.database as dbmod
+
+    captured = {}
+    monkeypatch.setattr(_persist, 'get_thread_db', lambda *_a, **_k: object())
+
+    def _execute(_db, _sql, params, **_kwargs):
+        captured['params'] = params
+        return None
+
+    monkeypatch.setattr(dbmod, 'db_execute_with_retry', _execute)
+    before = int(time.time() * 1000)
+    _persist._upsert_task_row(
+        {'id': 'running-checkpoint', '_inline_messages': True}, '',
+        content='', thinking='', status='running', error_json=None,
+        tr_json='[]', meta_json='{}')
+    after = int(time.time() * 1000)
+    assert before <= captured['params'][-1] <= after, (
+        'running checkpoint did not stamp completed_at/write time; '
+        're-evaluate find_orphan_running_results()')
 
 
 # ── Kill switch + wiring ─────────────────────────────────────────────────

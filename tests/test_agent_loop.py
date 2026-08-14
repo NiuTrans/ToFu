@@ -84,12 +84,33 @@ def test_loop_completes_when_no_tool_calls():
         calls['dispatch'] += 1
         return _mk_msg(None)  # no tools → natural end
 
-    out = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=4,
+    out = run_agent_loop(abort=AbortSignal.never(),
                          round_tools=['T'], dispatch=dispatch,
                          execute_tool=lambda rnd, tc: calls.__setitem__('tools', calls['tools'] + 1))
     assert out.completed and not out.aborted
     assert out.rounds == 1 and calls['dispatch'] == 1 and calls['tools'] == 0
     _ok('loop completes on a no-tool-calls turn (1 round, 0 tools)')
+
+
+def test_removed_tool_round_limit_arguments_are_rejected():
+    """The retired numeric/terminal-round knobs cannot silently return."""
+    import inspect
+    from lib.agent_loop import AbortSignal, run_agent_loop
+
+    params = inspect.signature(run_agent_loop).parameters
+    assert 'max_tool_rounds' not in params
+    assert 'tools_terminal_round' not in params
+    base = dict(
+        abort=AbortSignal.never(),
+        round_tools=['T'],
+        dispatch=lambda rnd, tools: _mk_msg(None),
+        execute_tool=lambda rnd, tc: None,
+    )
+    with pytest.raises(TypeError):
+        run_agent_loop(**base, max_tool_rounds=8)
+    with pytest.raises(TypeError):
+        run_agent_loop(**base, tools_terminal_round=True)
+    _ok('retired tool-round limit arguments are absent and strictly rejected')
 
 
 def test_loop_runs_tools_then_completes():
@@ -105,7 +126,7 @@ def test_loop_runs_tools_then_completes():
         return m
 
     out = run_agent_loop(
-        abort=AbortSignal.never(), max_tool_rounds=4, round_tools=['T'],
+        abort=AbortSignal.never(), round_tools=['T'],
         dispatch=dispatch,
         execute_tool=lambda rnd, tc: calls.__setitem__('tools', calls['tools'] + 1),
         on_tool_round=lambda rnd, msg: calls.__setitem__('tool_round_hook', calls['tool_round_hook'] + 1),
@@ -115,23 +136,23 @@ def test_loop_runs_tools_then_completes():
     _ok('loop executes one tool round then completes; on_tool_round fired once')
 
 
-def test_loop_final_round_gets_no_tools():
-    """Round index == max_tool_rounds must be offered tools=None."""
+def test_tools_stay_available_until_natural_completion():
+    """Tool schemas stay available across arbitrarily many productive rounds."""
     from lib.agent_loop import AbortSignal, run_agent_loop
     offered = []
 
     def dispatch(rnd, tools):
         offered.append(tools)
-        # Always ask for a tool so the loop is forced to the cap.
-        return _mk_msg([{'id': 'x', 'function': {'name': 'web_search', 'arguments': '{}'}}])
+        if rnd < 25:
+            return _mk_msg([{'id': 'x', 'function': {'name': 'web_search', 'arguments': '{}'}}])
+        return _mk_msg(None)
 
-    out = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=2,
+    out = run_agent_loop(abort=AbortSignal.never(),
                          round_tools=['T'], dispatch=dispatch,
                          execute_tool=lambda rnd, tc: None)
-    # rounds 0,1 get ['T']; round 2 (the cap) gets None; then loop ends.
-    assert offered == [['T'], ['T'], None], offered
-    assert out.rounds == 3 and not out.completed and not out.aborted
-    _ok('final (cap) round is offered tools=None; earlier rounds get the tool list')
+    assert offered == [['T']] * 26, offered
+    assert out.rounds == 26 and out.completed and not out.aborted
+    _ok('tools remain available past former caps until natural completion')
 
 
 def test_before_round_check_blocks_dispatch():
@@ -142,7 +163,7 @@ def test_before_round_check_blocks_dispatch():
         calls['dispatch'] += 1
         return _mk_msg(None)
 
-    out = run_agent_loop(abort=AbortSignal(lambda: True), max_tool_rounds=4,
+    out = run_agent_loop(abort=AbortSignal(lambda: True),
                          round_tools=['T'], dispatch=dispatch,
                          execute_tool=lambda rnd, tc: None)
     assert out.aborted and out.rounds == 0 and calls['dispatch'] == 0
@@ -159,7 +180,7 @@ def test_post_stream_check_stops_before_tools():
         flag['v'] = True  # user stopped mid-stream
         return _mk_msg([{'id': 't', 'function': {'name': 'web_search', 'arguments': '{}'}}])
 
-    out = run_agent_loop(abort=AbortSignal(lambda: flag['v']), max_tool_rounds=4,
+    out = run_agent_loop(abort=AbortSignal(lambda: flag['v']),
                          round_tools=['T'], dispatch=dispatch,
                          execute_tool=lambda rnd, tc: calls.__setitem__('tools', calls['tools'] + 1))
     assert out.aborted and out.rounds == 1 and calls['tools'] == 0
@@ -188,34 +209,29 @@ def test_between_tools_check_skips_remaining_tools():
         ran.append(tc['id'])
         flag['v'] = True  # Stop pressed DURING the first (slow) tool.
 
-    out = run_agent_loop(abort=AbortSignal(lambda: flag['v']), max_tool_rounds=4,
+    out = run_agent_loop(abort=AbortSignal(lambda: flag['v']),
                          round_tools=['T'], dispatch=dispatch, execute_tool=execute_tool)
     assert ran == ['t1'], f'second tool ran despite abort: {ran}'
     assert out.aborted and out.rounds == 1
     _ok('(3) between-tools abort skips remaining queued tools + no fresh round')
 
 
-def test_exit_reason_completed_and_exhausted():
-    """LoopOutcome.exit_reason reports WHY the loop stopped (orchestrator diag parity)."""
+def test_exit_reason_completed():
+    """LoopOutcome reports natural completion without a cap-exhausted state."""
     from lib.agent_loop import AbortSignal, run_agent_loop
     # natural completion
-    out = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=2, round_tools=['T'],
+    out = run_agent_loop(abort=AbortSignal.never(), round_tools=['T'],
                          dispatch=lambda rnd, tools: _mk_msg(None),
                          execute_tool=lambda rnd, tc: None)
     assert out.completed and out.exit_reason == 'completed', out.exit_reason
-    # forced to the cap (always asks for a tool) → max_rounds_exhausted
-    out2 = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=1, round_tools=['T'],
-                          dispatch=lambda rnd, tools: _mk_msg([{'id': 'x', 'function': {'name': 'web_search', 'arguments': '{}'}}]),
-                          execute_tool=lambda rnd, tc: None)
-    assert not out2.completed and out2.exit_reason == 'max_rounds_exhausted', out2.exit_reason
-    _ok('exit_reason reports completed vs max_rounds_exhausted')
+    _ok('exit_reason reports natural completion')
 
 
 def test_exit_reason_abort_phases():
     """exit_reason distinguishes the three abort placements."""
     from lib.agent_loop import AbortSignal, run_agent_loop
     # before-round
-    o1 = run_agent_loop(abort=AbortSignal(lambda: True), max_tool_rounds=2, round_tools=['T'],
+    o1 = run_agent_loop(abort=AbortSignal(lambda: True), round_tools=['T'],
                         dispatch=lambda rnd, tools: _mk_msg(None), execute_tool=lambda rnd, tc: None)
     assert o1.exit_reason == 'aborted_before_round', o1.exit_reason
     # post-stream
@@ -223,20 +239,14 @@ def test_exit_reason_abort_phases():
     def disp_ps(rnd, tools):
         f['v'] = True
         return _mk_msg([{'id': 't', 'function': {'name': 'web_search', 'arguments': '{}'}}])
-    o2 = run_agent_loop(abort=AbortSignal(lambda: f['v']), max_tool_rounds=2, round_tools=['T'],
+    o2 = run_agent_loop(abort=AbortSignal(lambda: f['v']), round_tools=['T'],
                         dispatch=disp_ps, execute_tool=lambda rnd, tc: None)
     assert o2.exit_reason == 'aborted_post_stream', o2.exit_reason
     _ok('exit_reason distinguishes before-round vs post-stream aborts')
 
 
 def test_retry_bonus_grants_extra_round_dynamically():
-    """A premature-close retry_bonus hook expands the ceiling mid-loop (orchestrator parity).
-
-    With max_tool_rounds=0 (no tools) a plain for-range would run exactly ONE
-    round. The retry_bonus hook, returning True once, must grant ONE extra
-    round — matching orchestrator's `_premature_retry_count` growing the while
-    ceiling so even a no-tools turn gets its premature-close retry.
-    """
+    """A premature-close retry hook retries before accepting natural stop."""
     from lib.agent_loop import AbortSignal, run_agent_loop
     disp = {'n': 0}
     def dispatch(rnd, tools):
@@ -249,7 +259,7 @@ def test_retry_bonus_grants_extra_round_dynamically():
             bonus['granted'] += 1
             return True   # premature close → grant a retry round
         return False
-    out = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=0, round_tools=None,
+    out = run_agent_loop(abort=AbortSignal.never(), round_tools=None,
                          dispatch=dispatch, execute_tool=lambda rnd, tc: None,
                          retry_bonus=retry_bonus)
     assert disp['n'] == 2, f'expected 2 dispatches (1 base + 1 bonus), got {disp["n"]}'
@@ -264,7 +274,7 @@ def test_retry_bonus_is_capped():
     def dispatch(rnd, tools):
         disp['n'] += 1
         return _mk_msg(None)
-    out = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=0, round_tools=None,
+    out = run_agent_loop(abort=AbortSignal.never(), round_tools=None,
                          dispatch=dispatch, execute_tool=lambda rnd, tc: None,
                          retry_bonus=lambda *a: True,  # always wants a retry
                          max_retry_bonus=2)
@@ -274,11 +284,11 @@ def test_retry_bonus_is_capped():
     _ok('retry_bonus is capped by max_retry_bonus (no infinite premature-close loop)')
 
 
-def test_retry_bonus_default_off_preserves_for_range():
-    """With no retry_bonus hook the loop is byte-equivalent to the old for-range."""
+def test_retry_bonus_default_off_completes_once():
+    """With no retry hook, a no-tool response completes in one dispatch."""
     from lib.agent_loop import AbortSignal, run_agent_loop
     disp = {'n': 0}
-    out = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=0, round_tools=None,
+    out = run_agent_loop(abort=AbortSignal.never(), round_tools=None,
                          dispatch=lambda rnd, tools: (disp.__setitem__('n', disp['n'] + 1) or _mk_msg(None)),
                          execute_tool=lambda rnd, tc: None)
     assert disp['n'] == 1 and out.rounds == 1  # exactly one round, as before
@@ -296,7 +306,7 @@ def test_loop_does_not_swallow_dispatch_exception():
         raise Boom('propagate me')
 
     with pytest.raises(Boom):
-        run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=2,
+        run_agent_loop(abort=AbortSignal.never(),
                        round_tools=['T'], dispatch=dispatch,
                        execute_tool=lambda rnd, tc: None)
     _ok('loop lets a dispatch exception propagate (AbortedError reaches caller)')
@@ -313,7 +323,7 @@ def test_before_round_hook_halts_with_reason():
         # Always ask for a tool so only the hook can stop the loop.
         return _mk_msg([{'id': 'x', 'function': {'name': 'web_search', 'arguments': '{}'}}])
 
-    out = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=99,
+    out = run_agent_loop(abort=AbortSignal.never(),
                          round_tools=['T'], dispatch=dispatch,
                          execute_tool=lambda rnd, tc: None,
                          before_round=lambda rnd: 'timeout' if rnd >= 2 else None)
@@ -321,25 +331,6 @@ def test_before_round_hook_halts_with_reason():
     assert not out.aborted and not out.completed
     assert out.rounds == 2 and disp['n'] == 2  # rnd 0,1 ran; rnd 2 halted at top
     _ok('before_round halt hook stops the loop with custom reason (timeout seam)')
-
-
-def test_tools_terminal_round_off_offers_tools_every_round():
-    """tools_terminal_round=False: the cap round still gets the tool list
-    (swarm parity — no forced tool-less final turn)."""
-    from lib.agent_loop import AbortSignal, run_agent_loop
-    offered = []
-
-    def dispatch(rnd, tools):
-        offered.append(tools)
-        return _mk_msg([{'id': 'x', 'function': {'name': 'web_search', 'arguments': '{}'}}])
-
-    out = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=1,
-                         round_tools=['T'], dispatch=dispatch,
-                         execute_tool=lambda rnd, tc: None,
-                         tools_terminal_round=False)
-    assert offered == [['T'], ['T']], offered  # 2 rounds, tools EVERY round
-    assert out.exit_reason == 'max_rounds_exhausted' and out.rounds == 2
-    _ok('tools_terminal_round=False offers tools every round (pure ceiling)')
 
 
 def test_execute_tools_batch_hook_replaces_per_tool_loop():
@@ -353,7 +344,7 @@ def test_execute_tools_batch_hook_replaces_per_tool_loop():
     calls = {'batch': [], 'per_tool': 0}
     seq = iter([_mk_msg(list(two)), _mk_msg(None)])
 
-    out = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=4,
+    out = run_agent_loop(abort=AbortSignal.never(),
                          round_tools=['T'],
                          dispatch=lambda rnd, tools: next(seq),
                          execute_tool=lambda rnd, tc: calls.__setitem__('per_tool', calls['per_tool'] + 1),
@@ -376,7 +367,7 @@ def test_tool_timeout_breaker_halts_at_threshold():
         disp['n'] += 1
         return _mk_msg([{'id': 'x', 'function': {'name': 'web_search', 'arguments': '{}'}}])
 
-    out = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=99,
+    out = run_agent_loop(abort=AbortSignal.never(),
                          round_tools=['T'], dispatch=dispatch,
                          execute_tools=lambda rnd, tcs: {'timed_out': True},
                          max_consecutive_tool_timeouts=2,
@@ -400,7 +391,7 @@ def test_tool_timeout_breaker_resets_on_clean_round():
         _mk_msg([{'id': 'd', 'function': {'name': 'web_search', 'arguments': '{}'}}]),
         _mk_msg(None),
     ])
-    out = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=9,
+    out = run_agent_loop(abort=AbortSignal.never(),
                          round_tools=['T'], dispatch=lambda rnd, tools: next(seq),
                          execute_tools=lambda rnd, tcs: next(notes),
                          max_consecutive_tool_timeouts=2)
@@ -419,7 +410,7 @@ def test_on_round_end_fires_only_after_executed_tool_rounds():
         _mk_msg([{'id': 'b', 'function': {'name': 'web_search', 'arguments': '{}'}}]),
         _mk_msg(None),
     ])
-    out = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=9,
+    out = run_agent_loop(abort=AbortSignal.never(),
                          round_tools=['T'], dispatch=lambda rnd, tools: next(seq),
                          execute_tools=lambda rnd, tcs: None,
                          on_round_end=lambda rnd: ends.append(rnd))
@@ -437,18 +428,17 @@ def main():
         test_abortsignal_broken_predicate_is_safe,
         test_loop_completes_when_no_tool_calls,
         test_loop_runs_tools_then_completes,
-        test_loop_final_round_gets_no_tools,
+        test_tools_stay_available_until_natural_completion,
         test_before_round_check_blocks_dispatch,
         test_post_stream_check_stops_before_tools,
         test_between_tools_check_skips_remaining_tools,
-        test_exit_reason_completed_and_exhausted,
+        test_exit_reason_completed,
         test_exit_reason_abort_phases,
         test_retry_bonus_grants_extra_round_dynamically,
         test_retry_bonus_is_capped,
-        test_retry_bonus_default_off_preserves_for_range,
+        test_retry_bonus_default_off_completes_once,
         test_loop_does_not_swallow_dispatch_exception,
         test_before_round_hook_halts_with_reason,
-        test_tools_terminal_round_off_offers_tools_every_round,
         test_execute_tools_batch_hook_replaces_per_tool_loop,
         test_tool_timeout_breaker_halts_at_threshold,
         test_tool_timeout_breaker_resets_on_clean_round,

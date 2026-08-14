@@ -18,6 +18,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -26,7 +27,10 @@ import pytest
 pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parent.parent
-MAIN_JS = ROOT / "static" / "js" / "main.js"
+sys.path.insert(0, str(ROOT / 'tests'))
+from _runtime_sections import runtime_section_path  # noqa: E402
+
+MAIN_JS = Path(runtime_section_path('main.js'))
 
 
 def _node() -> str:

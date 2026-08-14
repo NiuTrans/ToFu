@@ -31,10 +31,10 @@ that exec'd copy resolves the real sub-modules regardless of ``__package__``.
 import json
 import re
 import time
+import uuid
 
 import lib as _lib
 from lib.agent_loop import AbortSignal, run_agent_loop
-from lib.database import get_thread_db
 from lib.llm_dispatch.api import dispatch_stream
 from lib.llm_errors import AbortedError
 from lib.log import get_logger
@@ -46,11 +46,7 @@ from lib.paper.images import (
     _is_placeholder_title,
     _lookup_paper_title,
 )
-from lib.paper.prompts import (
-    _FULL_REPORT_TOOLS,
-    _MAX_REPORT_TOOL_ROUNDS,
-    _REPORT_TOOLS,
-)
+from lib.paper.prompts import _FULL_REPORT_TOOLS, _REPORT_TOOLS
 from lib.paper.report_runtime import _append_report_event, _cleanup_stale_report_tasks
 from lib.paper.tools import (
     _execute_report_tool,
@@ -336,7 +332,6 @@ def _run_report_task(task, messages, images):
     try:
         _outcome = run_agent_loop(
             abort=abort_signal,
-            max_tool_rounds=_MAX_REPORT_TOOL_ROUNDS,
             round_tools=_FULL_REPORT_TOOLS,
             dispatch=_dispatch,
             execute_tool=_execute_tool,
@@ -531,18 +526,16 @@ def _run_report_task(task, messages, images):
             report_meta['rebuttalDecision'] = task['rebuttal_decision']
 
         task['report_meta'] = report_meta
-        meta_json = json.dumps(report_meta, ensure_ascii=False)
-
-        # Persist to DB
+        # Persist through storage.v1. The worker never owns a database driver,
+        # connection, cursor, or transaction.
         if enriched:
             try:
-                db2 = get_thread_db()
-                from lib.database._core_schema import PAPER_REPORTS, upsert
-                upsert(db2, PAPER_REPORTS, {
+                from lib.storage import get_storage_client
+                get_storage_client(write=True).command('paper.report.upsert', {
                     'paper_hash': phash, 'lang': lang, 'report': enriched,
-                    'model': report_model, 'meta': meta_json,
+                    'model': report_model, 'meta': report_meta,
                     'created_at': int(time.time()),
-                }, retry=True)
+                }, f'paper.report.upsert:{uuid.uuid4().hex}')
                 logger.info('[Paper:Report] Persisted — hash=%s lang=%s %d chars (%d imgs) '
                             'model=%s cost=%s',
                             phash, lang, len(enriched), len(images),
@@ -661,7 +654,6 @@ __all__ = [
     '_extract_title_from_report',
     '_is_placeholder_title',
     '_lookup_paper_title',
-    '_MAX_REPORT_TOOL_ROUNDS',
     '_REPORT_TOOLS',
     '_FULL_REPORT_TOOLS',
 ]

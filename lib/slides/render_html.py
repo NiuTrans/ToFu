@@ -180,7 +180,10 @@ def _text_div(el: dict, deck: Deck, theme: dict) -> str:
     if el.get('opacity') is not None and float(el['opacity']) < 1:
         outer.append(f'opacity:{float(el["opacity"]):.3f}')
     body = _rich_html(str(content.get('text') or ''), theme)
-    return (f'<div class="el text" style="{";".join(outer)}">'
+    eid = _html.escape(str(el.get('elementId') or ''), quote=True)
+    allow = 'true' if el.get('allowOverlap') is True else 'false'
+    return (f'<div class="el text" data-element-id="{eid}" '
+            f'data-allow-overlap="{allow}" style="{";".join(outer)}">'
             f'<div style="{";".join(style)}">{body}</div></div>')
 
 
@@ -411,7 +414,9 @@ def _image_div(el: dict, deck: Deck, theme: dict) -> str:
         radius = 'border-radius:50%;'
     img = (f'<img src="{_html.escape(url, quote=True)}" style="width:100%;'
            f'height:100%;object-fit:{fit};{vb}display:block"/>')
-    return f'<div class="el image" style="{";".join(style)};{radius}">{img}</div>'
+    eid = _html.escape(str(el.get('elementId') or ''), quote=True)
+    return (f'<div class="el image" data-element-id="{eid}" '
+            f'style="{";".join(style)};{radius}">{img}</div>')
 
 
 # ── Icon (built-in mini set, v1) ──────────────────────────

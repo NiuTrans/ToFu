@@ -207,6 +207,10 @@ def test_engine_full_chain(monkeypatch, tmp_path):
     for sc in scenes:
         idx = os.path.join(job, 'scenes', sc['id'], 'index.html')
         assert os.path.isfile(idx), sc['id']
+        assert sc['timeline_contract_version'] == 'motion-timeline-v1'
+        assert sc['render_duration_s'] >= sc['content_duration_s']
+    assert result['timeline']['duration_s'] > 0
+    assert result['audio']['enabled'] is False
     # sidecar carries the (loose-adjusted) timeline
     sidecar = open(result['srt_path'], encoding='utf-8').read()
     assert '-->' in sidecar and '第一句话' in sidecar
@@ -380,6 +384,10 @@ def test_videos_start_validation(flask_client):
     r = flask_client.post('/api/v1/motion/videos',
                           json={'srt': SRT, 'alignment': 'weird'})
     assert r.status_code == 400
+    r = flask_client.post('/api/v1/motion/videos',
+                          json={'srt': SRT, 'author_rounds': 8})
+    assert r.status_code == 400
+    assert r.get_json()['field'] == 'author_rounds'
 
 
 def test_videos_start_poll_dedup_abort(flask_client, monkeypatch, tmp_path):
@@ -389,12 +397,18 @@ def test_videos_start_poll_dedup_abort(flask_client, monkeypatch, tmp_path):
     sidecar = tmp_path / 'final.srt'
     sidecar.write_text('1\n00:00:01,000 --> 00:00:02,000\nx\n',
                        encoding='utf-8')
+    audio_plan = tmp_path / 'audio_plan.json'
+    audio_plan.write_text('{"version":"motion-audio-v1"}', encoding='utf-8')
+    attribution = tmp_path / 'audio_attribution.txt'
+    attribution.write_text('License: original\n', encoding='utf-8')
 
     def fake_worker(task):
         from lib.motion_video.runtime import _motion_runtime
         task['result'] = {'final_path': str(final),
                           'srt_path': str(sidecar), 'duration': 1.0,
-                          'scenes': 1, 'narrated': False}
+                          'scenes': 1, 'narrated': False,
+                          'audio_plan_path': str(audio_plan),
+                          'audio_attribution_path': str(attribution)}
         _motion_runtime.finish(task['task_id'], result=task['result'])
     monkeypatch.setattr('lib.motion_video.engine.run_motion_task', fake_worker)
 
@@ -422,6 +436,15 @@ def test_videos_start_poll_dedup_abort(flask_client, monkeypatch, tmp_path):
     r = flask_client.get(f'/api/v1/motion/videos/{tid}/file?part=srt')
     assert r.status_code == 200
     assert b'-->' in r.data
+    r = flask_client.get(
+        f'/api/v1/motion/videos/{tid}/file?part=audio-attribution')
+    assert r.status_code == 200
+    assert b'License: original' in r.data
+    r = flask_client.get(f'/api/v1/motion/videos/{tid}/file?part=audio-plan')
+    assert r.status_code == 200
+    assert b'motion-audio-v1' in r.data
+    assert flask_client.get(
+        f'/api/v1/motion/videos/{tid}/file?part=unknown').status_code == 404
 
 
 def test_videos_dedup_join(flask_client, monkeypatch):
@@ -439,4 +462,32 @@ def test_videos_dedup_join(flask_client, monkeypatch):
     assert r1['task_id'] == r2['task_id']
     # abort cleans the hanging worker
     flask_client.post(f"/api/v1/motion/videos/abort/{r1['task_id']}")
+    hold.set()
+
+
+def test_videos_model_is_persisted_and_part_of_dedup(flask_client,
+                                                      monkeypatch):
+    hold = threading.Event()
+
+    def hanging_worker(task):
+        hold.wait(5)
+
+    monkeypatch.setattr('lib.motion_video.engine.run_motion_task',
+                        hanging_worker)
+    body = {'srt': SRT + '\nmodel-lock', 'narration': False,
+            'model': 'kimi-k3'}
+    first = flask_client.post('/api/v1/motion/videos', json=body).get_json()
+    same = flask_client.post('/api/v1/motion/videos', json=body).get_json()
+    other = flask_client.post('/api/v1/motion/videos',
+                              json={**body, 'model': 'other-model'}).get_json()
+    assert same['deduped'] is True
+    assert same['task_id'] == first['task_id']
+    assert other['deduped'] is False
+    assert other['task_id'] != first['task_id']
+    from lib.motion_video.runtime import _motion_runtime
+    assert _motion_runtime.get(first['task_id'])['model'] == 'kimi-k3'
+    flask_client.post(
+        f"/api/v1/motion/videos/abort/{first['task_id']}")
+    flask_client.post(
+        f"/api/v1/motion/videos/abort/{other['task_id']}")
     hold.set()

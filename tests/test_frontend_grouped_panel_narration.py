@@ -40,11 +40,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-TR_JS = os.path.join(ROOT, 'static', 'js', 'ui', 'tool_rounds.js')
+TR_JS = runtime_section_path('ui/tool_rounds.js')
 
 
 def _extract_grouped_fns() -> str:
@@ -171,8 +173,10 @@ def test_neuter_removes_grouped_narration_prepend():
     path (not merely present-but-inert)."""
     src = _extract_grouped_fns()
     # Turn `return narr + \`<div class="ptool-turn"...` into `return \`<div ...`
-    neutered = src.replace('return narr + `<div class="ptool-turn"',
-                           'return `<div class="ptool-turn"')
+    target = ('return narr + `<div class="ptool-turn'
+              '${programs.length ? " ptool-program-turn" : ""}"')
+    neutered = src.replace(
+        target, 'return ' + target.removeprefix('return narr + '))
     assert neutered != src, 'neuter target string not found — extraction drifted'
     out = _run_node(_HARNESS, neutered)
     # With the prepend gone, the Chinese narration disappears from the panel →

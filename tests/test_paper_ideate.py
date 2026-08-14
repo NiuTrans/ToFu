@@ -51,9 +51,11 @@ _OPEN_GAPS = {
     'direction': 'long-context KV compression',
     'open_gaps': [
         {'id': 'gap_1', 'gap': 'no exact recall under KV compression',
-         'why_open': 'only perplexity measured', 'kind_hint': 'methodology'},
+         'why_open': 'only perplexity measured', 'kind_hint': 'methodology',
+         'evidence': ['2305.11111']},
         {'id': 'gap_2', 'gap': 'no analysis of per-layer compressibility',
-         'why_open': 'treated as uniform', 'kind_hint': 'analysis'},
+         'why_open': 'treated as uniform', 'kind_hint': 'analysis',
+         'evidence': ['2401.22222']},
     ],
 }
 
@@ -62,6 +64,9 @@ def _good_idea():
     return {
         'title': 'Per-layer learnable KV rank with recall-preserving loss',
         'kind': 'methodology', 'linked_gap_id': 'gap_1',
+        'corpus_anchor_id': '2305.11111',
+        'corpus_delta': 'Replace the anchor paper\'s uniform static rank with a '
+                        'retrieval-conditioned per-layer allocation.',
         'core_mechanism': 'A retrieval-consistency loss makes each layer learn its own '
                           'rank so needle tokens survive compression — a mechanism absent '
                           'from prior uniform-rank work.',
@@ -166,6 +171,37 @@ def test_structural_gate_rejects_invented_problem():
     reason = it._structural_gate(_ab_stitch_no_gap(), valid)
     assert reason and 'linked_gap_id' in reason, f'stitch should fail on gap link, got {reason!r}'
     _ok('structural gate: idea linking no real open_gap is rejected (invented problem)')
+
+
+def test_novelty_claim_without_manual_arxiv_id_reaches_evidence_judge():
+    """A missing citation is formatting, not negative novelty evidence; the
+    forced retrieved-neighbour gate is the substantive judge."""
+    import lib.paper.ideate as it
+
+    idea = _good_idea()
+    idea['novelty_claim'] = 'No prior method makes allocation retrieval-conditioned.'
+    assert it._structural_gate(idea, it._valid_gap_ids(_OPEN_GAPS)) is None
+
+
+def test_corpus_anchor_must_support_the_linked_gap():
+    import lib.paper.ideate as it
+
+    idea = _good_idea()
+    idea['corpus_anchor_id'] = '9999.99999'
+    fake_search = _FakeSearch([{'arxiv_id': '2305.11111', 'title': 'x'}] * 5)
+    restore = _patch({
+        '_generate_raw_ideas': lambda *a, **k: [idea],
+        'search_arxiv': fake_search,
+        'fetch_arxiv_title': lambda aid: 'Real',
+        '_score_idea': _score_returning(4.8),
+    })
+    try:
+        result = it.generate_ideas('dir', _OPEN_GAPS, lang='en')
+    finally:
+        restore()
+    assert result['accepted'] == []
+    assert result['rejected'][0]['reject_stage'] == 'structural'
+    assert 'corpus_anchor_id' in result['rejected'][0]['reject_reason']
 
 
 def test_ab_stitch_rejected_end_to_end_NEUTER():
@@ -536,6 +572,20 @@ def test_prompt_declares_the_legal_kind_values():
         for k in it._VALID_KINDS:
             assert k in p, f'{lang} prompt does not declare the legal kind value {k!r}'
     _ok('generation prompt declares the legal kind enum (both languages)')
+
+
+def test_prompt_demands_proactive_causal_mechanisms_after_llm_eval():
+    """The first real LLM evaluation found reactive metric wrappers despite
+    the anti-A+B prose. Pin the corrective mechanism contract, not its score."""
+    import lib.paper.ideate as it
+
+    for lang in ('en', 'zh'):
+        prompt = it._ideate_system_prompt(lang, 6)
+        for field in ('corpus_anchor_id', 'corpus_delta', 'failure_cause',
+                      'new_invariant', 'intervention_level'):
+            assert field in prompt
+        assert 'state transition' in prompt or '状态转移' in prompt
+        assert 'different causal mechanism' in prompt or '不同的因果机制' in prompt
 
 
 # ── The gate must report its own pathology (charter: guards must not idle) ──

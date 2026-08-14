@@ -1,7 +1,6 @@
 # TESTING_STRATEGY.md — Tofu 测试体系分层战略
 
-> 2026-08-04 owner 拍板版。三路 swarm 调研（业界实践 / 后端家底 / 前端家底）后的
-> 分层方案与防负优化纪律。本文是测试工作的 north star：新增测试前先对层入座。
+> 2026-08-14 Vite/ESM 更新版。本文是测试工作的 north star：新增测试前先对层入座。
 
 ---
 
@@ -12,17 +11,17 @@
 | 后端单元 | ~950 套件 | pytest + conftest 自动打标（无标记者兜底 unit） |
 | 集成/API | ~40 套件 | Flask test client + mock LLM |
 | 守护棘轮 | ~113 套件 | drift/parity/contract/invariant，只降不升 |
-| 前端 jsdom | **467 套件 / 321 个 run_harness 调用点** | Python 驱动 node+jsdom eval 真实生产 JS |
-| 前后端契约缝 | 1 族 | `test_frontend_backend_contract.py`：api.js 路径 ⇄ live url_map |
-| 真浏览器 E2E | 4 套件 | Playwright；`test_e2e_smoke.py` 已是「真 app+真浏览器+stub LLM」hermetic 车道 |
-| 总量 | **15,528 用例**（collect-only 87.7s） | CI: lint / unit×2 / api / frontend(node) / e2e |
+| 前端 ESM 契约 | 24 个现行文件 / 102 用例 | owner 隔离、类型检查、Vite manifest、缓存/MIME、无 Node 发布 |
+| 前后端契约缝 | Vite + API transport | `api/transport.ts` 路径 ⇄ live url_map；manifest ⇄ 静态服务 |
+| 真浏览器 E2E | 11 条主流程 | Playwright；真 app + 真浏览器 + stub LLM，CI 覆盖 Chromium/Firefox/WebKit |
+| classic harness | 退休，不进现行门禁 | 依赖已删除 `static/js` 文件顺序的历史测试不代表发布图 |
 
 ## 2. 业界对照（一手源）
 
 | 做法 | 我们的对齐状态 |
 |---|---|
 | 金字塔 70/20/10（[Google](https://testing.googleblog.com/2015/04/just-say-no-to-more-end-to-end-tests.html)） | 比例大致符合；E2E 偏薄但在正确的一侧 |
-| 奖杯「mostly integration」（[Dodds](https://kentcdodds.com/blog/write-tests)） | jsdom 族本质是集成测试（eval 真实模块组合） |
+| 奖杯「mostly integration」（[Dodds](https://kentcdodds.com/blog/write-tests)） | ESM owner harness + 浏览器旅程覆盖模块组合 |
 | S/M/L hermetic 分级（[Google Test Sizes](https://testing.googleblog.com/2010/12/test-sizes.html)） | markers(unit/api/visual/slow/live_llm) 已是同构物 |
 | 契约测试：monolith 用静态契约而非 Pact（[Fowler](https://martinfowler.com/articles/consumerDrivenContracts.html)） | **已在做**（路径⇄路由表），P1 升级到字段形状 |
 | flake 隔离+SLA+删除（[Google Flaky](https://testing.googleblog.com/2016/05/flaky-tests-at-google-and-how-we.html)） | 有「预存红」三板斧文化，未制度化 SLA → P2 |
@@ -31,10 +30,8 @@
 
 ## 3. 三个真缺口（按 ROI 排序）
 
-1. **skip 静默吸收**：CI 已有 node 车道、Makefile 已预检，但 CI frontend job 与
-   本地裸跑 `pytest tests/test_frontend_*.py` 时，node/jsdom 缺席 → 467 套件
-   全部 skip 而退出码为 0（绿）。~40 处手写 node 检查 + 4 处 module-level skip
-   + `run_harness` 自身 skip，全是同一个静默洞。
+1. **旧 harness 漂移**：依赖 classic 文件路径、拼接顺序或 window owner 的测试
+   已退出现行门禁；`make test-frontend` 只运行能描述发布 ESM 图的显式清单。
 2. **断言地板是虚的**：`run_harness` 默认 `min_pass=1`，且用
    `output.count('PASS')` 子串计数（非行锚定）；102 个文件中只有 60 个显式
    声明 min_pass —— 约 42 个文件的地板是「至少 1 行像 PASS 的输出」。
@@ -44,10 +41,8 @@
 ## 4. 分层方案（owner 拍板）
 
 ### P0（本批）
-- **P0-1 skip 必须响亮**：`TOFU_REQUIRE_FRONTEND=1` 时
-  `tests/_jsdom.py` 的 skip 变硬失败；conftest 会话末哨兵统计
-  `test_frontend_*` 的 node/jsdom/npm/tsc 类 skip，>0 即红；Makefile
-  `test-frontend` 与 CI frontend job 注入该环境变量。
+- **P0-1 前端门禁必须响亮**：`make test-frontend` 与 CI frontend job 运行
+  显式 ESM 契约清单；Node/jsdom/esbuild 缺失时硬失败。
 - **P0-2 结构化断言地板**：`_jsdom_harness.js` 的 `report()` 追加结构化
   尾行 `__JSDOM_RESULT__ {"pass":N,"fail":M}`；`run_harness` 优先解析尾行
   （缺失走行锚定计数，不再子串计数）；新增 `expect_pass=` 精确申报；新棘轮
@@ -93,7 +88,7 @@
 
 - 跑测试统一 `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` 或 Makefile 的 `-p no:napari` 基底。
 - 每批改动后必跑 `--collect-only` 闸。
-- 期望前端套件执行的环境（CI frontend job、`make test-frontend`）必须设
-  `TOFU_REQUIRE_FRONTEND=1`；未设的环境保持静默 skip（贡献者无 npm 不炸）。
-- 新 jsdom 套件：`run_harness(..., expect_pass=N)`，N = harness 实际断言数；
-  未申报会被 `test_frontend_harness_expect_ratchet` 计红。
+- 期望前端套件执行的环境先运行 `npm run check:frontend`，再运行
+  `make test-frontend`；CI 将同一份 `static/vite` 工件交给三浏览器 E2E。
+- 新 ESM owner 隔离测试使用 `tests/_esm_feature_harness.py` 注入私有 service
+  port；禁止为测试把 owner 重新发布到 `window`。

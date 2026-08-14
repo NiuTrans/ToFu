@@ -49,6 +49,20 @@ PY="/path/to/your/project"
 PORT=15000
 LOG="server_${PORT}.log"
 
+# A test process must never turn this production lifecycle entrypoint into an
+# integration fixture.  ``skipif(port_listening)`` is vulnerable to TOCTOU: a
+# server present at collection can disappear before execution, making the
+# script take its intentional dead-server recovery path and launch a real Tofu
+# with pytest's temporary DB/data environment.  Retargeted, defanged test
+# COPIES may opt in only after they set TOFU_ALLOW_LIFECYCLE_TEST=1.
+if { [ -n "${PYTEST_CURRENT_TEST:-}" ] \
+     || [ "${TOFU_TESTING:-}" = "1" ]; } \
+   && [ "${TOFU_ALLOW_LIFECYCLE_TEST:-}" != "1" ]; then
+  echo "[lifecycle-gate] REFUSING production restart_15000.sh from a test process."
+  echo "                 Use a retargeted, defanged script copy on an isolated port."
+  exit 3
+fi
+
 # ── Headless-Chromium libs from LOCAL disk, never the FUSE conda env. ──
 # The conda env lives on beegfs-fuse, which intermittently fails .so reads
 # under pressure — measured 2026-08-03: 'libatk-1.0.so.0: cannot open shared
@@ -233,6 +247,15 @@ if [ -n "${LPIDS_GATE}" ]; then
   fi
 fi
 
+# The approval above is the authoritative human gate for this compatibility
+# entrypoint. Once admitted, hand the operation to the single lifecycle owner.
+# Isolated legacy tests copy only this script and therefore exercise the old,
+# self-contained implementation below without touching a real manager.
+if [ -f "${PROJ}/serverctl.py" ]; then
+  export TOFU_RESTART_GATE_PASSED=1
+  exec "${PY}" "${PROJ}/serverctl.py" restart -y --source legacy-restart_15000.sh
+fi
+
 # ── [pre/5b] RESTART SERIALIZATION LOCK — one restart at a time on this box. ──
 # On a shared-HEAD box, multiple sibling agents may each run this script to load
 # a commit, unaware of each other. Without a lock they BOTH reach [1/5] and kill
@@ -245,15 +268,12 @@ fi
 #
 # SECOND-PROBE (skip-if-already-done): after we finally GET the lock, a sibling
 # that held it first may have JUST relaunched a healthy new instance loading the
-# same HEAD — killing it and relaunching again is pure waste. So we skip ONLY
-# when BOTH hold: (i) the health endpoint answers, AND (ii) the live listener
-# was STARTED AFTER this restart began (a fresh instance a sibling spawned while
-# we waited), proven by process start-time — NOT merely "something is on the
-# port". A stale pre-existing process (started before this restart) fails (ii),
-# so we still kill+relaunch it and never falsely report success without loading
-# new code.
+# same HEAD — killing it and relaunching again is pure waste. Skip only when the
+# listener PID was NOT present in the pre-lock snapshot and the endpoint is a
+# real Tofu health document. PID identity avoids the one-second timestamp race
+# where an already-present listener and RESTART_EPOCH round to the same second;
+# ``curl -f`` + bootId avoids treating an arbitrary HTTP 404 listener as Tofu.
 RESTART_LOCK="${PROJ}/data/.restart.lock"
-RESTART_EPOCH="$(date +%s)"
 if command -v flock >/dev/null 2>&1 \
    && mkdir -p "${PROJ}/data" 2>/dev/null \
    && exec 9>"${RESTART_LOCK}" 2>/dev/null; then
@@ -261,20 +281,25 @@ if command -v flock >/dev/null 2>&1 \
   if flock -w 60 9; then
     echo "      Restart lock acquired (held until this script exits)."
     RL_PID="$(listener_pids | head -n1)"
-    if [ -n "${RL_PID}" ] \
-       && curl -s --max-time 2 "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1; then
+    RL_WAS_INITIAL=0
+    for _rl_initial in ${LPIDS_INIT}; do
+      [ "${RL_PID}" = "${_rl_initial}" ] && RL_WAS_INITIAL=1
+    done
+    RL_HEALTH=""
+    if [ -n "${RL_PID}" ] && [ "${RL_WAS_INITIAL}" = "0" ]; then
+      RL_HEALTH="$(curl -fsS --max-time 2 \
+        "http://127.0.0.1:${PORT}/api/health" 2>/dev/null || true)"
+    fi
+    if [ -n "${RL_PID}" ] && [ "${RL_WAS_INITIAL}" = "0" ] \
+       && printf '%s' "${RL_HEALTH}" | grep -q '"bootId"'; then
       RL_AGE="$(ps -o etimes= -p "${RL_PID}" 2>/dev/null | tr -d ' ')"
-      if [ -n "${RL_AGE}" ]; then
-        RL_STARTED_AT=$(( $(date +%s) - RL_AGE ))
-        if [ "${RL_STARTED_AT}" -ge "${RESTART_EPOCH}" ]; then
-          echo "[pre/5b] A concurrent restart already brought up a HEALTHY new"
-          echo "        instance (pid ${RL_PID}, started ${RL_AGE}s ago — AFTER this"
-          echo "        restart began) — skipping redundant kill+relaunch. Done."
-          exit 0
-        fi
-        echo "      Live listener pid ${RL_PID} is healthy but PREDATES this restart"
-        echo "      (age ${RL_AGE}s) — it is the stale instance; proceeding to reload."
-      fi
+      echo "[pre/5b] A concurrent restart already brought up a HEALTHY new"
+      echo "        Tofu instance (pid ${RL_PID}, age ${RL_AGE:-?}s — absent from"
+      echo "        the pre-lock listener snapshot) — skipping redundant reload. Done."
+      exit 0
+    elif [ -n "${RL_PID}" ]; then
+      echo "      Listener pid ${RL_PID} is pre-existing or not a Tofu health"
+      echo "      endpoint — proceeding with the requested reload."
     fi
   else
     echo "[pre/5b] Another restart has held the lock for >60s — aborting to avoid a"

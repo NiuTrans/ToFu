@@ -324,6 +324,54 @@ def test_redis_unreachable_fails_open(monkeypatch):
     assert s.live_keys('admit') == []
 
 
+def test_redis_retries_after_initial_connect_failure(monkeypatch):
+    """A Redis restart must heal without restarting the application process."""
+    from lib.runtime_state_store import RedisRuntimeStateStore
+
+    class _RecoveredClient:
+        def __init__(self):
+            self.values = {}
+
+        def ping(self):
+            return True
+
+        def set(self, key, value, **_kwargs):
+            self.values[key] = value
+            return True
+
+        def close(self):
+            pass
+
+    recovered = _RecoveredClient()
+    attempts = iter([RuntimeError('redis booting'), recovered])
+    s = RedisRuntimeStateStore()
+    monkeypatch.setattr(s, '_new_client', lambda: next(attempts))
+
+    # First call fails open, but does not permanently disable the backend.
+    assert s.acquire_lease('admit', 'long-task', ttl=90) is True
+    assert s.health()['available'] is False
+
+    # Move past the backoff without sleeping; the next operation reconnects.
+    s._next_retry_at = 0.0
+    assert s.acquire_lease('admit', 'long-task', ttl=90) is True
+    assert s.health()['available'] is True
+    assert recovered.values['tofu:rts:admit:long-task'] == '1'
+
+
+def test_refresh_slots_reconstructs_living_work_after_store_recovery():
+    """Lease expiry/recovery changes accounting only; it never kills long work."""
+    from lib.runtime_state_store import InProcRuntimeStateStore
+    s = InProcRuntimeStateStore()
+    assert s.acquire_slot('admit', 'task-a', limit=1, ttl=0.05,
+                          count_prefix='') is True
+    time.sleep(0.07)
+    assert s.count_slots('admit', '') == 0
+    s.refresh_slots('admit', ['task-a'], ttl=0.2, count_prefix='')
+    assert s.count_slots('admit', '') == 1
+    assert s.acquire_slot('admit', 'task-b', limit=1, ttl=0.2,
+                          count_prefix='') is False
+
+
 def test_redis_backend_functional_with_real_fakeredis():
     """Criterion 4, done RIGHT: drive the RedisRuntimeStateStore against a REAL
     redis-py client backed by an in-memory fakeredis server — exercising the

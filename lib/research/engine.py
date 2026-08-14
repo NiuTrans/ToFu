@@ -1,7 +1,7 @@
 """lib/research/engine.py — headless worker for auto-research jobs (R4).
 
-Thin bridge: the recipe (lib.research.recipe) owns the harvest→survey→ideate
-work, the substrate owns checkpointed resume + the crash-resume manifest, this
+Thin bridge: the recipe owns harvest→survey→ideate→independent LLM evaluation,
+the substrate owns checkpointed resume + the crash-resume manifest, this
 file only connects a TaskRuntime task to them and exposes the ``produce_research``
 entry point.
 """
@@ -46,7 +46,7 @@ def _write_manifest(task: dict, state: str) -> None:
 
 
 def run_research_task(task: dict) -> None:
-    """Worker entry — direction → scored ideas (+ survey + open-gap map)."""
+    """Worker entry — direction → ideas, evidence map, and LLM review."""
     from lib.research.recipe import build_research_from_direction
     from lib.research.runtime import _research_runtime
 
@@ -117,24 +117,22 @@ def produce_research(direction: str, *, lang: str = 'en', n_ideas: int = 6,
     through the generic /api/v1/tasks/* surface (the runtime is discovered by
     kind='research') — no bespoke routes.
     """
-    from lib.research.runtime import (_cleanup_stale_research_tasks,
-                                      _new_research_task, _research_index_get,
-                                      _research_index_register, _research_runtime,
-                                      _research_task_id)
+    from lib.research.runtime import (_claim_research_task,
+                                      _cleanup_stale_research_tasks,
+                                      _research_runtime, _research_task_id)
 
     _cleanup_stale_research_tasks()
     key = (direction.strip(), lang)
-    existing = _research_index_get(key)
-    if existing:
-        return {'task_id': existing, 'deduped': True}
     tid = _research_task_id()
     wd = os.path.join(research_root(), 'jobs', tid)
+    task, existing = _claim_research_task(
+        key, tid, direction=direction.strip(), workdir=wd,
+        lang=lang, n_ideas=n_ideas, conv_id=conv_id)
+    if existing:
+        return {'task_id': existing, 'deduped': True}
     os.makedirs(wd, exist_ok=True)
-    task = _new_research_task(tid, direction=direction.strip(), workdir=wd,
-                             lang=lang, n_ideas=n_ideas, conv_id=conv_id)
     if seed_arxiv_ids:
         task['seed_arxiv_ids'] = list(seed_arxiv_ids)
-    _research_index_register(key, tid)
     _research_runtime.spawn(tid, run_research_task, task)
     logger.info('[Research] started %s direction=%r lang=%s', tid, direction[:60], lang)
     return {'task_id': tid, 'deduped': False}

@@ -105,7 +105,6 @@ from lib.key_stats._state import (
     _lock,
     _new_entry,
     _pair_key,
-    _save_unlocked,
     _siblings_cache,
     _siblings_lock,
     _today,

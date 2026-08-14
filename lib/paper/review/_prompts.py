@@ -198,7 +198,6 @@ def build_review_tool_instruction(ui_lang: str) -> str:
     review (novelty check + reproducibility verification are the two things a
     reviewer MUST search for).
     """
-    from lib.paper.prompts import _MAX_REPORT_TOOL_ROUNDS
     if ui_lang == 'zh':
         return (
             "你拥有 web_search（批量）和 fetch_url（批量）工具。\n\n"
@@ -207,7 +206,7 @@ def build_review_tool_instruction(ui_lang: str) -> str:
             "'<最接近的竞争方法>'，判断核心想法是否真新颖、是否已被在先或同期工作做过、之后是否被后续工作超越。\n"
             "  2. **可复现性核验**：用 fetch_url **逐个打开**论文给出的代码/数据/模型链接，如实报告里面到底有什么；"
             "若论文未给链接，用 web_search 找官方仓库。绝不凭论文文字就判定'代码已公开'。\n\n"
-            f"工具调用预算：最多 {_MAX_REPORT_TOOL_ROUNDS} 轮，可在一轮里批量发多个查询——宁可少数几轮宽搜，"
+            "可在一轮里批量发多个查询——宁可少数几轮宽搜，"
             "也不要много 窄搜。收集足够后停止调用工具，一次性写出完整评审。\n\n"
             "输出纪律：开始写评审时，**立即**以第一个标题 ``# 评审意见`` 开头，之前不得有任何文字"
             "（不要'我来查一下…'、不要'我已经有足够材料…'、不要过渡句）。最前面的字符必须是 ``# 评审意见``。\n\n"
@@ -221,7 +220,7 @@ def build_review_tool_instruction(ui_lang: str) -> str:
         "  2. **Reproducibility verification**: use fetch_url to OPEN every code / data / model "
         "link the paper prints and report what is ACTUALLY there; if none is printed, web_search "
         "for an official repo. Never conclude 'code is available' from the paper's text alone.\n\n"
-        f"Tool-call budget: up to {_MAX_REPORT_TOOL_ROUNDS} rounds. Batch many queries per round — "
+        "Batch many queries per round — "
         "prefer a few wide rounds over many narrow ones. Once you've gathered enough, stop calling "
         "tools and write the FULL review in one pass.\n\n"
         "Output discipline: begin IMMEDIATELY with the first heading ``# Review``. Do NOT emit ANY "
@@ -389,7 +388,6 @@ def build_rebuttal_tool_instruction(ui_lang: str) -> str:
     ONE thing the reviewer must do with tools is check a newly-cited link /
     benchmark number / prior-work comparison the rebuttal leans on.
     """
-    from lib.paper.prompts import _MAX_REPORT_TOOL_ROUNDS
     if ui_lang == 'zh':
         return (
             "你拥有 web_search（批量）和 fetch_url（批量）工具。\n\n"
@@ -398,7 +396,7 @@ def build_rebuttal_tool_instruction(ui_lang: str) -> str:
             "  - 作者声称的新基准数字/对比——必要时搜索核对；\n"
             "  - 作者说“某在先工作没做过 X”——核查是否属实。\n"
             "绝不凭作者的一句话就认定某个缺点已解决。\n\n"
-            f"工具调用预算：最多 {_MAX_REPORT_TOOL_ROUNDS} 轮，可批量。核验够了就停，一次性写完回复。\n\n"
+            "工具调用可以批量执行。核验够了就停，一次性写完回复。\n\n"
             "输出纪律：**立即**以 ``# 对作者的回复`` 开头，之前不得有任何文字。\n\n"
         )
     return (
@@ -408,8 +406,7 @@ def build_rebuttal_tool_instruction(ui_lang: str) -> str:
         "  - a new benchmark number / comparison the authors claim — search to check it;\n"
         "  - an author claim that 'prior work never did X' — verify whether that holds.\n"
         "Never accept that a weakness is resolved on the authors' word alone.\n\n"
-        f"Tool-call budget: up to {_MAX_REPORT_TOOL_ROUNDS} rounds, batchable. Once you have "
+        "Tool calls may be batched. Once you have "
         "verified enough, stop and write the full reply in one pass.\n\n"
         "Output discipline: begin IMMEDIATELY with ``# Response to Authors``. No text before it.\n\n"
     )
-

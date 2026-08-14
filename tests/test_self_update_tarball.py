@@ -14,7 +14,13 @@ built tarball, and ``_ROOT`` is pointed at a throwaway "install" dir, so the
 tests never hit the network or touch the real project tree.
 """
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {
+    'lib/foo.py', 'static/js/bundle-abc.js',
+    'static/vite/assets/main-abc.js',
+}
+
 import contextlib
+import io
 import os
 import sys
 import tarfile
@@ -330,9 +336,9 @@ def test_git_checkout_flips_to_indeterminate_pull():
 def test_overlay_skip_classification():
     from lib.self_update import _overlay_skip as skip
     must_skip = ['.tofu/skills/x.md', 'data/app.db', 'logs/app.log',
-                 'uploads/img.png', '.git/config', 'static/js/bundle-abc.js',
+                 'uploads/img.png', '.git/config',
                  '.update_backup/20260101-000000/x']
-    must_copy = ['server.py', 'lib/foo.py', 'static/js/update.js',
+    must_copy = ['server.py', 'lib/foo.py', 'static/vite/assets/main-abc.js',
                  'static/styles.css', 'requirements.txt', 'routes/chat.py']
     for p in must_skip:
         assert skip(p), f'{p} should be skipped'
@@ -430,6 +436,71 @@ def test_tarball_invalid_archive_aborts_untouched():
         assert open(os.path.join(inst, 'server.py')).read().strip() == 'UNTOUCHED'
         assert not os.path.exists(os.path.join(inst, '.update_backup'))
         _ok('_apply_via_tarball: invalid archive aborts, install untouched')
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_tarball_rejects_link_escape_before_extracting():
+    """A safe member name must not be allowed to redirect later extraction."""
+    from lib.self_update._apply import _validated_tar_members
+
+    tmp = tempfile.mkdtemp(prefix='tofu-test-')
+    try:
+        tar_path = os.path.join(tmp, 'escape.tar.gz')
+        with tarfile.open(tar_path, 'w:gz') as tf:
+            link = tarfile.TarInfo('rangehow-ToFu-deadbeef/lib')
+            link.type = tarfile.SYMTYPE
+            link.linkname = '../../outside'
+            tf.addfile(link)
+            body = b'overwritten\n'
+            payload = tarfile.TarInfo('rangehow-ToFu-deadbeef/lib/victim')
+            payload.size = len(body)
+            tf.addfile(payload, io.BytesIO(body))
+
+        with tarfile.open(tar_path, 'r:gz') as tf:
+            try:
+                _validated_tar_members(tf)
+            except ValueError as exc:
+                assert 'member type' in str(exc)
+            else:
+                raise AssertionError('link member was accepted')
+        assert not os.path.exists(os.path.join(tmp, 'outside', 'victim'))
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_tarball_rejects_declared_oversize_before_streaming():
+    import lib.self_update as su
+    from lib.self_update._apply import _MAX_TARBALL_DOWNLOAD_BYTES
+
+    tmp = tempfile.mkdtemp(prefix='tofu-test-')
+    try:
+        inst = _build_install(tmp)
+
+        class _Resp:
+            status_code = 200
+            headers = {'Content-Length': str(_MAX_TARBALL_DOWNLOAD_BYTES + 1)}
+
+            def iter_content(self, _n):
+                raise AssertionError('oversize response body must not be read')
+
+        @contextlib.contextmanager
+        def _fake(_method, _url, **_kwargs):
+            yield _Resp()
+
+        original = (su.http_stream, su._ROOT)
+        try:
+            su.http_stream = _fake
+            su._ROOT = inst
+            result = su._apply_via_tarball('v9.9.9')
+        finally:
+            su.http_stream, su._ROOT = original
+
+        assert result['ok'] is False
+        assert '512 MiB' in result['detail']
+        assert open(os.path.join(inst, 'server.py')).read() == 'OLD server\n'
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)

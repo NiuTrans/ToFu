@@ -131,10 +131,20 @@ _SHIPPED_DIRS = ('lib/', 'routes/', 'static/', 'server.py', 'export.py')
 
 
 def _tracked(pattern: str) -> list[str]:
-    """git ls-files — never os.walk (FUSE mounts make walks pathologically slow)."""
+    """Return tracked files that exist in the current worktree.
+
+    ``git ls-files`` deliberately keeps index entries for unstaged deletions.
+    Those paths are not part of the worktree that pytest/CI will execute, so
+    treating them as unreadable A0 findings makes the local ratchet disagree
+    with the exact same change after it is committed.  Keep genuinely
+    unreadable existing files visible to :func:`analyze_file`; exclude only
+    paths that are no longer files.
+    """
     out = subprocess.run(['git', 'ls-files', pattern], cwd=REPO,
                          capture_output=True, text=True, timeout=120)
-    return [ln for ln in out.stdout.splitlines() if ln.strip()]
+    tracked = [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
+    return [rel for rel in tracked
+            if os.path.isfile(os.path.join(REPO, rel))]
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -428,6 +438,51 @@ def analyze_file(rel: str) -> FileReport:
     # NEUTER product (``neutered``/``poisoned``/``patched``) — those hold
     # deliberately-mutated text and assert the anchor is GONE.
     mentioned_paths: set[str] = set()
+    # Prose and negative assertions may legitimately spell a retired path:
+    # they document a migration or prove that the old owner is absent.  Such
+    # strings are not anchors used to locate source, so category F must not
+    # classify them as dead reads.
+    prose_ids: set[int] = set()
+    for owner in ast.walk(tree):
+        if not isinstance(owner, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                  ast.AsyncFunctionDef)) or not owner.body:
+            continue
+        first = owner.body[0]
+        if (isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)):
+            prose_ids.add(id(first.value))
+    negative_path_ids: set[int] = set()
+    for assertion in (n for n in ast.walk(tree) if isinstance(n, ast.Assert)):
+        negative_parts: list[ast.AST] = []
+        if isinstance(assertion.test, ast.UnaryOp) and isinstance(
+                assertion.test.op, ast.Not):
+            negative_parts.append(assertion.test.operand)
+        if isinstance(assertion.test, ast.Compare) and any(
+                isinstance(op, (ast.NotIn, ast.NotEq, ast.IsNot))
+                for op in assertion.test.ops):
+            negative_parts.append(assertion.test)
+        for part in negative_parts:
+            negative_path_ids.update(
+                id(item) for item in ast.walk(part)
+                if isinstance(item, ast.Constant) and isinstance(item.value, str))
+    # Tests that exercise parsers, manifests, or compaction frequently need
+    # realistic-looking paths that are intentionally NOT repository files.
+    # An exact, module-level declaration keeps those fixtures visible and
+    # reviewable without misreporting them as dead source anchors.
+    synthetic_paths: set[str] = set()
+    for n in tree.body:
+        if not isinstance(n, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+        if not any(isinstance(t, ast.Name)
+                   and t.id == '_AUDIT_SYNTHETIC_REPO_PATHS'
+                   for t in targets):
+            continue
+        value = n.value
+        for item in ast.walk(value):
+            if isinstance(item, ast.Constant) and isinstance(item.value, str):
+                synthetic_paths.add(item.value.strip())
     needles: list[tuple[str, int, str, int]] = []
     _or_branch = set()
     for n in ast.walk(tree):
@@ -444,7 +499,8 @@ def analyze_file(rel: str) -> FileReport:
                 for d in ast.walk(c):
                     _scope_of[id(d)] = id(c)
     for n in ast.walk(tree):
-        if isinstance(n, ast.Constant) and isinstance(n.value, str):
+        if (isinstance(n, ast.Constant) and isinstance(n.value, str)
+                and id(n) not in prose_ids and id(n) not in negative_path_ids):
             v = n.value.strip()
             if _PATH_RE.match(v):
                 mentioned_paths.add(v)
@@ -466,6 +522,61 @@ def analyze_file(rel: str) -> FileReport:
                 rep.imports.add(mod or a.name)
             if mod:
                 rep.imports.add(mod)
+
+    mentioned_paths.difference_update(synthetic_paths)
+
+    # ``tests._runtime_sections`` intentionally exposes the retired classic
+    # names as a virtual test namespace backed by marked slices of the retained
+    # Vite runtime.  In files that explicitly opt into that adapter, a matching
+    # ``static/js/<name>`` string is a logical section identity, not a disk
+    # lookup.  Require both the import and a live marker so a typo or removed
+    # section still remains an F finding.
+    has_runtime_adapter = any(
+        isinstance(n, ast.ImportFrom)
+        and (n.module or '').removeprefix('tests.') == '_runtime_sections'
+        for n in ast.walk(tree))
+    if has_runtime_adapter:
+        runtime_path = os.path.join(
+            REPO, 'frontend', 'src', 'runtime', 'app-runtime.js')
+        try:
+            with open(runtime_path, encoding='utf-8') as runtime_file:
+                runtime_source = runtime_file.read()
+        except OSError:
+            runtime_source = ''
+        migrated = set(re.findall(
+            r'/\* ===== migrated source: (.+?) ===== \*/', runtime_source))
+        mentioned_paths.difference_update(
+            f'static/js/{name}' for name in migrated)
+
+        # Native orchestration owners retain their classic logical names only
+        # inside the test adapter.  Accept one of those names iff its concrete
+        # TypeScript owner exists; this keeps typos (and deleted owners) red.
+        orchestration_dir = os.path.join(
+            REPO, 'frontend', 'src', 'features', 'orchestration')
+        native_virtual_paths: set[str] = set()
+        for mentioned in mentioned_paths:
+            if not mentioned.startswith('static/js/') or not mentioned.endswith('.js'):
+                continue
+            basename = mentioned.removeprefix('static/js/').removesuffix('.js')
+            stem = (basename.removeprefix('orchestration-')
+                    if basename.startswith('orchestration-') else basename)
+            if os.path.isfile(os.path.join(orchestration_dir, stem + '.ts')):
+                native_virtual_paths.add(mentioned)
+
+        # ``native_module_graph`` also permits intentionally named temporary
+        # outputs that have no 1:1 source stem (the call supplies the concrete
+        # source beside each name). Treat only literal names inside that call
+        # as declared virtual paths.
+        for call in (n for n in ast.walk(tree) if isinstance(n, ast.Call)):
+            if _call_name(call) != 'native_module_graph':
+                continue
+            for item in ast.walk(call):
+                if (isinstance(item, ast.Constant)
+                        and isinstance(item.value, str)
+                        and item.value.endswith('.js')
+                        and '/' not in item.value):
+                    native_virtual_paths.add('static/js/' + item.value)
+        mentioned_paths.difference_update(native_virtual_paths)
 
     # F: dead path anchors
     for p in sorted(mentioned_paths):

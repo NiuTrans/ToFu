@@ -51,6 +51,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -58,7 +59,12 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+sys.path.insert(0, HERE)
+from _runtime_sections import runtime_section_path  # noqa: E402
+
+CROSS_TAB_SYNC = runtime_section_path('core/cross_tab_sync.js')
+CONV_REDUCERS = runtime_section_path('core/conv_reducers.js')
+CONV_STATE_REDUCER = runtime_section_path('core/conv_state_reducer.js')
 
 
 def _node_available() -> bool:
@@ -79,6 +85,7 @@ let saveCalls = [];          // saveConversations(convId)
 let listRefreshCalls = 0;    // loadConversationsFromServer()
 let bodyRefetchCalls = [];   // loadConversationMessages — must NEVER run for active
 let serverResponse = null;   // what Api.conversations.get resolves to
+let getImpl = null;          // optional deferred-response seam for single-flight
 let reconnectCalls = [];     // _reconnectServerTaskIfIdle(convId)
 let sendBtnCalls = 0;        // updateSendButton()
 let reconnectReturns = false;// what _reconnectServerTaskIfIdle returns
@@ -118,7 +125,10 @@ global.loadConversationsFromServer = async () => { listRefreshCalls++; };
 global.loadConversationMessages = async (id) => { bodyRefetchCalls.push(id); };
 global.pushIsConnected = () => true;
 global.pushSubscribe = () => {};
-global.Api = { conversations: { get: async (id) => { getCalls.push(id); return serverResponse; } } };
+global.Api = { conversations: { get: async (id) => {
+  getCalls.push(id);
+  return getImpl ? getImpl(id) : serverResponse;
+} } };
 
 const SRC = fs.readFileSync(process.argv[2], 'utf8');
 // Epic-E slices: _verifyActiveConvFromServer now calls _mergeTerminalTurnFields
@@ -135,7 +145,7 @@ loadModule(STATE_REDUCER);
 
 function reset() {
   getCalls = []; renderChatCalls = []; saveCalls = [];
-  listRefreshCalls = 0; bodyRefetchCalls = []; serverResponse = null;
+  listRefreshCalls = 0; bodyRefetchCalls = []; serverResponse = null; getImpl = null;
   reconnectCalls = []; sendBtnCalls = 0; reconnectReturns = false;
   _timers = [];
   global.conversations = [];
@@ -283,6 +293,42 @@ const settle = async () => { for (let i = 0; i < 5; i++) await flush(); };
     _onConvNotifyPush({ type: 'conv_changed', convId: 'c1', rev: 4, userId: 1 });
     await flush(); fireTimers(); await settle();
     check('revgate_no_get', getCalls.length === 0);
+  }
+
+  // ══ 3b. A newer rev DURING a slow verify: one in-flight GET, then one
+  //          bounded catch-up GET. Never concurrent; never lose rev 7. ══
+  {
+    reset();
+    conversations = [{ id: 'c1', _serverRev: 5, messages: [
+      { role: 'user', content: 'q' },
+    ] }];
+    activeConvId = 'c1';
+    const resolvers = [];
+    getImpl = () => new Promise((resolve) => { resolvers.push(resolve); });
+
+    _onConvNotifyPush({ type: 'conv_changed', convId: 'c1', rev: 6, userId: 1 });
+    fireTimers(); await settle();
+    check('singleflight_first_get_started', getCalls.length === 1 && resolvers.length === 1);
+
+    _onConvNotifyPush({ type: 'conv_changed', convId: 'c1', rev: 7, userId: 1 });
+    fireTimers(); await settle();
+    check('singleflight_no_concurrent_duplicate', getCalls.length === 1);
+
+    resolvers[0]({ rev: 6, messages: [
+      { role: 'user', content: 'q' },
+      { role: 'assistant', content: 'rev six' },
+    ] });
+    await settle();
+    check('singleflight_catchup_started', getCalls.length === 2 && resolvers.length === 2);
+
+    resolvers[1]({ rev: 7, messages: [
+      { role: 'user', content: 'q' },
+      { role: 'assistant', content: 'rev seven is longer' },
+    ] });
+    await settle();
+    check('singleflight_newest_rev_adopted', conversations[0]._serverRev === 7);
+    check('singleflight_newest_body_adopted',
+      conversations[0].messages[1].content === 'rev seven is longer');
   }
 
   // ══ 4. SELF-ECHO fast-path: fresh local PUT (_localWriteAt) → no DESTRUCTIVE verify ══
@@ -507,9 +553,8 @@ def test_conv_notify_push_handler():
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, os.path.join(JS_DIR, 'core', 'cross_tab_sync.js'),
-             os.path.join(JS_DIR, 'core', 'conv_reducers.js'),
-             os.path.join(JS_DIR, 'core', 'conv_state_reducer.js')],
+            ['node', harness, CROSS_TAB_SYNC, CONV_REDUCERS,
+             CONV_STATE_REDUCER],
             capture_output=True, text=True, timeout=60,
         )
     finally:

@@ -2,13 +2,10 @@
 
 Two independent fixture families live here:
 
-  * ``flask_client`` / ``flask_app`` — a Quart (Flask-shim) test client over
-    the REAL ``server.app``, consumed by ``tests/test_api_integration.py``,
-    ``tests/test_conversation_search.py`` and any other API integration test.
-    Importing ``server`` (in ``flask_app``) installs the Flask→Quart shim
-    BEFORE any ``routes.*`` import, which is also what keeps
-    ``routes/push.py``'s ``@push_bp.websocket`` from crashing collection with
-    ``AttributeError: 'Blueprint' object has no attribute 'websocket'``.
+  * ``flask_client`` / ``flask_app`` — legacy fixture names for a native Quart
+    test client over the REAL ``server.app``, consumed by API integration
+    tests. Importing ``server`` assembles the Quart blueprint stack once after
+    test storage isolation is configured.
   * ``_reset_global_config`` — snapshots/restores the tofu_search global
     ``SearchConfig`` singleton around every test so ``configure()`` mutations
     don't leak between tests.
@@ -30,9 +27,66 @@ import json
 import logging
 import os
 import re
+import sys
 import tempfile
+import threading
 
 import pytest
+
+# Test storage isolation must happen before the FIRST project import.  In
+# particular, importing tofu_search.config below can transitively import
+# lib.config_dir, whose CONFIG_DIR is frozen at module import time.  Setting
+# TOFU_DATA_DIR later in _initialize_test_application() is therefore too late
+# and previously let API tests write webhook subscriptions into the user's
+# real data/config directory.  Every pytest process (including each xdist
+# worker) gets fresh roots; an ambient production setting is intentionally not
+# inherited by tests.
+_PYTEST_WORKER = os.environ.get('PYTEST_XDIST_WORKER', '')
+_PYTEST_SUFFIX = f'-{_PYTEST_WORKER}' if _PYTEST_WORKER else ''
+_PYTEST_ID = (_PYTEST_WORKER or 'controller').upper()
+_PYTEST_DATA_ROOT_KEY = f'TOFU_PYTEST_DATA_ROOT_{_PYTEST_ID}'
+_PYTEST_DATA_ROOT = os.environ.get(_PYTEST_DATA_ROOT_KEY)
+if not _PYTEST_DATA_ROOT:
+    _PYTEST_DATA_ROOT = tempfile.mkdtemp(
+        prefix=f'tofu-test-data{_PYTEST_SUFFIX}-')
+    os.environ[_PYTEST_DATA_ROOT_KEY] = _PYTEST_DATA_ROOT
+os.environ['TOFU_DATA_DIR'] = _PYTEST_DATA_ROOT
+# Pytest may load this file as top-level ``conftest`` while guard tests import
+# ``tests.conftest``.  Without an alias, Python executes the module twice: the
+# second import replaces TOFU_DATA_DIR after route modules have frozen paths,
+# splitting one worker across two supposedly-isolated roots.
+_THIS_CONFTEST = sys.modules.get(__name__)
+if _THIS_CONFTEST is not None:
+    sys.modules.setdefault('conftest', _THIS_CONFTEST)
+    sys.modules.setdefault('tests.conftest', _THIS_CONFTEST)
+if os.environ.get('TOFU_ALLOW_PG_TESTS') != '1':
+    os.environ['TOFU_DB_BACKEND'] = 'sqlite'
+    _PYTEST_DB_ROOT_KEY = f'TOFU_PYTEST_DB_ROOT_{_PYTEST_ID}'
+    _PYTEST_DB_ROOT = os.environ.get(_PYTEST_DB_ROOT_KEY)
+    if not _PYTEST_DB_ROOT:
+        _PYTEST_DB_ROOT = tempfile.mkdtemp(
+            prefix=f'tofu-test-db{_PYTEST_SUFFIX}-')
+        os.environ[_PYTEST_DB_ROOT_KEY] = _PYTEST_DB_ROOT
+    _PYTEST_DB_DATA = os.path.join(_PYTEST_DB_ROOT, 'data')
+    os.makedirs(_PYTEST_DB_DATA, exist_ok=True)
+    os.environ['TOFU_DB_PATH'] = os.path.join(
+        _PYTEST_DB_DATA, 'tofu.db')
+    # The Storage Sidecar derives its database from a project root rather than
+    # TOFU_DB_PATH.  Give every pytest process its own explicit test-authorized
+    # project root so it shares this worker's SQLite database and never
+    # contends with a developer's live sidecar in the repository root.
+    os.environ['TOFU_STORAGE_PROJECT_ROOT'] = _PYTEST_DB_ROOT
+    os.environ['TOFU_STORAGE_ALLOW_PROJECT_OVERRIDE'] = '1'
+
+# tofu_search's public facade imports pymupdf4llm.  Keep its optional, known-
+# incompatible layout/OCR backend from creating a host-sized ONNX pool merely
+# to collect tests.  The classic Markdown extractor remains available; ONNX is
+# guarded and loaded lazily only when a test actually asks for Docling.
+try:
+    from runtime_guards import install_pymupdf_classic_policy
+    install_pymupdf_classic_policy()
+except Exception:
+    pass
 
 import tofu_search.config as _config
 
@@ -63,24 +117,38 @@ def _ensure_werkzeug_version():
 _ensure_werkzeug_version()
 
 
-# ─── Module-load: install the Flask→Quart shim BEFORE collection ──────
+def _ensure_quart_default_config():
+    """Keep isolated mini-app tests runnable on the pre-0.20 Quart dev env.
+
+    Production and CI install the ``quart>=0.20`` floor from requirements.txt.
+    Some developer environments can still carry Quart 0.19 alongside Flask
+    3.1; that pair reads ``PROVIDE_AUTOMATIC_OPTIONS`` in ``Quart.__init__``
+    before an instance can set it. The production app factory already guards
+    its instance, while direct route-contract mini-apps need this one
+    process-local test bootstrap.
+    """
+    from quart import Quart
+
+    if 'PROVIDE_AUTOMATIC_OPTIONS' not in Quart.default_config:
+        Quart.default_config = {
+            **Quart.default_config,
+            'PROVIDE_AUTOMATIC_OPTIONS': True,
+        }
+
+
+_ensure_quart_default_config()
+
+
+# ─── Module-load: initialize the isolated Quart test app ─────────────
 #
-# pytest imports this conftest before it collects any test module. Several
-# test files do top-level ``from routes... import X`` / ``import lib...``
-# which transitively hits ``routes/push.py``'s ``@push_bp.websocket`` — an
-# attribute that only exists once ``server._install_flask_shim()`` has
-# pointed ``sys.modules['flask']`` at Quart. Installing the shim here (at
-# conftest import) makes every test file's module-level imports safe,
-# regardless of collection order, without forcing the full app build (that
-# stays lazy in the ``flask_app`` fixture). The shim is idempotent, so the
-# later ``import server`` re-runs it harmlessly.
-def _install_shim_for_collection():
-    # A plain ``import server`` runs ``_install_flask_shim()`` at server.py's
-    # module top and caches the module in ``sys.modules``, so the ``import
-    # server`` inside the ``flask_app`` fixture is a no-op (no double app
-    # build). We must set the SQLite env BEFORE this import so the DB layer
-    # picks the right backend (mirrors _configure_test_env's setdefaults,
-    # which haven't run yet at conftest-import time).
+# pytest imports this conftest before collecting test modules. Assemble the app
+# once, after storage isolation is configured, so top-level route imports and
+# the later ``flask_app`` fixture share the same native Quart application.
+def _initialize_test_application():
+    # A plain ``import server`` assembles the native Quart app and caches the
+    # module in ``sys.modules``, so the import inside ``flask_app`` is a no-op.
+    # Set the SQLite env BEFORE this import so the DB layer picks the isolated
+    # backend (mirrors _configure_test_env's later setdefaults).
     import os as _os
     # ⚠️ DATA-LOSS GUARD (2026-06-28 incident): an ambient
     # ``TOFU_DB_BACKEND=postgres`` in the agent's shell (it lives in .env)
@@ -137,12 +205,31 @@ def _install_shim_for_collection():
     # test process — they run live LLM polls + web searches against the
     # shared DB, stealing CPU/IO and making timing-sensitive tests flaky.
     _os.environ.setdefault('TOFU_DISABLE_SCHEDULER', '1')
+    _os.environ.setdefault('TOFU_MODEL_CATALOG_SYNC', '0')
     # Never start the netpath prober thread in test processes either:
     # server.py calls start_prober() at import, and the daemon would fire
     # real network probes (through the env proxy) 10s later and write into
     # the production logs/app.log. netpath's own tests opt back in via
     # monkeypatch (tests/test_netpath.py).
     _os.environ.setdefault('TOFU_NETPATH', 'off')
+    # The repository's deployment .env may have normalized message-row
+    # authority enabled.  Authority is intentionally a production cut-over
+    # invariant: when on, startup requires both row write/read flags too.  It
+    # must never leak into the isolated pytest SQLite process (where row-store
+    # tests opt in explicitly with monkeypatch).  Force all three gates off
+    # before `import server` loads .env, eliminating collection-order-dependent
+    # E2E startup failures when no earlier test happened to neutralize them.
+    _os.environ['TOFU_MESSAGES_ROWS'] = '0'
+    _os.environ['TOFU_MESSAGES_ROWS_READ'] = '0'
+    _os.environ['TOFU_MESSAGES_ROWS_AUTHORITY'] = '0'
+    # The server import below freezes lib.LLM_API_KEYS.  Seed the hermetic
+    # placeholder BEFORE that import so the browser-facing server config
+    # truthfully represents the stubbed E2E provider as configured.  Doing
+    # this only in _configure_test_env is too late and makes the keyless
+    # first-run modal race every visual journey.  Force (rather than inherit)
+    # the value so a developer's real shell credential cannot leak into tests.
+    _os.environ['LLM_API_KEY'] = 'test-key-placeholder'
+    _os.environ['LLM_API_KEYS'] = 'test-key-placeholder'
     # ⚠️ LOG ISOLATION (2026-07-27, after app.log hit 9.1 GB in one day).
     # Everything else in this block is already isolated — DB, scheduler,
     # netpath, mlock — but logs were NOT, so the test process appended to the
@@ -165,10 +252,10 @@ def _install_shim_for_collection():
         _os.environ['TOFU_DATA_DIR'] = _tf_log.mkdtemp(
             prefix=f'tofu-test-logs{_log_suffix}-')
     try:
-        import server  # noqa: F401 — side-effect: installs Flask→Quart shim
-    except Exception as _e:  # never block collection on the shim probe
+        import server  # noqa: F401 — side-effect: assembles the Quart app
+    except Exception as _e:  # never block collection on the app probe
         import sys as _sys
-        _sys.stderr.write(f'[conftest] shim pre-install skipped: {_e}\n')
+        _sys.stderr.write(f'[conftest] app initialization skipped: {_e}\n')
 
     # ─── HARD PATH LOCK (2026-07-26) ──────────────────────────────────
     # Force lib.database._core.DB_PATH to the session-specific temp path
@@ -248,13 +335,13 @@ def _assert_test_database(context: str = ''):
     raise pytest.UsageError(msg)
 
 
-_install_shim_for_collection()
+_initialize_test_application()
 
 
 # ─── Module-load: make Quart's app_context() usable as a SYNC context ──
 #
-# Under the Flask→Quart shim ``app.app_context()`` returns a Quart
-# ``AppContext`` that only implements ``__aenter__``/``__aexit__`` (async).
+# Native Quart's ``app.app_context()`` returns an ``AppContext`` that only
+# implements ``__aenter__``/``__aexit__`` (async).
 # A large family of sync-style tests (the ``tests/test_artifacts_*`` suite)
 # wrap pure DB calls in ``with flask_app.app_context():`` — legacy Flask
 # style. Under Quart that raises ``TypeError: 'AppContext' object does not
@@ -305,17 +392,79 @@ _install_sync_app_context_shim()
 # every later test's INSERT then burns its 30s busy_timeout and fails with
 # 'database is locked' (CI cascade: test_error_result_model_metadata /
 # test_task_birth_row / test_tool_exec_failure_verdict, 2026-08-06). This
-# autouse belt rolls back any txn still open at a test boundary whose last
-# activity predates the boundary by >1s (a genuinely-live background writer
-# touches the connection continuously; only a zombie goes quiet).
+# autouse belt immediately rolls back a txn owned by pytest's current runner
+# thread, and rolls back other-thread txns only when idle >1s. This closes the
+# sub-second boundary gap without racing a genuinely-live background writer.
 @pytest.fixture(autouse=True)
 def _reap_leaked_db_transactions():
     yield
     try:
         import lib.database._core as _dbc
-        _dbc.reap_idle_write_transactions()
+        _dbc.reap_idle_write_transactions(owner_ident=threading.get_ident())
     except Exception as e:
         _conftest_logger.debug('txn reaper unavailable: %s', e)
+
+
+# ─── Background event-storage worker isolation ──────────────────────
+# ``append_persistent_event`` lazily starts both a batch writer and a storage
+# maintenance daemon.  Production wants those process-lifetime workers, but a
+# pytest worker deliberately rebinds DB_PATH / SQLite ownership in several
+# tests.  Letting the daemon survive across that boundary makes it write with
+# the previous test's owner claim, and it can still log after pytest has closed
+# its capture stream.  Quiesce only modules that are already imported (do not
+# import the event stack for unrelated tests), before AND after every test.
+def _stop_test_event_storage_workers(reason: str) -> None:
+    import sys
+
+    event_log = sys.modules.get('lib.tasks_pkg.event_log')
+    if event_log is None:
+        return
+    try:
+        event_log.stop_storage_maintenance(timeout=3.0)
+    except Exception as e:
+        _conftest_logger.debug(
+            'event maintenance stop failed %s: %s', reason, e)
+    try:
+        event_log.stop_event_writer(timeout=3.0)
+    except Exception as e:
+        _conftest_logger.debug('event writer stop failed %s: %s', reason, e)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_event_storage_workers():
+    _stop_test_event_storage_workers('(test setup)')
+    try:
+        yield
+    finally:
+        _stop_test_event_storage_workers('(test teardown)')
+
+
+# ─── Auxiliary SQLite ownership isolation ───────────────────────────
+# Production auxiliary stores are process-lifetime paths. Tests frequently
+# bind them to a fresh tmp_path, so retaining each path's process-lifetime
+# heartbeat creates one daemon thread per completed test. Release only an
+# already-imported registry at test boundaries; individual owner-contract
+# tests still retain their claim for the full duration of the test itself.
+def _release_test_store_owners(reason: str) -> None:
+    import sys
+
+    owner = sys.modules.get('lib.database.sqlite_store_owner')
+    if owner is None:
+        return
+    try:
+        owner.release_store_owners()
+    except Exception as e:
+        _conftest_logger.debug(
+            'auxiliary SQLite owner release failed %s: %s', reason, e)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_auxiliary_sqlite_owners():
+    _release_test_store_owners('(test setup)')
+    try:
+        yield
+    finally:
+        _release_test_store_owners('(test teardown)')
 
 
 # ─── tofu_search global-config isolation (pre-existing) ───────────────
@@ -371,13 +520,6 @@ _NC_GUARDED_SOURCES = (
     'lib/scheduler/manager.py',
     'lib/project_mod/config.py',
     'routes/conversations.py',
-    # Frontend: test_frontend_tofu_scene_pixeldiff.py byte-patches this shipped
-    # source IN PLACE (record-freeze + pale-neuter) and restores in a finally.
-    # If the node subprocess is SIGKILLed / times out, the finally is skipped
-    # and the shipped file is left neutered — poisoning every later tofu-scene
-    # test. It is the only UNPROTECTED in-place shipped-source writer, so it
-    # belongs on the belt like the on-disk NC .py targets above.
-    'static/js/tofu-scene.js',
     # Discovered by tests/test_nc_guard_registry.py (the self-enforcing
     # meta-guard) — each is byte-patched IN PLACE by an NC with a finally
     # restore, so they need the same crash-heal backstop:
@@ -508,6 +650,20 @@ def _restore_nc_patched_sources():
         restore_drifted_nc_sources()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_open_mode_rate_limit(monkeypatch):
+    """Do not let unrelated API tests exhaust the production open-mode RPM.
+
+    The API suite shares one app and one per-IP rate-limit store per xdist
+    worker. At the production default of 120 RPM, ordinary CRUD setup traffic
+    eventually turns every later test into HTTP 429. A few limiter tests also
+    deliberately remove the variable after probing it, so a session-only
+    setting is insufficient. Reset at every test boundary; limiter-specific
+    cases remain free to override/delete it inside their own scope.
+    """
+    monkeypatch.setenv('TOFU_OPEN_MODE_RPM', '0')
+
+
 # ─── Session-level: one SQLite DB per pytest run ──────────────────────
 @pytest.fixture(scope="session", autouse=True)
 def _configure_test_env():
@@ -546,12 +702,13 @@ def _configure_test_env():
             _init_db()
         except Exception as _e:
             _conftest_logger.warning('[conftest] session init_db failed: %s', _e)
-    os.environ.setdefault("TOFU_MLOCK", "0")  # see _install_shim_for_collection
+    os.environ.setdefault("TOFU_MLOCK", "0")  # see _initialize_test_application
     os.environ.setdefault("TRADING_ENABLED", "0")
     os.environ.setdefault("PPTX_TRANSLATE_ENABLED", "0")
     os.environ.setdefault("TOFU_BROWSER_POLL_WAIT", "0.2")
     os.environ.setdefault("TOFU_DESKTOP_POLL_WAIT", "0.2")
     os.environ.setdefault("TOFU_DISABLE_SCHEDULER", "1")
+    os.environ.setdefault("TOFU_MODEL_CATALOG_SYNC", "0")
     # Avoid accidental real LLM calls in CI.
     os.environ.setdefault("LLM_API_KEY", "test-key-placeholder")
     os.environ.setdefault("LLM_API_KEYS", "test-key-placeholder")
@@ -563,23 +720,48 @@ def _configure_test_env():
     yield
 
     try:
+        from lib.storage import stop_storage
+        stop_storage()
+    except Exception as _e:
+        _conftest_logger.debug('test storage sidecar cleanup failed: %s', _e)
+
+    # Release process-local SQLite handles/ownership while the throwaway root
+    # still exists.  Leaving these to atexit after rmtree produces a spurious
+    # owner-marker warning through an already-closed pytest log stream.
+    try:
+        from lib.database import close_thread_db, shutdown_pool
+        close_thread_db()
+        shutdown_pool()
+        from lib.database.sqlite_store_owner import release_store_owners
+        from lib.database.sqlite_owner import release_owner
+        release_store_owners()
+        release_owner()
+    except Exception as _e:
+        _conftest_logger.debug('test SQLite owner cleanup failed: %s', _e)
+
+    try:
         import shutil
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        if _PYTEST_DATA_ROOT:
+            shutil.rmtree(_PYTEST_DATA_ROOT, ignore_errors=True)
+        if os.environ.get('TOFU_ALLOW_PG_TESTS') != '1':
+            shutil.rmtree(_PYTEST_DB_ROOT, ignore_errors=True)
     except Exception:
         pass
 
 
-# ─── Session-level: build the Flask (Quart-shim) app once ─────────────
+# ─── Session-level: build the native Quart app once ──────────────────
 @pytest.fixture(scope="session")
 def flask_app(_configure_test_env):
     """Import and return ``server.app`` AFTER env-vars are set.
 
-    Importing ``server`` installs the Flask→Quart shim and constructs the
-    full blueprint stack exactly once per session.
+    Importing ``server`` constructs the native Quart blueprint stack exactly
+    once per session. The fixture name remains for test compatibility only.
     """
     # Keystone guard: never build the real app against a production DB.
     _assert_test_database('flask_app fixture')
-    import server  # noqa: F401 — import side-effect installs shim + builds app
+    import server  # noqa: F401 — import side-effect builds the application
     from server import app
 
     # Create the DB schema. On the real serving path this runs inside
@@ -790,7 +972,7 @@ def _auth_mode_override(request):
 
 # ─── Sync adapter over the async Quart test client ────────────────────
 #
-# The app is Quart (via the Flask→Quart shim), so ``app.test_client()`` is a
+# The app is native Quart, so ``app.test_client()`` is a
 # ``QuartClient`` whose ``.get()/.post()/...`` are COROUTINES and whose
 # response ``.get_json()/.get_data()`` are async too. The API integration
 # tests, however, are written in the legacy SYNC Flask style
@@ -802,6 +984,31 @@ def _auth_mode_override(request):
 # documented to use.
 def _run_coro(coro):
     import asyncio
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        # Playwright's synchronous API owns an event loop on the pytest main
+        # thread.  Quart's legacy sync adapter must not try to nest another
+        # loop there (``Cannot run the event loop while another loop is
+        # running``); drive this one request on a private helper thread.
+        import threading
+        result = []
+        error = []
+
+        def _drive():
+            try:
+                result.append(asyncio.run(coro))
+            except BaseException as exc:  # preserve the original traceback
+                error.append(exc)
+
+        thread = threading.Thread(target=_drive, name='pytest-quart-sync-bridge')
+        thread.start()
+        thread.join()
+        if error:
+            raise error[0]
+        return result[0]
     loop = asyncio.new_event_loop()
     try:
         return loop.run_until_complete(coro)
@@ -878,7 +1085,15 @@ class _SyncClient:
 # ─── Function-level: fresh test client per test ───────────────────────
 @pytest.fixture()
 def flask_client(flask_app):
-    """Return a sync-adapted test client with its own cookie jar (per test)."""
+    """Return a ready sync client with its own cookie jar (per test).
+
+    Quart's in-process client does not enter the serving lifespan, so it does
+    not run the production ``before_serving`` hook that starts the mandatory
+    Storage Sidecar.  Start/handshake it explicitly before APIs migrated to
+    named storage operations (users, billing, artifacts) can be exercised.
+    """
+    from lib.storage import start_storage
+    start_storage()
     return _SyncClient(flask_app.test_client())
 
 
@@ -927,6 +1142,10 @@ _TEST_CONV_CONTENT_LIKE = (
     'Conversation One Message',
     'Conversation Two Message',
     'Sent via keyboard shortcut',
+    '__e2e_slow__ stream please',
+    'Hello reload E2E',
+    'turn one E2E',
+    'Hello clear E2E',
 )
 
 
@@ -1188,6 +1407,13 @@ def live_server(flask_app):
     # destructive E2E cleanup fixtures — refuse to boot against production.
     _assert_test_database('live_server fixture')
 
+    # Hypercorn's programmatic ASGI runner does not consistently enter Quart's
+    # production serving lifecycle in every supported version.  Complete the
+    # mandatory storage handshake here so browser requests never race an
+    # unstarted process-wide Sidecar.
+    from lib.storage import start_storage
+    start_storage()
+
     try:
         from hypercorn.asyncio import serve
         from hypercorn.config import Config
@@ -1213,6 +1439,19 @@ def live_server(flask_app):
         except Exception as e:  # pragma: no cover
             _conftest_logger.warning('live_server runner exited: %s', e)
         finally:
+            # Hypercorn/Quart can leave websocket queue readers pending after
+            # the shutdown trigger resolves. Closing the loop underneath them
+            # produces noisy ``Queue.get`` unraisable exceptions and, in a
+            # longer mixed suite, leaks their process-global state. Drain all
+            # loop-owned tasks before closing the loop.
+            pending = [task for task in asyncio.all_tasks(loop)
+                       if not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
             loop.close()
 
     t = threading.Thread(target=_runner, daemon=True)
@@ -1264,7 +1503,7 @@ def _ensure_chromium_library_path():
 
 @pytest.fixture(scope='session')
 def browser():
-    """Session-scoped headless Chromium via Playwright (sync API).
+    """Session-scoped Playwright browser (Chromium by default).
 
     Self-bootstraps ``LD_LIBRARY_PATH`` (rootless conda-forge GUI libs) before
     launch so it succeeds on shared/HPC nodes without sudo. Skips — with the
@@ -1276,19 +1515,29 @@ def browser():
     except Exception as e:
         pytest.skip(f'playwright not installed: {e}')
 
-    _ensure_chromium_library_path()
+    browser_name = (os.environ.get('TOFU_E2E_BROWSER') or 'chromium').lower()
+    if browser_name not in {'chromium', 'firefox', 'webkit'}:
+        pytest.fail('TOFU_E2E_BROWSER must be chromium, firefox, or webkit; '
+                    f'got {browser_name!r}')
+    if browser_name == 'chromium':
+        _ensure_chromium_library_path()
 
     pw = sync_playwright().start()
     try:
-        # --no-sandbox is required inside this container (no user namespaces);
-        # --disable-gpu avoids the swiftshader GL path on headless nodes.
-        b = pw.chromium.launch(headless=True, args=['--no-sandbox', '--disable-gpu'])
+        launcher = getattr(pw, browser_name)
+        launch_opts = {'headless': True}
+        if browser_name == 'chromium':
+            # Required in this container; avoid swiftshader on headless nodes.
+            launch_opts['args'] = ['--no-sandbox', '--disable-gpu']
+            executable = os.environ.get('TOFU_E2E_EXECUTABLE_PATH', '').strip()
+            if executable:
+                launch_opts['executable_path'] = executable
+        b = launcher.launch(**launch_opts)
     except Exception as e:
         pw.stop()
-        pytest.skip(f'chromium build unavailable / failed to launch '
-                    f'(run `playwright install chromium`; on a rootless host '
-                    f'install GUI libs via conda-forge — see the '
-                    f'playwright-chromium-rootless-conda-libs skill): {e}')
+        pytest.skip(f'{browser_name} build unavailable / failed to launch '
+                    f'(run `playwright install {browser_name}`; on a rootless '
+                    f'Chromium host install GUI libs via conda-forge): {e}')
     try:
         yield b
     finally:
@@ -1299,18 +1548,18 @@ def browser():
 
 
 def _conv_ids_in_page(pg):
-    """Best-effort snapshot of the frontend's conversation ids."""
+    """Best-effort snapshot through the rendered ESM-owned sidebar."""
     try:
         ids = pg.evaluate(
-            "(typeof conversations !== 'undefined' && conversations) "
-            "? conversations.map(c => c.id) : []")
+            "[...document.querySelectorAll('.conv-item[data-conv-id]')]"
+            ".map(item => item.dataset.convId).filter(Boolean)")
         return set(ids or [])
     except Exception:
         return set()
 
 
 def _conv_global_ready(pg):
-    """True iff the frontend ``conversations`` global is an array RIGHT NOW.
+    """True iff the Vite app and its conversation rail are ready RIGHT NOW.
 
     Distinguishes a genuinely-empty sidebar (global present, length 0) from
     the not-yet-loaded race (global undefined) — the latter makes an empty
@@ -1318,7 +1567,7 @@ def _conv_global_ready(pg):
     cleanup for why this matters (2026-06-28 mass-deletion guard)."""
     try:
         return bool(pg.evaluate(
-            "typeof conversations !== 'undefined' && Array.isArray(conversations)"))
+            "window.TofuModules?.version === 3 && !!document.querySelector('#convList')"))
     except Exception:
         return False
 
@@ -1335,6 +1584,11 @@ def _conv_global_ready(pg):
 _BENIGN_CONSOLE_ERRORS = (
     'SSE PREMATURE CLOSE',        # transport degraded → poll fallback engaged
     'falling back to poll',       # the same path's follow-up line
+    # Reload/navigation can cancel the old document's health probes while its
+    # push socket closes.  This is an app-authored degradation verdict, not an
+    # uncaught JavaScript exception; journey tests separately require the new
+    # document to settle online with no banner.
+    'BACKEND OFFLINE confirmed',
 )
 
 
@@ -1432,10 +1686,12 @@ def _dismiss_onboarding_modals(pg):
             has_overlay = pg.evaluate(
                 "() => !!document.querySelector('.modal-overlay.open')")
             if has_overlay:
-                pg.evaluate(
-                    "() => { if (typeof closeSettings === 'function') closeSettings();"
-                    "  document.querySelectorAll('.modal-overlay.open')"
-                    "    .forEach(el => el.classList.remove('open')); }")
+                pg.evaluate("""async () => {
+                  const close = window.TofuModules?.resolveAction?.('closeSettings');
+                  if (typeof close === 'function') await close();
+                  document.querySelectorAll('.modal-overlay.open')
+                    .forEach((element) => element.classList.remove('open'));
+                }""")
                 closed_any = True
                 pg.wait_for_timeout(120)
                 continue
@@ -1491,7 +1747,9 @@ def page(browser, live_server):
     _attach_js_error_capture(pg)
     pg.goto(live_server, wait_until='domcontentloaded')
     try:
-        pg.wait_for_function("typeof conversations !== 'undefined'", timeout=10000)
+        pg.wait_for_function(
+            "window.TofuModules && window.TofuModules.version === 3",
+            timeout=10000)
     except Exception as e:
         _conftest_logger.debug('page: conversations global not ready: %s', e)
 
@@ -1526,7 +1784,10 @@ def page(browser, live_server):
             created = set()
         for cid in created:
             try:
-                pg.evaluate(f"deleteConversation({json.dumps(cid)})")
+                pg.evaluate("""async (conversationId) => {
+                  const remove = window.TofuModules?.resolveAction?.('deleteConversation');
+                  if (typeof remove === 'function') await remove(conversationId);
+                }""", cid)
             except Exception as e:
                 _conftest_logger.debug('page cleanup deleteConversation(%s) '
                                        'failed: %s', cid, e)

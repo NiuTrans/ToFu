@@ -1,4 +1,4 @@
-"""Guard: the per-round log line must state the REAL bounds, not "∞".
+"""Guard: the per-round log line states the live semantic safety breakers.
 
 WHY
 ---
@@ -6,9 +6,7 @@ WHY
 
     ── Round 4/∞ START ── messages=8
 
-using ``self.max_rounds or '∞'``. After the no-progress breaker landed that
-line became actively MISLEADING: an operator reading "∞" concludes the agent
-has no protection at all, when in fact TWO bounds are live —
+After the no-progress breaker landed, the line must show the live protections:
 ``_MAX_CONSECUTIVE_NO_PROGRESS_ROUNDS`` (10 identical tool-call rounds) and
 ``SubTaskSpec.timeout_seconds`` (1800s by default).
 
@@ -19,12 +17,9 @@ invisible in the logs cannot be trusted by the person reading them, and
 "is the breaker actually live in this process?" is exactly the question a
 post-restart acceptance check has to answer from the log alone.
 
-So the round line must render the effective bounds. The chosen shape keeps
-the explicit budget when one exists and otherwise shows what really stops
-the loop:
-
-    max_rounds=5  → "Round 2/5"
-    max_rounds=0  → "Round 2/∞(np=10,t=1800s)"
+So the round line renders ``∞(np=10,t=1800s)``: normal tool work is not
+numerically capped, while semantic and optional wall-clock breakers remain
+observable.
 
 This is a LOG-CONTRACT test: it asserts the rendered string, because the
 string IS the operator interface here.
@@ -58,15 +53,9 @@ def _mk_agent(**spec_kw):
 
 class TestRoundBoundsRendering(unittest.TestCase):
 
-    def test_explicit_max_rounds_renders_the_number(self):
-        agent = _mk_agent(max_rounds=5)
-        self.assertEqual(agent._round_budget_label(), '5')
-
-    def test_unlimited_renders_the_effective_bounds_not_bare_infinity(self):
-        """max_rounds=0 must NOT print a bare ∞ — the breaker + wall clock
-        are real bounds and an operator must be able to see them."""
-        agent = _mk_agent(max_rounds=0, timeout_seconds=1800)
-        label = agent._round_budget_label()
+    def test_safety_label_renders_effective_breakers(self):
+        agent = _mk_agent(timeout_seconds=1800)
+        label = agent._round_safety_label()
         self.assertNotEqual(
             label, '\u221e',
             'a bare "∞" hides the no-progress breaker and the wall-clock '
@@ -76,11 +65,11 @@ class TestRoundBoundsRendering(unittest.TestCase):
         self.assertIn('1800', label,
                       f'wall-clock timeout missing from {label!r}')
 
-    def test_unlimited_without_timeout_still_shows_the_breaker(self):
+    def test_without_timeout_still_shows_the_breaker(self):
         """A caller may deliberately pass timeout_seconds=0; the breaker is
         still the bound and must remain visible."""
-        agent = _mk_agent(max_rounds=0, timeout_seconds=0)
-        label = agent._round_budget_label()
+        agent = _mk_agent(timeout_seconds=0)
+        label = agent._round_safety_label()
         self.assertIn('np=10', label)
         self.assertNotIn('t=0', label,
                          'a disabled wall clock should not be advertised '
@@ -92,11 +81,9 @@ class TestRoundBoundsRendering(unittest.TestCase):
 
         from lib.swarm import agent as agent_mod
         src = inspect.getsource(agent_mod)
-        self.assertNotIn(
-            "self.max_rounds or '\\u221e'", src,
-            'the round-start line still renders a bare ∞ via '
-            '`self.max_rounds or "∞"` instead of _round_budget_label()')
-        self.assertIn('_round_budget_label()', src,
+        self.assertNotIn('max_rounds', src,
+                         'the retired numeric round ceiling leaked back in')
+        self.assertIn('_round_safety_label()', src,
                       'the round-start line does not call the renderer')
 
 

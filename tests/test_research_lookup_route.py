@@ -34,6 +34,8 @@ import sys
 
 import pytest
 
+from tests._runtime_sections import runtime_section
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 pytestmark = pytest.mark.unit
@@ -88,12 +90,21 @@ _IDEATE = {
 # ── Fixtures: the REAL app, the REAL DB ────────────────────────────────────
 
 @pytest.fixture()
-def fresh_db(tmp_path):
+def fresh_db(tmp_path, monkeypatch):
     from lib.database import reset_sqlite_for_tests, restore_db_state
+    from lib.research import persistence
+    from lib.storage import StorageSupervisor
+
     snapshot = reset_sqlite_for_tests(str(tmp_path / 'research_route.db'))
+    supervisor = StorageSupervisor(
+        project_root=tmp_path / 'sidecar', backend='sqlite', startup_timeout=20)
+    supervisor.start()
+    monkeypatch.setattr(
+        persistence, '_storage', lambda **_kwargs: supervisor.client)
     try:
-        yield
+        yield supervisor
     finally:
+        supervisor.stop()
         restore_db_state(snapshot)
 
 
@@ -257,9 +268,7 @@ def test_the_persistence_loader_has_a_real_caller():
 def test_frontend_client_exposes_the_lookup():
     """api.js is the single seam for backend calls (charter: no raw fetch
     outside it). A route with no client method is unreachable from the UI."""
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    src = open(os.path.join(root, 'static', 'js', 'api.js'),
-               encoding='utf-8').read()
+    src = runtime_section('api.js')
     assert '/api/v1/research/lookup' in src, (
         'Api has no method for the research lookup — the frontend cannot '
         'reach the persisted artifacts')

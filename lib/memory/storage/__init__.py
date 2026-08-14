@@ -99,6 +99,7 @@ from ._crud import (
     get_enabled_memories,
     get_eligible_memories,
     create_memory,
+    clear_memories,
     update_memory,
     delete_memory,
     merge_memories,
@@ -113,7 +114,7 @@ __all__ = [
     'LEGACY_PROJECT_MEMORY_SUBDIR', 'PROJECT_SKILLS_SUBDIR', 'SERVER_GLOBAL_SKILLS_SUBPATH',
     'list_all_memories', 'list_memories', 'get_memory', 'get_enabled_memories',
     'get_eligible_memories',
-    'create_memory', 'update_memory', 'delete_memory', 'merge_memories',
+    'create_memory', 'update_memory', 'delete_memory', 'clear_memories', 'merge_memories',
     'toggle_memory',
     'resolve_target_dir', 'resolve_skills_dir', 'run_storage_migrations',
 ]

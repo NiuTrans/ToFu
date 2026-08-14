@@ -1,7 +1,7 @@
 """Guards for pt_3879f00e sub-part 4 — split tool_rounds.js (261KB, the
 largest non-i18n file in the core bundle): move the conv-meta rich-render
 family (~40KB) + the timer-watcher block (~18KB) + its 1 Hz ticker into
-ui/tool_rounds_rich.js (_DEFERRED_FILES).
+ui/tool_rounds_rich.js (_CLASSIC_ASSET_FILES).
 
 Census (2026-08-01, all grep-verified):
   * the WHOLE public surface (renderToolRoundsHTML /
@@ -41,7 +41,7 @@ BUNDLER_PY = ROOT / 'lib' / 'js_bundler.py'
 INDEX_HTML = ROOT / 'index.html'
 TR_CORE = ROOT / 'static' / 'js' / 'ui' / 'tool_rounds.js'
 TR_RICH = ROOT / 'static' / 'js' / 'ui' / 'tool_rounds_rich.js'
-FEATURE_LOADER = ROOT / 'static' / 'js' / 'feature-loader.js'
+FEATURE_LOADER = ROOT / 'static' / 'js' / 'feature-bridge.js'
 
 MOVED_SYMBOLS = (
     '_convMetaHeadLabel', '_convMetaPurpose', '_renderConvDigest',
@@ -75,7 +75,7 @@ def _rich_src():
 def test_rich_module_in_deferred_files():
     _bf, deferred, _ep, _crit = _manifest()
     assert 'ui/tool_rounds_rich.js' in deferred, (
-        "'ui/tool_rounds_rich.js' must be in _DEFERRED_FILES — the rich "
+        "'ui/tool_rounds_rich.js' must be in _CLASSIC_ASSET_FILES — the rich "
         'conv-meta + timer-watcher renderers (~58KB) out of the core boot '
         'bundle')
 
@@ -177,10 +177,8 @@ def test_no_stub_entries_for_moved_symbols():
     loader = FEATURE_LOADER.read_text()
     for name in ('_renderConvMetaBlock', '_renderTimerWatcherBlock'):
         assert f"'{name}'" not in loader, (
-            f'{name} must NOT be in feature-loader.js stub list either')
+            f'{name} must NOT be in feature-bridge.js stub list either')
 
 
-def test_dev_fallback_script_tag_kept():
-    assert 'static/js/ui/tool_rounds_rich.js' in INDEX_HTML.read_text(), (
-        'index.html must carry the tool_rounds_rich.js dev-fallback '
-        '<script> tag (bundle-build failure path loads files individually)')
+def test_index_has_no_raw_tool_rounds_rich_script():
+    assert 'static/js/ui/tool_rounds_rich.js' not in INDEX_HTML.read_text()

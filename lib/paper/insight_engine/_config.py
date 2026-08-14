@@ -1,6 +1,6 @@
 """Insight-engine tunables + the flag/gate/lang-key helpers.
 
-All module constants live here (the tool-round cap, temperatures, token
+All module constants live here (temperatures, token
 ceilings, reader-context caps, the headroom-gate threshold) alongside the three
 pure predicates that read them: :func:`insight_gate_fires`,
 :func:`insight_enabled`, :func:`insight_lang_key`.
@@ -11,11 +11,6 @@ import os
 from lib.log import get_logger
 
 logger = get_logger(__name__)
-
-# How many tool-eligible research rounds the insight agent gets before it MUST
-# produce its final JSON. Enough to scan the current frontier + open a couple of
-# hits, but bounded so the pass stays a cheap add-on to the report.
-_MAX_INSIGHT_TOOL_ROUNDS = 6
 
 # Above the report's temp=0 (insight is a divergent act) but NOT so high that
 # strict-JSON extraction breaks: temp=0.7 failed to emit parseable JSON ~1/3 of

@@ -50,28 +50,11 @@ _REPORT = (
 
 
 class _FakeDB:
-    """Rows keyed by (phash, lang); supports the engine's SELECT/UPDATE + upsert."""
+    """Rows keyed by (phash, lang) behind a fake semantic client."""
 
     def __init__(self):
         self.rows = {}
         self.updates = []
-
-    def execute(self, sql, params=None):
-        self._last_sql = sql
-        if sql.strip().upper().startswith('SELECT'):
-            row = self.rows.get((params[0], params[1]))
-            self._result = row
-        elif sql.strip().upper().startswith('UPDATE'):
-            self.updates.append(params)
-            key = (params[1], params[2])
-            if key in self.rows:
-                self.rows[key]['meta'] = params[0]
-            self._result = None
-        return self
-
-    def fetchone(self):
-        return self._result
-
 
 class _DbPatched:
     def __init__(self):
@@ -79,23 +62,67 @@ class _DbPatched:
         self._orig = {}
 
     def __enter__(self):
-        import lib.database as _dbmod
-        import lib.database._core_schema as _schema
-        self._orig['get_thread_db'] = getattr(_dbmod, 'get_thread_db', None)
-        self._orig['upsert'] = _schema.upsert
-        _dbmod.get_thread_db = lambda: self.db
+        import lib.storage as _storage_mod
+        self._orig['get_storage_client'] = _storage_mod.get_storage_client
         db = self.db
 
-        def _fake_upsert(d, table, row, **kw):
-            db.rows[(row['paper_hash'], row['lang'])] = dict(row)
+        class _Client:
+            @staticmethod
+            def _meta(row):
+                raw = row.get('meta') or {}
+                return json.loads(raw) if isinstance(raw, str) else dict(raw)
 
-        _schema.upsert = _fake_upsert
-        self._dbmod, self._schema = _dbmod, _schema
+            def query(self, operation, payload):
+                assert operation == 'paper.report.get'
+                row = db.rows.get((payload['paper_hash'], payload['lang']))
+                if row is None:
+                    return None
+                return {**row, 'meta': self._meta(row)}
+
+            def command(self, operation, payload, command_id):
+                assert command_id
+                key = (payload['paper_hash'], payload['lang'])
+                if operation == 'paper.report.upsert':
+                    db.rows[key] = dict(payload)
+                    return {'saved': True}
+                assert operation == 'paper.report.second_pass.accumulate'
+                row = db.rows.get(key)
+                if row is None:
+                    return {'found': False, 'meta': None}
+                meta = self._meta(row)
+                passes = meta.setdefault('secondPasses', {})
+                entry = passes.setdefault(payload['name'], {})
+                keys = ('prompt_tokens', 'completion_tokens',
+                        'cache_read_tokens', 'cache_write_tokens',
+                        'reasoning_tokens')
+                prior_usage = entry.get('usage') or {}
+                entry['usage'] = {
+                    name: int(prior_usage.get(name, 0))
+                    + int((payload.get('usage') or {}).get(name, 0))
+                    for name in keys
+                }
+                entry['calls'] = int(entry.get('calls', 0)) + 1
+                total = {
+                    name: int(meta.get(
+                        name.split('_')[0] + ''.join(
+                            part.title() for part in name.split('_')[1:]), 0))
+                    for name in keys
+                }
+                for pass_meta in passes.values():
+                    for name in keys:
+                        total[name] += int(
+                            (pass_meta.get('usage') or {}).get(name, 0))
+                meta['totalUsage'] = total
+                row['meta'] = meta
+                db.updates.append((payload['paper_hash'], payload['lang'], meta))
+                return {'found': True, 'meta': meta}
+
+        _storage_mod.get_storage_client = lambda *, write=False: _Client()
+        self._storage_mod = _storage_mod
         return self
 
     def __exit__(self, *exc):
-        self._dbmod.get_thread_db = self._orig['get_thread_db']
-        self._schema.upsert = self._orig['upsert']
+        self._storage_mod.get_storage_client = self._orig['get_storage_client']
         return False
 
 
@@ -142,20 +169,13 @@ def test_cache_freshness():
 def test_neuter_hash_validation_is_load_bearing():
     """NEUTER: bypass the hash check → stale depth would be served after a
     regeneration — proving the validator is what keeps depth honest."""
-    with _DbPatched():
+    with _DbPatched() as p:
         sec = de.extract_report_section(_REPORT, 1)
         de._write_deepen_cache('h2', 'deeper', 1, 'en', sec['hash'],
                                'STALE DEPTH', None, 'm1')
         # Neutered read: hash check removed.
-        try:
-            from lib.database import get_thread_db
-            db = get_thread_db()
-            row = db.execute(
-                "SELECT report, meta FROM paper_reports WHERE paper_hash = ? AND lang = ?",
-                ('h2', de.deepen_lang_key('deeper', 1, 'en'))).fetchone()
-            served_stale = row['report'] if row else None
-        except Exception:
-            served_stale = None
+        row = p.db.rows.get(('h2', de.deepen_lang_key('deeper', 1, 'en')))
+        served_stale = row['report'] if row else None
         assert served_stale == 'STALE DEPTH', \
             'NEUTER precondition: without the check the stale row IS served'
         # Real read rejects it.
@@ -258,10 +278,14 @@ def test_worker_done_cache_cost():
         row2 = p.db.rows.get(('hz', de.deepen_lang_key('derive', 3, 'en')))
         assert row1 and 'Deeper expansion' in row1['report']
         assert row2
-        meta1 = json.loads(row1['meta'])
+        meta1 = (json.loads(row1['meta']) if isinstance(row1['meta'], str)
+                 else row1['meta'])
         assert meta1['kind'] == 'deep' and meta1['section_hash'] == section['hash']
         # Cost accumulated into the REPORT row: two calls summed.
-        report_meta = json.loads(p.db.rows[('hz', 'en')]['meta'])
+        raw_report_meta = p.db.rows[('hz', 'en')]['meta']
+        report_meta = (json.loads(raw_report_meta)
+                       if isinstance(raw_report_meta, str)
+                       else raw_report_meta)
         sp = report_meta.get('secondPasses', {}).get('deepen')
         assert sp, f'deepen not accumulated: {report_meta}'
         assert sp['calls'] == 2, f'expected 2 accumulated calls: {sp}'

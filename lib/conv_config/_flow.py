@@ -8,14 +8,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from lib.log import get_logger
-
-logger = get_logger(__name__)
+from lib.orchestration_chat_flow_selection import CHAT_FLOW_BUILTINS
 
 
-#: Built-in flow names the toolbar's ``builtin:<name>`` selector maps to.
-#: Mirrors the builders registered in lib.orchestration_endpoint_runner.
-_KNOWN_FLOW_BUILTINS = frozenset({'endpoint', 'autopilot'})
+#: Stable compatibility alias for the shared chat-flow selection registry.
+_KNOWN_FLOW_BUILTINS = CHAT_FLOW_BUILTINS
 
 
 def _parse_active_flow(value: Any) -> tuple[str, str]:

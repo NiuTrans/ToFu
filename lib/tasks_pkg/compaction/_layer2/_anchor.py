@@ -79,9 +79,19 @@ def _objective_anchor_index(messages: list) -> int | None:
 
 
 def _extract_current_query(messages: list) -> str:
-    """Extract the most recent user query from messages."""
+    """Extract the most recent real/current user query from messages.
+
+    Runtime attachments are represented as ``role='user'`` for provider wire
+    compatibility, but they are not a new objective.  Treating a trailing
+    checklist/system reminder (or a pure swarm inbox notification) as the
+    current query steers the lossy summary away from the human request.
+    """
     for msg in reversed(messages):
         if msg.get('role') == 'user':
+            if msg.get('_isMeta'):
+                continue
+            if msg.get('_isInboxInject') and not msg.get('_containsHumanSteer'):
+                continue
             content = msg.get('content', '')
             if isinstance(content, list):
                 text_parts = [
@@ -284,7 +294,7 @@ def _extract_recently_accessed_files(messages: list,
             fn_name = fn.get('name', '')
 
             if fn_name not in ('read_files', 'read_file',
-                               'write_file', 'apply_diff', 'apply_diffs',
+                               'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
                                'insert_content', 'insert_contents'):
                 continue
 
@@ -317,7 +327,7 @@ def _extract_recently_accessed_files(messages: list,
                     if p and p not in files_set:
                         files_seen.append(p)
                         files_set.add(p)
-            elif fn_name in ('apply_diff', 'apply_diffs') and args.get('edits'):
+            elif fn_name in ('edit_file', 'apply_diff', 'apply_diffs') and args.get('edits'):
                 for edit in _coerce_spec_list(args.get('edits')):
                     if isinstance(edit, dict):
                         p = edit.get('path', '')

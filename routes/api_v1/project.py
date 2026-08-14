@@ -51,7 +51,9 @@ from __future__ import annotations
 
 import os
 
-from flask import Blueprint, request
+from quart import Blueprint, request
+
+from lib.quart_sync import request_files, request_form
 
 from lib.api_response import (
     api_bad_request, api_error, api_internal_error, api_not_found, api_ok,
@@ -1695,7 +1697,7 @@ def project_brain_peer_message():
     tags=['project'],
 )
 def project_brain_peer_abort():
-    from flask import g
+    from quart import g
     data = parse_body()
     project_path = (data.get('path') or '').strip()
     if not project_path:
@@ -1789,12 +1791,14 @@ def project_write():
     tags=['project'],
 )
 def project_upload():
-    dest_dir = (request.form.get('dir') or '').strip()
-    name_override = (request.form.get('name') or '').strip()
+    form = request_form()
+    dest_dir = (form.get('dir') or '').strip()
+    name_override = (form.get('name') or '').strip()
 
-    if 'file' not in request.files:
+    files = request_files()
+    if 'file' not in files:
         return api_bad_request('No file', field='file')
-    upload = request.files['file']
+    upload = files['file']
     fname = name_override or (upload.filename or '')
     # Reject navigation in the client-supplied filename — a drop names a leaf,
     # never a path. os.path.basename strips any directory the browser attached.

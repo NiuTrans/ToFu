@@ -48,9 +48,11 @@ HOW TO RESPOND TO A FAILURE HERE
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -70,6 +72,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 AUDIT = os.path.join(ROOT, 'scripts', 'audit_tests.py')
 BASELINE_PATH = os.path.join(HERE, 'audit_baseline.json')
+
+
+def _fixture_test_path(name: str) -> str:
+    """Build a synthetic test path without declaring a repository anchor."""
+    return 'tests/' + name
+
+
+def _load_audit_module():
+    spec = importlib.util.spec_from_file_location('audit_tests_under_test', AUDIT)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 def _census() -> dict:
@@ -101,6 +116,126 @@ def test_audit_tool_is_runnable():
         f'suite (expected >1000). A collapsed scan makes this whole guard inert.')
     assert census['tests'] > 5000, (
         f"census only found {census['tests']} test functions — scan collapsed")
+
+
+def test_tracked_scan_excludes_worktree_deletions(tmp_path, monkeypatch):
+    """An unstaged deletion is absent from the tree pytest will execute.
+
+    ``git ls-files`` still reports it until the deletion is staged/committed;
+    the audit must therefore filter by current filesystem state rather than
+    manufacture an A0 parse failure that disappears after commit.
+    """
+    audit = _load_audit_module()
+    live = tmp_path / 'tests' / 'test_live.py'
+    live.parent.mkdir()
+    live.write_text('def test_live():\n    assert True\n', encoding='utf-8')
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+    monkeypatch.setattr(
+        audit.subprocess,
+        'run',
+        lambda *args, **kwargs: SimpleNamespace(
+            stdout=(f'{_fixture_test_path("test_live.py")}\n'
+                    f'{_fixture_test_path("test_deleted.py")}\n'),
+        ),
+    )
+
+    assert audit._tracked('tests/test_*.py') == [
+        _fixture_test_path('test_live.py')]
+
+
+def test_dead_path_scan_ignores_prose_and_negative_absence_guards(
+        tmp_path, monkeypatch):
+    """F describes a dead *lookup*, not documentation or an absence pin."""
+    audit = _load_audit_module()
+    test_path = tmp_path / 'tests' / 'test_retired_owner.py'
+    test_path.parent.mkdir()
+    test_path.write_text(
+        '"""Migrated from lib/retired_owner.py."""\n'
+        'from pathlib import Path\n'
+        'def test_absent():\n'
+        '    assert not Path("lib/retired_owner.py").exists()\n'
+        '    source = "current graph"\n'
+        '    assert "static/js/retired.js" not in source\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+
+    report = audit.analyze_file(_fixture_test_path('test_retired_owner.py'))
+
+    assert not [item for item in report.findings if item[0] == 'F']
+
+
+def test_dead_path_scan_still_reports_positive_source_lookup(
+        tmp_path, monkeypatch):
+    audit = _load_audit_module()
+    test_path = tmp_path / 'tests' / 'test_missing_owner.py'
+    test_path.parent.mkdir()
+    test_path.write_text(
+        'from pathlib import Path\n'
+        'def test_read():\n'
+        '    source = Path("lib/missing_owner.py").read_text()\n'
+        '    assert source\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+
+    report = audit.analyze_file(_fixture_test_path('test_missing_owner.py'))
+
+    assert [item for item in report.findings if item[0] == 'F'] == [
+        ('F', 0, 'references missing path lib/missing_owner.py')]
+
+
+def test_dead_path_scan_accepts_only_live_runtime_adapter_identities(
+        tmp_path, monkeypatch):
+    audit = _load_audit_module()
+    runtime = tmp_path / 'frontend/src/runtime/app-runtime.js'
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text(
+        '/* ===== migrated source: core/live.js ===== */\nconst live = 1;\n',
+        encoding='utf-8',
+    )
+    test_path = tmp_path / _fixture_test_path('test_runtime_owner.py')
+    test_path.parent.mkdir()
+    test_path.write_text(
+        'from tests._runtime_sections import runtime_section\n'
+        'def test_owner():\n'
+        '    assert runtime_section("core/live.js")\n'
+        '    assert runtime_section("core/missing.js")\n'
+        '    labels = ["static/js/core/live.js", '
+        '"static/js/core/missing.js"]\n'
+        '    assert labels\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+
+    report = audit.analyze_file(_fixture_test_path('test_runtime_owner.py'))
+
+    assert [item for item in report.findings if item[0] == 'F'] == [
+        ('F', 0, 'references missing path static/js/core/missing.js')]
+
+
+def test_dead_path_scan_accepts_only_live_native_adapter_identities(
+        tmp_path, monkeypatch):
+    audit = _load_audit_module()
+    owner = tmp_path / 'frontend/src/features/orchestration/task-mode-list.ts'
+    owner.parent.mkdir(parents=True)
+    owner.write_text('export const live = true;\n', encoding='utf-8')
+    test_path = tmp_path / _fixture_test_path('test_native_owner.py')
+    test_path.parent.mkdir()
+    test_path.write_text(
+        'from tests._runtime_sections import orchestration_legacy_test_root\n'
+        'def test_owner():\n'
+        '    paths = ["static/js/task-mode-list.js", '
+        '"static/js/task-mode-missing.js"]\n'
+        '    assert paths\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+
+    report = audit.analyze_file(_fixture_test_path('test_native_owner.py'))
+
+    assert [item for item in report.findings if item[0] == 'F'] == [
+        ('F', 0, 'references missing path static/js/task-mode-missing.js')]
 
 
 @pytest.mark.skipif(_OPENSOURCE, reason='audit baseline is source-tree-specific; the export deliberately strips referenced files')

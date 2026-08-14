@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -33,7 +34,11 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+sys.path.insert(0, HERE)
+from _runtime_sections import runtime_section_path  # noqa: E402
+
+FINISH_INFO = runtime_section_path('ui/finish_info.js')
+FINISH_INFO_RICH = runtime_section_path('ui/finish_info_rich.js')
 
 
 def _node_available() -> bool:
@@ -153,7 +158,7 @@ def _run(nc: str = '') -> str:
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, os.path.join(JS_DIR, 'ui', 'finish_info.js'), nc],
+            ['node', harness, FINISH_INFO, nc],
             capture_output=True, text=True, timeout=60,
         )
     finally:
@@ -290,8 +295,7 @@ def _run_render() -> str:
         f.write(_RENDER_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, os.path.join(JS_DIR, 'ui', 'finish_info.js'),
-             os.path.join(JS_DIR, 'ui', 'finish_info_rich.js')],
+            ['node', harness, FINISH_INFO, FINISH_INFO_RICH],
             capture_output=True, text=True, timeout=60,
         )
     finally:
@@ -435,8 +439,7 @@ def _run_derive(causes, nc: str = '') -> str:
         json.dump(causes, f)
     try:
         proc = subprocess.run(
-            ['node', harness, os.path.join(JS_DIR, 'ui', 'finish_info.js'),
-             causes_file, nc],
+            ['node', harness, FINISH_INFO, causes_file, nc],
             capture_output=True, text=True, timeout=60,
         )
     finally:

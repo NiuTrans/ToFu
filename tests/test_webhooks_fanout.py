@@ -51,6 +51,12 @@ from routes.api_v1 import webhooks as wh  # noqa: E402
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _no_real_webhook_dns(monkeypatch):
+    """Delivery-shape tests mock transport, so keep DNS off the test host."""
+    monkeypatch.setattr(wh, '_validate_webhook_url', lambda _url: None)
+
+
 def _sub(**over):
     s = {
         'id': 'wh_deadbeef',
@@ -252,8 +258,8 @@ def test_delivery_posts_signed_envelope_with_expected_headers(monkeypatch):
     class _Resp:
         status_code = 200
 
-    def fake_post(url, data=None, headers=None, timeout=None):
-        sent.update(url=url, data=data, headers=headers)
+    def fake_post(url, data=None, headers=None, timeout=None, **kwargs):
+        sent.update(url=url, data=data, headers=headers, kwargs=kwargs)
         return _Resp()
 
     monkeypatch.setattr(wh, 'http_post', fake_post)
@@ -277,6 +283,7 @@ def test_delivery_posts_signed_envelope_with_expected_headers(monkeypatch):
                         hashlib.sha256).hexdigest()
     assert hdr['X-Tofu-Signature'] == f'v1={expected}', (
         'signature does not verify against the body that was sent')
+    assert sent['kwargs']['allow_redirects'] is False
 
 
 def test_unsigned_when_subscription_has_no_secret(monkeypatch):
@@ -289,7 +296,7 @@ def test_unsigned_when_subscription_has_no_secret(monkeypatch):
         status_code = 200
 
     monkeypatch.setattr(wh, 'http_post',
-                        lambda url, data=None, headers=None, timeout=None:
+                        lambda url, data=None, headers=None, timeout=None, **kwargs:
                         (sent.update(headers=headers), _Resp())[1])
     wh._deliver({'sub': _sub(secret=''), 'channel': 'c', 'task_id': 't',
                  'payload': {}, 'ts': 1.0, 'attempt': 0})
@@ -339,7 +346,7 @@ def test_non_ascii_payload_survives_the_envelope(monkeypatch):
         status_code = 200
 
     monkeypatch.setattr(wh, 'http_post',
-                        lambda url, data=None, headers=None, timeout=None:
+                        lambda url, data=None, headers=None, timeout=None, **kwargs:
                         (sent.update(data=data), _Resp())[1])
     wh._deliver({'sub': _sub(), 'channel': 'c', 'task_id': 't',
                  'payload': {'text': '豆腐'}, 'ts': 1.0, 'attempt': 0})
@@ -359,6 +366,66 @@ def test_queue_full_is_swallowed_so_push_keeps_working(subs, monkeypatch):
 
     monkeypatch.setattr(wh, '_QUEUE', _FullQueue())
     wh._on_push_event('chat', 't1', {'type': 'done'})   # must not raise
+
+
+def test_retry_schedule_is_bounded_and_uses_no_timer_threads():
+    """A failed endpoint consumes heap entries, never one OS thread per retry."""
+    import itertools
+    delayed = []
+    item = {'sub': _sub(), 'attempt': 0}
+    assert wh._schedule_retry(delayed, itertools.count(), item, now=10.0)
+    assert len(delayed) == 1
+    assert delayed[0][0] == 12.0
+    assert item['attempt'] == 1
+
+
+def test_permanent_4xx_is_not_retryable_but_transient_failures_are():
+    assert wh._delivery_is_retryable({'_last_status': 400}) is False
+    assert wh._delivery_is_retryable({'_last_status': 404}) is False
+    assert wh._delivery_is_retryable({'_last_status': 429}) is True
+    assert wh._delivery_is_retryable({'_last_status': 503}) is True
+    assert wh._delivery_is_retryable({'_last_status': None}) is True
+
+
+def test_deleted_or_disabled_subscription_revokes_queued_work(monkeypatch):
+    sub = _sub(id='wh_revoke')
+    monkeypatch.setattr(wh, '_load', lambda: [])
+    assert wh._subscription_is_active(sub) is False
+
+    monkeypatch.setattr(
+        wh, '_load', lambda: [dict(sub, disabled=True)])
+    assert wh._subscription_is_active(sub) is False
+
+    monkeypatch.setattr(wh, '_load', lambda: [dict(sub, disabled=False)])
+    assert wh._subscription_is_active(sub) is True
+
+
+def test_worker_shutdown_wakes_and_joins_with_a_bound(monkeypatch):
+    calls = []
+
+    class _Stop:
+        def set(self):
+            calls.append('set')
+
+    class _Queue:
+        def put_nowait(self, item):
+            calls.append(('wake', item))
+
+    class _Thread:
+        def join(self, timeout):
+            calls.append(('join', timeout))
+
+        def is_alive(self):
+            return False
+
+    monkeypatch.setattr(wh, '_WORKER_STOP', _Stop())
+    monkeypatch.setattr(wh, '_QUEUE', _Queue())
+    monkeypatch.setattr(wh, '_WORKER_THREAD', _Thread())
+    monkeypatch.setattr(wh, '_WORKER_STARTED', True)
+
+    assert wh.stop_webhook_worker(timeout='0.25') is True
+    assert calls == ['set', ('wake', None), ('join', 0.25)]
+    assert wh._WORKER_STARTED is False
 
 
 if __name__ == '__main__':

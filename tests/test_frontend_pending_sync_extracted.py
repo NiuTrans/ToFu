@@ -43,6 +43,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import quart as _quart
 sys.modules.setdefault('flask', _quart)
 
+from tests._runtime_sections import runtime_section, runtime_section_names
+
 try:
     import pytest
 except ImportError:  # pragma: no cover
@@ -68,8 +70,7 @@ _FUNCS_ASYNC = (
 
 
 def _read(rel_path: str) -> str:
-    with open(os.path.join(_ROOT, rel_path), encoding='utf-8') as f:
-        return f.read()
+    return runtime_section(rel_path.removeprefix('static/js/'))
 
 
 @_unit
@@ -88,8 +89,8 @@ def test_pending_sync_leaf_module_exists_and_declares_five():
             f'— extraction incomplete'
         )
     for name in _FUNCS_SYNC + _FUNCS_ASYNC:
-        assert f'window.{name} = {name}' in src, (
-            f'core/pending_sync.js must expose window.{name} = {name} so '
+        assert f'runtimeScope.{name} = {name}' in src, (
+            f'core/pending_sync.js must expose runtimeScope.{name} = {name} so '
             f'downstream typeof-guarded reads still resolve'
         )
 
@@ -119,14 +120,14 @@ def test_bundle_manifest_loads_pending_sync_before_conversations():
     'core/conversations.js' — the still-in-file syncConversationToServer
     success branch reads _clearPendingSyncMarkers, so the leaf must load
     first."""
-    src = _read('lib/js_bundler.py')
-    pending_idx = src.find("'core/pending_sync.js'")
-    conv_idx = src.find("'core/conversations.js'")
-    assert pending_idx > 0, (
+    owners = runtime_section_names()
+    pending_idx = owners.index('core/pending_sync.js')
+    conv_idx = owners.index('core/conversations.js')
+    assert pending_idx >= 0, (
         "lib/js_bundler.py::_BUNDLE_FILES must include "
         "'core/pending_sync.js' — bundler ratchet skipped"
     )
-    assert conv_idx > 0, (
+    assert conv_idx >= 0, (
         "lib/js_bundler.py::_BUNDLE_FILES must still include "
         "'core/conversations.js'"
     )

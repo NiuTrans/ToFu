@@ -23,7 +23,7 @@ break translation itself.
 """
 
 import hashlib
-import json
+import math
 import os
 import re
 import sys
@@ -31,6 +31,7 @@ import tempfile
 import time
 
 from lib.env_compat import getenv_compat
+from lib.json_store import read_json, write_json_atomic
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -91,20 +92,16 @@ def get(text: str, source: str, target: str):
     if not _ENABLED or not text:
         return None
     path = _path_for(_key(text, source, target))
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-    except FileNotFoundError as _e:
-        logger.debug('get: missing (%s)', _e)
-        return None
-    except (OSError, json.JSONDecodeError) as e:
-        logger.debug('[TranslateRefusal] read failed for %s: %s', path, e)
-        return None
+    data = read_json(path, default=None)
 
     if not isinstance(data, dict) or not data.get('verdict'):
         logger.debug('[TranslateRefusal] malformed payload at %s', path)
         return None
     ts = data.get('ts', 0)
+    if (not isinstance(ts, (int, float)) or isinstance(ts, bool)
+            or not math.isfinite(float(ts))):
+        logger.debug('[TranslateRefusal] malformed timestamp at %s', path)
+        return None
     if _TTL_SECONDS > 0 and (time.time() - ts) > _TTL_SECONDS:
         try:
             os.remove(path)
@@ -132,9 +129,6 @@ def put(text: str, source: str, target: str, *, verdict: str, reason: str,
     }
     try:
         os.makedirs(shard, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(prefix='.tr-', suffix='.tmp', dir=shard)
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            json.dump(payload, f, ensure_ascii=False)
-        os.replace(tmp_path, path)
-    except OSError as e:
+        write_json_atomic(path, payload, indent=None)
+    except (OSError, TypeError, ValueError) as e:
         logger.debug('[TranslateRefusal] write failed for %s: %s', path, e)

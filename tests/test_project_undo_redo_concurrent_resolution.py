@@ -31,6 +31,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from lib.project_mod import config as pm_config  # noqa: E402
+from lib.project_mod import modifications as pm_modifications  # noqa: E402
 from lib.project_mod.modifications import (  # noqa: E402
     redo_task_modifications,
     resolve_base_path,
@@ -159,6 +160,27 @@ def test_undo_task_targets_correct_project_under_concurrency():
             assert f.read() == 'B-new\n'
     finally:
         _cleanup()
+
+
+def test_stale_reverse_patch_fails_without_rewriting_the_file():
+    with tempfile.TemporaryDirectory() as project:
+        path = os.path.join(project, 'document.txt')
+        with open(path, 'w', encoding='utf-8') as handle:
+            handle.write('newer external edit\n')
+        undone, failed = pm_modifications._undo_modifications_list(project, [{
+            'type': 'apply_diff',
+            'path': 'document.txt',
+            'reversePatch': {'search': 'tool replacement',
+                             'replace': 'original text'},
+        }])
+
+        assert undone == []
+        assert failed == [{
+            'path': 'document.txt',
+            'reason': 'Reverse patch target no longer matches',
+        }]
+        with open(path, encoding='utf-8') as handle:
+            assert handle.read() == 'newer external edit\n'
 
 
 # ── undo-all with a pinned project only touches THAT project ──

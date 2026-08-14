@@ -97,27 +97,40 @@ def exchange_code(provider: str, code: str, state: str = '') -> dict:
                 _active_flows[provider]['error'] = str(e)
         return {'error': str(e), 'status_code': e.status_code, 'detail': e.detail}
 
-    with _flows_lock:
-        if token:
+    if token:
+        with _flows_lock:
             _active_flows[provider]['status'] = 'success'
             _active_flows[provider]['email'] = token.get('email', '')
-            audit_log('oauth_login', provider=provider, email=token.get('email', ''))
-            try:
-                from lib.oauth.outbound import provision_oauth_provider
-                provision_oauth_provider(provider)
-            except Exception as e:
-                logger.error('[OAuth] Failed to provision provider for %s: %s',
-                             provider, e, exc_info=True)
-        else:
+        audit_log('oauth_login', provider=provider, email=token.get('email', ''))
+        provider_ready = False
+        provision_warning = ''
+        try:
+            from lib.oauth.outbound import provision_oauth_provider
+            provision_oauth_provider(provider)
+            from lib.oauth.outbound import managed_oauth_provider_status
+            provider_ready = managed_oauth_provider_status(
+                provider).get('provider_ready', False)
+            if provider == 'codex':
+                from lib.oauth.codex_catalog import trigger_codex_catalog_refresh
+                trigger_codex_catalog_refresh()
+        except Exception as e:
+            provision_warning = str(e)[:300]
+            logger.error('[OAuth] Failed to provision provider for %s: %s',
+                         provider, e, exc_info=True)
+    else:
+        with _flows_lock:
             _active_flows[provider]['status'] = 'error'
             _active_flows[provider]['error'] = 'Token exchange failed'
-            return {'error': 'Token exchange failed. The code may have expired.'}
+        return {'error': 'Token exchange failed. The code may have expired.'}
 
     return {
         'ok': True,
         'provider': provider,
         'email': token.get('email', ''),
         'status': 'success',
+        'authenticated': True,
+        'provider_ready': provider_ready,
+        'warning': provision_warning,
     }
 
 
@@ -159,10 +172,19 @@ def store_token(provider: str, token_response: dict) -> dict:
             _active_flows[provider]['email'] = token.get('email', '')
     audit_log('oauth_login', provider=provider, email=token.get('email', ''),
               via='browser_exchange')
+    provider_ready = False
+    provision_warning = ''
     try:
         from lib.oauth.outbound import provision_oauth_provider
         provision_oauth_provider(provider)
+        from lib.oauth.outbound import managed_oauth_provider_status
+        provider_ready = managed_oauth_provider_status(
+            provider).get('provider_ready', False)
+        if provider == 'codex':
+            from lib.oauth.codex_catalog import trigger_codex_catalog_refresh
+            trigger_codex_catalog_refresh()
     except Exception as e:
+        provision_warning = str(e)[:300]
         logger.error('[OAuth] Failed to provision provider for %s: %s',
                      provider, e, exc_info=True)
 
@@ -171,6 +193,9 @@ def store_token(provider: str, token_response: dict) -> dict:
         'provider': provider,
         'email': token.get('email', ''),
         'status': 'success',
+        'authenticated': True,
+        'provider_ready': provider_ready,
+        'warning': provision_warning,
     }
 
 
@@ -178,7 +203,7 @@ def logout_oauth(provider: str) -> dict:
     """Logout from an OAuth provider (delete stored token)."""
     from lib.oauth.token_store import delete_token
 
-    delete_token(provider)
+    deleted = delete_token(provider)
 
     try:
         from lib.oauth.outbound import deprovision_oauth_provider
@@ -198,6 +223,17 @@ def logout_oauth(provider: str) -> dict:
             old.server_close()
         except Exception as e:
             logger.debug('[OAuth] Error closing relay server for %s: %s', provider, e)
+
+    if not deleted:
+        audit_log('oauth_logout_failed', provider=provider,
+                  reason='credential_delete_failed')
+        logger.error('[OAuth] Runtime session for %s was cleared, but the '
+                     'credential file could not be deleted', provider)
+        return {
+            'ok': False,
+            'provider': provider,
+            'error': 'credential_delete_failed',
+        }
 
     audit_log('oauth_logout', provider=provider)
     logger.info('[OAuth] Logged out from %s', provider)

@@ -232,13 +232,16 @@ def _i18n_dict() -> dict:
     A stubbed ``t`` that echoes a fallback would manufacture strings the real UI
     can never produce (the exact trap that shipped a raw `project.qrScan` key).
     """
-    src = (_ROOT / 'static/js/i18n.js').read_text(encoding='utf-8')
-    out = {}
-    for m in re.finditer(
-            r"'([\w.]+)':\s*\{\s*zh:\s*'((?:[^'\\]|\\.)*)'\s*,\s*"
-            r"en:\s*'((?:[^'\\]|\\.)*)'", src):
-        out[m.group(1)] = {'zh': m.group(2), 'en': m.group(3)}
-    return out
+    catalogs = {
+        lang: json.loads(
+            (_ROOT / f'frontend/src/i18n/locales/{lang}.json').read_text(
+                encoding='utf-8'))
+        for lang in ('zh', 'en')
+    }
+    return {
+        key: {'zh': catalogs['zh'][key], 'en': catalogs['en'][key]}
+        for key in catalogs['zh'].keys() & catalogs['en'].keys()
+    }
 
 
 def _sidecar_from_real_producer() -> list:
@@ -249,10 +252,11 @@ def _sidecar_from_real_producer() -> list:
 
 
 def _run_js(script: str) -> dict:
-    """Evaluate shipped core.js + tool_rounds.js in node and return the probe."""
+    """Evaluate the migrated core/tool-round owners and return the probe."""
     node = _node()
-    core = (_ROOT / 'static/js/core.js').read_text(encoding='utf-8')
-    rounds = (_ROOT / 'static/js/ui/tool_rounds.js').read_text(encoding='utf-8')
+    from tests._runtime_sections import runtime_section
+    core = runtime_section('core.js')
+    rounds = runtime_section('ui/tool_rounds.js')
     harness = f"""
 globalThis.window = globalThis;
 globalThis.document = {{
@@ -432,7 +436,7 @@ def test_the_chip_copy_is_translated_not_a_raw_key():
     )
     assert 'stall.' not in probe['html'], (
         'a raw i18n key leaked into the rendered chip — the key is referenced '
-        'but not defined in i18n.js'
+        'but not defined in the locale chunks'
     )
 
 

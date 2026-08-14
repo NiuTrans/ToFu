@@ -117,6 +117,48 @@ def is_glm(model: str) -> bool:
     return 'glm' in model.lower()
 
 
+def glm_line_version(model: str) -> tuple[int, int] | None:
+    """Extract ``(major, minor)`` for a GLM model id.
+
+    THE single version parser for every "GLM generation ≥ N" decision
+    (mirrors :func:`claude_line_version`):
+
+      glm-5.3                → (5, 3)
+      glm-5.3[1m]            → (5, 3)   1M-context coding-plan suffix
+      GLM-5.2-Air            → (5, 2)   gateway casing/variant tolerated
+      glm-5                  → (5, 0)   bare-major alias
+      glm-4.7                → (4, 7)
+      glm-zero-preview       → None     no version group
+      gpt-5.3 / qwen3.6      → None     not GLM family
+
+    Version groups are capped at two digits with a digit-boundary lookahead
+    (same guard as the Claude parser), so a trailing date suffix can never
+    be misread as a minor version.
+    """
+    if not is_glm(model):
+        return None
+    match = re.search(r'glm[-_.]?(\d{1,2})(?!\d)(?:[-_.](\d{1,2})(?!\d))?',
+                      model.lower())
+    if not match:
+        return None
+    major = int(match.group(1))
+    minor = int(match.group(2)) if match.group(2) else 0
+    return (major, minor)
+
+
+def is_glm53(model: str) -> bool:
+    """GLM-5.3+ — the forced-thinking generation.
+
+    GLM-5.3 (2026-08-14) keeps the 5.2 base but tightens the thinking
+    contract: ``thinking.type: 'disabled'`` is an API ERROR (native
+    endpoint), and the accepted ``reasoning_effort`` set narrows to
+    low/high/max. The 5.2-style enabled/disabled + seven-effort wire must
+    NOT be sent to 5.3.
+    """
+    v = glm_line_version(model)
+    return v is not None and v >= (5, 3)
+
+
 def is_kimi(model: str) -> bool:
     """Moonshot Kimi models (kimi-k2, kimi-k2.5, kimi-k2.6, moonshot-v1, etc.)."""
     m = model.lower()
@@ -157,8 +199,10 @@ def is_gpt5(model: str) -> bool:
 
 
 def is_gpt_56(model: str) -> bool:
-    """GPT-5.6+ — the first GPT generation to expose the ``ultra`` reasoning
-    effort tier. Older GPT-5.x models clamp ``ultra`` down to ``high``.
+    """GPT-5.6+ — the first GPT generation where Tofu's legacy ``ultra``
+    label is normalized to the public API's top ``max`` reasoning
+    effort tier. Older GPT-5.x models clamp ``ultra`` to their supported top
+    rung.
 
     Extracts the minor version from ``gpt-5``/``gpt-5.6``/``gpt-5.6-mini`` and
     returns True iff minor >= 6 (``gpt-5`` alone == minor 0).

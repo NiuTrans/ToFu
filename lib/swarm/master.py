@@ -65,7 +65,7 @@ except (TypeError, ValueError) as e:
 #: used for read-only commands (git status, tests), so counting it would
 #: over-flag. We count only the unambiguous write tools.
 _FILE_WRITE_TOOLS = frozenset({
-    'write_file', 'apply_diff', 'apply_diffs',
+    'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
     'insert_content', 'insert_contents',
 })
 
@@ -264,6 +264,11 @@ class MasterOrchestrator:
         self._results_by_id: dict[str, tuple[SubTaskSpec, SubAgentResult]] = {}
         self._lock = threading.Lock()
         self._aborted = False
+        # Internal cancellation used when the shared liveness beacon has
+        # positively classified the swarm as stalled. Keep it separate from
+        # _aborted so durable/UI verdicts remain "stalled", not the lie that a
+        # user clicked Stop. SubAgent tool proxies observe both signals.
+        self._stop_stalled = False
 
         # Throttle for the DEDICATED full-blob snapshot CAS write (write-amp
         # guard on FUSE-mounted DBs). The cheap in-memory live-task stamp runs
@@ -326,6 +331,11 @@ class MasterOrchestrator:
         # fresh initial-message list — that's what makes a resumed agent
         # continue mid-conversation rather than restart from scratch.
         self._resume_messages: dict[str, list] = {}
+        # Agent id -> number of rounds completed by its durable checkpoint.
+        # ``SubAgent`` runs on a generic chassis whose local counter always
+        # starts at zero, so resume must restore this independently of the
+        # message payload.
+        self._resume_rounds: dict[str, int] = {}
 
     # ── Model resolution (mirrors SubAgent._resolve_model) ──
 
@@ -340,7 +350,10 @@ class MasterOrchestrator:
         if spec.model_override:
             return spec.model_override
         tier = get_role_model_hint(spec.role)
-        return resolve_model_for_tier(tier, self.model)
+        provider_id = self._parent_task_proxy['config'].get(
+            '_pinned_provider_id', '')
+        return resolve_model_for_tier(
+            tier, self.model, role=spec.role, provider_id=provider_id)
 
     # ── Agent factory used by StreamingScheduler ──────
 
@@ -355,7 +368,8 @@ class MasterOrchestrator:
             model=self.model,
             thinking_enabled=self.thinking_enabled,
             on_event=self.on_progress,
-            abort_check=lambda: self._aborted or self.abort_check(),
+            abort_check=lambda: (
+                self._aborted or self._stop_stalled or self.abort_check()),
             project_path=self.project_path,
             artifact_store=self.artifact_store,
             output_file=out_path,
@@ -366,9 +380,34 @@ class MasterOrchestrator:
         #    over. The interrupted (uncheckpointed) round is naturally re-run.
         resume = self._resume_messages.get(spec.id)
         if resume:
-            agent.messages = list(resume)
-            logger.info('[Master:%s] Rehydrated agent %s from checkpoint (%d msgs)',
-                        self.task_id, spec.id, len(resume))
+            resumed = [dict(m) if isinstance(m, dict) else m for m in resume]
+            initial = getattr(agent, 'messages', None) or []
+            fresh_system = (dict(initial[0])
+                            if initial and isinstance(initial[0], dict)
+                            and initial[0].get('role') == 'system' else None)
+            # Checkpoints preserve dialogue, not stale authority. Tool schemas,
+            # role policy, and security wording can change between processes;
+            # retaining the old system prompt let a resumed browser worker
+            # keep following a withdrawn browser_execute_js promise and route
+            # around it with run_command. Refresh only the system carrier and
+            # leave every user/assistant/tool turn byte-for-byte intact.
+            if fresh_system:
+                if (resumed and isinstance(resumed[0], dict)
+                        and resumed[0].get('role') == 'system'):
+                    resumed[0] = fresh_system
+                else:
+                    resumed.insert(0, fresh_system)
+            agent.messages = resumed
+        resume_rounds = max(0, int(self._resume_rounds.get(spec.id, 0) or 0))
+        if resume or resume_rounds:
+            agent._round_offset = resume_rounds
+            # Honest state if an abort/stall lands before the first resumed
+            # dispatch. A real dispatch advances this to offset + local round.
+            if getattr(agent, 'result', None) is not None:
+                agent.result.rounds_used = resume_rounds
+            logger.info('[Master:%s] Rehydrated agent %s from checkpoint '
+                        '(%d msgs, %d completed rounds)',
+                        self.task_id, spec.id, len(resume or []), resume_rounds)
         # Share THE liveness record with this agent: every token / tool call it
         # makes must land on the same beacon the driver and the TTL sweep read,
         # otherwise we would just have created a fourth private clock.
@@ -669,7 +708,12 @@ class MasterOrchestrator:
         with self._lock:
             self._results.append((spec, result))
             self._results_by_id[spec.id] = (spec, result)
-            running = self._scheduler.running_count if self._scheduler else 0
+            # Scheduler publishes this callback before removing the current
+            # id from ``_running`` so its driver cannot outrun master result
+            # publication. Exclude the current completion from the remaining
+            # count surfaced to the inbox/UI.
+            running = (max(0, self._scheduler.running_count - 1)
+                       if self._scheduler else 0)
             pending = self._scheduler.pending_count if self._scheduler else 0
             # A result EXISTS for this agent now — it was never stuck, just
             # slow. Drop the stall verdict so the next snapshot self-heals to
@@ -728,7 +772,8 @@ class MasterOrchestrator:
             agent_factory=self._make_agent,
             rate_limiter=self.rate_limiter,
             max_parallel=self.max_parallel,
-            abort_check=lambda: self._aborted or self.abort_check(),
+            abort_check=lambda: (
+                self._aborted or self._stop_stalled or self.abort_check()),
             default_retries=self.max_retries,
             on_agent_start=self._on_agent_start_callback,
             on_agent_complete=self._on_agent_complete_callback,
@@ -802,6 +847,24 @@ class MasterOrchestrator:
             except Exception as e:
                 logger.error('%s Driver loop crashed: %s', log_prefix, e, exc_info=True)
             finally:
+                # iter_completions returns on a liveness verdict, but returning
+                # alone does not stop a worker already blocked inside a tool.
+                # Publish the distinct internal stop BEFORE shutdown waits;
+                # SubAgent mirrors it into run_command's cooperative aborted
+                # field, which kills the whole subprocess tree. Previously the
+                # pool merely waited 30s and abandoned the still-live thread.
+                try:
+                    if (self._scheduler.running_count > 0
+                            and not self._beacon.is_making_progress()):
+                        self._stop_stalled = True
+                        logger.warning(
+                            '%s propagating stall verdict to %d running '
+                            'agent(s) before scheduler shutdown',
+                            log_prefix, self._scheduler.running_count)
+                except Exception as e:
+                    logger.warning('%s stall cancellation probe failed: %s',
+                                   log_prefix, e)
+
                 # ORDER MATTERS. This block used to shut the pool down and set
                 # ``_terminated`` while agents were STILL EXECUTING, because
                 # the loop above could exit on a fixed 600s budget. Two lies
@@ -974,6 +1037,15 @@ class MasterOrchestrator:
                 msgs = a.get('messages') or []
                 if msgs:
                     self._resume_messages[spec.id] = msgs
+                try:
+                    self._resume_rounds[spec.id] = max(
+                        0, int(a.get('rounds_used') or 0))
+                except (TypeError, ValueError):
+                    logger.warning('[Master:%s] invalid persisted rounds_used '
+                                   'for agent %s: %r; resuming from round 0',
+                                   self.task_id, spec.id,
+                                   a.get('rounds_used'))
+                    self._resume_rounds[spec.id] = 0
                 resume_specs.append(spec)
 
         logger.info('[Master:%s] Rehydrate — preloaded=%d (re-enqueued=%d) resume=%d',
@@ -1071,16 +1143,19 @@ class MasterOrchestrator:
         deadline = time.monotonic() + max(0.0, timeout_seconds)
         timed_out = False
 
-        # Snapshot scheduler state ONCE under one lock acquisition.
+        # Snapshot the master's durable session membership under its lock.
+        # Do NOT derive no-id membership from the scheduler's transient
+        # running/pending maps: a scheduler worker records completion and pops
+        # ``_running`` immediately before its completion callback publishes the
+        # result into ``_results_by_id``.  In that small but real window an
+        # agent exists in neither map, so ``await_agents(ids=ALL)`` used to
+        # forget it and return k/N results.
         # already_done = ids the caller asked about that ARE already finished.
         # to_wait      = ids the caller asked about that are NOT yet finished.
         # unknown      = caller-supplied ids unknown to this swarm session.
         with self._lock:
             done_ids = set(self._results_by_id.keys())
-            running_ids = (set(self._scheduler._running.keys())
-                           if self._scheduler else set())
-            pending_ids = ({s.id for s in self._scheduler._pending}
-                           if self._scheduler else set())
+            known_ids = {str(s.id) for s in self.specs}
 
             if ids:
                 requested = set(str(x) for x in ids)
@@ -1091,10 +1166,10 @@ class MasterOrchestrator:
                 # nor to_wait, so it can never be reported and mode='all'
                 # silently evaluates "all" over only the still-in-flight
                 # subset — yielding k/N < total while the panel shows N/N.
-                requested = done_ids | running_ids | pending_ids
+                requested = known_ids | done_ids
             already_done = requested & done_ids
-            to_wait = requested & (running_ids | pending_ids)
-            unknown = requested - done_ids - running_ids - pending_ids
+            to_wait = (requested & known_ids) - done_ids
+            unknown = requested - known_ids - done_ids
 
         # Critical trace: WHAT this await is blocking on, plus a snapshot of
         # the swarm state. When an await later reports timed_out, this ENTER
@@ -1103,11 +1178,11 @@ class MasterOrchestrator:
         logger.info(
             '[Master:%s] await_agents ENTER mode=%s timeout=%.0fs ids=%s — '
             'to_wait=%s already_done=%s unknown=%s '
-            '(snapshot: done=%d running=%d pending=%d, hard_cap=%ss)',
+            '(snapshot: done=%d known=%d, hard_cap=%ss)',
             self.task_id, mode, timeout_seconds,
             (sorted(str(x) for x in ids) if ids else 'ALL'),
             sorted(to_wait), sorted(already_done), sorted(unknown),
-            len(done_ids), len(running_ids), len(pending_ids),
+            len(done_ids), len(known_ids),
             int(timeout_seconds))
 
         # ── Special case: nothing to wait for ──────────────────────────
@@ -1287,11 +1362,29 @@ class MasterOrchestrator:
                 len(completed_payloads) + len(still_running),
                 still_running or 'none')
             if stuck_detail:
+                zero_round_ids = []
+                progressed_ids = []
+                with self._lock:
+                    for sid in still_running:
+                        ag = self._agents.get(sid)
+                        rounds = getattr(
+                            getattr(ag, 'result', None), 'rounds_used', 0) if ag else 0
+                        (zero_round_ids if rounds == 0 else progressed_ids).append(sid)
+                diagnosis = []
+                if zero_round_ids:
+                    diagnosis.append(
+                        'rounds=0 agents never completed an LLM round and may '
+                        'be stalled upstream: ' + ','.join(zero_round_ids))
+                if progressed_ids:
+                    diagnosis.append(
+                        'non-zero-round agents already made LLM progress; '
+                        'inspect their latest tool/dispatch instead of '
+                        'classifying them as pre-round stalls: '
+                        + ','.join(progressed_ids))
                 logger.warning(
                     '[Master:%s] await_agents TIMEOUT stuck-agent state: %s '
-                    '(rounds=0 ⇒ agent never produced a round — likely wedged '
-                    'on an upstream/model stall, not merely slow)',
-                    self.task_id, '; '.join(stuck_detail))
+                    '(%s)', self.task_id, '; '.join(stuck_detail),
+                    '; '.join(diagnosis))
         else:
             logger.info(
                 '[Master:%s] await_agents EXIT mode=%s satisfied — completed=%s '
@@ -1430,7 +1523,6 @@ class MasterOrchestrator:
                     'objective':  spec.objective[:120],
                     'status':     status,
                     'round':      rounds,
-                    'max_rounds': spec.max_rounds,
                 }
             return out
 

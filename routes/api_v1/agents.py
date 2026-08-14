@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import time
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.api_response import api_bad_request, api_internal_error, api_ok, safe_route
 from lib.log import get_logger, log_context

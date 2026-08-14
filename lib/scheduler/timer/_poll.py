@@ -96,11 +96,12 @@ def _apply_reconcile_poll(timer: dict, predicate_result, llm_ready,
 
     # Persist promotion-streak / condition_kind transition (authoritative).
     try:
-        from lib.database import DOMAIN_SYSTEM, get_thread_db
+        from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, get_thread_db
         db = get_thread_db(DOMAIN_SYSTEM)
         now = datetime.now().isoformat()
         if outcome.promoted:
-            db.execute(
+            db_execute_with_retry(
+                db,
                 "UPDATE timer_watchers SET condition_kind='code', "
                 "promotion_streak=?, promoted_at=?, updated_at=? WHERE id=?",
                 [outcome.new_streak, now, now, timer_id])
@@ -110,7 +111,8 @@ def _apply_reconcile_poll(timer: dict, predicate_result, llm_ready,
             logger.info('[Timer:%s] ✅ Predicate PROMOTED to code (streak=%d) — '
                         'LLM drops out of future polls', timer_id, outcome.new_streak)
         elif outcome.demoted:
-            db.execute(
+            db_execute_with_retry(
+                db,
                 "UPDATE timer_watchers SET condition_kind='hybrid', "
                 "promotion_streak=0, promoted_at='', updated_at=? WHERE id=?",
                 [now, timer_id])
@@ -120,11 +122,11 @@ def _apply_reconcile_poll(timer: dict, predicate_result, llm_ready,
             logger.warning('[Timer:%s] ⚠️ Predicate DEMOTED to hybrid — %s',
                            timer_id, outcome.note)
         elif outcome.new_streak != current_streak or outcome.new_kind != kind:
-            db.execute(
+            db_execute_with_retry(
+                db,
                 "UPDATE timer_watchers SET condition_kind=?, promotion_streak=?, "
                 "updated_at=? WHERE id=?",
                 [outcome.new_kind, outcome.new_streak, now, timer_id])
-        db.commit()
     except Exception as e:
         logger.error('[Timer:%s] Failed to persist reconcile transition: %s',
                      timer_id, e, exc_info=True)
@@ -148,9 +150,6 @@ _POLL_SYSTEM_PROMPT = build_poll_system_prompt(
         '\n- ready=true means conditions are met and the follow-up task '
         'should start; ready=false means keep waiting'
         '\n- Do NOT think — go straight to action or decision'))
-
-# Maximum LLM rounds per poll (tool calls + final decision)
-_MAX_POLL_AGENT_ROUNDS = 5
 
 
 def _run_check_command(check_command: str, timer_id: str) -> str:
@@ -493,12 +492,8 @@ def poll_timer(timer_id: str) -> tuple[bool, str, int, bool, bool, str, str, lis
     _last_round = [0]    # round in flight — for a faithful smart_chat-failure log
 
     # ── Mini-agent loop via the shared run_agent_loop primitive ──────
-    # The timer wants tools available on EVERY poll round (no final
-    # tools-off round), so the dispatch adapter ignores the primitive's
-    # per-round ``tools`` arg and always passes ``poll_tools``; with
-    # ``max_tool_rounds = _MAX_POLL_AGENT_ROUNDS - 1`` the loop still runs
-    # exactly _MAX_POLL_AGENT_ROUNDS dispatches (rounds 0..N-1), all
-    # tool-carrying. Polls have no Stop path → AbortSignal.never().
+    # Poll tools stay available until the model returns its ready/not-ready
+    # decision without another tool call. Polls have no Stop path.
     def _poll_dispatch(rnd, _tools):
         nonlocal content, total_tokens, poll_model
         _last_round[0] = rnd
@@ -563,7 +558,6 @@ def poll_timer(timer_id: str) -> tuple[bool, str, int, bool, bool, str, str, lis
     try:
         run_agent_loop(
             abort=AbortSignal.never(),
-            max_tool_rounds=_MAX_POLL_AGENT_ROUNDS - 1,
             round_tools=poll_tools,
             dispatch=_poll_dispatch,
             execute_tool=_poll_execute,
@@ -636,10 +630,11 @@ def _record_poll(timer_id: str, decision: str, reason: str,
     _pred_matched = _audit['predicate_matched'] if _audit else -1
     _llm_agreed = _audit['llm_agreed'] if _audit else -1
     try:
-        from lib.database import DOMAIN_SYSTEM, get_thread_db
+        from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, get_thread_db
         db = get_thread_db(DOMAIN_SYSTEM)
         now = datetime.now().isoformat()
-        db.execute(
+        db_execute_with_retry(
+            db,
             '''INSERT INTO timer_poll_log
                (timer_id, poll_time, decision, reason, check_output, tokens_used,
                 model, poll_id, raw_output, tier, predicate_matched, llm_agreed)
@@ -648,40 +643,47 @@ def _record_poll(timer_id: str, decision: str, reason: str,
              (model or '')[:120], (poll_id or '')[:80], (raw_output or '')[:5000],
              _tier, _pred_matched, _llm_agreed]
         )
-        db.commit()
     except Exception as e:
         logger.warning('[Timer:%s] Failed to record poll: %s', timer_id, e, exc_info=True)
 
 
 def _increment_poll_count(timer_id: str, decision: str, reason: str) -> None:
     """Update the timer's poll count and last-poll fields in DB."""
+    changed = False
     try:
-        from lib.database import DOMAIN_SYSTEM, get_thread_db
+        from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, get_thread_db
         db = get_thread_db(DOMAIN_SYSTEM)
         now = datetime.now().isoformat()
-        db.execute(
+        cursor = db_execute_with_retry(
+            db,
             '''UPDATE timer_watchers
                SET poll_count=poll_count+1, last_poll_at=?, last_poll_decision=?,
                    last_poll_reason=?, updated_at=?
                WHERE id=?''',
-            [now, decision, reason[:500], now, timer_id]
+            [now, decision, reason[:500], now, timer_id], return_cursor=True,
         )
-        db.commit()
+        changed = cursor.rowcount > 0
     except Exception as e:
         logger.warning('[Timer:%s] Failed to increment poll count: %s', timer_id, e, exc_info=True)
+    if changed:
+        from ._notify import notify_timer_changed
+        notify_timer_changed('progress')
 
 
 def _mark_exhausted(timer_id: str) -> None:
     """Mark a timer as exhausted (max_polls reached)."""
+    changed = False
     try:
-        from lib.database import DOMAIN_SYSTEM, get_thread_db
+        from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, get_thread_db
         db = get_thread_db(DOMAIN_SYSTEM)
         now = datetime.now().isoformat()
-        db.execute(
-            "UPDATE timer_watchers SET status='exhausted', updated_at=? WHERE id=?",
-            [now, timer_id]
+        cursor = db_execute_with_retry(
+            db,
+            "UPDATE timer_watchers SET status='exhausted', updated_at=? "
+            "WHERE id=? AND status='active'",
+            [now, timer_id], return_cursor=True,
         )
-        db.commit()
+        changed = cursor.rowcount > 0
     except Exception as e:
         logger.warning('[Timer:%s] Failed to mark exhausted: %s', timer_id, e, exc_info=True)
     with _timers_lock:
@@ -690,19 +692,25 @@ def _mark_exhausted(timer_id: str) -> None:
         _last_cmd_outputs.pop(timer_id, None)
     with _reconcile_audit_lock:
         _reconcile_audit.pop(timer_id, None)
+    if changed:
+        from ._notify import notify_timer_changed
+        notify_timer_changed('exhausted')
 
 
 def _mark_expired(timer_id: str) -> None:
     """Mark a timer as expired (over-age zombie auto-retired on resume)."""
+    changed = False
     try:
-        from lib.database import DOMAIN_SYSTEM, get_thread_db
+        from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, get_thread_db
         db = get_thread_db(DOMAIN_SYSTEM)
         now = datetime.now().isoformat()
-        db.execute(
-            "UPDATE timer_watchers SET status='expired', updated_at=? WHERE id=?",
-            [now, timer_id]
+        cursor = db_execute_with_retry(
+            db,
+            "UPDATE timer_watchers SET status='expired', updated_at=? "
+            "WHERE id=? AND status='active'",
+            [now, timer_id], return_cursor=True,
         )
-        db.commit()
+        changed = cursor.rowcount > 0
     except Exception as e:
         logger.warning('[Timer:%s] Failed to mark expired: %s', timer_id, e, exc_info=True)
     with _timers_lock:
@@ -711,6 +719,9 @@ def _mark_expired(timer_id: str) -> None:
         _last_cmd_outputs.pop(timer_id, None)
     with _reconcile_audit_lock:
         _reconcile_audit.pop(timer_id, None)
+    if changed:
+        from ._notify import notify_timer_changed
+        notify_timer_changed('expired')
 
 
 def _mark_orphaned(timer_id: str) -> None:
@@ -727,15 +738,18 @@ def _mark_orphaned(timer_id: str) -> None:
     ``_timerOrphaned`` badge ("task interrupted, timer still active in
     background") — here we make that the DB truth: the timer is done.
     """
+    changed = False
     try:
-        from lib.database import DOMAIN_SYSTEM, get_thread_db
+        from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, get_thread_db
         db = get_thread_db(DOMAIN_SYSTEM)
         now = datetime.now().isoformat()
-        db.execute(
-            "UPDATE timer_watchers SET status='orphaned', updated_at=? WHERE id=?",
-            [now, timer_id]
+        cursor = db_execute_with_retry(
+            db,
+            "UPDATE timer_watchers SET status='orphaned', updated_at=? "
+            "WHERE id=? AND status='active'",
+            [now, timer_id], return_cursor=True,
         )
-        db.commit()
+        changed = cursor.rowcount > 0
     except Exception as e:
         logger.warning('[Timer:%s] Failed to mark orphaned: %s', timer_id, e, exc_info=True)
     with _timers_lock:
@@ -744,3 +758,6 @@ def _mark_orphaned(timer_id: str) -> None:
         _last_cmd_outputs.pop(timer_id, None)
     with _reconcile_audit_lock:
         _reconcile_audit.pop(timer_id, None)
+    if changed:
+        from ._notify import notify_timer_changed
+        notify_timer_changed('orphaned')

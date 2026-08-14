@@ -17,28 +17,55 @@ Run standalone: ``python3 tests/test_paper_title_recovery.py``
 """
 
 import os
+from pathlib import Path
 import sys
-import tempfile
+import time
+import uuid
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Isolated SQLite DB so get_thread_db() works without PG and never touches the
-# real project DB. MUST be set before importing lib.database.
-_TMP = tempfile.mkdtemp(prefix='tofu-title-test-')
+# The Sidecar's test project remains inside the repository/FUSE mount, matching
+# the production data-locality rule instead of escaping to a system temp dir.
+_TMP = (Path(__file__).resolve().parents[1] / 'data' /
+        'storage-certification' / f'title-recovery-{os.getpid()}')
 os.environ.setdefault('TOFU_DB_BACKEND', 'sqlite')
-os.environ.setdefault('TOFU_DB_PATH', os.path.join(_TMP, 'test.db'))
 os.environ.setdefault('TRADING_ENABLED', '0')
+_TEST_RUNTIME = None
+pytestmark = pytest.mark.unit
 
 
 def _bootstrap_test_db():
-    """Repoint the DB layer at the isolated temp file AND create the schema.
+    """Start an isolated real Sidecar for both pytest and standalone runs."""
+    global _TEST_RUNTIME
+    if _TEST_RUNTIME is not None:
+        return
+    from lib.storage import StorageRuntime, StorageSupervisor
+    from lib.storage.service import install_runtime_for_test
+    _TMP.mkdir(parents=True, exist_ok=True)
+    _TEST_RUNTIME = StorageRuntime(
+        StorageSupervisor(project_root=_TMP, backend='sqlite'),
+        auto_restart=False,
+    )
+    install_runtime_for_test(_TEST_RUNTIME)
+    _TEST_RUNTIME.start()
 
-    Just setting TOFU_DB_PATH is not enough — the SQLite schema (incl.
-    paper_library) is only created by init_db(). reset_sqlite_for_tests does
-    both: repoint + drop cached connections + re-run init_db.
-    """
-    from lib.database._core import reset_sqlite_for_tests
-    reset_sqlite_for_tests(os.path.join(_TMP, 'test.db'))
+
+def _shutdown_test_storage():
+    global _TEST_RUNTIME
+    from lib.storage.service import install_runtime_for_test
+    install_runtime_for_test(None)
+    _TEST_RUNTIME = None
+
+
+@pytest.fixture(scope='module', autouse=True)
+def _storage_sidecar():
+    _bootstrap_test_db()
+    try:
+        yield
+    finally:
+        _shutdown_test_storage()
 
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
@@ -256,26 +283,22 @@ def test_ensure_heading_keeps_placeholder_when_no_better_title():
 # ─── Layer 2b: library backfill (placeholder-only) ───────────────
 
 def _seed_library_row(phash, title, row_id='p1'):
-    from lib.database import get_thread_db
-    from lib.database._core_schema import PAPER_LIBRARY, upsert
-    import time as _t
-    db = get_thread_db()
-    upsert(db, PAPER_LIBRARY, {
+    from lib.storage import get_storage_client
+    get_storage_client(write=True).command('paper.library.put', {
         'id': row_id, 'user_id': 1, 'title': title,
         'pdf_url': '', 'pdf_filename': '', 'arxiv_id': '1706.03762',
         'paper_hash': phash, 'parsed_text': '', 'parser_version': '', 'qa_history': '[]',
         'images': '[]', 'babel_cache': '{}', 'page_count': 0, 'folder_id': '',
-        'created_at': int(_t.time()), 'updated_at': int(_t.time()),
-    })
-    db.commit()
+        'created_at': int(time.time()), 'updated_at': int(time.time()),
+    }, f'paper.title.seed:{uuid.uuid4().hex}')
 
 
 def _read_title(phash, row_id='p1'):
-    from lib.database import get_thread_db
-    row = get_thread_db().execute(
-        'SELECT title FROM paper_library WHERE paper_hash=? AND id=?',
-        (phash, row_id)).fetchone()
-    return (row['title'] if row else None)
+    del row_id  # each test hash is unique; identity returns its newest row
+    from lib.storage import get_storage_client
+    row = get_storage_client().query(
+        'paper.library.identity', {'paper_hash': phash})
+    return row['title'] if row else None
 
 
 def test_backfill_heals_arxiv_placeholder():
@@ -340,6 +363,13 @@ def _run_engine_once(phash, report_body=_MINI_REPORT):
     re_mod.dispatch_stream = _fake_dispatch
     try:
         task = _new_report_task(f'rpt_{phash[:8]}', phash, 'en', None)
+        # This suite owns title extraction/backfill, not the independently
+        # tested post-report agents whose interactive defaults are ON.
+        task['config'] = {
+            'paperInsightEnabled': False,
+            'paperTermfillEnabled': False,
+            'paperCheckpointsEnabled': False,
+        }
         re_mod._run_report_task(task, [
             {'role': 'system', 'content': 'sys'},
             {'role': 'user', 'content': 'paper'},
@@ -419,18 +449,21 @@ def main():
         test_engine_leaves_renamed_title_alone,
         test_engine_replaces_placeholder_h1_in_body,
     ]
-    for fn in tests:
-        try:
-            fn()
-        except AssertionError as e:
-            _fail(f'{fn.__name__}: {e}')
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            _fail(f'{fn.__name__}: unexpected {type(e).__name__}: {e}')
-    print()
-    print(_color(f'═══ ALL {len(tests)} TESTS PASSED ═══', '32'))
-    print()
+    try:
+        for fn in tests:
+            try:
+                fn()
+            except AssertionError as e:
+                _fail(f'{fn.__name__}: {e}')
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                _fail(f'{fn.__name__}: unexpected {type(e).__name__}: {e}')
+        print()
+        print(_color(f'═══ ALL {len(tests)} TESTS PASSED ═══', '32'))
+        print()
+    finally:
+        _shutdown_test_storage()
 
 
 if __name__ == '__main__':

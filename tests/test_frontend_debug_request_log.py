@@ -23,11 +23,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = runtime_sections_dir()
 
 
 def _node_deps_available() -> bool:
@@ -86,6 +88,10 @@ const META = (round) => ({
   kind: 'request', model: 'm-x',
   params: { maxTokens: 1000, temperature: 1 },
   roundNum: round, taskId: 'task-A',
+  contextManifest: [
+    { id: 'project_rules', source: 'project.rules', placement: 'head',
+      authority: 'project', injected: true, tokens: 42 },
+  ],
 });
 
 /* ── Two request snapshots on the SAME task → BOTH rounds retained ── */
@@ -104,6 +110,10 @@ check('model_params_stored', !!tA &&
   tA.rounds['1'].params && tA.rounds['1'].params.maxTokens === 1000);
 check('messages_ref_kept', !!tA &&
   Array.isArray(tA.rounds['1'].messages) && tA.rounds['1'].messages.length === 2);
+check('context_manifest_stored', !!tA &&
+  tA.rounds['1'].contextManifest[0].id === 'project_rules');
+check('context_block_rendered',
+  !!document.querySelector('#debugContent .debug-context-block'));
 
 /* ── kind='state' → .states, NOT the request rounds ── */
 showMessagesInDebug(msgs2, '最终回复后 · 4条', true, 'conv-1', undefined, undefined,
@@ -162,7 +172,7 @@ def _run(src_path=None, expect_fail=None):
         return output
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'request-log data-plane failures:\n' + output
-    assert output.count('PASS') >= 13, f'expected >=13 PASS lines, got:\n{output}'
+    assert output.count('PASS') >= 15, f'expected >=15 PASS lines, got:\n{output}'
     return output
 
 

@@ -23,7 +23,7 @@ import asyncio
 import json
 import time
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.agent_core.admission import (
     await_terminal, controller, on_terminal, register_waiter,
@@ -205,13 +205,13 @@ async def _stream_generator(task, model: str, requested_id: str,
     cursor = 0
     _billed = False
     task_id = task.get('id') or ''
+    from lib.task_replay import task_memory_replay_page
 
     try:
       while True:
-        # Snapshot events under the task's events_lock.
-        with task['events_lock']:
-            new_events = list(task['events'][cursor:])
-            cursor = len(task['events'])
+        page = task_memory_replay_page(task, cursor)
+        new_events = page.events
+        cursor = page.next_cursor
 
         for ev in new_events:
             etype = ev.get('type', '')

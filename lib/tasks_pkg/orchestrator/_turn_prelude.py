@@ -23,7 +23,12 @@ Steps (original order, each with its own branch):
    merged values. Rebinds ``task['config']`` too (the inline original
    did both).
 
-3. **Per-client browser routing.** ``cfg['browserClientId']`` sets the
+3. **Cost experiment assignment.** When the server-side experiment is
+   enabled, deterministically assigns the conversation and overlays only the
+   bounded MCP-exposure / working-set policy. Disabled is an exact no-op;
+   explicit request overrides are excluded rather than overwritten.
+
+4. **Per-client browser routing.** ``cfg['browserClientId']`` sets the
    thread-local client ID so all browser commands (tools, fetch
    fallback, search fallback) from this task thread route to the
    correct device's extension.
@@ -66,7 +71,16 @@ def run_turn_prelude(task, cfg, tid):
         cfg = apply_profile(cfg)
         task['config'] = cfg
 
-    # ── 3. Per-client browser routing: thread-local client ID so all
+    # ── 3. Conversation-sticky cost experiment. Fail open: observability
+    #    must never become a reason an otherwise valid chat request fails.
+    try:
+        from lib.cost_experiments import apply_cost_experiment
+        cfg = apply_cost_experiment(task, cfg)
+    except Exception as _e:
+        logger.error('[Task %s] cost experiment assignment failed; using '
+                     'original request config: %s', tid, _e, exc_info=True)
+
+    # ── 4. Per-client browser routing: thread-local client ID so all
     #    browser commands from this task thread route to the correct
     #    device's extension ──
     _browser_client_id = cfg.get('browserClientId')

@@ -39,12 +39,19 @@ class TestEgressStatus(unittest.TestCase):
         # (provider_probe_oauth) reroutes THEIR probes through the egress
         # branch and breaks them. Pollution hygiene, not production logic.
         self._saved = dict(egress._probe_cache._data)
+        self._saved_network_fail = dict(
+            egress._probe_network_fail_cache._data)
         egress._probe_cache.clear()
+        egress._probe_network_fail_cache.clear()
 
     def tearDown(self):
         with egress._probe_cache._lock:
             egress._probe_cache._data.clear()
             egress._probe_cache._data.update(self._saved)
+        with egress._probe_network_fail_cache._lock:
+            egress._probe_network_fail_cache._data.clear()
+            egress._probe_network_fail_cache._data.update(
+                self._saved_network_fail)
 
     def _status(self, host='api.anthropic.com', verdict=None, agents=(),
                 user_id=''):
@@ -56,6 +63,8 @@ class TestEgressStatus(unittest.TestCase):
     def test_direct_when_cached_ok(self):
         st = self._status(verdict='ok')
         self.assertEqual(st['state'], 'direct')
+        self.assertIn('server_routes', st)
+        self.assertIn('preferred_server_route', st)
 
     def test_agent_when_blocked_and_capable_agent_online(self):
         st = self._status(verdict='geo_blocked', agents=[_agent()])
@@ -95,6 +104,39 @@ class TestEgressStatus(unittest.TestCase):
                           agents=[_agent(user_id='u2')], user_id='u1')
         self.assertEqual(st['state'], 'unavailable')
 
+    def test_bg_probe_hits_real_api_endpoint_not_web_root(self):
+        # 2026-08-10 事故回归：chatgpt.com/ 根路径被 Cloudflare 拦 403
+        #（健康代理也一样），误判 geo_blocked 后按 host 键缓存 300s，
+        # 连真实路由一起毒死。后台探测必须打真实 API 端点。
+        seen = []
+        with mock.patch.object(egress, '_probe_host',
+                               side_effect=lambda url: seen.append(url) or 'ok'):
+            egress._spawn_background_probe('chatgpt.com')
+            deadline = time.time() + 5
+            while 'chatgpt.com' in egress._probe_bg_fired \
+                    and time.time() < deadline:
+                time.sleep(0.02)
+        self.assertEqual(seen,
+                         ['https://chatgpt.com/backend-api/codex/responses'])
+
+    def test_bg_probe_default_stays_web_root(self):
+        # 未登记的主机维持根路径语义（api.anthropic.com 根 POST 不返 403）。
+        seen = []
+        with mock.patch.object(egress, '_probe_host',
+                               side_effect=lambda url: seen.append(url) or 'ok'):
+            egress._spawn_background_probe('api.anthropic.com')
+            deadline = time.time() + 5
+            while 'api.anthropic.com' in egress._probe_bg_fired \
+                    and time.time() < deadline:
+                time.sleep(0.02)
+        self.assertEqual(seen, ['https://api.anthropic.com/'])
+
+    def test_bg_probe_url_overrides_stay_whitelisted(self):
+        # 覆盖表里的每个 URL 必须仍落在订阅白名单主机上——否则探测本身
+        # 会把缓存暖到 route_candidates 永不接管的域外。
+        for url in egress._BG_PROBE_URL.values():
+            self.assertTrue(egress.host_allowed(url), url)
+
 
 class TestPinnedSelector(unittest.TestCase):
 
@@ -104,14 +146,10 @@ class TestPinnedSelector(unittest.TestCase):
             self.assertEqual(eg._pinned_agent('u1'), 'a2')
 
     def test_route_request_uses_pin_among_many(self):
-        saved = dict(egress._probe_cache._data)
-        egress._probe_cache.clear()
-        egress._probe_cache.set('api.anthropic.com', 'geo_blocked')
-        self.addCleanup(lambda: (
-            egress._probe_cache._data.clear(),
-            egress._probe_cache._data.update(saved)))
         with mock.patch('lib.desktop.online_agents',
                         return_value=[_agent('a1'), _agent('a2', name='b2')]), \
+             mock.patch.object(egress, '_probe_host',
+                               return_value='geo_blocked'), \
              mock.patch.object(egress, '_pinned_agent', return_value='a2'):
             self.assertEqual(
                 egress.route_request('https://api.anthropic.com/v1/x',
@@ -126,7 +164,9 @@ class TestProviderProbeRouting(unittest.TestCase):
         return probe_one_cell
 
     def test_claude_probe_direct_path(self):
-        resp = mock.Mock(status_code=200, text='{}')
+        resp = mock.Mock(
+            status_code=200,
+            text='{"content":[{"type":"text","text":"OK"}]}')
         with mock.patch('lib.desktop.egress.route_request', return_value='direct'), \
              mock.patch('lib.http_client.http_post', return_value=resp) as hp, \
              mock.patch('lib.oauth.outbound.resolve_oauth_request',
@@ -138,7 +178,9 @@ class TestProviderProbeRouting(unittest.TestCase):
         self.assertTrue(hp.called)
 
     def test_claude_probe_egress_path(self):
-        er = mock.Mock(status_code=200, text='{}')
+        er = mock.Mock(
+            status_code=200,
+            text='{"content":[{"type":"text","text":"OK"}]}')
         with mock.patch('lib.desktop.egress.route_request', return_value='a1'), \
              mock.patch('lib.desktop.egress.egress_http', return_value=er) as eh, \
              mock.patch('lib.oauth.outbound.resolve_oauth_request',
@@ -152,7 +194,8 @@ class TestProviderProbeRouting(unittest.TestCase):
     def test_codex_probe_is_streaming_now(self):
         # S4：codex 探测从 SKIPPED 升级为流式真探测。
         reader = mock.Mock(status_code=200)
-        reader.read_all_text.return_value = ''
+        reader.read_all_text.return_value = (
+            'data: {"type":"response.output_text.delta","delta":"OK"}\n\n')
         with mock.patch('lib.oauth.codex.codex_get_valid_token',
                         return_value='tok'), \
              mock.patch('lib.oauth.token_store.load_token',

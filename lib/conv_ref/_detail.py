@@ -54,25 +54,24 @@ def row_window_usable(db, conversation_id, blob_count):
         blob_count: number of messages in the authoritative ``messages`` array.
 
     Returns:
-        True iff the row store holds at least ``blob_count`` rows for this
-        conversation (equal, or ahead because a dual-write landed first).
+        True iff the row store holds exactly ``blob_count`` rows.  Extra rows
+        are stale tail data after a failed truncation mirror and are just as
+        unsafe as missing rows.
     """
     try:
-        row = db.execute(
-            'SELECT COUNT(*) AS n FROM conversation_messages WHERE conv_id=?',
-            (conversation_id,)).fetchone()
-        n = int(row['n'] if hasattr(row, 'keys') else row[0]) if row else 0
+        from lib.database.messages_rows import mirror_is_current
+        ok = mirror_is_current(
+            db, conversation_id, expected_count=int(blob_count or 0))
     except Exception as e:
-        logger.debug('[conv_ref] row-store coverage probe failed conv=%s: %s '
+        logger.debug('[conv_ref] row-store marker probe failed conv=%s: %s '
                      '— falling back to the authoritative blob',
                      (conversation_id or '')[:12], e)
         return False
-    if n < int(blob_count or 0):
-        logger.debug('[conv_ref] row store has %d rows for conv=%s but the '
-                     'blob has %d — NOT backfilled, using the blob',
-                     n, (conversation_id or '')[:12], blob_count)
-        return False
-    return True
+    if not ok:
+        logger.debug('[conv_ref] row store is incomplete, stale, or not '
+                     'revision-marked for conv=%s — using the blob',
+                     (conversation_id or '')[:12])
+    return ok
 
 
 def _select_message_window(messages, head, tail, before=None):
@@ -227,11 +226,37 @@ def get_conversation(conversation_id, include_tool_details=True,
         return "Error: Cannot reference the current conversation — you are already in it. Use list_conversations to find other conversations."
 
     db = _get_db()
-    row = db.execute(
-        'SELECT id, user_id, title, messages, created_at, updated_at, '
-        'settings, msg_count, rev FROM conversations WHERE id=? AND user_id=?',
-        (conversation_id, DEFAULT_USER_ID if user_id is None else user_id)
-    ).fetchone()
+    owner_id = DEFAULT_USER_ID if user_id is None else user_id
+
+    def _blob_row():
+        from lib.database.conversation_repository import load_conversation
+        return load_conversation(
+            db, conversation_id, user_id=owner_id,
+            metadata_columns=(
+                'title', 'created_at', 'updated_at', 'settings'))
+
+    row = None
+    row_backed = False
+    if not raw:
+        try:
+            from lib.database.messages_rows import rows_read_enabled
+            if rows_read_enabled():
+                candidate = db.execute(
+                    'SELECT id, user_id, title, created_at, updated_at, '
+                    'settings, msg_count, rev FROM conversations '
+                    'WHERE id=? AND user_id=?',
+                    (conversation_id, owner_id),
+                ).fetchone()
+                if candidate and row_window_usable(
+                        db, conversation_id,
+                        int(candidate['msg_count'] or 0)):
+                    row = candidate
+                    row_backed = True
+        except Exception as e:
+            logger.debug('[conv_ref] metadata-only row gate failed conv=%s: %s',
+                         (conversation_id or '')[:12], e)
+    if row is None:
+        row = _blob_row()
 
     if not row:
         return f"Error: Conversation '{conversation_id}' not found. Use list_conversations to find valid conversation IDs."
@@ -247,56 +272,41 @@ def get_conversation(conversation_id, include_tool_details=True,
     #   lib/tasks_pkg/manager/_sync.py is likewise disabled. Revisit later.
 
     title = row['title'] or '(untitled)'
-    messages = _coerce_json(row['messages'], default=[], label='conv-ref-messages')
-
-    if not messages:
-        return f"Conversation '{title}' [{conversation_id}] exists but has no messages."
-
-    # Parse settings for model info
-    settings = _coerce_json(row['settings'], default={}, label='conv-ref-settings')
-
     _tail = TRANSCRIPT_TAIL if limit is None else max(1, int(limit))
     _before = None if before is None else max(0, int(before) - 1)
+    settings = _coerce_json(row['settings'], default={},
+                            label='conv-ref-settings')
 
-    # ── Row-store cutover seam (charter 2026-07-26) ──
-    # Windowing happens in memory today. When TOFU_MESSAGES_ROWS_READ flips,
-    # the charter's "pure swap" is only safe on a conversation the row store
-    # has actually backfilled — otherwise it answers totalCount=0 and a real
-    # conversation renders as empty. The guard is consulted HERE, while it is
-    # still inert, so the protection predates the migration instead of being
-    # remembered during it. rows_read_enabled() is False today, so this whole
-    # branch is skipped and the in-memory path below is byte-identical.
     kept = None
-    try:
-        from lib.database.messages_rows import (
-            load_message_window,
-            rows_read_enabled,
-        )
-        if rows_read_enabled() and row_window_usable(
-                db, conversation_id, len(messages)):
-            # The charter's pure swap: same limit/before semantics, served off
-            # the (conv_id, seq) index instead of the already-parsed blob.
-            w = load_message_window(db, conversation_id, _tail,
-                                    before_seq=_before)
-            first = w.get('firstLoadedSeq')
-            if w.get('messages') and first is not None:
-                head_block = list(enumerate(messages[:TRANSCRIPT_HEAD]))
-                tail_block = [(first + i, m)
-                              for i, m in enumerate(w['messages'])]
-                seen = {i for i, _ in head_block}
-                kept = head_block + [(i, m) for i, m in tail_block
-                                     if i not in seen]
-                omitted = w.get('totalCount', 0) - len(kept)
-                total = w.get('totalCount', 0)
-    except Exception as e:
-        logger.debug('[conv_ref] row-store window failed conv=%s: %s — '
-                     'falling back to the in-memory window',
-                     (conversation_id or '')[:12], e)
-        kept = None
+    if row_backed:
+        try:
+            from lib.database.messages_rows import load_message_selection
+            selected = load_message_selection(
+                db, conversation_id, TRANSCRIPT_HEAD, _tail,
+                before_seq=_before, known_total=int(row['msg_count'] or 0))
+            kept = selected['kept']
+            omitted = selected['omitted']
+            total = selected['totalCount']
+        except Exception as e:
+            logger.debug('[conv_ref] row selection failed conv=%s: %s — '
+                         'falling back to the authoritative blob',
+                         (conversation_id or '')[:12], e)
+            row = _blob_row()
+            row_backed = False
+            if row is None:
+                return (f"Error: Conversation '{conversation_id}' not found. "
+                        'Use list_conversations to find valid conversation IDs.')
 
-    if kept is None:
+    if not row_backed:
+        messages = row.messages
+        if not messages:
+            return (f"Conversation '{title}' [{conversation_id}] exists but "
+                    'has no messages.')
         kept, omitted, total = _select_message_window(
             messages, TRANSCRIPT_HEAD, _tail, before=_before)
+    elif not kept:
+        return (f"Conversation '{title}' [{conversation_id}] exists but "
+                'has no messages.')
 
     # Build formatted output
     parts = []
@@ -440,11 +450,11 @@ def build_conversation_digest(conversation_id, current_conv_id=None,
         return None
     try:
         db = _get_db()
-        row = db.execute(
-            'SELECT id, title, messages, settings, created_at, updated_at, rev '
-            'FROM conversations WHERE id=? AND user_id=?',
-            (conversation_id, DEFAULT_USER_ID if user_id is None else user_id)
-        ).fetchone()
+        from lib.database.conversation_repository import load_conversation
+        row = load_conversation(
+            db, conversation_id,
+            user_id=DEFAULT_USER_ID if user_id is None else user_id,
+            metadata_columns=('title', 'settings', 'created_at', 'updated_at'))
     except Exception as e:
         logger.debug('[conv_ref] digest DB read failed for %s: %s',
                      conversation_id, e)
@@ -452,7 +462,7 @@ def build_conversation_digest(conversation_id, current_conv_id=None,
     if not row:
         return None
 
-    messages = _coerce_json(row['messages'], default=[], label='conv-digest-messages')
+    messages = row.messages
     if not isinstance(messages, list) or not messages:
         return None
     settings = _coerce_json(row['settings'], default={}, label='conv-digest-settings')

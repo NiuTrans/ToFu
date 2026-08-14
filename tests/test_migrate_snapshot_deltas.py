@@ -186,6 +186,36 @@ def test_idempotent_second_run_is_noop():
         _cleanup(tid)
 
 
+def test_mixed_delta_then_full_rows_are_detected_and_reprojected_safely():
+    """A rolling deployment can leave delta rows first and legacy full rows
+    later. Candidate discovery and verification must not mistake that legal
+    mixed chain for an all-delta task or compare delta storage to full output.
+    """
+    mod = _load_script()
+    tid = f'mig-mixed-{uuid.uuid4().hex[:8]}'
+    originals = _grow(6)
+    projector = mod.SnapshotProjector()
+    mixed = [projector.project(tid, p) for p in originals[:3]] + originals[3:]
+    db = _seed(tid, mixed)
+    try:
+        assert tid in mod._tasks_with_full_rows(db), (
+            'fast first+latest probe missed a delta->full deployment transition')
+        assert tid in mod._tasks_with_full_rows(db, comprehensive=True)
+        rep = mod.migrate_task(db, tid)
+        assert rep['status'] == 'ok', rep
+        stored = _stored(tid)
+        assert all('prefixLen' in row for row in stored)
+        from lib.tasks_pkg.snapshot_delta import rebuild_snapshots
+        rebuilt = rebuild_snapshots(
+            [{'type': 'messages_snapshot', 'payload': row} for row in stored])
+        for expected, got in zip(originals, rebuilt):
+            assert not got.get('degraded'), got.get('degradedReason')
+            assert _canon(got['messages']) == _canon(expected['messages'])
+            assert _canon(got['tools']) == _canon(expected['tools'])
+    finally:
+        _cleanup(tid)
+
+
 def test_neuter_verification_lets_corruption_through():
     """NC: make the rebuild ECHO the originals so the byte-compare always
     passes → the same corruption that was caught above now lands in the DB,

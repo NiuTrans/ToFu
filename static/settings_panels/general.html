@@ -3,15 +3,15 @@
             <div class="settings-field">
               <div class="settings-section-title" data-i18n="settings.theme" style="margin-bottom:8px">主题</div>
               <div class="theme-picker" id="themePicker">
-                <div class="theme-option active" data-theme="dark" onclick="selectTheme('dark')">
+                <div class="theme-option active" data-theme="dark" data-tofu-action="selectTheme('dark')">
                   <div class="theme-preview dark-preview"></div>
                   <span class="theme-option-label"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401"/></svg><span data-i18n="settings.themeDark">暗色</span></span>
                 </div>
-                <div class="theme-option" data-theme="light" onclick="selectTheme('light')">
+                <div class="theme-option" data-theme="light" data-tofu-action="selectTheme('light')">
                   <div class="theme-preview light-preview"></div>
                   <span class="theme-option-label"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg><span data-i18n="settings.themeLight">亮色</span></span>
                 </div>
-                <div class="theme-option" data-theme="tofu" onclick="selectTheme('tofu')">
+                <div class="theme-option" data-theme="tofu" data-tofu-action="selectTheme('tofu')">
                   <div class="theme-preview tofu-preview"></div>
                   <span class="theme-option-label"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11c0-3 3-5 7-5s7 2 7 5"/><path d="M5 11l1.3 6.6a2 2 0 0 0 2 1.4h7.4a2 2 0 0 0 2-1.4L19 11Z"/><path d="M3 20h18"/></svg><span data-i18n="settings.themeTofu">豆腐</span></span>
                 </div>
@@ -20,17 +20,17 @@
             <div class="settings-field">
               <div class="settings-section-title" data-i18n="settings.language" style="margin-bottom:8px">界面语言</div>
               <div class="lang-picker" id="langPicker">
-                <div class="lang-option active" data-lang="zh" onclick="_onLanguageChange('zh')">
+                <div class="lang-option active" data-lang="zh" data-tofu-action="_onLanguageChange('zh')">
                   <span class="lang-flag"><svg width="20" height="14" viewBox="0 0 24 16"><rect width="24" height="16" fill="#de2910"/><path d="M5 3l.7 2.1H8l-1.85 1.35.7 2.15L5 7.25 3.15 8.6l.7-2.15L2 5.1h2.3z" fill="#ffde00"/></svg></span>
                   <span class="lang-label">中文</span>
                 </div>
-                <div class="lang-option" data-lang="en" onclick="_onLanguageChange('en')">
+                <div class="lang-option" data-lang="en" data-tofu-action="_onLanguageChange('en')">
                   <span class="lang-flag"><svg width="20" height="14" viewBox="0 0 24 16"><rect width="24" height="16" fill="#fff"/><g fill="#b22234"><rect width="24" height="1.85"/><rect y="3.7" width="24" height="1.85"/><rect y="7.4" width="24" height="1.85"/><rect y="11.1" width="24" height="1.85"/><rect y="14.15" width="24" height="1.85"/></g><rect width="10" height="8.6" fill="#3c3b6e"/></svg></span>
                   <span class="lang-label">English</span>
                 </div>
               </div>
               <!-- hidden select kept for JS compat -->
-              <select id="settingLanguage" style="display:none" onchange="_onLanguageChange(this.value)">
+              <select id="settingLanguage" style="display:none" data-tofu-action-change="_onLanguageChange(this.value)">
                 <option value="zh">中文</option>
                 <option value="en">English</option>
               </select>
@@ -39,8 +39,7 @@
 
           <!-- No brand-mascot picker here, on purpose (owner, 2026-07-29):
                "I only want the original version … there is really no need to
-               switch." Third veto of mascot switching — see the note in
-               static/js/core/brand_logo.js before adding one back. -->
+               switch." Third veto of mascot switching. -->
 
           <div class="settings-divider"></div>
           <div class="settings-section-title" data-i18n="settings.modelParams">模型参数</div>
@@ -48,7 +47,7 @@
             <div class="settings-row">
               <div class="settings-field">
                 <label data-i18n="settings.temperature">温度 (Temperature)</label>
-                <div class="range-row"><input type="range" id="settingTemp" min="0" max="1" step="0.05" value="0.7" oninput="document.getElementById('tempVal').textContent=this.value"><span class="range-value" id="tempVal">0.7</span></div>
+                <div class="range-row"><input type="range" id="settingTemp" min="0" max="1" step="0.05" value="0.7" data-tofu-action-input="_syncRangeOutput(this,'tempVal','')"><span class="range-value" id="tempVal">0.7</span></div>
               </div>
             </div>
             <div class="settings-row two-col">
@@ -70,7 +69,7 @@
                   <option value="high" data-i18n="settings.thinkingHigh">High — 深度</option>
                   <option value="xhigh" data-i18n="settings.thinkingXHigh">xHigh — 超深度 (Claude 4.7+)</option>
                   <option value="max" data-i18n="settings.thinkingMax">Max — 最大</option>
-                  <option value="ultra" data-i18n="settings.thinkingUltra">Ultra — 至臻 (GPT-5.6+)</option>
+                  <option value="ultra" data-i18n="settings.thinkingUltra">Ultra — 兼容别名（GPT-5.6 实际发送 Max）</option>
                 </select>
                 <div class="settings-toggle-desc" data-i18n="settings.defaultThinkingDesc">新对话的默认思维深度级别</div>
               </div>
@@ -92,7 +91,7 @@
             <option value="replace">replace</option>
           </select>
           <div class="sysprompt-control-row">
-            <button type="button" class="stg-btn-balance" onclick="openSystemPromptEditor()" data-i18n="settings.systemPromptEdit">编辑系统提示词…</button>
+            <button type="button" class="stg-btn-balance" data-tofu-action="openSystemPromptEditor()" data-i18n="settings.systemPromptEdit">编辑系统提示词…</button>
           </div>
           <div class="settings-toggle-desc" data-i18n="settings.systemPromptBlocksHint">逐块开关内置系统提示词，并可追加自定义指令。CLAUDE.md / 记忆 / 多智能体 / 日期仍会注入。</div>
           <div class="sysprompt-summary-row">
@@ -100,8 +99,10 @@
           </div>
 
           <div class="settings-divider"></div>
-          <div class="settings-section-title" data-i18n="settings.featureModules">功能模块</div>
-          <div class="settings-group">
+          <details class="settings-disclosure">
+            <summary><strong data-i18n="settings.featureModules">功能模块</strong></summary>
+            <div class="settings-disclosure-body">
+            <div class="settings-group">
             <div class="settings-toggle-row">
               <div>
                 <span class="settings-toggle-label" data-i18n="settings.tradingModule">交易 / 基金模块</span>
@@ -186,9 +187,13 @@
             </div>
           </div>
 
-          <div class="settings-divider"></div>
-          <div class="settings-section-title" data-i18n="settings.aboutUpdate">关于与更新</div>
-          <div class="settings-group">
+            </div>
+          </details>
+
+          <details class="settings-disclosure">
+            <summary><strong data-i18n="settings.aboutUpdate">关于与更新</strong></summary>
+            <div class="settings-disclosure-body">
+            <div class="settings-group">
             <div class="stg-update-row">
               <div class="stg-update-info">
                 <span class="stg-update-icon" aria-hidden="true">
@@ -202,11 +207,13 @@
                   </div>
                 </div>
               </div>
-              <button type="button" class="stg-update-btn" id="settingsUpdateBtn" onclick="openUpdateDialog()">
+              <button type="button" class="stg-update-btn" id="settingsUpdateBtn" data-tofu-action="openUpdateDialog()">
                 <span data-i18n="settings.updateCheck">检查更新</span>
                 <span class="stg-update-pill" id="settingsUpdatePill" style="display:none" data-i18n="update.btnNew">New</span>
               </button>
             </div>
-          </div>
+            </div>
+            </div>
+          </details>
 
         </div>

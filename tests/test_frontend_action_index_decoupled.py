@@ -42,15 +42,18 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
-ESCAPE_HTML = os.path.join(JS_DIR, 'core', 'escape_html.js')
-SAFE_HTML = os.path.join(JS_DIR, 'core', 'safe_html.js')
-TOOL_ROUNDS = os.path.join(JS_DIR, 'ui', 'tool_rounds.js')
-CHAT_RENDER = os.path.join(JS_DIR, 'ui', 'chat_render.js')
+ESCAPE_HTML = runtime_section_path('core/escape_html.js')
+SAFE_HTML = runtime_section_path('core/safe_html.js')
+TOOL_ROUNDS = runtime_section_path('ui/tool_rounds.js')
+TRANSLATION_MODEL = runtime_section_path('core/translation_model.js')
+TRANSLATION_INDICATOR = runtime_section_path('ui/translation_indicator.js')
+CHAT_RENDER = runtime_section_path('ui/chat_render.js')
 
 
 def _node_available() -> bool:
@@ -59,7 +62,7 @@ def _node_available() -> bool:
 
 _HARNESS = r"""
 const fs = require('fs');
-const NC = process.argv[6] || '';
+const NC = process.argv[8] || '';
 global.window = global;
 global.document = {
   addEventListener: function () {}, removeEventListener: function () {},
@@ -105,12 +108,12 @@ function loadAll(chatSrc) {
   (0, eval)(fs.readFileSync(process.argv[2], 'utf8'));  // escape_html.js
   (0, eval)(fs.readFileSync(process.argv[3], 'utf8'));  // safe_html.js
   (0, eval)(fs.readFileSync(process.argv[4], 'utf8'));  // tool_rounds.js
-  (0, eval)(fs.readFileSync(process.argv[2].replace('escape_html.js', 'translation_model.js'), 'utf8'));
-  (0, eval)(fs.readFileSync(process.argv[2].replace('core/escape_html.js', 'ui/translation_indicator.js'), 'utf8'));
+  (0, eval)(fs.readFileSync(process.argv[5], 'utf8'));  // translation_model.js
+  (0, eval)(fs.readFileSync(process.argv[6], 'utf8'));  // translation_indicator.js
   (0, eval)(chatSrc);
 }
 
-let CHAT = fs.readFileSync(process.argv[5], 'utf8');
+let CHAT = fs.readFileSync(process.argv[7], 'utf8');
 if (NC === 'bake') {
   // NEUTER: re-bake the array index back into the action onclicks. The token
   // `_msgElIndex(this)` is the Phase-2b sentinel; absent → not landed.
@@ -197,7 +200,8 @@ def _run(nc: str = '') -> str:
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, ESCAPE_HTML, SAFE_HTML, TOOL_ROUNDS, CHAT_RENDER, nc],
+            ['node', harness, ESCAPE_HTML, SAFE_HTML, TOOL_ROUNDS,
+             TRANSLATION_MODEL, TRANSLATION_INDICATOR, CHAT_RENDER, nc],
             capture_output=True, text=True, timeout=60,
         )
     finally:

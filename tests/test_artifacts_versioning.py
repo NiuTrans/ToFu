@@ -18,6 +18,8 @@ import uuid
 
 import pytest
 
+pytest_plugins = ('tests._artifact_sidecar',)
+
 
 # ─── Versioning ───────────────────────────────────────────────────────
 

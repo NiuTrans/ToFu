@@ -33,9 +33,15 @@ from __future__ import annotations
 
 import os
 
-from tests._jsdom import run_harness, JS_DIR, ROOT
+import pytest
 
-CONV_VIEW = os.path.join(JS_DIR, 'conv_view.js')
+from tests._jsdom import run_harness, ROOT
+from tests._runtime_sections import runtime_section_path
+
+pytestmark = pytest.mark.unit
+
+CONV_VIEW = runtime_section_path('conv_view.js')
+SSE_PIPELINE = runtime_section_path('ui/sse_pipeline.js')
 
 
 _BODY = r"""
@@ -210,10 +216,10 @@ def test_source_carries_identity_keyed_render_seam():
          "(observed: a failed Continue made the interrupted turn vanish). Hold "
          "the new node by reference (replaceWith) instead.")
 
-    sse = os.path.join(ROOT, 'static', 'js', 'ui', 'sse_pipeline.js')
+    sse = SSE_PIPELINE
     with open(sse, encoding='utf-8') as f:
         sse_src = f.read()
-    assert 'window.ConvView.startStreaming(convId' in sse_src, \
+    assert 'runtimeScope.ConvView.startStreaming(convId' in sse_src, \
         'connectToTask reconnect no longer routes the streaming insert through ConvView.startStreaming'
     # The old index-based eviction must be gone (it was the drift-miss vector).
     assert 'const existing = document.getElementById(`msg-${lastIdx}`);' not in sse_src, \

@@ -14,6 +14,8 @@ through ``_pkg()`` at call time so a patch on ``lib.mcp.client`` is honoured.
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
 import os
 import tempfile
 import threading
@@ -51,6 +53,35 @@ from lib.mcp.client._install import _prepend_interpreter_bin_to_path
 
 logger = get_logger(__name__)
 
+MCP_CURRENT_PROTOCOL_VERSION = '2026-07-28'
+
+
+def _protocol_compatibility_notice(protocol_version: str) -> dict | None:
+    """Return a non-blocking update advisory for an older MCP peer.
+
+    MCP protocol revisions use ISO dates.  Unknown/non-date future values are
+    not guessed at: compatibility warnings should be evidence-based and must
+    never make a healthy custom server look broken.
+    """
+    version = str(protocol_version or '').strip()
+    try:
+        parts = tuple(int(value) for value in version.split('-'))
+        current = tuple(
+            int(value) for value in MCP_CURRENT_PROTOCOL_VERSION.split('-'))
+    except (TypeError, ValueError) as exc:
+        logger.debug('[MCP] ignored invalid protocol version %r: %s',
+                     version, exc)
+        return None
+    if len(parts) != 3 or parts >= current:
+        return None
+    return {
+        'kind': 'legacy_protocol',
+        'protocol_version': version,
+        'target_protocol': MCP_CURRENT_PROTOCOL_VERSION,
+        'update_recommended': True,
+        'blocking': False,
+    }
+
 
 def _tool_input_schema(tool) -> dict:
     """The MCP SDK renamed ``Tool.input_schema`` to the spec spelling
@@ -58,6 +89,59 @@ def _tool_input_schema(tool) -> dict:
     connect died on the AttributeError). Accept either; empty → open object."""
     return (getattr(tool, 'input_schema', None) or getattr(tool, 'inputSchema', None)
             or {'type': 'object', 'properties': {}})
+
+
+def _tool_meta(tool) -> dict[str, Any]:
+    """Read MCP ``Tool._meta`` across SDK aliases without exposing it."""
+    raw = getattr(tool, 'meta', None) or getattr(tool, '_meta', None) or {}
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _result_meta(result) -> dict[str, Any]:
+    raw = getattr(result, 'meta', None) or getattr(result, '_meta', None) or {}
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _result_catalog_version(result) -> str:
+    meta = _result_meta(result)
+    return str(
+        meta.get('catalogVersion') or meta.get('catalog_version')
+        or getattr(result, 'catalogVersion', None)
+        or getattr(result, 'catalog_version', None) or '')
+
+
+def _schema_hash(tool) -> str:
+    from lib.mcp.tool_search import canonical_schema_hash
+    meta = _tool_meta(tool)
+    annotations = getattr(tool, 'annotations', None)
+    if annotations is not None and not isinstance(annotations, dict):
+        try:
+            annotations = (annotations.model_dump(by_alias=True)
+                           if hasattr(annotations, 'model_dump')
+                           else annotations.dict(by_alias=True))
+        except Exception as exc:
+            logger.debug('[MCP] annotation serialization fallback: %s', exc)
+            annotations = str(annotations)
+    return str(meta.get('schemaHash')
+               or canonical_schema_hash({
+                   'name': str(getattr(tool, 'name', '') or ''),
+                   'description': str(getattr(tool, 'description', '') or ''),
+                   'inputSchema': _tool_input_schema(tool),
+                   'annotations': annotations,
+               }))
+
+
+def _tool_result_is_error(result) -> bool:
+    """Read the MCP tool-error flag across the installed SDK generations.
+
+    The v2 client exposes ``is_error`` while the still-supported v1.29 model
+    follows the wire spelling ``isError``.  New installs resolve the bounded
+    v2 dependency, but an in-place ``python server.py`` upgrade must not make
+    every MCP call fail until the user manually rebuilds the environment.
+    """
+    if hasattr(result, 'is_error'):
+        return bool(result.is_error)
+    return bool(getattr(result, 'isError', False))
 
 
 # ══════════════════════════════════════════════════════════
@@ -69,7 +153,8 @@ class _MCPServerHandle:
 
     Lifecycle is driven by a dedicated "owner" coroutine (see
     ``MCPBridge._server_owner``).  That coroutine opens the
-    ``AsyncExitStack`` holding the stdio/SSE transport + ``ClientSession``
+    ``AsyncExitStack`` holding the negotiated SDK v2 ``Client`` or v1
+    ``ClientSession`` compatibility path
     context managers, signals readiness via ``_ready_future``, then blocks
     on ``_shutdown_event`` until shutdown is requested.  This guarantees
     the context stack is always closed **from the same task that opened
@@ -79,28 +164,36 @@ class _MCPServerHandle:
 
     __slots__ = (
         'name', 'config', 'session', 'tools',
-        'server_name', 'server_version',  # from InitializeResult.serverInfo
+        'server_name', 'server_version',  # negotiated server identity, when advertised
+        'protocol_version',               # negotiated MCP wire revision
+        'sdk_generation',                 # 1 fallback or 2 high-level Client
         '_shutdown_event',   # asyncio.Event — set() to request shutdown
-        '_ready_future',     # asyncio.Future[list[Tool]] — resolved when init+list_tools done
+        '_ready_future',     # asyncio.Future[list[Tool]] — resolved after negotiate+list_tools
         '_closed_future',    # asyncio.Future[None] — resolved when owner task exits
         '_owner_task',       # asyncio.Task — the owner coroutine handle
         '_stderr_file',      # tempfile.SpooledTemporaryFile capturing child stderr (stdio transport only)
         '_cold_install',     # True when connect_server just evicted this launcher's dep tree
+        'catalog_version', 'catalog_fingerprint', 'tools_list_changed',
     )
 
     def __init__(self, name: str, config: dict):
         self.name = name
         self.config = config
-        self.session = None       # mcp.ClientSession (set after connect)
+        self.session = None       # mcp.Client or mcp.ClientSession
         self.tools: list = []     # list of mcp.types.Tool
         self.server_name = ''     # reported by server via InitializeResult.serverInfo.name
         self.server_version = ''  # reported by server via InitializeResult.serverInfo.version
+        self.protocol_version = ''  # 2026-07-28 or a negotiated legacy revision
+        self.sdk_generation = 0
         self._shutdown_event = None
         self._ready_future = None
         self._closed_future = None
         self._owner_task = None
         self._stderr_file = None
         self._cold_install = False
+        self.catalog_version = ''
+        self.catalog_fingerprint = ''
+        self.tools_list_changed = False
 
 
 class MCPBridge:
@@ -172,12 +265,63 @@ class MCPBridge:
 
         # Per-server resolved liveness-probe method name (see
         # ``_probe_liveness``): 'send_discover' | 'discover' | 'send_ping' |
-        # 'list_tools'. Memoised after a probe answers, so a 2026-07-28 server
-        # (whose ``ping`` is -32601) pays the fallback walk once instead of
-        # every 45s sweep. Cleared whenever the handle goes away, because the
-        # replacement peer may speak a different revision. Protected by
-        # ``self._lock``.
+        # 'list_tools'. SDK-v2 Client sessions never select send_ping (the SDK
+        # warns even when mode='auto' negotiated a legacy peer); list_tools is
+        # forced past the response cache so it proves a real round trip. Only
+        # the true SDK-v1 ClientSession path uses ping. Cleared whenever the
+        # handle goes away, because the replacement peer may speak a different
+        # revision. Protected by ``self._lock``.
         self._probe_method: dict[str, str] = {}
+
+    def _replace_server_catalog(self, name: str, handle: _MCPServerHandle,
+                                tools: list, *, catalog_version: str = '') -> bool:
+        """Atomically replace one allowed catalog; return whether it changed."""
+        rows = []
+        for tool in tools or ():
+            rows.append({
+                'name': str(getattr(tool, 'name', '') or ''),
+                'schemaHash': _schema_hash(tool),
+                'meta': _tool_meta(tool),
+            })
+        payload = json.dumps({
+            'server': name, 'catalogVersion': catalog_version,
+            'tools': sorted(rows, key=lambda row: row['name']),
+        }, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+        import hashlib
+        fingerprint = hashlib.sha256(payload.encode('utf-8')).hexdigest()
+        changed = fingerprint != getattr(handle, 'catalog_fingerprint', '')
+        if not changed:
+            return False
+
+        with self._lock:
+            for key in [key for key, info in self._tool_index.items()
+                        if info['server_name'] == name]:
+                self._tool_index.pop(key, None)
+            for tool in tools or ():
+                ns_name = make_namespaced_name(name, tool.name)
+                meta = _tool_meta(tool)
+                self._tool_index[ns_name] = MCPToolInfo(
+                    server_name=name,
+                    tool_name=tool.name,
+                    namespaced_name=ns_name,
+                    description=tool.description or '',
+                    input_schema=_tool_input_schema(tool),
+                    openai_def=self._tool_to_openai(name, tool),
+                    read_only_hint=_extract_read_only_hint(tool),
+                    meta=meta,
+                    schema_hash=_schema_hash(tool),
+                    catalog_version=str(catalog_version or ''),
+                )
+            handle.tools = list(tools or [])
+            handle.catalog_version = str(catalog_version or '')
+            handle.catalog_fingerprint = fingerprint
+        try:
+            from lib.mcp.tool_search import invalidate_server_catalog
+            invalidate_server_catalog(name)
+        except Exception as exc:
+            logger.debug('[MCP] catalog index invalidation skipped for %s: %s',
+                         name, exc)
+        return True
 
     # ── Event loop management ─────────────────────────────
 
@@ -221,6 +365,68 @@ class MCPBridge:
         loop = self._ensure_loop()
         future = asyncio.run_coroutine_threadsafe(coro, loop)
         return future.result(timeout=timeout)
+
+    @staticmethod
+    def _notification_method(message: Any) -> str:
+        current = message
+        for _ in range(4):
+            if isinstance(current, dict):
+                method = current.get('method')
+                if method:
+                    return str(method)
+                current = current.get('root')
+                if current is None:
+                    break
+                continue
+            method = getattr(current, 'method', None)
+            if method:
+                return str(method)
+            next_value = getattr(current, 'root', None)
+            if next_value is None or next_value is current:
+                break
+            current = next_value
+        return ''
+
+    async def _handle_server_message(self, handle: _MCPServerHandle,
+                                     message: Any) -> None:
+        """Consume declared tools/list_changed without polling every round."""
+        if self._notification_method(message) != \
+                'notifications/tools/list_changed':
+            return
+        if not getattr(handle, 'tools_list_changed', False):
+            logger.warning('[MCP] %s sent tools/list_changed without declaring '
+                           'tools.listChanged=true; refreshing defensively',
+                           handle.name)
+        try:
+            await self._async_refresh_tool_catalog(handle)
+        except Exception as exc:
+            logger.warning('[MCP] tools/list_changed refresh failed for %s: %s',
+                           handle.name, exc, exc_info=True)
+
+    async def _async_refresh_tool_catalog(self,
+                                          handle: _MCPServerHandle) -> bool:
+        if handle.session is None:
+            return False
+        response = await asyncio.wait_for(
+            handle.session.list_tools(), timeout=MCP_CONNECT_TIMEOUT)
+        version = _result_catalog_version(response)
+        changed = self._replace_server_catalog(
+            handle.name, handle, list(response.tools or []),
+            catalog_version=version)
+        logger.info('[MCP] Server %s tools/list_changed: %s (%d tools)',
+                    handle.name, 'catalog rebuilt' if changed else 'no-op',
+                    len(response.tools or []))
+        return changed
+
+    def refresh_tool_catalog(self, server_name: str) -> bool:
+        """Public/manual refresh seam used by notifications and tests."""
+        with self._lock:
+            handle = self._servers.get(server_name)
+        if handle is None:
+            raise ValueError(f'MCP server not connected: {server_name}')
+        return bool(self._run_async(
+            self._async_refresh_tool_catalog(handle),
+            timeout=MCP_CONNECT_TIMEOUT + 5))
 
     # ── Connection management ─────────────────────────────
 
@@ -319,19 +525,10 @@ class MCPBridge:
 
         with self._lock:
             self._servers[name] = handle
-            # Build tool index
-            for tool in tools:
-                ns_name = make_namespaced_name(name, tool.name)
-                self._tool_index[ns_name] = MCPToolInfo(
-                    server_name=name,
-                    tool_name=tool.name,
-                    namespaced_name=ns_name,
-                    description=tool.description or '',
-                    input_schema=_tool_input_schema(tool),
-                    openai_def=self._tool_to_openai(name, tool),
-                    read_only_hint=_extract_read_only_hint(tool),
-                )
             self._started = True
+        self._replace_server_catalog(
+            name, handle, tools,
+            catalog_version=getattr(handle, 'catalog_version', ''))
 
         logger.info('[MCP] Server %s connected — %d tools discovered: %s',
                     name, len(tools),
@@ -612,7 +809,7 @@ class MCPBridge:
 
         The owner task holds the ``AsyncExitStack`` open for the lifetime
         of the server (see ``_server_owner``). We return only after the
-        session is initialized and the tool list has been fetched.
+        the protocol is negotiated and the tool list has been fetched.
 
         ``cold_install`` widens the readiness budget for the ONE case we can
         positively identify: the caller just evicted this launcher's dependency
@@ -639,7 +836,7 @@ class MCPBridge:
         # ``asyncio.shield`` prevents our wait_for timeout from cancelling
         # the owner task itself — if readiness hangs, we still want the
         # owner to complete its own cleanup cycle.
-        # Readiness ceiling: connect handshake + list_tools each have their
+        # Readiness ceiling: protocol negotiation + list_tools each have their
         # own MCP_CONNECT_TIMEOUT inside the owner. When a dependency tree was
         # just evicted, the download is serialized ahead of the handshake, so
         # the budget is widened for that identified case only.
@@ -720,14 +917,12 @@ class MCPBridge:
                         )
                         http_client = create_mcp_http_client(headers=hdrs or None)
                         await stack.enter_async_context(http_client)
-                        read, write = await stack.enter_async_context(
-                            streamable_http_client(url, http_client=http_client)
+                        transport_cm = streamable_http_client(
+                            url, http_client=http_client
                         )
                     elif transport == SSE:
                         from mcp.client.sse import sse_client
-                        read, write = await stack.enter_async_context(
-                            sse_client(url, headers=hdrs or None)
-                        )
+                        transport_cm = sse_client(url, headers=hdrs or None)
                     else:
                         raise ValueError(
                             f'MCP server {name}: unknown remote transport '
@@ -828,35 +1023,90 @@ class MCPBridge:
                     # delete=True) so it never accumulates.
                     stderr_buf = tempfile.TemporaryFile(mode='w+b')
                     handle._stderr_file = stderr_buf
-                    read, write = await stack.enter_async_context(
-                        stdio_client(params, errlog=stderr_buf)
-                    )
+                    transport_cm = stdio_client(params, errlog=stderr_buf)
 
-                # Create and initialize session
-                from mcp import ClientSession
-
-                session = await stack.enter_async_context(
-                    ClientSession(read, write)
-                )
                 # Handshake budget. When this launcher's dependency tree was
                 # just evicted, npx must finish DOWNLOADING before the spawned
                 # process answers a single JSON-RPC byte — so the wait lands
-                # here, on initialize(), not on process spawn. Measured: the
+                # here, during protocol negotiation, not on process spawn.
+                # Measured: the
                 # outer readiness budget alone was NOT sufficient (a trial
                 # still failed at 67.5s with 300s granted outside), because
                 # this inner 30s timer fired first.
                 handshake_budget = (MCP_COLD_INSTALL_TIMEOUT
                                     if getattr(handle, '_cold_install', False)
                                     else MCP_CONNECT_TIMEOUT)
-                init_result = await asyncio.wait_for(
-                    session.initialize(), timeout=handshake_budget
-                )
-                # Harvest serverInfo.name / serverInfo.version so the UI
-                # can surface the upstream MCP server's own version (not
-                # Tofu's or the launcher's). This comes from the MCP
-                # handshake — see mcp.types.Implementation.
+
+                async def _message_handler(message):
+                    await self._handle_server_message(handle, message)
+
+                # Prefer the SDK v2 high-level Client.  Production upgrades
+                # are not atomic, though: the process may restart after code
+                # is deployed but before the environment has moved from the
+                # still-supported v1.29 SDK.  Falling back to ClientSession
+                # keeps every legacy MCP server usable during that window;
+                # once v2 is installed the auto-negotiating path remains the
+                # default and can also reach 2026-07-28-only peers.
+                import mcp as _mcp_sdk
+                Client = getattr(_mcp_sdk, 'Client', None)
+                init_result = None
+                if Client is not None:
+                    _client_kwargs = {
+                        'mode': 'auto',
+                        'cache': None,
+                        'read_timeout_seconds': handshake_budget,
+                    }
+                    try:
+                        if 'message_handler' in inspect.signature(Client).parameters:
+                            _client_kwargs['message_handler'] = _message_handler
+                    except (TypeError, ValueError) as exc:
+                        logger.debug('[MCP] Client signature unavailable: %s', exc)
+                    session = await stack.enter_async_context(
+                        Client(transport_cm, **_client_kwargs)
+                    )
+                    handle.sdk_generation = 2
+                    handle.protocol_version = str(
+                        getattr(session, 'protocol_version', '') or '')
+                else:
+                    # SDK v1 transports are context managers yielding the
+                    # read/write stream pair; v2's Client consumes the context
+                    # manager itself.  Keep the split here at the single
+                    # construction seam so all later discovery/call logic is
+                    # shared across generations.
+                    from datetime import timedelta
+                    from mcp import ClientSession
+
+                    read, write = await stack.enter_async_context(transport_cm)
+                    _session_kwargs = {
+                        'read_timeout_seconds': timedelta(
+                            seconds=handshake_budget),
+                    }
+                    try:
+                        if 'message_handler' in inspect.signature(
+                                ClientSession).parameters:
+                            _session_kwargs['message_handler'] = _message_handler
+                    except (TypeError, ValueError) as exc:
+                        logger.debug(
+                            '[MCP] ClientSession signature unavailable: %s', exc)
+                    session = await stack.enter_async_context(
+                        ClientSession(read, write, **_session_kwargs)
+                    )
+                    init_result = await asyncio.wait_for(
+                        session.initialize(), timeout=handshake_budget)
+                    handle.sdk_generation = 1
+                    handle.protocol_version = str(
+                        getattr(init_result, 'protocolVersion', '') or '')
+                    logger.info(
+                        '[MCP] Server %s using SDK v1 compatibility path; '
+                        'install project dependency mcp>=2,<3 to enable '
+                        '2026-07-28 protocol negotiation', name)
+
+                # Harvest server identity so the UI can surface the upstream
+                # implementation version. Legacy initialize always carries
+                # it; 2026-07-28 advertises it optionally via response _meta.
                 try:
-                    srv_info = getattr(init_result, 'server_info', None)
+                    srv_info = (getattr(session, 'server_info', None)
+                                or getattr(init_result, 'serverInfo', None))
                     if srv_info is not None:
                         handle.server_name = str(getattr(srv_info, 'name', '') or '')
                         handle.server_version = str(getattr(srv_info, 'version', '') or '')
@@ -868,6 +1118,11 @@ class MCPBridge:
                 except Exception as e:
                     logger.debug('[MCP] Could not parse serverInfo for %s: %s', name, e)
 
+                logger.info(
+                    '[MCP] Server %s negotiated protocol %s',
+                    name, handle.protocol_version or 'unknown',
+                )
+
                 # Discover tools
                 response = await asyncio.wait_for(
                     session.list_tools(), timeout=handshake_budget
@@ -875,6 +1130,22 @@ class MCPBridge:
 
                 handle.session = session
                 handle.tools = response.tools
+                handle.catalog_version = _result_catalog_version(response)
+                try:
+                    _caps = (session.get_server_capabilities()
+                             if hasattr(session, 'get_server_capabilities')
+                             else getattr(session, 'server_capabilities', None))
+                    _tools_cap = (_caps.get('tools') if isinstance(_caps, dict)
+                                  else getattr(_caps, 'tools', None))
+                    handle.tools_list_changed = bool(
+                        (_tools_cap.get('listChanged')
+                         or _tools_cap.get('list_changed'))
+                        if isinstance(_tools_cap, dict)
+                        else (getattr(_tools_cap, 'listChanged', None)
+                              or getattr(_tools_cap, 'list_changed', None)))
+                except Exception as exc:
+                    logger.debug('[MCP] tools.listChanged capability parse '
+                                 'failed for %s: %s', name, exc)
 
                 # Signal readiness BEFORE blocking on the shutdown event.
                 if not handle._ready_future.done():
@@ -1136,6 +1407,28 @@ class MCPBridge:
                     if info['tool_name']
                     not in self._disabled_tools_for(info['server_name'])]
 
+    def get_tool_catalog_snapshot(self) -> list[dict[str, Any]]:
+        """Return the cached allowed catalog plus private retrieval metadata.
+
+        This never calls ``tools/list``.  ``_meta`` stays on the ChatUI side;
+        callers inject only ``openai_def`` into model requests.
+        """
+        with self._lock:
+            return [{
+                'server_id': info['server_name'],
+                'server_name': info['server_name'],
+                'tool_name': info['tool_name'],
+                'namespaced_name': ns,
+                'description': info.get('description', ''),
+                'openai_def': info['openai_def'],
+                'read_only_hint': bool(info.get('read_only_hint')),
+                'meta': dict(info.get('meta') or {}),
+                'schema_hash': str(info.get('schema_hash') or ''),
+                'catalog_version': str(info.get('catalog_version') or ''),
+            } for ns, info in sorted(self._tool_index.items())
+                if info['tool_name']
+                not in self._disabled_tools_for(info['server_name'])]
+
     def get_tool_safety(self) -> dict[str, bool]:
         """Map every discovered MCP tool's namespaced name → read-only flag.
 
@@ -1191,6 +1484,13 @@ class MCPBridge:
                     'transport': handle.config.get('transport', 'stdio'),
                     'server_version': handle.server_version,
                     'server_impl_name': handle.server_name,
+                    'protocol_version': handle.protocol_version,
+                    'sdk_generation': handle.sdk_generation,
+                    'compatibility_notice': _protocol_compatibility_notice(
+                        handle.protocol_version),
+                    'catalog_version': getattr(handle, 'catalog_version', ''),
+                    'tools_list_changed': bool(
+                        getattr(handle, 'tools_list_changed', False)),
                 })
             return result
 
@@ -1359,19 +1659,26 @@ class MCPBridge:
         timeout: int,
     ) -> str:
         """Async: call a tool on an MCP server and extract text result."""
-        from datetime import timedelta
-
+        # SDK v1 takes ``datetime.timedelta`` here; v2 takes seconds.  The
+        # bridge records which constructor path won so a rolling dependency
+        # upgrade cannot turn the first real tool call into an AttributeError
+        # inside the SDK timeout code.
+        if getattr(handle, 'sdk_generation', 0) == 1 and timeout:
+            from datetime import timedelta
+            read_timeout = timedelta(seconds=float(timeout))
+        else:
+            read_timeout = float(timeout) if timeout else None
         result = await handle.session.call_tool(
             tool_name,
             arguments=arguments,
             # None = no read timeout (the default). A per-server "timeout" in
             # mcp_servers.json still bounds that server's calls, and that is
             # what keeps the degraded-streak breaker meaningful.
-            read_timeout_seconds=timedelta(seconds=timeout) if timeout else None,
+            read_timeout_seconds=read_timeout if timeout else None,
         )
 
         # Extract text from the MCP CallToolResult
-        if result.is_error:
+        if _tool_result_is_error(result):
             # MCP reports an error from the tool
             error_text = self._extract_text(result)
             return f'MCP Error: {error_text}'
@@ -1448,7 +1755,14 @@ class MCPBridge:
                 return False
         return True
 
-    async def _probe_liveness(self, name: str, session) -> str:
+    async def _probe_liveness(
+        self,
+        name: str,
+        session,
+        *,
+        sdk_generation: int = 0,
+        protocol_version: str = '',
+    ) -> str:
         """Ask the peer one cheap question and report whether it ANSWERED.
 
         Returns ``'alive'`` or ``'dead'``. Never raises.
@@ -1475,16 +1789,14 @@ class MCPBridge:
 
         PROBE SELECTION
         ---------------
-        Ordered by protocol standing, resolved against what the live session
-        actually offers, and memoised per server once one works:
+        Ordered by the NEGOTIATED protocol, resolved against what the live
+        session actually offers, and memoised per server once one works:
 
-          1. ``server/discover`` — the 2026-07-28 RPC that servers **MUST**
-             implement; semantically exactly "are you there + what can you do".
-             Only present on SDK v2 sessions.
-          2. ``send_ping`` — correct for pre-2026-07-28 servers, which is what
-             Tofu's own ``mcp<2`` pin still talks to today.
-          3. ``list_tools`` — present in every revision including 2026-07-28,
-             so it is the floor that always exists.
+          * SDK v2 ``Client`` (modern or legacy-fallback): discovery when the
+            client exposes it, then an uncached ``list_tools``. ``send_ping``
+            is deliberately absent because auto mode warns on that API.
+          * True SDK v1 ``ClientSession``: discovery when available, then
+            ``send_ping``, then ``list_tools`` as the compatibility floor.
 
         A ``-32601`` from a probe means "this peer does not implement THIS
         method" (not "this peer is dead"), so we record that and try the next
@@ -1494,11 +1806,23 @@ class MCPBridge:
             _is_method_not_found, _is_peer_answered_error,
         )
 
+        protocol_version = str(
+            protocol_version
+            or getattr(session, 'protocol_version', '')
+            or '').strip()
+        modern = protocol_version == MCP_CURRENT_PROTOCOL_VERSION
+        sdk_v2_client = sdk_generation >= 2
+        order = (
+            ('discover', 'send_discover', 'list_tools')
+            if modern or sdk_v2_client
+            else ('discover', 'send_discover', 'send_ping', 'list_tools')
+        )
+
         candidates: list[str] = []
         preferred = self._probe_method.get(name)
-        if preferred:
+        if preferred in order:
             candidates.append(preferred)
-        for meth in ('discover', 'send_discover', 'send_ping', 'list_tools'):
+        for meth in order:
             if meth not in candidates and self._probe_callable(session, meth):
                 candidates.append(meth)
 
@@ -1516,7 +1840,21 @@ class MCPBridge:
                 continue
             fn = getattr(session, meth)
             try:
-                await asyncio.wait_for(fn(), timeout=MCP_PING_TIMEOUT)
+                kwargs = {}
+                if meth == 'list_tools':
+                    # SDK v2 honors the server's ttlMs cache hint. A cached
+                    # catalogue proves nothing about whether the subprocess is
+                    # still alive, so explicitly force a wire round trip when
+                    # that keyword exists; v1 has no cache_mode parameter.
+                    try:
+                        import inspect
+                        if 'cache_mode' in inspect.signature(fn).parameters:
+                            kwargs['cache_mode'] = 'reload'
+                    except (TypeError, ValueError) as exc:
+                        logger.debug(
+                            '[MCP] %s: could not inspect %s() signature: %s',
+                            name, meth, exc)
+                await asyncio.wait_for(fn(**kwargs), timeout=MCP_PING_TIMEOUT)
                 if self._probe_method.get(name) != meth:
                     with self._lock:
                         self._probe_method[name] = meth
@@ -1607,7 +1945,12 @@ class MCPBridge:
                 session = handle.session if handle is not None else None
 
                 if session is not None:
-                    verdict = await self._probe_liveness(name, session)
+                    verdict = await self._probe_liveness(
+                        name,
+                        session,
+                        sdk_generation=getattr(handle, 'sdk_generation', 0),
+                        protocol_version=getattr(handle, 'protocol_version', ''),
+                    )
                     if verdict == 'alive':
                         # Transport is alive — but the stored CREDENTIALS may
                         # have expired underneath it. Re-probe at most once per

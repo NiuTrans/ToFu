@@ -36,9 +36,9 @@ and must NEVER taint the already-finished report.
 
 from __future__ import annotations
 
-import json
 import os
 import time
+import uuid
 
 from lib.agent_loop import AbortSignal
 from lib.llm_errors import AbortedError
@@ -253,12 +253,10 @@ def run_report_checkpoints(report_md, ui_lang='en', *, phash='', model=None,
 
     if persist and items:
         try:
-            from lib.database import get_thread_db
-            from lib.database._core_schema import PAPER_REPORTS, upsert
+            from lib.storage import get_storage_client
             meta = {'kind': 'checkpoints', 'v': 2, 'items': items,
                     'usage': out['usage']}
-            db = get_thread_db()
-            upsert(db, PAPER_REPORTS, {
+            get_storage_client(write=True).command('paper.report.upsert', {
                 'paper_hash': phash,
                 'lang': checkpoints_lang_key(ui_lang),
                 # The report column carries a compact markdown rendering so the
@@ -268,9 +266,9 @@ def run_report_checkpoints(report_md, ui_lang='en', *, phash='', model=None,
                     [f"- **{i['section']}** — {i['question']} → {i['answer']}"
                      for i in items]) + '\n',
                 'model': model or '',
-                'meta': json.dumps(meta, ensure_ascii=False),
+                'meta': meta,
                 'created_at': int(time.time()),
-            }, retry=True)
+            }, f'paper.checkpoints.upsert:{uuid.uuid4().hex}')
             out['persisted'] = True
             logger.info('[Paper:Checkpoints] Persisted — hash=%s key=%s %d cards',
                         phash, checkpoints_lang_key(ui_lang), len(items))

@@ -12,6 +12,7 @@ Extracted from the monolithic ``_bootstrap.py`` (facade-preserving split).
 import os
 import shutil
 import subprocess
+import tempfile
 
 from lib.log import get_logger
 
@@ -206,6 +207,7 @@ def _restore_from_sql_dump_if_present(base_dir, pg_port, pg_user, pg_dbname):
     logger.info('[DB] Restoring data from %s (%.1f MB) — this may take a moment…',
                 dump_path, size / (1024 * 1024))
     proc = None
+    stderr_file = None
     try:
         # Connect to the postgres admin DB; pg_dumpall --clean expects
         # to be able to DROP the target databases before recreating them.
@@ -221,10 +223,17 @@ def _restore_from_sql_dump_if_present(base_dir, pg_port, pg_user, pg_dbname):
         # quarantine — deterministic on every attempt). The head filter drops
         # exactly the current role's DROP/CREATE lines; ON_ERROR_STOP stays
         # armed for every real error.
+        # stderr must not be a PIPE here. The parent streams an arbitrarily
+        # large dump into stdin before it can call communicate(); if psql emits
+        # enough diagnostics to fill the stderr pipe first, child and parent
+        # block each other forever. A temporary file provides bounded-memory
+        # backpressure while retaining the complete failure report.
+        stderr_file = tempfile.TemporaryFile()
         proc = subprocess.Popen(
             [psql_bin, '-h', '127.0.0.1', '-p', str(pg_port), '-U', pg_user,
              '-d', 'postgres', '-v', 'ON_ERROR_STOP=1', '-q', '-f', '-'],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=stderr_file,
             env={**os.environ, 'PGCONNECT_TIMEOUT': '10', 'PGGSSENCMODE': 'disable'},
         )
         with open(dump_path, 'rb') as fh:
@@ -237,13 +246,11 @@ def _restore_from_sql_dump_if_present(base_dir, pg_port, pg_user, pg_dbname):
             proc.stdin.write(filtered_head)
             shutil.copyfileobj(fh, proc.stdin, 1024 * 1024)
         proc.stdin.close()
-        proc.stdin = None  # communicate() must not flush an already-closed stdin
-        _out, _err = proc.communicate()
-        class _Result:
-            pass
-        result = _Result()
-        result.returncode = proc.returncode
-        result.stderr = (_err or b'').decode('utf-8', 'replace')
+        proc.stdin = None
+        returncode = proc.wait()
+        stderr_file.flush()
+        stderr_file.seek(0)
+        stderr_text = stderr_file.read().decode('utf-8', 'replace')
     except Exception as e:
         logger.error('[DB] psql restore invocation failed: %s', e, exc_info=True)
         if proc is not None:
@@ -254,19 +261,29 @@ def _restore_from_sql_dump_if_present(base_dir, pg_port, pg_user, pg_dbname):
                     logger.debug('[DB] psql kill after failed restore raced the '
                                  'process exit (harmless): %s', _ke)
             try:
-                _err = proc.stderr.read() if proc.stderr else b''
+                proc.wait(timeout=10)
+            except (OSError, subprocess.TimeoutExpired) as _we:
+                logger.error('[DB] could not reap failed psql restore: %s', _we)
+            try:
+                if stderr_file is not None:
+                    stderr_file.flush()
+                    stderr_file.seek(0)
+                _err = stderr_file.read() if stderr_file is not None else b''
                 if _err:
                     logger.error('[DB] psql stderr before failure: %.500s',
                                  _err.decode('utf-8', 'replace'))
             except Exception as _se:
                 logger.debug('[DB] could not read psql stderr after failure: %s', _se)
         return
+    finally:
+        if stderr_file is not None:
+            stderr_file.close()
 
-    if result.returncode != 0:
+    if returncode != 0:
         # Leave the dump file in place so the user can retry manually.
         logger.error('[DB] Restore from %s FAILED (rc=%d). Dump preserved for '
                      'manual retry. stderr=%.1000s',
-                     dump_path, result.returncode, (result.stderr or '').strip())
+                     dump_path, returncode, (stderr_text or '').strip())
         return
 
     logger.info('[DB] Restore from %s completed successfully', dump_path)

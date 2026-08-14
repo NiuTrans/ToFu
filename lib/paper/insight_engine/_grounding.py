@@ -38,22 +38,16 @@ def _self_identity(phash, report_md, self_arxiv_id=None, self_title=None):
 
     if phash and (not aid or not title):
         try:
-            from lib.database import get_db, get_thread_db
-            try:
-                db = get_db()
-            except RuntimeError as e:
-                logger.debug('[Paper:Insight] no request-context DB, using thread DB: %s', e)
-                db = get_thread_db()
-            row = db.execute(
-                "SELECT title, arxiv_id FROM paper_library WHERE paper_hash = ? LIMIT 1",
-                (phash,)).fetchone()
+            from lib.storage import get_storage_client
+            row = get_storage_client().query(
+                'paper.library.identity', {'paper_hash': phash})
             if row:
                 if not title:
                     title = (row['title'] or '').strip()
                 if not aid and row['arxiv_id']:
                     aid = _extract_arxiv_id(str(row['arxiv_id']))
         except Exception as e:
-            logger.debug('[Paper:Insight] self-identity DB lookup failed: %s', e)
+            logger.debug('[Paper:Insight] self-identity lookup failed: %s', e)
 
     head = (report_md or '')[:2500]
     if not title:

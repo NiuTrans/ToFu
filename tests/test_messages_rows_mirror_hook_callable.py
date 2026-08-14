@@ -133,7 +133,8 @@ def test_every_caller_keyword_is_in_the_signature():
 
     bad = []
     for path in out.stdout.split():
-        if not path.endswith('.py'):
+        if (not path.endswith('.py')
+                or not os.path.isfile(os.path.join(root, path))):
             continue
         with open(os.path.join(root, path), encoding='utf-8') as f:
             src = f.read()

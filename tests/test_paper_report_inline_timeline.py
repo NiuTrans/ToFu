@@ -66,12 +66,12 @@ _VIEWS = {
     'report': {
         'container': 'paperReportContent',
         'thinking_block': 'reportThinkingBlock',
-        'entry': '_generatePaperReport()',
+        'entry': '_generatePaperReport',
     },
     'review': {
         'container': 'paperReviewContent',
         'thinking_block': 'reviewThinkingBlock',
-        'entry': '_generatePaperReview()',
+        'entry': '_generatePaperReview',
     },
 }
 
@@ -174,15 +174,30 @@ def _install_report_task_routes(page) -> None:
     return captured
 
 
-def _start_generation(page, view: str = 'report') -> None:
-    """Enter reading mode and drive the REAL production generation flow."""
-    page.evaluate("typeof togglePaperMode === 'function' && togglePaperMode()")
+def _enter_paper_mode(page) -> None:
+    """Load the lazy Vite Paper domain before inspecting its global seams."""
+    page.evaluate("""async () => {
+        await window.TofuModules.invokeFeature('togglePaperMode', [], () => {});
+    }""")
+    page.wait_for_function(
+        "window.paperMode && typeof window.TofuModules.resolveAction("
+        "'_reportSegmentsForRender') === 'function'",
+        timeout=15000)
+    # Paper library hydration is intentionally async and may replace the
+    # active entry. Let it settle before the fixture stages its synthetic id.
     page.wait_for_timeout(800)
+
+
+def _start_generation(page, view: str = 'report', *, enter: bool = True) -> None:
+    """Enter reading mode and drive the REAL production generation flow."""
+    if enter:
+        _enter_paper_mode(page)
     page.evaluate(
-        "() => { window._activePaperId = 'p-tl';"
+        "(entry) => { window._activePaperId = 'p-tl';"
         " window._paperParsedText = 'parsed paper text';"
         " window._paperHash = 'h-tl';"
-        f" {_VIEWS[view]['entry']}; }}")
+        " window.TofuModules.resolveAction(entry)(); }",
+        _VIEWS[view]['entry'])
 
 
 def _panel_order(page, view: str = 'report'):
@@ -201,7 +216,10 @@ def _panel_order(page, view: str = 'report'):
 
 def _wait_ready(page, timeout=20000):
     page.wait_for_selector('#userInput', state='visible', timeout=timeout)
-    page.wait_for_function("typeof togglePaperMode === 'function'", timeout=timeout)
+    page.wait_for_function(
+        "window.TofuModules?.version === 3"
+        " && typeof window.TofuModules.invokeFeature === 'function'",
+        timeout=timeout)
 
 
 def _assert_timeline_flow(page, view: str) -> None:
@@ -302,7 +320,8 @@ def _assert_timeline_above_body(page, view: str, body_marker: str) -> None:
 def test_report_stream_uses_chat_inline_tool_timeline(page, assert_no_js_errors):
     _wait_ready(page)
     _install_report_task_routes(page)
-    _start_generation(page, 'report')
+    _enter_paper_mode(page)
+    _start_generation(page, 'report', enter=False)
     _assert_timeline_flow(page, 'report')
 
 
@@ -327,7 +346,8 @@ def test_review_stream_uses_chat_inline_tool_timeline(page, assert_no_js_errors)
     # ── EN/中 reading-language toggle re-renders through _renderFinalReport —
     #    the timeline must survive BOTH directions (a regression here would
     #    eat the panel the first time a zh UI user toggles the view).
-    page.evaluate("_setReviewLang('zh')")
+    page.evaluate(
+        "() => window.TofuModules.resolveAction('_setReviewLang')('zh')")
     page.wait_for_function(
         "() => { const a = document.querySelector("
         "   '#paperReviewContent .paper-report-article');"
@@ -335,7 +355,8 @@ def test_review_stream_uses_chat_inline_tool_timeline(page, assert_no_js_errors)
         timeout=15000)
     _assert_timeline_above_body(page, 'review', '翻译后的评审正文')
 
-    page.evaluate("_setReviewLang('en')")
+    page.evaluate(
+        "() => window.TofuModules.resolveAction('_setReviewLang')('en')")
     page.wait_for_function(
         "() => { const a = document.querySelector("
         "   '#paperReviewContent .paper-report-article');"
@@ -351,14 +372,16 @@ def test_neuter_drop_segments_passing_removes_inline_thinking(page, assert_no_js
     the segments seam, not on incidental markup."""
     _wait_ready(page)
     _install_report_task_routes(page)
+    _enter_paper_mode(page)
     # Precondition: the production seam must exist in the shipped bundle —
     # an absent global means the override neuters NOTHING (silent no-op).
-    seam = page.evaluate("() => typeof window._reportSegmentsForRender")
+    seam = page.evaluate(
+        "() => typeof window.TofuModules.resolveAction('_reportSegmentsForRender')")
     assert seam == 'function', (
         'window._reportSegmentsForRender is not a function in the shipped '
         'bundle — the neuter would be a no-op; check bundling first')
     page.evaluate("() => { window._reportSegmentsForRender = () => []; }")
-    _start_generation(page, 'report')
+    _start_generation(page, 'report', enter=False)
 
     page.wait_for_function(
         "() => !!document.querySelector('#paperReportContent .ptool-panel')",
@@ -383,12 +406,14 @@ def test_neuter_drop_delta_reset_segment_removal_leaks_draft(page, assert_no_js_
     Proves the draft-absence assertion depends on the removal."""
     _wait_ready(page)
     _install_report_task_routes(page)
-    seam = page.evaluate("() => typeof window._segApplyDeltaReset")
+    _enter_paper_mode(page)
+    seam = page.evaluate(
+        "() => typeof window.TofuModules.resolveAction('_segApplyDeltaReset')")
     assert seam == 'function', (
         'window._segApplyDeltaReset is not a function in the shipped bundle — '
         'the neuter would be a no-op; check bundling first')
     page.evaluate("() => { window._segApplyDeltaReset = () => {}; }")
-    _start_generation(page, 'report')
+    _start_generation(page, 'report', enter=False)
 
     page.wait_for_function(
         "() => !!document.querySelector("

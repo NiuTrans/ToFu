@@ -22,6 +22,7 @@ from lib.tasks_pkg.handlers import (  # noqa: F401
     motion_video,
     project,
     skills,
+    tool_gateway,
 )
 
 # ``search`` is imported SEPARATELY and degradably. Its three modules import

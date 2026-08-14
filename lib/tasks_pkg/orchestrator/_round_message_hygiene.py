@@ -91,7 +91,10 @@ def run_round_message_hygiene(
             )
             if _attachments:
                 inject_attachments(messages, _attachments,
-                                    conv_id=task.get('convId') or None)
+                                    conv_id=task.get('convId') or None,
+                                    task=task, round_num=round_num,
+                                    model=((task.get('config') or {}).get('model')
+                                           or ''))
         except Exception as e:
             logger.error('[Task:%s] compute_turn_attachments failed '
                          'round=%d: %s — continuing without attachments',

@@ -32,11 +32,10 @@ import asyncio
 import datetime as _dt
 import os
 import random
-import re
 import threading
 import time
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.api_response import api_bad_request, api_error, api_not_found, api_ok
 from lib.daily_report import (  # noqa: F401  — back-compat re-exports
@@ -49,6 +48,7 @@ from lib.daily_report import (  # noqa: F401  — back-compat re-exports
     _TODO_TOOL_DEFAULTS,
     _TODO_TOOL_MAP,
     _active_jobs,
+    _activity_counts_for_range,
     _analyse_conversations,
     _backfill_yesterday_if_missing,
     _build_transcript_from_messages,
@@ -67,6 +67,7 @@ from lib.daily_report import (  # noqa: F401  — back-compat re-exports
     _get_yesterday_carryover,
     _get_yesterday_todo_accountability,
     _jobs_lock,
+    _is_report_date,
     _load_cached_day_costs,
     _load_report,
     _mark_yesterday_todos_done,
@@ -77,9 +78,11 @@ from lib.daily_report import (  # noqa: F401  — back-compat re-exports
     _report_path,
     _run_llm_analysis,
     _safe_int_ts,
+    _save_generated_report,
     _save_report,
     _scan_costs_in_range,
     _scheduler_loop,
+    _update_report,
     _update_job,
     invalidate_day_cost_cache,
     start_report_scheduler,
@@ -115,7 +118,7 @@ async def generate_daily_report():
 
     logger.info('[DailyReport] POST request: date=%s, force=%s', target_date, force)
 
-    if not re.match(r'^\d{4}-\d{2}-\d{2}$', target_date):
+    if not _is_report_date(target_date):
         logger.warning('[DailyReport] Invalid date format: %s', target_date)
         return api_bad_request('Invalid date format')
 
@@ -141,15 +144,15 @@ async def generate_daily_report():
         }
         return api_ok(empty_result)
 
-    # Manual-state preservation (status overrides, TODO check-offs, manual
-    # TODOs, legacy _todo tasks) is centralized in _analyse_conversations →
-    # _merge_manual_state, so POST / backfill / async generator all inherit it.
+    # Manual-state preservation happens in the locked generated-report commit,
+    # against the newest on-disk version after this potentially long analysis.
     # Off-loop: _run_llm_analysis inside is a synchronous LLM call.
-    result = await asyncio.to_thread(_analyse_conversations, convs, target_date)
+    result = await asyncio.to_thread(
+        _analyse_conversations, convs, target_date, preserve_manual=False)
 
     # Persist if analysis succeeded
     if (result.get('streams') or result.get('tomorrow')) and not result.get('error'):
-        _save_report(target_date, result)
+        result = _save_generated_report(target_date, result)
 
     elapsed = time.monotonic() - t0
     stream_count = len(result.get('streams', []))
@@ -165,7 +168,7 @@ async def generate_daily_report():
 @require_auth
 async def get_cached_report(date_str):
     """Get a previously generated report for a specific date."""
-    if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+    if not _is_report_date(date_str):
         return api_bad_request('Invalid date format')
 
     today_todos = _get_today_inherited_todos(date_str)
@@ -203,7 +206,7 @@ async def backfill_report(date_str):
     Used for past days when the frontend didn't generate a report.
     Also callable from the calendar UI.
     """
-    if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+    if not _is_report_date(date_str):
         return api_bad_request('Invalid date format')
 
     # Don't re-generate if cached
@@ -222,10 +225,11 @@ async def backfill_report(date_str):
                        'persona': _pick_persona({}),
                        'stats': {'totalConversations': 0}})
 
-    result = await asyncio.to_thread(_analyse_conversations, convs, date_str)
+    result = await asyncio.to_thread(
+        _analyse_conversations, convs, date_str, preserve_manual=False)
 
     if result.get('streams') and not result.get('error'):
-        _save_report(date_str, result)
+        result = _save_generated_report(date_str, result)
 
     elapsed = time.monotonic() - t0
     stream_count = len(result.get('streams', []))
@@ -233,30 +237,6 @@ async def backfill_report(date_str):
                 date_str, elapsed, len(convs), stream_count,
                 result.get('error', 'none'))
     return api_ok(result)
-
-
-def _conv_days_from_rows(rows, ms_start, ms_end):
-    """Count conversations with activity per day-of-month, from fetched rows.
-
-    Pure CPU (json.loads + timestamp scan) — no DB access — so it is safe to
-    run in a worker thread via ``asyncio.to_thread``.
-    """
-    from lib.utils import safe_json
-
-    conv_days = {}
-    for r in rows:
-        msgs = safe_json(r['messages'], default=[], label='cal-conv-days')
-        if not isinstance(msgs, list) or not msgs:
-            continue
-        for msg in msgs:
-            ts = _safe_int_ts(msg.get('timestamp', 0))
-            if not ts:
-                ts = _safe_int_ts(r['updated_at'] or r['created_at'] or 0)
-            if ms_start <= ts < ms_end:
-                day_num = _dt.datetime.fromtimestamp(ts / 1000).day
-                conv_days[day_num] = conv_days.get(day_num, 0) + 1
-                break
-    return conv_days
 
 
 @api_v1_daily_report_bp.route('/api/v1/daily-report/calendar/<int:year>/<int:month>')
@@ -325,8 +305,6 @@ async def get_calendar_month(year, month):
         # ── Compute conv_days from DB (which days have conversations) ──
         conv_days = {}
         try:
-            from lib.database import DOMAIN_CHAT, async_fetchall
-
             month_start = _dt.date(year, month, 1)
             if month < 12:
                 month_end = _dt.date(year, month + 1, 1)
@@ -335,22 +313,12 @@ async def get_calendar_month(year, month):
             ms_start = int(_dt.datetime.combine(month_start, _dt.time.min).timestamp() * 1000)
             ms_end = int(_dt.datetime.combine(month_end, _dt.time.min).timestamp() * 1000)
 
-            # SQL-level date filter: only fetch convs whose window overlaps
-            # the target month.  Bound both ends so we don't scan the whole
-            # future history (created_at / updated_at are BIGINT epoch-ms).
-            rows = await async_fetchall(
-                'SELECT id, messages, created_at, updated_at '
-                'FROM conversations WHERE user_id=? AND '
-                'COALESCE(updated_at, created_at, 0) >= ? AND '
-                'COALESCE(created_at, updated_at, 0) < ? '
-                'ORDER BY updated_at DESC',
-                (DEFAULT_USER_ID, ms_start, ms_end),
-                domain=DOMAIN_CHAT,
-            )
-            # Off-loop: json.loads of a whole month's messages blobs is the
-            # CPU-heavy part — same stall class as get_conv_count.
+            # Off-loop and row-backed: the normal path projects only one
+            # timestamp scalar per message after an exact batch mirror gate.
+            # A verified-stale conversation alone falls back to its blob.
             conv_days = await asyncio.to_thread(
-                _conv_days_from_rows, rows, ms_start, ms_end)
+                _activity_counts_for_range, ms_start, ms_end,
+                bound_created_end=True)
         except Exception as e:
             logger.warning('[DailyReport] Calendar conv-days %d-%02d: %s', year, month, e)
 
@@ -429,12 +397,8 @@ async def update_task_status():
     valid_statuses = ('done', 'in_progress', 'blocked', 'incomplete')
     if not cycle and new_status not in valid_statuses:
         return api_error(f'Invalid status — must be one of {valid_statuses}', status=400)
-    if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+    if not _is_report_date(date_str):
         return api_bad_request('Invalid date format')
-
-    report = _load_report(date_str)
-    if not report:
-        return api_not_found('No report for this date')
 
     def _apply(item) -> str:
         old_status = item.get('status', '?')
@@ -445,34 +409,41 @@ async def update_task_status():
             item['remaining'] = None
         return old_status
 
-    found = False
-    resolved_status = new_status
-    # Try streams first
-    for stream in report.get('streams', []):
-        if stream.get('id') == item_id:
-            old_status = _apply(stream)
-            resolved_status = stream['status']
-            found = True
-            logger.info('[DailyReport] Stream status updated %s: %s → %s (id=%s)',
-                        date_str, old_status, resolved_status, item_id)
-            break
+    outcome = {'missing': False, 'found': False, 'status': new_status}
 
-    # Fall back to tasks (manual todos)
-    if not found:
-        for task in report.get('tasks', []):
-            if task.get('conv_id') == item_id or task.get('id') == item_id:
-                old_status = _apply(task)
-                resolved_status = task['status']
-                found = True
-                logger.info('[DailyReport] Task status updated %s: %s → %s (id=%s)',
-                            date_str, old_status, resolved_status, item_id)
-                break
+    def _mutate(report):
+        if not report:
+            outcome['missing'] = True
+            return None
+        # Try streams first, then legacy/manual tasks.
+        for kind, items in (
+                ('Stream', report.get('streams', [])),
+                ('Task', report.get('tasks', []))):
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                matches = item.get('id') == item_id
+                if kind == 'Task':
+                    matches = matches or item.get('conv_id') == item_id
+                if not matches:
+                    continue
+                old_status = _apply(item)
+                outcome['status'] = item['status']
+                outcome['found'] = True
+                logger.info(
+                    '[DailyReport] %s status updated %s: %s → %s (id=%s)',
+                    kind, date_str, old_status, outcome['status'], item_id)
+                return report
+        return None
 
-    if not found:
+    _update_report(date_str, _mutate)
+    if outcome['missing']:
+        return api_not_found('No report for this date')
+    if not outcome['found']:
         return api_not_found('Item not found in report')
-
-    _save_report(date_str, report)
-    return api_ok({'status': resolved_status})
+    return api_ok({'status': outcome['status']})
 
 
 @api_v1_daily_report_bp.route('/api/v1/daily-report/todo-toggle', methods=['PATCH'])
@@ -490,22 +461,27 @@ async def toggle_tomorrow_todo():
 
     if not date_str or not todo_id:
         return api_bad_request('Missing date or todo_id')
+    if not _is_report_date(date_str):
+        return api_bad_request('Invalid date format')
 
-    report = _load_report(date_str)
-    if not report:
+    outcome = {'missing': False, 'found': False}
+
+    def _mutate(report):
+        if not report:
+            outcome['missing'] = True
+            return None
+        for item in report.get('tomorrow', []):
+            if isinstance(item, dict) and item.get('id') == todo_id:
+                item['done'] = bool(done)
+                outcome['found'] = True
+                return report
+        return None
+
+    _update_report(date_str, _mutate)
+    if outcome['missing']:
         return api_not_found('No report for this date')
-
-    found = False
-    for item in report.get('tomorrow', []):
-        if item.get('id') == todo_id:
-            item['done'] = bool(done)
-            found = True
-            break
-
-    if not found:
+    if not outcome['found']:
         return api_not_found('TODO item not found')
-
-    _save_report(date_str, report)
     logger.info('[DailyReport] Tomorrow TODO toggled %s: %s done=%s', date_str, todo_id, done)
     return api_ok()
 
@@ -529,24 +505,27 @@ async def toggle_inherited_todo():
 
     if not origin_date or not todo_id:
         return api_bad_request('Missing origin_date or todo_id')
-    if not re.match(r'^\d{4}-\d{2}-\d{2}$', origin_date):
+    if not _is_report_date(origin_date):
         return api_bad_request('Invalid date format')
 
-    report = _load_report(origin_date)
-    if not report:
+    outcome = {'missing': False, 'found': False}
+
+    def _mutate(report):
+        if not report:
+            outcome['missing'] = True
+            return None
+        for item in report.get('tomorrow', []):
+            if isinstance(item, dict) and item.get('id') == todo_id:
+                item['done'] = bool(done)
+                outcome['found'] = True
+                return report
+        return None
+
+    _update_report(origin_date, _mutate)
+    if outcome['missing']:
         return api_not_found('No report for origin date')
-
-    found = False
-    for item in report.get('tomorrow', []):
-        if item.get('id') == todo_id:
-            item['done'] = bool(done)
-            found = True
-            break
-
-    if not found:
+    if not outcome['found']:
         return api_not_found('TODO item not found in origin report')
-
-    _save_report(origin_date, report)
     logger.info('[DailyReport] Inherited TODO toggled: origin=%s id=%s done=%s',
                 origin_date, todo_id, done)
     return api_ok()
@@ -569,21 +548,33 @@ async def delete_inherited_todo():
 
     if not origin_date or not todo_id:
         return api_bad_request('Missing origin_date or todo_id')
-    if not re.match(r'^\d{4}-\d{2}-\d{2}$', origin_date):
+    if not _is_report_date(origin_date):
         return api_bad_request('Invalid date format')
 
-    report = _load_report(origin_date)
-    if not report:
+    outcome = {'missing': False, 'found': False}
+
+    def _mutate(report):
+        if not report:
+            outcome['missing'] = True
+            return None
+        tomorrow = report.get('tomorrow', [])
+        if not isinstance(tomorrow, list):
+            return None
+        new_tomorrow = [
+            item for item in tomorrow
+            if not (isinstance(item, dict) and item.get('id') == todo_id)
+        ]
+        if len(new_tomorrow) == len(tomorrow):
+            return None
+        outcome['found'] = True
+        report['tomorrow'] = new_tomorrow
+        return report
+
+    _update_report(origin_date, _mutate)
+    if outcome['missing']:
         return api_not_found('No report for origin date')
-
-    tomorrow = report.get('tomorrow', [])
-    new_tomorrow = [t for t in tomorrow if t.get('id') != todo_id]
-
-    if len(new_tomorrow) == len(tomorrow):
+    if not outcome['found']:
         return api_not_found('TODO item not found in origin report')
-
-    report['tomorrow'] = new_tomorrow
-    _save_report(origin_date, report)
     logger.info('[DailyReport] Inherited TODO deleted: origin=%s id=%s', origin_date, todo_id)
     return api_ok()
 
@@ -595,7 +586,7 @@ async def get_conv_count(date_str):
 
     Queries the database directly — reliable count regardless of frontend state.
     """
-    if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+    if not _is_report_date(date_str):
         return api_bad_request('Invalid date format')
 
     # Off-loop: _count_convs_for_date fetches + json.loads-es EVERY in-window
@@ -622,26 +613,30 @@ async def add_manual_task():
 
     if not date_str or not task_text:
         return api_bad_request('Missing date or task')
-    if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+    if not _is_report_date(date_str):
         return api_bad_request('Invalid date format')
 
     from lib.ids import short_id
     todo_id = short_id('todo-', 8)
 
-    report = _load_report(date_str) or {
+    default_report = {
         'streams': [], 'tomorrow': [], 'tasks': [],
         'stats': {'totalConversations': 0},
         'quote': random.choice(_QUOTES),
     }
-    report.setdefault('tomorrow', []).append({
-        'id': todo_id,
-        'text': task_text[:60],
-        'done': False,
-        # Mark as user-authored so a report regeneration preserves it
-        # (see lib/daily_report/todos.py::_merge_manual_state).
-        '_manual': True,
-    })
-    _save_report(date_str, report)
+
+    def _mutate(report):
+        report.setdefault('tomorrow', []).append({
+            'id': todo_id,
+            'text': task_text[:60],
+            'done': False,
+            # Mark as user-authored so a report regeneration preserves it
+            # (see lib/daily_report/todos.py::_merge_manual_state).
+            '_manual': True,
+        })
+        return report
+
+    report = _update_report(date_str, _mutate, default=default_report)
     logger.info('[DailyReport] TODO added to %s: %s (id=%s)', date_str, task_text[:60], todo_id)
     return api_ok({'task_id': todo_id, 'report': report})
 
@@ -660,21 +655,33 @@ async def delete_manual_task():
 
     if not date_str or not task_id:
         return api_bad_request('Missing date or task_id')
-    if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+    if not _is_report_date(date_str):
         return api_bad_request('Invalid date format')
 
-    report = _load_report(date_str)
-    if not report:
+    outcome = {'missing': False, 'found': False}
+
+    def _mutate(report):
+        if not report:
+            outcome['missing'] = True
+            return None
+        tomorrow = report.get('tomorrow', [])
+        if not isinstance(tomorrow, list):
+            return None
+        new_tomorrow = [
+            item for item in tomorrow
+            if not (isinstance(item, dict) and item.get('id') == task_id)
+        ]
+        if len(new_tomorrow) == len(tomorrow):
+            return None
+        outcome['found'] = True
+        report['tomorrow'] = new_tomorrow
+        return report
+
+    report = _update_report(date_str, _mutate)
+    if outcome['missing']:
         return api_not_found('No report for this date')
-
-    tomorrow = report.get('tomorrow', [])
-    new_tomorrow = [t for t in tomorrow if t.get('id') != task_id]
-
-    if len(new_tomorrow) == len(tomorrow):
+    if not outcome['found']:
         return api_not_found('TODO item not found')
-
-    report['tomorrow'] = new_tomorrow
-    _save_report(date_str, report)
     logger.info('[DailyReport] TODO deleted from %s: %s', date_str, task_id)
     return api_ok({'report': report})
 
@@ -692,7 +699,7 @@ async def start_generation():
     target_date = data.get('date', _dt.date.today().isoformat())
     force = data.get('force', False)
 
-    if not re.match(r'^\d{4}-\d{2}-\d{2}$', target_date):
+    if not _is_report_date(target_date):
         return api_bad_request('Invalid date format')
 
     # Already generating?
@@ -735,7 +742,7 @@ async def get_generation_status(date_str):
       ``{status: 'done', report: {…}}``                   — finished
       ``{status: 'error', error: '…'}``                   — failed
     """
-    if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+    if not _is_report_date(date_str):
         return api_bad_request('Invalid date format')
 
     job = _get_job(date_str)

@@ -151,6 +151,63 @@ def _successor_already_running(task: dict, conv_id: str) -> bool:
         return False
 
 
+def _append_v2_autopilot_turns(task: dict, conv_id: str, vu_msg_id: str,
+                               text: str, rounds: list | None = None,
+                               run_id: str = '', segments: list | None = None
+                               ) -> dict | None:
+    """Create the VU turn and its pending Agent successor in one transaction."""
+    try:
+        from lib.tasks_pkg.manager._registry import task_user_id
+        from lib.turn_lifecycle import (
+            announce_related_turns,
+            create_turn_pair,
+            get_turn,
+        )
+
+        parent_turn = get_turn(
+            conv_id, task.get('_turnId') or '',
+            user_id=task_user_id(task) or 1)
+        cfg = dict(task.get('config') or {})
+        result = create_turn_pair(
+            conv_id,
+            command_id=(f'autopilot:{task.get("_attemptId") or task.get("id")}:'
+                        f'{vu_msg_id}'),
+            input_projection={
+                'content': text, 'thinking': '', 'toolRounds': rounds or [],
+                'segments': segments or [], 'timestamp': int(time.time() * 1000),
+            },
+            config=cfg,
+            lane_id=parent_turn.get('laneId') or 'main',
+            parent_turn_id=parent_turn['turnId'],
+            kind='autopilot_reply', output_actor='assistant', run_id=run_id,
+            user_id=task_user_id(task) or 1,
+            input_actor='virtual_user', input_kind='autopilot_virtual_user',
+            require_parent_is_lane_tail=True,
+        )
+        task['_v2AutopilotNext'] = result
+        task['_v2NextTurnId'] = result['turn']['turnId']
+        task['_v2NextAttemptId'] = result['attempt']['attemptId']
+        announce_related_turns(
+            task.get('_attemptId') or '',
+            [result['submittedTurn']['turnId'], result['turn']['turnId']],
+        )
+        return {
+            'role': 'user', 'content': text,
+            'timestamp': result['submittedTurn']['createdAt'],
+            '_turnId': result['submittedTurn']['turnId'],
+            '_isVirtualUser': True, '_autopilotRunId': run_id,
+            'toolRounds': rounds or [], 'segments': segments or [],
+        }
+    except Exception as exc:
+        if getattr(exc, 'code', None):
+            logger.info('[Autopilot] v2 continuation stood down conv=%s: %s',
+                        conv_id[:8], exc.code)
+            return None
+        logger.error('[Autopilot] v2 continuation create failed conv=%s: %s',
+                     conv_id[:8], exc, exc_info=True)
+        return None
+
+
 def _append_vu_message_to_conv(conv_id: str, vu_msg_id: str,
                                 text: str,
                                 rounds: list | None = None,
@@ -188,7 +245,6 @@ def _append_vu_message_to_conv(conv_id: str, vu_msg_id: str,
         from lib.database import (
             DOMAIN_CHAT,
             get_thread_db,
-            json_dumps_pg,
         )
     except Exception as e:
         logger.warning('[Autopilot] DB import failed: %s', e)
@@ -230,27 +286,14 @@ def _append_vu_message_to_conv(conv_id: str, vu_msg_id: str,
         # concurrency point in the system.
         _MAX_CAS = 5
         for attempt in range(1, _MAX_CAS + 1):
-            row = db.execute(
-                'SELECT messages, rev FROM conversations WHERE id=? AND user_id=1',
-                (conv_id,)
-            ).fetchone()
-            if not row:
+            from lib.database.conversation_repository import load_conversation
+            snapshot = load_conversation(db, conv_id)
+            if snapshot is None:
                 logger.warning('[Autopilot] conv=%s not found — cannot append VU msg',
                                conv_id[:8])
                 return None
-            # Reuse the store's row reader: rows arrive as psycopg DictRow,
-            # sqlite3.Row, or plain tuples from fakes, and indexing by position
-            # as a fallback is WRONG for both mapping rows (dict[1] is a KEY
-            # lookup) and short tuples (IndexError). One helper, one behaviour.
-            from lib.tasks_pkg.persistence_store import _row_fields
-            raw, _rev_raw = _row_fields(row, 'messages', 'rev')
-            cur_rev = int(_rev_raw or 0)
-            try:
-                messages = json.loads(raw or '[]')
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.warning('[Autopilot] conv=%s messages parse failed: %s',
-                               conv_id[:8], e)
-                return None
+            messages = snapshot.messages
+            cur_rev = int(snapshot.get('rev') or 0)
 
             # A REAL human turn landed while we were producing this reply.
             # Do NOT append behind it: the next turn feeds conversation history
@@ -286,35 +329,20 @@ def _append_vu_message_to_conv(conv_id: str, vu_msg_id: str,
                 logger.debug('[Autopilot] build_search_text failed: %s', e)
                 search_text = ''
 
-            cur = db.execute(
-                '''UPDATE conversations
-                      SET messages=?, updated_at=?, msg_count=?, search_text=?
-                      WHERE id=? AND user_id=1 AND rev=?''',
-                (json_dumps_pg(messages), now_ms, len(messages), search_text,
-                 conv_id, cur_rev),
-            )
-            db.commit()
-            affected = getattr(cur, 'rowcount', None)
-            if not (affected if affected is not None else 0):
+            from lib.database.conversation_repository import replace_messages
+            result = replace_messages(
+                db, conv_id, messages, expected_rev=cur_rev,
+                metadata={
+                    'updated_at': now_ms,
+                    'msg_count': len(messages),
+                    'search_text': search_text,
+                })
+            if not result.applied:
                 logger.debug('[Autopilot] conv=%s VU append lost the rev=%s race '
                              '(attempt %d/%d) — re-reading',
                              conv_id[:8], cur_rev, attempt, _MAX_CAS)
                 continue
 
-            # Phase 5 dual-write (flag-gated, inert when off): tail append.
-            # Guarded SEPARATELY from the authoritative write above: the VU turn
-            # is already durable at this point, so a mirror failure must not
-            # fall into this function's `except` and return None — the caller
-            # reads None as "the VU turn was not persisted" and ENDS the
-            # autopilot run (observed 2026-07-27: a NameError in the hook
-            # silently stopped autopilot with the VU message sitting committed).
-            try:
-                from lib.database.messages_rows import mirror_write_and_commit
-                mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms)
-            except Exception as _mirror_err:
-                logger.warning('[Autopilot] conv=%s row mirror failed (non-fatal, '
-                               'VU turn already durable): %s',
-                               conv_id[:8], _mirror_err, exc_info=True)
             logger.info('[Autopilot] conv=%s ✅ Appended VU msg %s (%d chars, %d rounds)',
                         conv_id[:8], vu_msg_id[:12], len(text), len(rounds or []))
             return vu_msg
@@ -358,14 +386,12 @@ def _maybe_auto_translate_vu(conv_id: str, vu_msg_id: str, content: str) -> None
         return
     try:
         from lib.database import DOMAIN_CHAT, get_thread_db
+        from lib.database.conversation_repository import load_conversation
         db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT messages FROM conversations WHERE id=? AND user_id=1',
-            (conv_id,),
-        ).fetchone()
-        if not row:
+        snapshot = load_conversation(db, conv_id)
+        if snapshot is None:
             return
-        messages = json.loads(row[0] or '[]')
+        messages = snapshot.messages
         vu_idx = next(
             (i for i, m in enumerate(messages)
              if isinstance(m, dict) and m.get('_msgId') == vu_msg_id),
@@ -390,7 +416,6 @@ def _start_followup_task(task: dict, conv_id: str) -> str | None:
     code at module scope — circular).
     """
     from lib.tasks_pkg import create_task
-    from lib.tasks_pkg.conv_message_builder import build_api_messages_from_db
     from lib.tasks_pkg.manager import abort_running_tasks_for_conv
 
     cfg = dict(task.get('config') or {})
@@ -447,7 +472,20 @@ def _start_followup_task(task: dict, conv_id: str) -> str | None:
         logger.debug('[Autopilot] conv model re-resolve failed — inheriting '
                      'parent model: %s', _me)
 
-    api_messages = build_api_messages_from_db(conv_id, cfg)
+    v2_result = task.get('_v2AutopilotNext') if task.get('_turnProtocolV2') else None
+    if v2_result:
+        from lib.turn_lifecycle import build_api_messages
+        cfg.update({
+            '_turnProtocolV2': True,
+            '_turnId': v2_result['turn']['turnId'],
+            '_attemptId': v2_result['attempt']['attemptId'],
+            'excludeLast': True,
+        })
+        api_messages = build_api_messages(
+            conv_id, v2_result['turn']['turnId'], cfg)
+    else:
+        from lib.tasks_pkg.conv_message_builder import build_api_messages_from_db
+        api_messages = build_api_messages_from_db(conv_id, cfg)
     if not api_messages:
         logger.warning('[Autopilot] conv=%s build_api_messages returned '
                        'empty — cannot start follow-up', conv_id[:8])
@@ -455,9 +493,38 @@ def _start_followup_task(task: dict, conv_id: str) -> str | None:
 
     # Belt-and-braces: any other still-running task for this conv is
     # superseded by this autopilot follow-up, same as a real user send.
-    abort_running_tasks_for_conv(conv_id)
+    if not v2_result:
+        abort_running_tasks_for_conv(conv_id)
 
-    new_task = create_task(conv_id, api_messages, cfg)
+    if v2_result:
+        from lib.turn_lifecycle import claim_attempt_start, fail_start
+        if not claim_attempt_start(v2_result['attempt']['attemptId']):
+            return None
+    try:
+        # Keep the legacy call shape unchanged (besides preserving existing
+        # tests and extensions, its default is deliberately supersede=True).
+        # A v2 successor is an already-authorized attempt and must coexist
+        # with its parent until the parent's terminal hook has returned.
+        if v2_result:
+            new_task = create_task(
+                conv_id, api_messages, cfg, supersede=False)
+        else:
+            new_task = create_task(conv_id, api_messages, cfg)
+    except Exception as e:
+        logger.error('[Autopilot] Failed to create follow-up task: %s',
+                     e, exc_info=True)
+        if v2_result:
+            from lib.error_envelope import make_envelope as _make_env
+            fail_start(
+                v2_result['attempt']['attemptId'],
+                _make_env(
+                    'internal',
+                    detail='Autopilot failed to create follow-up task.',
+                    model=cfg.get('model', ''), context='autopilot',
+                    source='autopilot', raw=str(e),
+                ),
+            )
+        return None
     new_task_id = new_task['id']
     new_task['_autopilotParent'] = task.get('id')
 
@@ -470,6 +537,9 @@ def _start_followup_task(task: dict, conv_id: str) -> str | None:
               conv_id=conv_id)
 
     try:
+        if v2_result:
+            from lib.turn_lifecycle import bind_task
+            bind_task(v2_result['attempt']['attemptId'], new_task_id)
         from lib.tasks_pkg import spawn_task as _spawn_task
         _spawn_task(new_task)
     except Exception as e:
@@ -485,6 +555,8 @@ def _start_followup_task(task: dict, conv_id: str) -> str | None:
             source='autopilot',
             raw=str(e),
         )
+        if v2_result:
+            fail_start(v2_result['attempt']['attemptId'], new_task['error'])
         return None
 
     # Update conversation settings.activeTaskId so reload still finds the
@@ -495,8 +567,9 @@ def _start_followup_task(task: dict, conv_id: str) -> str | None:
         from lib.conversations import set_conversation_settings
         # notify=False: notify_conv_changed is emitted just below (no double
         # push); the gate still invalidates the sidebar cache.
-        set_conversation_settings(conv_id, {'activeTaskId': new_task_id},
-                                  notify=False)
+        if not v2_result:
+            set_conversation_settings(conv_id, {'activeTaskId': new_task_id},
+                                      notify=False)
     except Exception as e:
         logger.debug('[Autopilot] activeTaskId update skipped: %s', e)
 
@@ -508,4 +581,3 @@ def _start_followup_task(task: dict, conv_id: str) -> str | None:
         logger.debug('[Autopilot] conv-changed notify skipped: %s', e)
 
     return new_task_id
-

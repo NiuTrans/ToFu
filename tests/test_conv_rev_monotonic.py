@@ -41,9 +41,6 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import quart as _quart  # noqa: E402
-sys.modules['flask'] = _quart
-
 import pytest  # noqa: E402
 
 pytestmark = pytest.mark.unit
@@ -75,6 +72,12 @@ def _rev(db, conv_id):
     r = db.execute('SELECT rev FROM conversations WHERE id=? AND user_id=1',
                    (conv_id,)).fetchone()
     return int((r[0] if not isinstance(r, dict) else r['rev']) or 0)
+
+
+def _msg_count(db, conv_id):
+    r = db.execute('SELECT msg_count FROM conversations WHERE id=? AND user_id=1',
+                   (conv_id,)).fetchone()
+    return int((r[0] if not isinstance(r, dict) else r['msg_count']) or 0)
 
 
 def _raw_update_messages(db, conv_id, messages):
@@ -187,8 +190,29 @@ def test_rev_not_bumped_by_noop_or_metadata_writes():
     _ok('rev NOT bumped by no-op / settings-only / title-only writes (no false 409)')
 
 
+def test_message_trigger_derives_msg_count_even_when_writer_is_wrong():
+    """``msg_count`` is metadata derived from messages, so one forgotten or
+    stale writer value must not make list counts and row-read gates lie."""
+    from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
+    conv_id = 'cv-msg-count-derived'
+    db = get_thread_db(DOMAIN_CHAT)
+    _seed(db, conv_id, _M(2))
+    try:
+        db.execute('UPDATE conversations SET messages=?, msg_count=? '
+                   'WHERE id=? AND user_id=1',
+                   (json_dumps_pg(_M(5)), 999, conv_id))
+        db.commit()
+        assert _msg_count(db, conv_id) == 5
+        assert _rev(db, conv_id) == 1
+    finally:
+        _cleanup(db, conv_id)
+
+
 _POSITIVE = [test_rev_bumps_on_message_writers,
-             test_rev_not_bumped_by_noop_or_metadata_writes]
+             test_rev_not_bumped_by_noop_or_metadata_writes,
+             test_message_trigger_derives_msg_count_even_when_writer_is_wrong]
+
+
 
 
 def _run(fn):
@@ -237,7 +261,10 @@ def _neuter_and_subrun():
             if is_pg:
                 db.execute('''CREATE OR REPLACE FUNCTION conversations_rev_bump() RETURNS trigger AS $$
                     BEGIN IF (NEW.messages IS DISTINCT FROM OLD.messages) THEN
-                    NEW.rev := COALESCE(OLD.rev,0)+1; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql;''')
+                    NEW.rev := COALESCE(OLD.rev,0)+1;
+                    NEW.msg_count := CASE WHEN jsonb_typeof(NEW.messages)='array'
+                    THEN jsonb_array_length(NEW.messages) ELSE 0 END;
+                    END IF; RETURN NEW; END; $$ LANGUAGE plpgsql;''')
                 db.execute('DROP TRIGGER IF EXISTS conversations_rev_bump_trg ON conversations')
                 db.execute('''CREATE TRIGGER conversations_rev_bump_trg
                     BEFORE UPDATE OF messages ON conversations
@@ -247,7 +274,9 @@ def _neuter_and_subrun():
                 db.execute('''CREATE TRIGGER conversations_rev_bump_trg
                     AFTER UPDATE OF messages ON conversations
                     FOR EACH ROW WHEN NEW.messages IS NOT OLD.messages
-                    BEGIN UPDATE conversations SET rev = OLD.rev + 1
+                    BEGIN UPDATE conversations SET rev = OLD.rev + 1,
+                    msg_count = CASE WHEN json_valid(NEW.messages)
+                    THEN json_array_length(NEW.messages) ELSE 0 END
                     WHERE id = NEW.id AND user_id = NEW.user_id; END;''')
             db.commit()
         except Exception as e:

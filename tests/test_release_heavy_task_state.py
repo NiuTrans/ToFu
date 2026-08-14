@@ -14,7 +14,8 @@ terminal task. This suite asserts, against the REAL function:
 
   * terminal task → messages + _endpoint_turns are released (set None);
   * ``events`` / ``content`` / ``thinking`` are KEPT (a reconnecting SSE client
-    replays events[cursor:]; content/thinking are thin and read by pollers);
+    replays the retained absolute-cursor tail; content/thinking are thin and
+    read by pollers);
   * a NON-terminal (running) task is UNTOUCHED (defensive — never strip a task
     that could still stream);
   * NC: with the release neutered, the heavy fields survive a terminal persist
@@ -74,7 +75,7 @@ def test_lightweight_fields_are_kept():
     from lib.tasks_pkg.manager import _release_heavy_task_state
     task = _big_task('done')
     _release_heavy_task_state(task)
-    # events MUST survive — a reconnecting SSE client replays events[cursor:].
+    # events MUST survive — reconnect replays the retained absolute-cursor tail.
     assert isinstance(task['events'], list) and len(task['events']) == 30, \
         'events wrongly dropped — breaks SSE reconnect within TTL'
     assert task['content'] == 'final answer', 'content wrongly dropped'

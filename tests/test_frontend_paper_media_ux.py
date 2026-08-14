@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """jsdom guards for the P-UX frontend contract (P-UX1~4).
 
-Drives the REAL shipped ``static/js/paper/podcast.js`` and
-``static/js/paper/video.js`` under jsdom with stubbed Api seams and probes
+Drives the shipped classic renderers together with the compiled native
+Podcast/Video runtimes under jsdom with stubbed Api seams and probes
 the progress-perception / anti-stuck behaviors
 (docs/PAPER_MEDIA_UX_DESIGN.md §3.4):
 
@@ -28,21 +28,33 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 
 import pytest
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 PODCAST_JS = os.path.join(ROOT, 'static', 'js', 'paper', 'podcast.js')
 VIDEO_JS = os.path.join(ROOT, 'static', 'js', 'paper', 'video.js')
+PODCAST_RUNTIME_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'podcast-runtime.ts')
+VIDEO_RUNTIME_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'video-runtime.ts')
+PUSH_TRANSPORT_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'push-transport.ts')
+MEDIA_MODEL_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'media-model-ui.ts')
+ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
+_NODE_HARNESS_TIMEOUT_S = 180
 
 
 def _node_deps_available() -> bool:
     if not shutil.which('node'):
         return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
+    return (os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
+            and os.path.isfile(ESBUILD))
 
 
 _PODCAST_HARNESS = r"""
@@ -54,7 +66,7 @@ const dom = new JSDOM(
   '<!DOCTYPE html><body><div id="paperPodcastContent"></div></body>',
   { url: 'http://localhost/' });
 const win = dom.window;
-global.window = win;
+global.window = global;
 global.document = win.document;
 const T_MAP = {
   'paper.podcastLost': 'LOST_TEXT',
@@ -100,7 +112,11 @@ global.Api = win.Api = { paper: {
 }};
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper/podcast.js (real)
-_PODCAST_POLL_MS = 1;
+Object.assign(global, { _podcast, _pcRender, _pcRenderProgress,
+  _pcRenderActivity, _pcT, _pcEsc, _pcSeedOptions, _pcPersistOptions,
+  _PODCAST_POLL_MS: 1, _PC_POLL_FAIL_LIMIT });
+eval(fs.readFileSync(process.argv[4], 'utf8'));  // native push transport
+eval(fs.readFileSync(process.argv[5], 'utf8'));  // native podcast runtime
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -239,7 +255,7 @@ const dom = new JSDOM(
   '<!DOCTYPE html><body><div id="paperVideoContent"></div></body>',
   { url: 'http://localhost/' });
 const win = dom.window;
-global.window = win;
+global.window = global;
 global.document = win.document;
 const T_MAP = {
   'paper.podcastLost': 'LOST_TEXT',
@@ -274,6 +290,7 @@ const apiState = {
   scenesCalls: 0,
   scenesResp: { ok: true, task_id: 'motion_x1', status: 'running', scenes: [
     { scene_id: 'scene-001', start: 0, end: 4, text: '第一句',
+      shot_recipe: 'hook-counter-burst', motion_family: 'metric-impact', shot_energy: 5,
       has_composition: true, has_video: true, has_narration: true },
     { scene_id: 'scene-002', start: 4, end: 8, text: '第二句',
       has_composition: true, has_video: false, has_narration: false },
@@ -301,7 +318,11 @@ global.Api = win.Api = {
 };
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper/video.js (real)
-_PVIDEO_POLL_MS = 1;
+Object.assign(global, { _pvideo, _pvRender, _pvRenderProgress,
+  _pvRenderActivity, _pvRenderSceneGrid, _pvT, _pvEsc,
+  _PVIDEO_POLL_MS: 1, _PV_POLL_FAIL_LIMIT });
+eval(fs.readFileSync(process.argv[4], 'utf8'));  // native push transport
+eval(fs.readFileSync(process.argv[5], 'utf8'));  // native video runtime
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -338,6 +359,10 @@ async function settle(n) { for (let i = 0; i < n; i++) await new Promise(r => se
   check('scenes_refetched_on_scene_done', apiState.scenesCalls >= 1);
   const cells = host().querySelectorAll('.paper-video-cell');
   check('grid_cells_rendered', cells.length === 2);
+  const shotMeta = host().querySelector('.paper-video-cell-meta');
+  check('shot_recipe_metadata_visible', !!shotMeta
+    && shotMeta.textContent.includes('hook-counter-burst')
+    && shotMeta.textContent.includes('E5'));
   check('grid_pending_cell_marked',
     host().querySelectorAll('.paper-video-cell.is-pending').length === 1);
   check('grid_lit_cell_has_video',
@@ -425,27 +450,41 @@ async function settle(n) { for (let i = 0; i < n; i++) await new Promise(r => se
 """
 
 
-def _run_harness(harness_src: str, module_path: str, name: str) -> str:
-    harness = os.path.join(HERE, f'_{name}_harness.js')
-    with open(harness, 'w', encoding='utf-8') as f:
-        f.write(harness_src)
-    try:
+def _run_harness(harness_src: str, renderer_path: str,
+                 runtime_path: str, name: str) -> str:
+    # Keep generated harnesses off the shared/FUSE checkout. Fixed files in
+    # tests/ made parallel workers contend with repository scans and could
+    # consume the entire old 60-second budget before Node reached assertions.
+    with tempfile.TemporaryDirectory(prefix=f'tofu-{name}-') as temp_dir:
+        harness = os.path.join(temp_dir, f'{name}_harness.js')
+        push_built = os.path.join(temp_dir, 'push-transport.js')
+        runtime_built = os.path.join(temp_dir, 'media-runtime.js')
+        with open(harness, 'w', encoding='utf-8') as f:
+            f.write(harness_src)
+        for source, output in ((PUSH_TRANSPORT_TS, push_built),
+                               (runtime_path, runtime_built)):
+            compiled = subprocess.run(
+                [ESBUILD, source, '--bundle', '--format=iife',
+                 '--platform=browser', f'--outfile={output}'],
+                capture_output=True, text=True, timeout=60)
+            assert compiled.returncode == 0, compiled.stderr
         proc = subprocess.run(
-            ['node', harness, module_path, ROOT],
-            capture_output=True, text=True, timeout=60)
-    finally:
-        try:
-            os.remove(harness)
-        except OSError:
-            pass
+            ['node', harness, renderer_path, ROOT, push_built, runtime_built],
+            capture_output=True, text=True, timeout=_NODE_HARNESS_TIMEOUT_S)
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{proc.stdout}'
     return proc.stdout.strip()
+
+
+def _portable_runtime_source(source: str) -> str:
+    """Keep a mutated runtime's real dependency resolvable outside src/."""
+    return source.replace("'./media-model-ui'", repr(MEDIA_MODEL_TS), 1)
 
 
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
 def test_podcast_ux_state_machine():
-    out = _run_harness(_PODCAST_HARNESS, PODCAST_JS, 'pux_podcast')
+    out = _run_harness(
+        _PODCAST_HARNESS, PODCAST_JS, PODCAST_RUNTIME_TS, 'pux_podcast')
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'podcast P-UX failures:\n' + out
     assert out.count('PASS') >= 21, f'expected >=21 PASS lines, got:\n{out}'
@@ -454,7 +493,8 @@ def test_podcast_ux_state_machine():
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
 def test_video_ux_state_machine():
-    out = _run_harness(_VIDEO_HARNESS, VIDEO_JS, 'pux_video')
+    out = _run_harness(
+        _VIDEO_HARNESS, VIDEO_JS, VIDEO_RUNTIME_TS, 'pux_video')
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'video P-UX failures:\n' + out
     assert out.count('PASS') >= 22, f'expected >=22 PASS lines, got:\n{out}'
@@ -463,69 +503,56 @@ def test_video_ux_state_machine():
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NEUTER_podcast_fail_limit_loadbearing():
-    """NEUTER: amputate the 5-strike branch from a COPY of podcast.js →
+    """NEUTER: amputate the 5-strike branch from a COPY of the runtime →
     polls reschedule forever, `lost_after_5_fails` flips to FAIL — the
     backstop is what stands between a 404 and an infinite spinner."""
-    src = open(PODCAST_JS, encoding='utf-8').read()
-    marker = 'if (_podcast.pollFails >= _PC_POLL_FAIL_LIMIT) {'
+    src = open(PODCAST_RUNTIME_TS, encoding='utf-8').read()
+    marker = 'if (state.pollFails >= limit) {'
     assert marker in src, 'fail-limit marker not found — test is stale'
     broken = src.replace(marker, 'if (false) {', 1)
     assert broken != src
 
-    tmp = os.path.join(HERE, '_podcast_no_limit.js')
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(broken)
-    try:
-        chk = subprocess.run(['node', '--check', tmp], capture_output=True,
-                             text=True, timeout=30)
-        assert chk.returncode == 0, f'patched JS invalid: {chk.stderr}'
-        out = _run_harness(_PODCAST_HARNESS, tmp, 'pux_podcast_neuter')
+    with tempfile.TemporaryDirectory(prefix='tofu-podcast-neuter-') as temp_dir:
+        tmp = os.path.join(temp_dir, 'podcast-runtime.ts')
+        with open(tmp, 'w', encoding='utf-8') as f:
+            f.write(_portable_runtime_source(broken))
+        out = _run_harness(
+            _PODCAST_HARNESS, PODCAST_JS, tmp, 'pux_podcast_neuter')
         assert 'FAIL lost_after_5_fails' in out, \
             'amputating the fail limit did NOT flip the probe:\n' + out
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-    assert open(PODCAST_JS, encoding='utf-8').read() == src, 'shipped file modified!'
+    assert open(PODCAST_RUNTIME_TS, encoding='utf-8').read() == src, \
+        'shipped file modified!'
 
 
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NEUTER_video_fail_limit_loadbearing():
-    """NEUTER: same amputation on video.js — the lost state must vanish."""
-    src = open(VIDEO_JS, encoding='utf-8').read()
-    marker = 'if (_pvideo.pollFails >= _PV_POLL_FAIL_LIMIT) {'
+    """NEUTER: same amputation on the Video runtime."""
+    src = open(VIDEO_RUNTIME_TS, encoding='utf-8').read()
+    marker = 'if (state.pollFails >= limit) {'
     assert marker in src, 'fail-limit marker not found — test is stale'
     broken = src.replace(marker, 'if (false) {', 1)
     assert broken != src
 
-    tmp = os.path.join(HERE, '_video_no_limit.js')
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(broken)
-    try:
-        chk = subprocess.run(['node', '--check', tmp], capture_output=True,
-                             text=True, timeout=30)
-        assert chk.returncode == 0, f'patched JS invalid: {chk.stderr}'
-        out = _run_harness(_VIDEO_HARNESS, tmp, 'pux_video_neuter')
+    with tempfile.TemporaryDirectory(prefix='tofu-video-neuter-') as temp_dir:
+        tmp = os.path.join(temp_dir, 'video-runtime.ts')
+        with open(tmp, 'w', encoding='utf-8') as f:
+            f.write(_portable_runtime_source(broken))
+        out = _run_harness(
+            _VIDEO_HARNESS, VIDEO_JS, tmp, 'pux_video_neuter')
         assert 'FAIL lost_after_5_fails' in out, \
             'amputating the fail limit did NOT flip the probe:\n' + out
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-    assert open(VIDEO_JS, encoding='utf-8').read() == src, 'shipped file modified!'
+    assert open(VIDEO_RUNTIME_TS, encoding='utf-8').read() == src, \
+        'shipped file modified!'
 
 
-@pytest.mark.parametrize('module,harness,name,state,stop_call', [
-    ('podcast', 'PODCAST', 'pux_pc_tickneuter', '_podcast', '_pcStopTick();'),
-    ('video', 'VIDEO', 'pux_pv_tickneuter', '_pvideo', '_pvStopTick();'),
+@pytest.mark.parametrize('module,name,stop_call', [
+    ('podcast', 'pux_pc_tickneuter', 'stopPodcastTick();'),
+    ('video', 'pux_pv_tickneuter', 'stopVideoTick();'),
 ])
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
-def test_NEUTER_liveness_ticker_survives_polling(module, harness, name, state,
-                                                 stop_call):
+def test_NEUTER_liveness_ticker_survives_polling(module, name, stop_call):
     """NEUTER: fold the ticker teardown back into the POLL-path stop (the
     pre-fix shape) → the 1s stopwatch dies on the first poll.
 
@@ -542,35 +569,30 @@ def test_NEUTER_liveness_ticker_survives_polling(module, harness, name, state,
     poll happens to land, so between polls a silent-but-healthy worker shows a
     stalled clock — the reported "stuck" symptom in slower form.
     """
-    js_path = PODCAST_JS if module == 'podcast' else VIDEO_JS
+    renderer_path = PODCAST_JS if module == 'podcast' else VIDEO_JS
+    runtime_path = (PODCAST_RUNTIME_TS if module == 'podcast'
+                    else VIDEO_RUNTIME_TS)
     harness_src = _PODCAST_HARNESS if module == 'podcast' else _VIDEO_HARNESS
-    src = open(js_path, encoding='utf-8').read()
-    anchor = (f"  if ({state}.pollTimer) "
-              f"{{ clearTimeout({state}.pollTimer); {state}.pollTimer = null; }}\n}}")
+    src = open(runtime_path, encoding='utf-8').read()
+    anchor = ('  if (state.pollTimer) window.clearTimeout(state.pollTimer);\n'
+              '  state.pollTimer = null;\n}')
     assert anchor in src, 'poll-stop marker not found — test is stale'
     broken = src.replace(
         anchor,
-        f"  if ({state}.pollTimer) "
-        f"{{ clearTimeout({state}.pollTimer); {state}.pollTimer = null; }}\n"
-        f"  {stop_call}\n}}", 1)
+        '  if (state.pollTimer) window.clearTimeout(state.pollTimer);\n'
+        '  state.pollTimer = null;\n'
+        f'  {stop_call}\n}}', 1)
     assert broken != src
 
-    tmp = os.path.join(HERE, f'_{name}_broken.js')
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(broken)
-    try:
-        chk = subprocess.run(['node', '--check', tmp], capture_output=True,
-                             text=True, timeout=30)
-        assert chk.returncode == 0, f'patched JS invalid: {chk.stderr}'
-        out = _run_harness(harness_src, tmp, name)
+    with tempfile.TemporaryDirectory(prefix=f'tofu-{name}-') as temp_dir:
+        tmp = os.path.join(temp_dir, f'{module}-runtime.ts')
+        with open(tmp, 'w', encoding='utf-8') as f:
+            f.write(_portable_runtime_source(broken))
+        out = _run_harness(harness_src, renderer_path, tmp, name)
         assert 'FAIL liveness_ticker_survives_polling' in out, \
             'restoring the ticker-in-poll-stop did NOT flip the probe:\n' + out
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-    assert open(js_path, encoding='utf-8').read() == src, 'shipped file modified!'
+    assert open(runtime_path, encoding='utf-8').read() == src, \
+        'shipped file modified!'
 
 
 @pytest.mark.parametrize('module,name,state', [
@@ -585,30 +607,25 @@ def test_NEUTER_empty_poll_must_not_fake_activity(module, name, state):
     becomes unreachable, and the quiet-clock probe flips FAIL. Proves the
     event-gated reset is what distinguishes "server answers" from "worker is
     actually doing something"."""
-    js_path = PODCAST_JS if module == 'podcast' else VIDEO_JS
+    renderer_path = PODCAST_JS if module == 'podcast' else VIDEO_JS
+    runtime_path = (PODCAST_RUNTIME_TS if module == 'podcast'
+                    else VIDEO_RUNTIME_TS)
     harness_src = _PODCAST_HARNESS if module == 'podcast' else _VIDEO_HARNESS
-    src = open(js_path, encoding='utf-8').read()
-    anchor = f"if ((resp.events || []).length) {state}.lastEventAt = Date.now();"
+    src = open(runtime_path, encoding='utf-8').read()
+    anchor = 'if (replay.accepted) state.lastEventAt = Date.now();'
     assert anchor in src, 'event-gated liveness marker not found — test is stale'
-    broken = src.replace(anchor, f'{state}.lastEventAt = Date.now();', 1)
+    broken = src.replace(anchor, 'state.lastEventAt = Date.now();', 1)
     assert broken != src
 
-    tmp = os.path.join(HERE, f'_{name}_broken.js')
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(broken)
-    try:
-        chk = subprocess.run(['node', '--check', tmp], capture_output=True,
-                             text=True, timeout=30)
-        assert chk.returncode == 0, f'patched JS invalid: {chk.stderr}'
-        out = _run_harness(harness_src, tmp, name)
+    with tempfile.TemporaryDirectory(prefix=f'tofu-{name}-') as temp_dir:
+        tmp = os.path.join(temp_dir, f'{module}-runtime.ts')
+        with open(tmp, 'w', encoding='utf-8') as f:
+            f.write(_portable_runtime_source(broken))
+        out = _run_harness(harness_src, renderer_path, tmp, name)
         assert 'FAIL liveness_empty_poll_keeps_quiet_clock' in out, \
             'un-gating the liveness clock did NOT flip the probe:\n' + out
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-    assert open(js_path, encoding='utf-8').read() == src, 'shipped file modified!'
+    assert open(runtime_path, encoding='utf-8').read() == src, \
+        'shipped file modified!'
 
 
 # ═══ Static guards (no node required) ═══

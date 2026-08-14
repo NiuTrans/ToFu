@@ -14,7 +14,7 @@ the UI-shaped duplicates (bare-dict status response) and add the
 
 from __future__ import annotations
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.api_response import api_internal_error, api_ok
 from lib.log import get_logger

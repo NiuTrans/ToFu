@@ -14,8 +14,8 @@ This is verified, not self-reported:
      unknown id / falsy id / when `conversations` is undefined, and never
      throws. A NEUTER (a broken lookup that returns the first conv regardless
      of id) makes the by-id assertion FAIL — proving the assertion bites.
-  2. SOURCE — the delegating callers (toolset-apply `_toolsetConv`, context-bar
-     `_activeConv`, folders `setConversationFolder`, timer `_jumpToTimerConv`)
+  2. SOURCE — the delegating callers (context-bar `_activeConv`, folders
+     `setConversationFolder`, timer `_jumpToTimerConv`)
      route through `getConvById`/`getActiveConv` instead of re-implementing the
      `.find`. Source-level so it's robust without spinning a full jsdom per
      module.
@@ -31,11 +31,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section, runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-_CORE_SRC = os.path.join(ROOT, 'static', 'js', 'core.js')
+_CORE_SRC = runtime_section_path('core.js')
 
 
 def _node_available() -> bool:
@@ -142,19 +144,13 @@ def test_delegating_callers_use_canonical_helper():
     canonical helper instead of re-implementing `conversations.find`.
     Source-level (no node) — robust and fast."""
     def _read(*parts):
-        return open(os.path.join(ROOT, 'static', 'js', *parts), encoding='utf-8').read()
+        return runtime_section('/'.join(parts))
 
     core = _read('core.js')
     # The canonical helper exists and getActiveConv delegates to it.
     assert 'function getConvById(id) {' in core, 'core.js must define getConvById'
     assert 'function getActiveConv() {\n  return getConvById(activeConvId);\n}' in core, (
         'getActiveConv must delegate to getConvById')
-
-    toolset = _read('toolset-apply.js')
-    assert 'return getConvById(convId);' in toolset, (
-        '_toolsetConv must delegate to getConvById')
-    assert 'conversations.find' not in toolset, (
-        'toolset-apply.js must not re-implement the conversation .find')
 
     ctxbar = _read('context-bar.js')
     assert 'return getConvById(' in ctxbar, '_activeConv must delegate to getConvById'

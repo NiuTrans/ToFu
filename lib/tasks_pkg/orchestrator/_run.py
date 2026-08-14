@@ -27,7 +27,12 @@ logger = get_logger(__name__)
 
 
 from lib.llm import AbortedError  # noqa: F401  (re-exported by the package facade)
-from lib.agent_core.events import EventType, build_event  # noqa: F401  (re-exported by the package facade)
+from lib.agent_core.events import (  # noqa: F401  (re-exported by the package facade)
+    EventType,
+    Phase,
+    build_event,
+    emit_phase,
+)
 from lib.tasks_pkg.manager import (
     _strip_base64_for_snapshot,  # noqa: F401  (re-exported by the package facade after slice 15)
     append_event,  # noqa: F401  (re-exported by the package facade)
@@ -65,7 +70,6 @@ from lib.tasks_pkg.orchestrator._tool_history import (
     inject_continue_tool_history,
 )
 from lib.tasks_pkg.orchestrator._memory_prefetch import (
-    await_memory_prefetch,
     maybe_run_memory_prefetch,
 )
 from lib.tasks_pkg.orchestrator._resume_state import apply_resume_state
@@ -82,7 +86,10 @@ from lib.tasks_pkg.orchestrator._cache_round_accounting import (
 from lib.tasks_pkg.orchestrator._tool_call_prelude import (
     append_assistant_tool_call_message,
 )
-from lib.tasks_pkg.orchestrator._round_gates import check_round_gates
+from lib.tasks_pkg.orchestrator._round_gates import (
+    check_round_gates,
+    check_task_resource_budget,
+)
 from lib.tasks_pkg.orchestrator._round_message_hygiene import (
     run_round_message_hygiene,
 )
@@ -140,7 +147,38 @@ from lib.tasks_pkg.orchestrator._task_open import (
 )
 
 
+_STARTUP_PHASES = {
+    'config': (
+        'Resolving model and workspace settings…',
+        'stream.phase.startupConfig',
+    ),
+    'tools': (
+        'Preparing tools and workspace…',
+        'stream.phase.startupTools',
+    ),
+    'history': (
+        'Restoring conversation and tool history…',
+        'stream.phase.startupHistory',
+    ),
+    'context': (
+        'Loading project context and relevant memory…',
+        'stream.phase.startupContext',
+    ),
+}
 
+
+def _emit_startup_phase(task: dict[str, Any], stage: str) -> None:
+    detail, detail_key = _STARTUP_PHASES[stage]
+    try:
+        emit_phase(
+            task,
+            Phase.WORKING,
+            detail=detail,
+            detailKey=detail_key,
+        )
+    except Exception as exc:
+        logger.debug('[Task %s] startup phase emit failed stage=%s: %s',
+                     (task.get('id') or '')[:8], stage, exc)
 
 
 # ══════════════════════════════════════════════════════════
@@ -162,17 +200,16 @@ def run_task(task: dict[str, Any]) -> None:
     # (which auto-stamp req_id) correlate to THIS task. run_task executes on a
     # pooled background thread where req_id() would otherwise be empty, leaving
     # every audit line and swallowed-exception trace un-attributable.
-    set_req_id(tid)
+    set_req_id(task.get('_requestId') or tid)
     # ★ Task open (slice 35 → _task_open: kick / snapshot / open-log).
     if check_autopilot_kick(task):
         return
     snapshot_turn_input(task)
     _t_run_start = log_task_open(task, tid)
+    _vu_phase = make_vu_phase(task)
     try:
+        _emit_startup_phase(task, 'config')
         cfg = task['config']
-
-        # ── VU phase closure (slice 37 → _vu_startup.make_vu_phase).
-        _vu_phase = make_vu_phase(task)
 
         # ── Turn prelude (slice 33 → _turn_prelude; returns the rebound cfg).
         cfg = run_turn_prelude(task, cfg, tid)
@@ -221,8 +258,8 @@ def run_task(task: dict[str, Any]) -> None:
 
         # ── Section 2: Tool Assembly (slice 29 → _tool_assembly_prep;
         #    force-enable guard + _tool_schema stash).
-        tool_list, has_real_tools, max_tool_rounds = assemble_round_tools(
-            cfg, task, mcfg, vu_phase=_vu_phase)
+        _emit_startup_phase(task, 'tools')
+        tool_list, has_real_tools = assemble_round_tools(cfg, task, mcfg)
 
         # (Planner no-tools override removed — all endpoint roles now
         #  get full tool access.  See endpoint_review._run_planner_turn.)
@@ -246,18 +283,18 @@ def run_task(task: dict[str, Any]) -> None:
         #    (slice 8 → _tool_history.restore_tool_history).
         _keep_tool_history = cfg.get('keepToolHistory', True)
         _conv_id = task.get('convId', '')
+        _emit_startup_phase(task, 'history')
         messages, original_messages, _tool_history_used = restore_tool_history(
-            task=task, cfg=cfg, messages=messages, tid=tid, vu_phase=_vu_phase,
+            task=task, cfg=cfg, messages=messages, tid=tid,
         )
         if not _prep_aborted:
             _prep_aborted = handle_abort_during_prep(task, rs,
                                                      stage='tool_setup',
                                                      tid=tid)
 
-        # ── Section 3.5 (SPAWN): memory prefetch started EARLY so it
-        #   overlaps Section 3 (joined by await_memory_prefetch before the
-        #   stream loop). Eligibility reads cfg['toolHistory'] — the drift
-        #   guard below pins it against the actual injected count.
+        # ── Section 3.5: local high-confidence memory selection. It completes
+        #   synchronously before Composer runs and never mutates messages.
+        _emit_startup_phase(task, 'context')
         maybe_run_memory_prefetch(
             task=task, cfg=cfg, messages=messages, tool_list=tool_list,
             project_path=project_path, project_enabled=project_enabled,
@@ -307,14 +344,6 @@ def run_task(task: dict[str, Any]) -> None:
         apply_resume_state(task=task, cfg=cfg, messages=messages,
                            model=model, tid=tid)
 
-        # ★ 禁止添加 anti-loop / 预算警告 / _force_stop 等机制。
-        #   不允许在运行时向 messages 注入任何 [SYSTEM NOTE] 或 [SYSTEM:] 消息来
-        #   干扰模型的正常生成。详见 max_tool_rounds 注释。
-
-        # ── Join the background memory prefetch (BOUNDED wait — a late
-        #   write into a body already on the wire is worse than a missing
-        #   advisory memory; no-op when nothing was spawned).
-        await_memory_prefetch(task)
         if not _prep_aborted:
             _prep_aborted = handle_abort_during_prep(task, rs, stage='prefinal',
                                                      tid=tid)
@@ -325,18 +354,20 @@ def run_task(task: dict[str, Any]) -> None:
         round_num = -1
         # (exit_reason / abort_phase / consecutive_tool_timeouts /
         #  last_checkpoint_ts now live on `rs` — slice 1 container swap)
-        # ★ WHILE-loop instead of FOR — the ceiling expands when premature-close
-        #   retries are used, so even max_tool_rounds=0 (no tools) gets retry
-        #   iterations.  Without this, `continue` in a single-iteration for-loop
-        #   exits immediately and the retry never actually fires.
-        #   Ceiling: max_tool_rounds + 1 (base) + _premature_retry_count (bonus).
-        #   Original for-loop was: range(max_tool_rounds + 1) = [0..max_tool_rounds].
-        while (not _prep_aborted
-               and round_num + 1 <= max_tool_rounds + _premature_retry_count):
+        # The model owns natural completion: every productive tool-call round
+        # receives the same tool surface, and the loop ends when the model
+        # returns no tool calls (or an explicit abort/budget/error gate fires).
+        while not _prep_aborted:
             round_num += 1
             # ★ Abort-at-round-start gate (slice 23 → _abort_round_start; True → break).
             if handle_abort_at_round_start(task, rs,
                                            round_num=round_num, tid=tid):
+                break
+            # Resource ceilings are checked before another provider call. This
+            # makes tool-output/API-round caps hard rather than discovering an
+            # overrun one provider request too late.
+            if check_task_resource_budget(
+                    task, rs, round_num=round_num, cfg=cfg):
                 break
 
             # ★ Per-round open: ROUND_START + phase emit
@@ -362,7 +393,6 @@ def run_task(task: dict[str, Any]) -> None:
             _tools_this_round, body = build_round_request(
                 task, rs, messages, tool_list,
                 round_num=round_num, tid=tid,
-                max_tool_rounds=max_tool_rounds,
                 thinking_depth=thinking_depth, temperature=temperature,
                 max_tokens=max_tokens, response_format=response_format,
             )
@@ -381,8 +411,7 @@ def run_task(task: dict[str, Any]) -> None:
             if run_llm_call_with_fallback(
                     task, rs, body, messages, tool_list, _stream_acc,
                     round_num=round_num, tid=tid,
-                    max_tokens=max_tokens,
-                    max_tool_rounds=max_tool_rounds) == 'break':
+                    max_tokens=max_tokens) == 'break':
                 break
 
             # ★ Per-round cache accounting — cacheBreak/toolCalls/
@@ -398,7 +427,8 @@ def run_task(task: dict[str, Any]) -> None:
 
             # ★ Post-LLM streaming-accumulator settle
             #   (slice 24 → _stream_acc_settle).
-            settle_stream_accumulator(_stream_acc, task, rs, tid=tid)
+            settle_stream_accumulator(
+                _stream_acc, task, rs, tid=tid, round_num=round_num)
 
             # ★ Post-stream decision (slice 25 → _stream_decision;
             #   'break'/'continue' + premature_retry_count rebind).
@@ -410,11 +440,19 @@ def run_task(task: dict[str, Any]) -> None:
                 break
             if _stream_action == 'continue':
                 continue
+            if _stream_action == 'program_continue':
+                # Program output without a final message is a protocol
+                # continuation, not a transport retry. Charge/check this API
+                # round before asking Responses for the final assistant item.
+                if check_round_gates(
+                        task, rs, round_num=round_num, tid=tid, cfg=cfg):
+                    break
+                continue
 
-            # ── Per-round gates: budget + tool-rounds ceilings
+            # ── Per-round gates: explicit financial budget
             #   (slice 17 → _round_gates; True → break).
             if check_round_gates(task, rs, round_num=round_num, tid=tid,
-                                 max_tool_rounds=max_tool_rounds, cfg=cfg):
+                                 cfg=cfg):
                 break
 
             rs.tool_call_happened = True
@@ -493,4 +531,3 @@ def run_task(task: dict[str, Any]) -> None:
         # 5-step teardown lane (slice 5 → _teardown.finalize_task_lane;
         # each step fail-soft).
         finalize_task_lane(task, tid=tid)
-

@@ -117,10 +117,31 @@ check('error_head_rendered', failHtml.includes(EHEAD));
 check('error_tail_rendered', failHtml.includes(ETAIL));
 check('error_full_body_rendered', failHtml.includes(bigErr));
 
+// ── Criterion 4: inbox updates render only in their chronological tool row ──
+// The legacy bubble-top builder remains as a deferred-module compatibility
+// seam, but must not duplicate the canonical `_inboxInject` timeline row.
+check('legacy_inbox_chip_suppressed',
+  _buildSwarmInboxChipsHTML([{ round: 4, count: 1, agentIds: ['test-audit'] }]) === '');
+
+// ── Criterion 5: canonical agent IDs are never shortened ──
+const idRound = {
+  roundNum: 4, _swarm: true, _swarmActive: false, status: 'done',
+  _swarmStartTime: Date.now() - 1000, _swarmEndTime: Date.now(),
+  _swarmAgents: [{
+    id: 'test-audit', role: 'coder', objective: 'audit tests',
+    status: 'done', phase: 'done', preview: 'ok',
+  }],
+};
+const idHtml = _buildSwarmPanelHTML(idRound, [idRound]);
+check('canonical_agent_id_visible', idHtml.includes('>test-audit</span>'));
+check('canonical_log_token_copyable',
+  idHtml.includes('data-grep="agent-coder-test-audit"'));
+check('truncated_agent_id_absent', !idHtml.includes('>test-aud</span>'));
+
 // ── No ellipsis artifacts injected by the renderer itself ──
 // (The agent-card body must not add a "…" of its own; a genuine backend-side
 //  truncation marker would arrive inside the text and is not the renderer's.)
-const renderedBodies = doneHtml + toolHtml + failHtml;
+const renderedBodies = doneHtml + toolHtml + failHtml + idHtml;
 check('no_renderer_ellipsis', !renderedBodies.includes('…]'));
 
 console.log(out.join('\n'));
@@ -150,7 +171,7 @@ def test_panel_renders_full_results():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'Swarm panel truncated a result:\n' + output
-    assert output.count('PASS') >= 12, f'expected >=12 PASS, got:\n{output}'
+    assert output.count('PASS') >= 16, f'expected >=16 PASS, got:\n{output}'
 
 
 @pytest.mark.skipif(not _node_deps_available(),

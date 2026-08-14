@@ -179,9 +179,8 @@ class TestAutodiscover:
     def test_frontend_preset_port_parity(self):
         """Backend WELL_KNOWN_ENGINES mirrors the frontend _LOCAL_ENGINE_PRESETS
         ports so the UI shows the auto card under the same engine badge."""
-        src = open(os.path.join(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__))),
-            'static/js/settings/local_endpoints.js')).read()
+        from tests._runtime_sections import runtime_section
+        src = runtime_section('settings/local_endpoints.js')
         import re
         for row in ad.WELL_KNOWN_ENGINES:
             assert str(row['port']) in src, row

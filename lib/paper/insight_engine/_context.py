@@ -28,17 +28,10 @@ def _library_context(phash: str, query: str):
     failure — the pass still runs without a library).
     """
     try:
-        from lib.database import get_db, get_thread_db
-        try:
-            db = get_db()
-        except RuntimeError as e:
-            logger.debug('[Paper:Insight] no request-context DB, using thread DB: %s', e)
-            db = get_thread_db()
-        rows = db.execute(
-            "SELECT title, arxiv_id, paper_hash FROM paper_library "
-            "WHERE paper_hash != ? AND title != '' "
-            "ORDER BY updated_at DESC LIMIT 40",
-            (phash or '',)).fetchall()
+        from lib.storage import get_storage_client
+        rows = get_storage_client().query('paper.library.recent', {
+            'exclude_paper_hash': phash or '', 'limit': 40,
+        })
     except Exception as e:
         logger.debug('[Paper:Insight] Library context unavailable: %s', e)
         return []
@@ -46,7 +39,9 @@ def _library_context(phash: str, query: str):
     items = []
     for r in rows or []:
         try:
-            items.append({'title': r['title'] or '', 'arxiv_id': r['arxiv_id'] or ''})
+            items.append({
+                'title': r['title'] or '', 'arxiv_id': r['arxiv_id'] or '',
+            })
         except Exception as e:
             logger.debug('[Paper:Insight] skipping malformed library row: %s', e)
             continue

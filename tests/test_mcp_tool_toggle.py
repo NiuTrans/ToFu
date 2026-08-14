@@ -190,7 +190,90 @@ def test_stale_migration_preserves_disabled_tools(tmp_path, monkeypatch):
     })
     loaded = mcp_config.load_mcp_config()
     assert loaded['overleaf']['command'] == 'uvx'  # migration fired
+    assert loaded['overleaf']['args'] == [
+        '--exclude-newer', '2026-08-14T00:00:00Z',
+        '--from', 'overleaf-mcp-plus[compile]==0.3.1', 'overleaf-mcp',
+    ]
     assert loaded['overleaf']['disabled_tools'] == ['compile_project']
+
+
+def test_stale_overleaf_mcp1_override_migrates_to_v2(tmp_path, monkeypatch):
+    """The production row once forced mcp<2 on every fresh uvx resolve.
+    Loading config must remove that override without touching credentials."""
+    from lib.mcp import config as mcp_config
+
+    cfg_file = tmp_path / 'mcp_servers.json'
+    monkeypatch.setattr(mcp_config, '_config_path', lambda: str(cfg_file))
+    mcp_config.save_mcp_config({
+        'overleaf': {
+            'command': 'uvx',
+            'args': [
+                '--from', 'overleaf-mcp-plus[compile]>=0.1.3',
+                '--with', 'mcp<2', 'overleaf-mcp',
+            ],
+            'env': {'OVERLEAF_SESSION': 'secret'},
+        },
+    })
+
+    loaded = mcp_config.load_mcp_config()
+
+    assert loaded['overleaf']['args'] == [
+        '--exclude-newer', '2026-08-14T00:00:00Z',
+        '--from', 'overleaf-mcp-plus[compile]==0.3.1', 'overleaf-mcp',
+    ]
+    assert loaded['overleaf']['env'] == {'OVERLEAF_SESSION': 'secret'}
+
+
+def test_intermediate_overleaf_v2_pin_gains_reviewed_cutoff(tmp_path, monkeypatch):
+    """A v2 pin must remain cold-reconnectable under an old live parent."""
+    from lib.mcp import config as mcp_config
+
+    cfg_file = tmp_path / 'mcp_servers.json'
+    monkeypatch.setattr(mcp_config, '_config_path', lambda: str(cfg_file))
+    mcp_config.save_mcp_config({
+        'overleaf': {
+            'command': 'uvx',
+            'args': [
+                '--from', 'overleaf-mcp-plus[compile]==0.3.0', 'overleaf-mcp',
+            ],
+            'env': {},
+        },
+    })
+
+    loaded = mcp_config.load_mcp_config()
+
+    assert loaded['overleaf']['args'] == [
+        '--exclude-newer', '2026-08-14T00:00:00Z',
+        '--from', 'overleaf-mcp-plus[compile]==0.3.1', 'overleaf-mcp',
+    ]
+
+
+def test_published_overleaf_030_pin_migrates_to_031(tmp_path, monkeypatch):
+    """Existing exact 0.3.0 installs must receive the integration fixes."""
+    from lib.mcp import config as mcp_config
+
+    cfg_file = tmp_path / 'mcp_servers.json'
+    monkeypatch.setattr(mcp_config, '_config_path', lambda: str(cfg_file))
+    mcp_config.save_mcp_config({
+        'overleaf': {
+            'command': 'uvx',
+            'args': [
+                '--exclude-newer', '2026-08-02T00:00:00Z',
+                '--from', 'overleaf-mcp-plus[compile]==0.3.0', 'overleaf-mcp',
+            ],
+            'env': {'OVERLEAF_SESSION': 'secret'},
+            'disabled_tools': ['delete_file'],
+        },
+    })
+
+    loaded = mcp_config.load_mcp_config()
+
+    assert loaded['overleaf']['args'] == [
+        '--exclude-newer', '2026-08-14T00:00:00Z',
+        '--from', 'overleaf-mcp-plus[compile]==0.3.1', 'overleaf-mcp',
+    ]
+    assert loaded['overleaf']['env'] == {'OVERLEAF_SESSION': 'secret'}
+    assert loaded['overleaf']['disabled_tools'] == ['delete_file']
 
 
 if __name__ == '__main__':

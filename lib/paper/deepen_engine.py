@@ -39,6 +39,7 @@ import json
 import re
 import threading
 import time
+import uuid
 
 import lib as _lib
 from lib.agent_loop import AbortSignal, run_agent_loop
@@ -71,10 +72,6 @@ __all__ = [
     '_append_deepen_event',
     '_run_deepen_task',
 ]
-
-# Interactive depth — same bound as Q&A (a handful of tool rounds is plenty
-# for "look one thing up while expanding").
-_MAX_DEEPEN_TOOL_ROUNDS = 4
 
 DEEPEN_MODES = ('deeper', 'derive', 'eli5')
 
@@ -135,45 +132,42 @@ def read_deepen_cache(phash, mode, section_idx, ui_lang, section_hash):
     stale depth).
     """
     try:
-        from lib.database import get_thread_db
-        db = get_thread_db()
-        row = db.execute(
-            "SELECT report, meta FROM paper_reports WHERE paper_hash = ? AND lang = ?",
-            (phash, deepen_lang_key(mode, section_idx, ui_lang))).fetchone()
+        from lib.storage import get_storage_client
+        row = get_storage_client().query('paper.report.get', {
+            'paper_hash': phash,
+            'lang': deepen_lang_key(mode, section_idx, ui_lang),
+        })
     except Exception as e:
         logger.warning('[Paper:Deepen] cache read failed hash=%s: %s', phash, e)
         return None
     if not row or not row['report']:
         return None
-    try:
-        meta = json.loads(row['meta'] or '{}')
-    except (json.JSONDecodeError, TypeError) as e:
-        logger.debug('[Paper:Deepen] bad cache meta (treated as miss): %s', e)
+    meta = row.get('meta')
+    if not isinstance(meta, dict):
+        logger.debug('[Paper:Deepen] bad cache meta (treated as miss)')
         return None
     if meta.get('section_hash') != section_hash:
         logger.info('[Paper:Deepen] cache stale (report regenerated) — hash=%s '
                     'mode=%s sec=%d', phash, mode, section_idx)
         return None
     return {'content': row['report'], 'usage': meta.get('usage'),
-            'model': row.get('model') if hasattr(row, 'get') else None}
+            'model': row.get('model')}
 
 
 def _write_deepen_cache(phash, mode, section_idx, ui_lang, section_hash,
                         content, usage, model):
     try:
-        from lib.database import get_thread_db
-        from lib.database._core_schema import PAPER_REPORTS, upsert
+        from lib.storage import get_storage_client
         meta = {'kind': 'deep', 'v': 1, 'mode': mode, 'section_idx': section_idx,
                 'section_hash': section_hash, 'usage': usage}
-        db = get_thread_db()
-        upsert(db, PAPER_REPORTS, {
+        get_storage_client(write=True).command('paper.report.upsert', {
             'paper_hash': phash,
             'lang': deepen_lang_key(mode, section_idx, ui_lang),
             'report': content,
             'model': model or '',
-            'meta': json.dumps(meta, ensure_ascii=False),
+            'meta': meta,
             'created_at': int(time.time()),
-        }, retry=True)
+        }, f'paper.deepen.upsert:{uuid.uuid4().hex}')
         logger.info('[Paper:Deepen] Cached — hash=%s key=%s %d chars',
                     phash, deepen_lang_key(mode, section_idx, ui_lang), len(content))
         return True
@@ -193,52 +187,30 @@ def _accumulate_deepen_cost(phash, lang, usage, model):
     if not usage:
         return
     try:
-        from lib.database import get_thread_db
-        db = get_thread_db()
-        row = db.execute(
-            "SELECT meta FROM paper_reports WHERE paper_hash = ? AND lang = ?",
-            (phash, lang)).fetchone()
-        if not row:
-            return
-        meta = json.loads(row['meta'] or '{}')
-        passes = meta.setdefault('secondPasses', {})
-        entry = passes.setdefault('deepen', {})
-        keys = ('prompt_tokens', 'completion_tokens', 'cache_read_tokens',
-                'cache_write_tokens', 'reasoning_tokens')
-        acc = {k: int((entry.get('usage') or {}).get(k, 0)) + int(usage.get(k, 0))
-               for k in keys}
-        entry['usage'] = acc
-        entry['calls'] = int(entry.get('calls', 0)) + 1
         from lib.cost import compute_cost
-        cost = compute_cost(acc, model_id=model or meta.get('model') or '',
-                            provider_id=meta.get('providerId') or None)
-        if cost:
-            entry['costCny'] = cost.get('costCny')
-            entry['costUsd'] = cost.get('costUsd')
-        # Re-total body + Σ passes.
-        total = {k: int(meta.get(_camel(k), 0) or 0) for k in keys}
-        for p in passes.values():
-            u = (p or {}).get('usage') or {}
-            for k in keys:
-                total[k] += int(u.get(k, 0) or 0)
-        meta['totalUsage'] = total
-        tcost = compute_cost(total, model_id=model or meta.get('model') or '',
-                             provider_id=meta.get('providerId') or None)
-        if tcost:
-            meta['totalCostCny'] = tcost.get('costCny')
-            meta['totalCostUsd'] = tcost.get('costUsd')
-        db.execute(
-            "UPDATE paper_reports SET meta = ? WHERE paper_hash = ? AND lang = ?",
-            (json.dumps(meta, ensure_ascii=False), phash, lang))
+        from lib.storage import get_storage_client
+        cost = compute_cost(usage, model_id=model or '') or {}
+        command_payload = {
+            'paper_hash': phash, 'lang': lang, 'name': 'deepen',
+            'usage': usage,
+        }
+        if cost.get('costCny') is not None:
+            command_payload['costCny'] = cost['costCny']
+        if cost.get('costUsd') is not None:
+            command_payload['costUsd'] = cost['costUsd']
+        response = get_storage_client(write=True).command(
+            'paper.report.second_pass.accumulate', command_payload,
+            f'paper.deepen.cost:{uuid.uuid4().hex}')
+        updated = response.get('meta') if response.get('found') else None
+        if not isinstance(updated, dict):
+            return
+        calls = int(
+            ((updated.get('secondPasses') or {}).get('deepen') or {})
+            .get('calls', 0))
         logger.info('[Paper:Deepen] cost accumulated — hash=%s calls=%d',
-                    phash, entry['calls'])
+                    phash, calls)
     except Exception as e:
         logger.warning('[Paper:Deepen] cost accumulation failed hash=%s: %s', phash, e)
-
-
-def _camel(snake_key):
-    parts = snake_key.split('_')
-    return parts[0] + ''.join(p.title() for p in parts[1:])
 
 
 # ── Task store (mirrors qa_runtime) ──────────────────────────────────────
@@ -479,7 +451,6 @@ def _run_deepen_task(task, messages, *, paper_hash, section, ui_lang):
     try:
         _outcome = run_agent_loop(
             abort=abort_signal,
-            max_tool_rounds=_MAX_DEEPEN_TOOL_ROUNDS,
             round_tools=_FULL_REPORT_TOOLS,
             dispatch=_dispatch,
             execute_tool=_execute_tool,
@@ -545,18 +516,16 @@ def start_deepen(paper_hash, lang, mode, section_idx, paper_text, *,
       {'joined': task_dict}                    — already in flight
       {'error': (message, http_status)}        — validation failure
     """
-    from lib.database import get_thread_db
-
     if mode not in DEEPEN_MODES:
         return {'error': (f'unknown deepen mode: {mode}', 400)}
     ui_lang = ui_lang or ('zh' if lang == 'zh' else 'en')
 
     # The stored report is authoritative — never a client-supplied body.
     try:
-        db = get_thread_db()
-        row = db.execute(
-            "SELECT report FROM paper_reports WHERE paper_hash = ? AND lang = ?",
-            (paper_hash, lang)).fetchone()
+        from lib.storage import get_storage_client
+        row = get_storage_client().query('paper.report.get', {
+            'paper_hash': paper_hash, 'lang': lang,
+        })
     except Exception as e:
         logger.warning('[Paper:Deepen] report lookup failed hash=%s: %s', paper_hash, e)
         row = None
@@ -581,7 +550,6 @@ def start_deepen(paper_hash, lang, mode, section_idx, paper_text, *,
         existing = _deepen_runtime.get(existing_id) if existing_id else None
         if existing and existing['status'] in ('pending', 'running'):
             return {'joined': existing}
-        import uuid
         task_id = f'deepen_{uuid.uuid4().hex[:16]}'
         task = _new_deepen_task(task_id, paper_hash, lang, model,
                                 section_idx=section_idx, mode=mode,

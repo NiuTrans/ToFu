@@ -38,7 +38,10 @@ from lib.database._schema_sqlite._selfheal import (  # noqa: F401
     _missing_critical_columns,
     _backfill_search_fts,
 )
-from lib.database._schema_sqlite._chat import _init_chat_schema  # noqa: F401
+from lib.database._schema_sqlite._chat import (  # noqa: F401
+    _apply_chat_runtime_tuning,
+    _init_chat_schema,
+)
 from lib.database._schema_sqlite._system import _init_system_schema  # noqa: F401
 
 logger = get_logger(__name__)
@@ -87,7 +90,7 @@ def init_db(_new_connection):
         #    runtime error) we log at ERROR and CONTINUE with DDL. Schema init
         #    is a correctness contract; data heal is not.
         try:
-            from lib.paper.hash_backfill import backfill_paper_hash_canonical
+            from lib.paper_hash_backfill import backfill_paper_hash_canonical
             backfill_paper_hash_canonical(conn)
         except Exception as e:
             logger.error('[DB] paper hash backfill failed — schema init continues '
@@ -111,6 +114,7 @@ def init_db(_new_connection):
                                '— forcing full DDL migration to converge',
                                _SCHEMA_VERSION, missing, missing_tables)
             else:
+                _apply_chat_runtime_tuning(conn)
                 elapsed = time.monotonic() - t0
                 logger.info('[DB] Schema version %d + domains [%s] current — skipping '
                             'DDL (fast startup, checked in %.2fs)',

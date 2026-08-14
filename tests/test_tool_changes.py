@@ -7,6 +7,8 @@ the JS itself changed and the port needs to track it.
 
 from __future__ import annotations
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {'scripts/build.sh', 'tests/test_x.py'}
+
 import json
 import unittest
 

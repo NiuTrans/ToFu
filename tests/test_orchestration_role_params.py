@@ -18,9 +18,16 @@ Layers under test:
 
 from __future__ import annotations
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {'lib/parse.py'}
+
 import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 from lib.orchestration import (
+    MAX_LIST_ITEM_LEN, MAX_LIST_ITEMS, MAX_OBJECTIVE_LEN,
     ROLE_PARAM_SCHEMA, VALID_PARAM_KINDS, render_role_brief, role_param_schema,
     validate_definition, build_endpoint_definition, build_autopilot_definition,
 )
@@ -73,6 +80,21 @@ class SchemaWellFormednessTest(unittest.TestCase):
                         self.assertIn('value', opt, (role, opt))
                         self.assertIn('label', opt, (role, opt))
 
+    def test_field_specs_publish_the_limits_used_by_validation(self):
+        for role, schema in self._all_schemas():
+            for spec in schema:
+                if spec['kind'] in {'text', 'textarea'}:
+                    self.assertEqual(
+                        spec['maxLength'], MAX_OBJECTIVE_LEN, (role, spec),
+                    )
+                if spec['kind'] == 'list':
+                    self.assertEqual(
+                        spec['maxItems'], MAX_LIST_ITEMS, (role, spec),
+                    )
+                    self.assertEqual(
+                        spec['maxItemLength'], MAX_LIST_ITEM_LEN, (role, spec),
+                    )
+
     def test_keys_unique_within_role(self):
         for role, schema in self._all_schemas():
             keys = [s['key'] for s in schema]
@@ -106,6 +128,25 @@ class SchemaWellFormednessTest(unittest.TestCase):
         for role, key in expect.items():
             keys = [s['key'] for s in ROLE_PARAM_SCHEMA[role]]
             self.assertIn(key, keys, f'{role} missing {key}')
+
+    def test_role_contracts_have_focused_physical_owners(self):
+        facade = (ROOT / 'lib/orchestration/_roles.py').read_text()
+        axes = (ROOT / 'lib/orchestration/_role_axes.py').read_text()
+        specs = (ROOT / 'lib/orchestration/_role_specs.py').read_text()
+        personas = (ROOT / 'lib/orchestration/_role_personas.py').read_text()
+
+        self.assertIn('EXECUTION_OPTION_ORDER = {', axes)
+        self.assertNotIn('ROLE_PARAM_SCHEMA = {', axes)
+        self.assertIn('ROLE_PARAM_SCHEMA = {', specs)
+        self.assertNotIn('def role_persona(', specs)
+        self.assertIn('def role_persona(', personas)
+        self.assertIn('get_role_model_hint', personas)
+        self.assertNotIn("config.get('model_hint', 'standard')", personas)
+        self.assertNotIn('ROLE_PARAM_SCHEMA = {', personas)
+        self.assertIn('from lib.orchestration._role_axes import', facade)
+        self.assertIn('from lib.orchestration._role_specs import', facade)
+        self.assertIn('from lib.orchestration._role_personas import', facade)
+        self.assertLess(facade.count('\n'), 50)
 
 
 class BackCompatTest(unittest.TestCase):

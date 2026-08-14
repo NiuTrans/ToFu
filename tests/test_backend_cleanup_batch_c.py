@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Batch C backend-cleanup test: routes/api_v1/memory._project_path dedup.
 
-Finding: _project_path() called request.get_json(silent=True) TWICE (once in
-the `if` guard, once to read .get('project_path')). Under the sync→loop shim
-each get_json is a cross-thread hop to the event loop, so the guard doubled the
+Finding: _project_path() parsed request JSON TWICE (once in the `if` guard,
+once to read .get('project_path')). Under the sync→loop shim each parse is a
+cross-thread hop to the event loop, so the guard doubled the
 body-read cost of every memory route. Deduped to a single parse while keeping
 the JSON-body branch's precedence over the query-string branch.
 
@@ -41,11 +41,11 @@ def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
 
 
 def test_project_path_parses_body_once():
-    """Static guard: _project_path calls get_json at most ONCE (was twice)."""
+    """Static guard: _project_path calls request_json at most once."""
     src = _project_path_source()
-    n = src.count('get_json(')
-    assert n <= 1, f'_project_path should call get_json at most once, found {n}'
-    _ok(f'_project_path: get_json called {n}× (deduped from 2)')
+    n = src.count('request_json(')
+    assert n <= 1, f'_project_path should call request_json at most once, found {n}'
+    _ok(f'_project_path: request_json called {n}× (deduped from 2)')
 
 
 def test_project_path_json_branch_precedence_documented():
@@ -54,7 +54,7 @@ def test_project_path_json_branch_precedence_documented():
     src = _project_path_source()
     # Drop the docstring so prose mentions don't skew position checks.
     code = re.sub(r'""".*?"""', '', src, count=1, flags=re.S)
-    json_pos = code.find('get_json(')
+    json_pos = code.find('request_json(')
     qs_pos = code.find('decode_proxy_path_arg')
     assert json_pos != -1 and qs_pos != -1 and json_pos < qs_pos, \
         'JSON body branch must precede the query-string fallback'

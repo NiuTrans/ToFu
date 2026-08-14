@@ -28,6 +28,7 @@ Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/test_translate_noo
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 
@@ -53,6 +54,7 @@ class _FakeDB:
         self._row = (json.dumps(messages), json.dumps(settings))
         self._rev = rev
         self.updates = []          # (sql, params) of every UPDATE attempted
+        self.repository_writes = []
         self._pending = None
 
     def execute(self, sql, params=()):
@@ -77,42 +79,53 @@ def _run_noop_path(monkeypatch):
 
     pushes = []
     claims = []
-    mirrors = []
     monkeypatch.setattr('lib.push.push_event',
                         lambda channel, task_id, frame: pushes.append(
                             (channel, task_id, frame)))
     monkeypatch.setattr('lib.translate.claim_inflight',
                         lambda *a, **kw: claims.append((a, kw)) or True)
-    monkeypatch.setattr('lib.database.messages_rows.mirror_write_and_commit',
-                        lambda *a, **kw: mirrors.append((a, kw)), raising=False)
 
     zh = '这段中文回复已经是目标语言，不需要任何翻译。'
     msg = {'role': 'assistant', 'content': zh, '_msgId': 'm-noop-1'}
     db = _FakeDB(messages=[msg], settings={'autoTranslate': True})
 
+    import lib.database.conversation_repository as repo
+
+    def _load(_db, _conv_id, **_kwargs):
+        return repo.ConversationSnapshot(
+            metadata={'settings': db._row[1], 'rev': db._rev},
+            messages=json.loads(db._row[0]), source='test_repository')
+
+    def _replace(_db, _conv_id, messages, **kwargs):
+        db.repository_writes.append((copy.deepcopy(messages), dict(kwargs)))
+        if kwargs.get('expected_rev') != db._rev:
+            return repo.ConversationWriteResult(applied=False, rev=None)
+        db._row = (json.dumps(messages), db._row[1])
+        db._rev += 1
+        return repo.ConversationWriteResult(applied=True, rev=db._rev)
+
+    monkeypatch.setattr(repo, 'load_conversation', _load)
+    monkeypatch.setattr(repo, 'replace_messages', _replace)
+
     at._maybe_auto_translate_assistant('conv-noop', zh, 0, db=db, task=None)
-    return pushes, claims, mirrors, db
+    return pushes, claims, db.repository_writes, db
 
 
 def test_noop_persists_translate_done_marker(monkeypatch):
-    _pushes, _claims, mirrors, db = _run_noop_path(monkeypatch)
+    _pushes, _claims, marker_writes, _db = _run_noop_path(monkeypatch)
 
-    marker_writes = [
-        params for sql, params in db.updates
-        if '"_translateDone": true' in (params[0] if params else '')
-    ]
     assert len(marker_writes) == 1, (
         'the no-op verdict must PERSIST _translateDone:true on the message row '
         '(CAS) — reloads and the watchdog DB probe read this row'
     )
     # The marker must be a bare settle — never a fabricated translation.
-    payload = json.loads(marker_writes[0][0])
+    payload, write_options = marker_writes[0]
     assert payload[0].get('_translateDone') is True
     assert 'translatedContent' not in payload[0], (
         'a no-op must not invent translatedContent (the original IS the target)'
     )
-    # Phase-5 dual-write mirror fires for the single edited message.
-    assert mirrors, 'the single-message mirror write should accompany the CAS'
+    assert write_options['expected_rev'] == 41
+    assert write_options['changed_seqs'] == [0]
 
 
 def test_noop_pushes_terminal_frame_and_never_claims(monkeypatch):

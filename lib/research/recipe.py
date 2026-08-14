@@ -1,12 +1,12 @@
-"""lib/research/recipe.py — direction → harvest → survey → ideate (R4).
+"""lib/research/recipe.py — direction → harvest → survey → ideate → evaluate.
 
-The auto-research recipe's spine: it wires the three primitives built in
-R1–R3 (harvest / survey / ideate) into the production stage graph
+The auto-research recipe's spine wires the three generative primitives
+(harvest / survey / ideate) and an independent LLM evaluation pass into the production stage graph
 (docs/AUTO_RESEARCH_SYSTEM_DESIGN.md §4), so a single ``produce_research`` call
 runs the whole chain with checkpointed crash-resume — and each stage stays
 independently callable.
 
-Stages:  harvest → survey → ideate
+Stages:  harvest → survey → ideate → evaluate
 
 This is the FOURTH capability on the production substrate (after motion-video /
 paper-podcast / longform-report). It deliberately owns NO lifecycle machinery:
@@ -31,6 +31,9 @@ carry real schema, not in-memory globals):
       artifact produced by a SICK pipeline (e.g. the free structural gate wiped
       every idea, so nothing was ever judged) — it rides to the result body and
       makes the job settle as ``degraded`` instead of a clean ``done``.
+  * evaluate → independent rubric scores from two judges, with a third
+      tiebreaker only on material disagreement. This replaces subjective
+      manual usefulness scoring with versioned, costed experiment evidence.
 
 Every seam into R1–R3 is resolved through this module (``_harvest_batch`` /
 ``_build_survey`` / ``_generate_ideas`` / ``_search_arxiv``) so a test patches
@@ -55,6 +58,9 @@ _DEFAULT_HARVEST_N = 20
 #: A harvest must land at least this many papers or the survey has nothing to
 #: fan in — the gate fails and the stage retries.
 _MIN_HARVEST_PAPERS = 3
+# A comparison matrix is the survey's cross-paper mechanism, not decoration.
+# Permit one miss in a medium corpus, but never accept an empty/token matrix.
+_MIN_METHOD_MATRIX_COVERAGE = 0.8
 
 
 # ── Seams into R1–R3 (monkeypatchable, facade discipline) ──────────────────
@@ -71,25 +77,41 @@ def _harvest_batch(arxiv_ids, *, folder_id, user_id, abort_check=None,
                                abort_check=abort_check, on_progress=on_progress)
 
 
-def _build_survey(direction, arxiv_ids, *, lang, user_id, folder_id, abort=None):
+def _build_survey(direction, arxiv_ids, *, lang, user_id, folder_id, abort=None,
+                  on_tool_event=None):
     from lib.paper.survey import build_survey
     return build_survey(direction, arxiv_ids, lang=lang, user_id=user_id,
-                        folder_id=folder_id, abort=abort)
+                        folder_id=folder_id, abort=abort,
+                        on_tool_event=on_tool_event)
 
 
-def _generate_ideas(direction, open_gaps, *, lang, n_ideas, abort=None):
+def _generate_ideas(direction, open_gaps, *, lang, n_ideas, abort=None,
+                    on_tool_event=None):
     from lib.paper.ideate import generate_ideas
-    return generate_ideas(direction, open_gaps, lang=lang, n_ideas=n_ideas, abort=abort)
+    return generate_ideas(direction, open_gaps, lang=lang, n_ideas=n_ideas,
+                          abort=abort, on_tool_event=on_tool_event)
 
 
-def _persist_survey(direction, lang, survey_md, open_gaps):
+def _evaluate_result(direction, result, *, model=None, abort=None):
+    from lib.research.evaluation import evaluate_research_result
+    return evaluate_research_result(direction, result, model=model, abort=abort)
+
+
+def _persist_survey(direction, lang, survey_md, open_gaps, usage=None):
     from lib.research.persistence import persist_survey
-    return persist_survey(direction, lang, survey_md, open_gaps)
+    return persist_survey(direction, lang, survey_md, open_gaps, usage=usage)
 
 
 def _persist_ideate(direction, lang, artifact):
     from lib.research.persistence import persist_ideate
     return persist_ideate(direction, lang, artifact)
+
+
+def _aggregate_usage(survey_usage: dict, ideate_usage: dict,
+                     evaluate_usage: dict | None = None) -> dict:
+    """Fold stage snapshots without reimplementing per-call token pricing."""
+    from lib.research.telemetry import aggregate_research_usage
+    return aggregate_research_usage(survey_usage, ideate_usage, evaluate_usage)
 
 
 # ── Stage: harvest ─────────────────────────────────────────────────────────
@@ -145,21 +167,26 @@ def _run_survey(ctx: dict) -> dict:
     artifact — the stage data contract, not an in-memory global.
     """
     h = ctx['artifacts']['harvest']
-    res = _build_survey(ctx['direction'], h['arxiv_ids'], lang=ctx.get('lang', 'en'),
-                        user_id=ctx.get('user_id', 1), folder_id=h['folder_id'],
-                        abort=ctx.get('abort'))
+    kwargs = dict(lang=ctx.get('lang', 'en'), user_id=ctx.get('user_id', 1),
+                  folder_id=h['folder_id'], abort=ctx.get('abort'))
+    # Keep the monkeypatch seam backward-compatible for offline graph tests;
+    # real jobs always carry the stage runner's event sink.
+    if ctx.get('emit') is not None:
+        kwargs['on_tool_event'] = ctx['emit']
+    res = _build_survey(ctx['direction'], h['arxiv_ids'], **kwargs)
     if not res.get('ok'):
         # Surface as an exception so the stage retries / fails loudly.
         raise RuntimeError(f'survey failed: {res.get("error")}')
     art = {'open_gaps': res['open_gaps'], 'survey_md': res['survey_md'],
            'inputs_used': res.get('inputs_used', 0),
-           'citation_audit': res.get('citation_audit')}
+           'citation_audit': res.get('citation_audit'),
+           'usage': res.get('usage') or {}}
     # Durable BEFORE the checkpoint: the task registry is in-memory with a TTL,
     # so without this the survey vanishes ~2h after the run (and instantly on a
     # restart). Never raises — a storage fault must not discard a finished
     # survey (see lib/research/persistence.py).
     _persist_survey(ctx['direction'], ctx.get('lang', 'en'), art['survey_md'],
-                    art['open_gaps'])
+                    art['open_gaps'], art['usage'])
     return art
 
 
@@ -167,6 +194,20 @@ def _gate_survey(ctx: dict, art: dict) -> list:
     gm = art.get('open_gaps') or {}
     if not gm.get('open_gaps'):
         return ['survey produced no open gaps — nothing for ideate to solve']
+    surveyed = {str(value).strip() for value in
+                (gm.get('surveyed_arxiv_ids') or []) if str(value).strip()}
+    if surveyed:
+        import math
+        from lib.paper.arxiv import normalize_arxiv_id
+        surveyed = {normalize_arxiv_id(value) for value in surveyed}
+        covered = {normalize_arxiv_id(row.get('paper')) for row in
+                   (gm.get('method_matrix') or []) if isinstance(row, dict)}
+        covered.discard('')
+        count = len(surveyed & covered)
+        required = max(1, math.ceil(len(surveyed) * _MIN_METHOD_MATRIX_COVERAGE))
+        if count < required:
+            return [f'method_matrix covers only {count}/{len(surveyed)} surveyed '
+                    f'paper(s); at least {required} are required for cross-paper synthesis']
     return []
 
 
@@ -179,12 +220,16 @@ def _run_ideate(ctx: dict) -> dict:
     checkpointed artifact.
     """
     s = ctx['artifacts']['survey']
-    res = _generate_ideas(ctx['direction'], s['open_gaps'], lang=ctx.get('lang', 'en'),
-                          n_ideas=ctx.get('n_ideas', 6), abort=ctx.get('abort'))
+    kwargs = dict(lang=ctx.get('lang', 'en'), n_ideas=ctx.get('n_ideas', 6),
+                  abort=ctx.get('abort'))
+    if ctx.get('emit') is not None:
+        kwargs['on_tool_event'] = ctx['emit']
+    res = _generate_ideas(ctx['direction'], s['open_gaps'], **kwargs)
     if not res.get('ok'):
         raise RuntimeError(f'ideate failed: {res.get("error")}')
     art = {'accepted': res['accepted'], 'rejected': res['rejected'],
            'threshold': res['threshold'],
+           'usage': res.get('usage') or {},
            # How deep the gate actually got ('accepted' | 'rubric' | 'structural' |
            # 'none') — a bare accepted-count cannot tell an honest 宁缺毋滥 zero
            # from a pipeline that killed everything before judging.
@@ -214,25 +259,80 @@ def _gate_ideate(ctx: dict, art: dict) -> list:
     return []
 
 
+# ── Stage: evaluate ────────────────────────────────────────────────────────
+
+def _run_evaluate(ctx: dict) -> dict:
+    """Score the frozen survey/idea artifact without mutating its gate.
+
+    Evaluation is observability, not another source of expensive artifact
+    loss. Any unexpected judge/provider failure is committed as an explicit
+    degraded evaluation so harvest/survey/ideate remain resumable and visible.
+    """
+    harvest = ctx['artifacts']['harvest']
+    survey = ctx['artifacts']['survey']
+    ideate = ctx['artifacts']['ideate']
+    frozen = {
+        'corpus_arxiv_ids': list(harvest.get('arxiv_ids') or []),
+        'survey_md': survey.get('survey_md') or '',
+        'open_gaps': survey.get('open_gaps') or {},
+        'accepted': list(ideate.get('accepted') or []),
+        'rejected': list(ideate.get('rejected') or []),
+        'threshold': ideate.get('threshold'),
+        'gate_reached': ideate.get('gate_reached'),
+    }
+    try:
+        evaluation = _evaluate_result(
+            ctx['direction'], frozen, model=ctx.get('evaluation_model'),
+            abort=ctx.get('abort'))
+        if not isinstance(evaluation, dict):
+            raise TypeError('evaluator returned a non-object result')
+    except Exception as exc:
+        logger.error('[Research:evaluate] evaluator unavailable: %s', exc,
+                     exc_info=True)
+        evaluation = {
+            'ok': False, 'schema_version': 1, 'judge_count': 0,
+            'attempted_judges': 0, 'scores': {}, 'overall_score': None,
+            'worth_following_up': False, 'consensus': 'unavailable',
+            'strengths': [], 'failure_modes': [], 'recommended_changes': [],
+            'verdict': '', 'judges': [],
+            'errors': [f'{type(exc).__name__}: {exc}'],
+            'degraded': True,
+            'degraded_reason': 'LLM evaluation unavailable',
+            'usage': {}, 'tiebreaker_used': False,
+        }
+
+    # The ideate row is the durable research-decision record. Upsert it again
+    # with the evaluation attached; this is idempotent and does not create a
+    # third schema/key family.
+    _persist_ideate(ctx['direction'], ctx.get('lang', 'en'), {
+        **ideate, 'evaluation': evaluation,
+    })
+    return evaluation
+
+
 # ── Stage graph + runner ───────────────────────────────────────────────────
 
 def research_recipe_stages() -> list:
-    """The ordered research stage graph. Static (unlike longform) — three
+    """The ordered research stage graph. Static (unlike longform) — four
     fixed stages; the data-dependent fan-out lives INSIDE harvest/survey."""
     return [
         Stage('harvest', _run_harvest, gate=_gate_harvest, retry=1),
-        Stage('survey', _run_survey, gate=_gate_survey, retry=1),
-        Stage('ideate', _run_ideate, gate=_gate_ideate, retry=1),
+        Stage('survey', _run_survey, gate=_gate_survey, retry=1,
+              checkpoint_version='comparison-matrix-v2'),
+        Stage('ideate', _run_ideate, gate=_gate_ideate, retry=1,
+              checkpoint_version='causal-mechanism-v2'),
+        Stage('evaluate', _run_evaluate, checkpoint_version='llm-judge-v1'),
     ]
 
 
 def build_research_from_direction(direction: str, workdir: str, *, lang: str = 'en',
                                   user_id: int = 1, n_ideas: int = 6,
                                   seed_arxiv_ids=None, harvest_n: int = _DEFAULT_HARVEST_N,
-                                  abort_event=None, emit=None) -> dict:
-    """Run harvest → survey → ideate for a direction; return the ideate result.
+                                  abort_event=None, emit=None,
+                                  evaluation_model: str | None = None) -> dict:
+    """Run harvest → survey → ideate → evaluate for one direction.
 
-    One pass over a static three-stage graph, checkpointed: a process killed
+    One pass over a static four-stage graph, checkpointed: a process killed
     mid-graph resumes at the first unfinished stage (harvest papers already in
     the shelf, and a survey/ideate artifact already committed, are never
     redone).
@@ -254,7 +354,9 @@ def build_research_from_direction(direction: str, workdir: str, *, lang: str = '
         'direction': direction, 'workdir': workdir, 'lang': lang,
         'user_id': user_id, 'n_ideas': n_ideas, 'folder_id': folder_id,
         'seed_arxiv_ids': list(seed_arxiv_ids or []), 'harvest_n': harvest_n,
+        'evaluation_model': evaluation_model,
         'abort_event': abort_event,
+        'emit': emit,
         'abort': (lambda: bool(abort_event is not None and abort_event.is_set())),
         'abort_check': (lambda: bool(abort_event is not None and abort_event.is_set())),
     }
@@ -266,6 +368,7 @@ def build_research_from_direction(direction: str, workdir: str, *, lang: str = '
     ideate = artifacts.get('ideate') or {}
     survey = artifacts.get('survey') or {}
     harvest = artifacts.get('harvest') or {}
+    evaluation = artifacts.get('evaluate') or {}
     out = {
         'direction': direction, 'lang': lang, 'folder_id': folder_id,
         'accepted': ideate.get('accepted', []),
@@ -277,8 +380,20 @@ def build_research_from_direction(direction: str, workdir: str, *, lang: str = '
         'harvested': harvest.get('harvested', 0),
         'cache_hits': harvest.get('cache_hits', 0),
         'corpus_size': len(harvest.get('arxiv_ids') or []),
+        'corpus_arxiv_ids': list(harvest.get('arxiv_ids') or []),
+        'evaluation': evaluation,
+        'usage': _aggregate_usage(survey.get('usage') or {},
+                                  ideate.get('usage') or {},
+                                  evaluation.get('usage') or {}),
     }
     if ideate.get('degraded'):
         out['degraded'] = True
         out['degraded_reason'] = ideate.get('degraded_reason') or 'pipeline degraded'
+    if evaluation.get('degraded'):
+        reason = evaluation.get('degraded_reason') or 'LLM evaluation degraded'
+        out['degraded'] = True
+        if out.get('degraded_reason'):
+            out['degraded_reason'] += f'; {reason}'
+        else:
+            out['degraded_reason'] = reason
     return out

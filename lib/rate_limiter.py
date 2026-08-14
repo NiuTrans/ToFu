@@ -12,7 +12,7 @@ gunicorn / uWSGI with N>1 workers.  See PR3c notes and
 import asyncio
 from functools import wraps
 
-from flask import request
+from quart import request
 
 from lib.log import audit_log, get_logger
 from lib.rate_limit_store import get_store

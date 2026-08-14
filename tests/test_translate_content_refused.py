@@ -214,10 +214,11 @@ def _frontend_missing(i18n_src: str, labels_src: str) -> list[str]:
 
 
 def test_frontend_vertical_keys_present():
-    with open(os.path.join(ROOT, 'static', 'js', 'i18n.js'), encoding='utf-8') as f:
-        i18n_src = f.read()
-    with open(os.path.join(ROOT, 'static', 'js', 'core', 'error_envelope.js'),
+    with open(os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales', 'zh.json'),
               encoding='utf-8') as f:
+        i18n_src = f.read()
+    from tests._runtime_sections import runtime_section_path
+    with open(runtime_section_path('core/error_envelope.js'), encoding='utf-8') as f:
         labels_src = f.read()
     missing = _frontend_missing(i18n_src, labels_src)
     assert not missing, 'frontend vertical incomplete:\n  ' + '\n  '.join(missing)

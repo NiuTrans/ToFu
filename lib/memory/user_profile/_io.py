@@ -10,28 +10,26 @@ layer consumes.
 
 from __future__ import annotations
 
-import os
-
 from lib.log import audit_log, get_logger
 
 from lib.memory.user_profile._paths import profile_path
 
 logger = get_logger(__name__)
 
-# Hard byte/char cap on the profile body. ~800 tokens of dense English prose
-# ≈ 2.5 KB; we cap on CHARS (cheap, exact, language-agnostic). Past this the
-# consolidation pass must distil rather than grow. Kept as a module constant
-# (not env-tunable) — the cap is the whole point of the design.
+# Hard byte/char cap on My Context. ~800 tokens of dense English prose ≈ 2.5
+# KB; we cap on CHARS (cheap, exact, language-agnostic). New writes are rejected
+# as a unit when they exceed it, so the model never silently rewrites or drops
+# a user's durable facts.
 USER_PROFILE_CHAR_CAP = 2500
 
 # Marker so the injection-side idempotency probe can detect an already-present
 # block, and so we never confuse the profile reminder with CLAUDE.md.
-_PROFILE_MARKER = '[USER PREFERENCE PROFILE]'
+_PROFILE_MARKER = '[USER CONTEXT]'
 
 # Distinct marker for the relevance-gated DETAIL tier (rendered as its own
 # cache-safe block, separate from the always-on core). Kept separate so the
 # injection-side idempotency probes for core vs detail never collide.
-_PROFILE_DETAIL_MARKER = '[USER PREFERENCE PROFILE — relevant detail]'
+_PROFILE_DETAIL_MARKER = '[USER CONTEXT — relevant detail]'
 
 # Section headers (case-insensitive, normalised) whose bullets form the
 # ALWAYS-ON core tier — work-style / standing instructions that should be in
@@ -40,7 +38,8 @@ _PROFILE_DETAIL_MARKER = '[USER PREFERENCE PROFILE — relevant detail]'
 # is the DETAIL tier, surfaced only when relevant to the current turn. A
 # header-less bullet (no preceding ``##``) defaults to core, since an unsorted
 # standing instruction is safer always-on than silently dropped.
-_CORE_HEADERS = frozenset({'preferences'})
+_CORE_HEADERS = frozenset({'preferences', 'response preferences',
+                           'about the user', 'work rules'})
 
 
 def load_profile(scope: str = '') -> str:
@@ -49,14 +48,12 @@ def load_profile(scope: str = '') -> str:
     Never raises — a read failure degrades to an empty profile (the feature
     is advisory; a missing/broken profile must never block a turn).
     """
-    path = profile_path(scope)
     try:
-        if not os.path.isfile(path):
-            return ''
-        with open(path, encoding='utf-8') as f:
-            return f.read().strip()
-    except OSError as e:
-        logger.warning('[UserProfile] read failed (%s): %s', path, e)
+        from lib.memory.user_profile._context import legacy_profile_body
+        return legacy_profile_body(scope)
+    except Exception as e:
+        logger.warning('[UserProfile] structured read failed (%s): %s',
+                       profile_path(scope), e)
         return ''
 
 
@@ -75,46 +72,31 @@ def profile_over_cap(body: str | None = None, scope: str = '') -> bool:
 def save_profile(body: str, scope: str = '') -> dict:
     """Persist the *scope*'s profile body atomically. Returns a status dict.
 
-    The body is stored verbatim (markdown). We do NOT silently truncate at
-    the cap — truncation mid-sentence corrupts meaning — instead we persist
-    and FLAG ``over_cap`` so the consolidation pass (layer 3) knows it must
-    distil on the next pass. Empty/whitespace body deletes the file (a user
-    clearing their profile should leave no stale block).
+    The legacy Markdown body is translated into structured My Context. Writes
+    over the hard cap are rejected rather than truncated or model-distilled.
+    Empty/whitespace input clears the document.
 
     Returns ``{'path', 'chars', 'over_cap', 'saved': bool}``.
     """
-    from lib.json_store import write_text_atomic
-
     path = profile_path(scope)
     body = (body or '').strip()
-
-    if not body:
-        # Clearing the profile — remove the file so nothing is injected.
-        try:
-            if os.path.isfile(path):
-                os.remove(path)
-                logger.info('[UserProfile] cleared (file removed): %s', path)
-        except OSError as e:
-            logger.warning('[UserProfile] clear failed (%s): %s', path, e)
-        return {'path': path, 'chars': 0, 'over_cap': False, 'saved': True}
-
-    over = len(body) > USER_PROFILE_CHAR_CAP
-    if over:
-        logger.warning('[UserProfile] body %d chars exceeds cap %d — saved '
-                       'anyway; consolidation pass must distil',
-                       len(body), USER_PROFILE_CHAR_CAP)
-
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        write_text_atomic(path, body + '\n')
-    except OSError as e:
-        logger.error('[UserProfile] save failed (%s): %s', path, e,
+        from lib.memory.user_profile._context import (
+            legacy_items_to_context,
+            save_context_items,
+        )
+        structured = legacy_items_to_context(parse_items(body)) if body else []
+        res = save_context_items(structured, scope, enforce_cap=True)
+    except Exception as e:
+        logger.error('[UserProfile] structured save failed (%s): %s', path, e,
                      exc_info=True)
-        return {'path': path, 'chars': len(body), 'over_cap': over,
+        return {'path': path, 'chars': len(body),
+                'over_cap': len(body) > USER_PROFILE_CHAR_CAP,
                 'saved': False}
-
-    audit_log('user_profile_saved', chars=len(body), over_cap=over)
-    return {'path': path, 'chars': len(body), 'over_cap': over, 'saved': True}
+    res['path'] = path
+    audit_log('user_profile_saved', chars=res['chars'],
+              over_cap=res['over_cap'])
+    return res
 
 
 # ── Structured per-item view (for the settings UI) ──

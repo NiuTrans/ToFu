@@ -121,6 +121,7 @@ def test_conclude_run_writes_authoritative_stopped_record(monkeypatch):
     writes the BACKEND-AUTHORITATIVE concluded(stopped) record, and clears the
     run pin so the next run is fresh."""
     import lib.tasks_pkg.autopilot as ap
+    import lib.tasks_pkg.autopilot_run_lifecycle as lifecycle
     # Seed a conv whose settings pin a live run id + carry a VU turn stamp.
     state = {'settings': json.dumps({'autopilotRunId': 'ar-live'}),
              'messages': json.dumps([
@@ -151,6 +152,10 @@ def test_conclude_run_writes_authoritative_stopped_record(monkeypatch):
     monkeypatch.setattr(_db, 'db_execute_with_retry', _fake_retry)
     monkeypatch.setattr(_ss, 'get_thread_db', lambda domain: _FakeDB())
     monkeypatch.setattr(_ss, 'db_execute_with_retry', _fake_retry)
+    # Isolate the repository-backed resolver; its behavior is covered by the
+    # focused resolver tests, while this test owns close-out persistence.
+    monkeypatch.setattr(lifecycle, '_resolve_recent_run_id',
+                        lambda conv_id: 'ar-live')
 
     rec = ap.conclude_run('conv-live', reason='stopped')
     assert rec is not None

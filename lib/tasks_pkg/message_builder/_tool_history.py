@@ -168,6 +168,8 @@ def inject_tool_history(messages, cfg, task, model):
                     'replayed tool_call (%s) since provider does not require it',
                     tid, conv_id_short, model, tc.get('name', '?'),
                 )
+            if isinstance(tc.get('caller'), dict):
+                tc_entry['caller'] = dict(tc['caller'])
             built_tool_calls.append(tc_entry)
 
         # Build assistant message with tool_calls
@@ -215,11 +217,19 @@ def inject_tool_history(messages, cfg, task, model):
         for tc in tc_list:
             tc_id = tc['id']
             tc_content = tr_by_id.get(tc_id, f'[Tool result lost for {tc["name"]}]')
-            injected_msgs.append({
+            tool_result = {
                 'role': 'tool',
                 'tool_call_id': tc_id,
                 'content': tc_content,
-            })
+            }
+            caller = tc.get('caller')
+            if not isinstance(caller, dict):
+                matching = next((tr for tr in tr_list
+                                 if tr.get('tool_call_id') == tc_id), None)
+                caller = matching.get('caller') if matching else None
+            if isinstance(caller, dict):
+                tool_result['caller'] = dict(caller)
+            injected_msgs.append(tool_result)
         injected += 1
 
     if injected_msgs:

@@ -1,7 +1,8 @@
-"""lib/database/_core.py — Dual-backend database layer (PostgreSQL primary, SQLite fallback).
+"""Legacy in-process database facade during migration to ``storage.v1``.
 
-Tries PostgreSQL first (full concurrency, JSONB, tsvector). If PG is unavailable
-(no binary, no psycopg2, bootstrap failure), falls back to SQLite with WAL mode.
+SQLite defaults and PostgreSQL is explicitly selected; either selection fails
+closed. This module is not a permanent connection owner: repositories migrate
+to the process-isolated Storage Sidecar before production cutover.
 
 All sub-concerns for PG:
   _sql_translate.py  — SQL compatibility translation (regex, cache)
@@ -18,9 +19,12 @@ This file retains:
 """
 
 import atexit
+from contextlib import contextmanager
 import json
 import os
+import re
 import sqlite3
+import sys
 import threading
 import time
 import traceback
@@ -34,22 +38,35 @@ logger = get_logger(__name__)
 def _get_g():
     """Return the request-context global object, resolved LAZILY.
 
-    Why not ``from flask import g`` at module top: ``server.py`` installs a
-    Flask→Quart shim (``sys.modules['flask'] = quart``) at boot. A
-    module-level ``from flask import g`` binds ``g`` at import time, so if
+    Why not ``from quart import g`` at module top: request context proxies are
+    bound to the current async context. A
+    module-level ``from quart import g`` binds ``g`` at import time, so if
     this module is imported BEFORE the shim runs (common in unit tests that
     pull ``lib.database`` transitively), ``g`` is permanently bound to
-    REAL Flask's proxy. The teardown handler below then touches that stale
+    an inactive Quart proxy. The teardown handler below then touches it
     proxy under a Quart app context and raises
     ``RuntimeError: Working outside of application context`` — and, because
     the binding is process-global, it poisons every later server-backed
     test in the same pytest run. Importing ``g`` at call time always yields
-    whatever ``flask`` currently resolves to (the shim's quart, in the app;
-    real flask if genuinely unshimmed), so the proxy matches the live
-    context. See .tofu/memories/test-server-shim-load-order.md.
+    the live Quart proxy, so it matches the active context.
     """
-    from flask import g
+    from quart import g
     return g
+
+
+def _has_app_context():
+    """Whether this execution context owns a Flask/Quart ``g`` object.
+
+    Resolve lazily for the same shim-order reason as :func:`_get_g`. Plain
+    worker threads and early bootstrap paths simply retain the historical
+    thread-local connection behaviour.
+    """
+    try:
+        from quart import has_app_context
+        return bool(has_app_context())
+    except (ImportError, RuntimeError) as exc:
+        logger.debug('[DB] app-context probe unavailable: %s', exc)
+        return False
 
 # ── Per-namespace log leveling ──────────────────────────────────────────
 # The database layer logs genuine failures (SQL errors, failed commits,
@@ -59,6 +76,24 @@ def _get_g():
 # flipping the whole app to DEBUG. Accepts a standard level name
 # (DEBUG/INFO/WARNING/ERROR) or numeric value; invalid values are ignored.
 from lib.env_compat import getenv_compat  # noqa: E402
+
+
+def _bounded_env_int(name, default, minimum, maximum):
+    """Read an integer knob without allowing a typo to brick DB import."""
+    raw = getenv_compat(name, default=str(default))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning('[DB] Invalid %s=%r; using %d', name, raw, default)
+        return default
+    if value < minimum or value > maximum:
+        clamped = min(max(value, minimum), maximum)
+        logger.warning('[DB] %s=%s outside [%d, %d]; clamped to %d',
+                       name, value, minimum, maximum, clamped)
+        return clamped
+    return value
+
+
 _DB_LOG_LEVEL = getenv_compat('TOFU_DB_LOG_LEVEL', default='').strip().upper()
 if _DB_LOG_LEVEL:
     import logging as _logging
@@ -78,10 +113,8 @@ if _DB_LOG_LEVEL:
 # Slow-query threshold (milliseconds). Any statement whose execute() exceeds
 # this is logged at WARNING with the (truncated) SQL — invaluable for tracing
 # contention/lock waits. Set to 0 to disable. Default 2000 ms.
-try:
-    _SLOW_QUERY_MS = int(getenv_compat('TOFU_DB_SLOW_QUERY_MS', default='2000'))
-except (ValueError, TypeError) as e:
-    logger.debug('[DB] Invalid TOFU_DB_SLOW_QUERY_MS, defaulting to 2000ms: %s', e)
+_SLOW_QUERY_MS = _bounded_env_int(
+    'TOFU_DB_SLOW_QUERY_MS', 2000, 0, 3_600_000)
 # ── Opt-in SQL-error log suppression ─────────────────────────────────────
 # Some callers run a query that is EXPECTED to fail as part of normal control
 # flow — e.g. an existence probe for a table that may not be created yet
@@ -205,9 +238,6 @@ class suppress_sql_error_log:
         _sql_log_local.suppress = self._prev
         return False
 
-
-    _SLOW_QUERY_MS = 2000
-
 # ═══════════════════════════════════════════════════════════════════════
 #  Backend Detection
 # ═══════════════════════════════════════════════════════════════════════
@@ -216,22 +246,47 @@ class suppress_sql_error_log:
 _BACKEND = 'sqlite'  # default, upgraded to 'pg' below if possible
 
 
-def _require_pg() -> bool:
-    """True when the deployment has declared PG mandatory (Epic D1).
+def _selected_backend() -> str:
+    """Resolve the one exact backend selector; invalid values fail closed."""
+    backend = (os.environ.get('TOFU_DB_BACKEND') or 'sqlite').strip().lower()
+    if backend not in {'sqlite', 'postgres'}:
+        raise RuntimeError(
+            'TOFU_DB_BACKEND must be exactly sqlite or postgres; refusing '
+            'backend inference or fallback')
+    return backend
 
-    Reads ``TOFU_REQUIRE_PG`` at call time. When True, the DB bootstrap must
-    fail-CLOSED rather than degrade to the write-serializing SQLite fallback.
+
+def _pg_explicitly_selected() -> bool:
+    return _selected_backend() == 'postgres'
+
+
+def _require_pg() -> bool:
+    """Compatibility predicate backed only by the canonical selector."""
+    return _pg_explicitly_selected()
+
+
+def _assert_sqlite_fallback_has_no_pg_history(has_pg_history: bool,
+                                               pgdata: str = '') -> None:
+    """Refuse a SQLite fallback when recoverable PostgreSQL history exists.
+
+    Serving an unrelated SQLite file is data divergence, even for a
+    single-user deployment.  Fresh hosts with no PG history still fall back to
+    zero-config SQLite exactly as before.
     """
-    from lib.env_compat import getenv_compat as _ge
-    return (_ge('TOFU_REQUIRE_PG', default='') or '').strip().lower() in ('1', 'true', 'yes')
+    if not has_pg_history:
+        return
+    raise RuntimeError(
+        f'PostgreSQL history exists at {pgdata or "the configured data root"} '
+        'but PostgreSQL is unavailable — refusing to serve a divergent SQLite '
+        'database. Recover PostgreSQL or complete a verified PG-to-SQLite '
+        'migration first.')
 
 
 def _pg_require_wait_s() -> float:
     """Bounded seconds to wait for PG to come up before fail-closing.
 
-    Returns 0.0 unless ``TOFU_REQUIRE_PG`` is set — a single-box / PG-optional
-    boot must add ZERO latency and stay byte-identical to today. When PG is
-    mandatory, default to 60s (tunable via ``TOFU_PG_REQUIRE_WAIT_S``), because
+    Returns 0.0 unless PostgreSQL is the exact selected backend. For that
+    selection, default to 60s (tunable via ``TOFU_PG_REQUIRE_WAIT_S``), because
     on a self-triggered re-exec the app-owned postmaster is torn down with the
     old process and returns within seconds; a single 5s probe that then aborts
     turns that transient race into a hard boot failure."""
@@ -279,24 +334,20 @@ def _retry_until(attempt, deadline_s: float, *, sleep=None, monotonic=None,
 
 
 def _assert_pg_available_or_raise(pg_ok: bool, pgdata: str = '') -> None:
-    """Epic D1: if PG is mandatory (``TOFU_REQUIRE_PG``) but unavailable,
-    raise instead of falling back to SQLite. Pure + testable — the module-load
-    guard delegates here. No-op when PG is available or the flag is unset (so
-    the single-box SQLite fallback is byte-identical)."""
+    """Fail closed when the exact selected PostgreSQL backend is unavailable."""
     if pg_ok or not _require_pg():
         return
     try:
         from lib.log import audit_log
         audit_log('pg_required_but_unavailable', pgdata=pgdata)
     except Exception as _ae:
-        logger.debug('[DB] audit_log for TOFU_REQUIRE_PG failed: %s', _ae)
+        logger.debug('[DB] audit_log for selected PostgreSQL failed: %s', _ae)
     logger.critical(
-        '[DB] TOFU_REQUIRE_PG=1 but PostgreSQL is unavailable — REFUSING to '
-        'start on the SQLite fallback (it serializes all writes under one file '
-        'lock and cannot serve a scaled deployment). Provision/repair PG '
-        '(see logs/postgresql.log) or unset TOFU_REQUIRE_PG for single-box.')
+        '[DB] PostgreSQL is required/selected but unavailable — REFUSING to '
+        'start or switch to SQLite. Provision/repair the selected PG backend '
+        '(see logs/storage-postgresql.log) or explicitly select SQLite before startup.')
     raise RuntimeError(
-        'TOFU_REQUIRE_PG=1 and PostgreSQL is unavailable — refusing to fall '
+        'PostgreSQL is explicitly required/selected and unavailable — refusing to fall '
         'back to SQLite for a scale-declared deployment.')
 
 
@@ -320,9 +371,20 @@ _DEFAULT_DB_FILE = os.path.join(_DB_DIR, 'tofu.db')
 _explicit_db_path = getenv_compat('TOFU_DB_PATH', default='')
 DB_PATH = _explicit_db_path or _DEFAULT_DB_FILE
 
+# Install before route/plugin discovery. The interposer starts with this exact
+# authority path; data-layer repositories may register auxiliary authorities
+# later. Unregistered dependency-private SQLite files remain available.
+from lib.database.sqlite_driver_guard import (  # noqa: E402
+    allow_sqlite_driver_connection,
+    install_sqlite_driver_guard,
+)
+if (os.environ.get('TOFU_SERVER_PROCESS') == '1'
+        and 'pytest' not in sys.modules):
+    install_sqlite_driver_guard(DB_PATH)
+
 # PostgreSQL config
 PG_HOST = getenv_compat('TOFU_PG_HOST', default='127.0.0.1')
-PG_PORT = int(getenv_compat('TOFU_PG_PORT', default='15432'))
+PG_PORT = _bounded_env_int('TOFU_PG_PORT', 15432, 0, 65535)
 # Default DB name is now ``tofu``. Live deployments still using the old
 # ``chatui`` DB must run ``pg_dump chatui | psql tofu`` (or set
 # ``TOFU_PG_DBNAME=chatui`` to keep the existing database in place
@@ -349,7 +411,8 @@ DOMAIN_SYSTEM = 'system'
 
 _CONNECT_TIMEOUT_S = 5
 _STATEMENT_TIMEOUT_MS = 120_000
-_IDLE_IN_TRANSACTION_S = 300
+_IDLE_IN_TRANSACTION_S = _bounded_env_int(
+    'TOFU_DB_IDLE_IN_TRANSACTION_S', 120, 30, 3600)
 
 
 def _pg_via_pooler():
@@ -382,7 +445,7 @@ def _pg_session_setup_plan(via_pooler):
     # Carry the SAME units as the legacy SET SESSION so the enforced timeouts
     # are identical — only the delivery mechanism changes. libpq's default unit
     # for these GUCs is ms, so idle_in_transaction MUST keep its 's' suffix
-    # (a bare 300 would mean 300ms, not 300s).
+    # (a bare 120 would mean 120ms, not 120s).
     options = (f'-c statement_timeout={_STATEMENT_TIMEOUT_MS}ms '
                f'-c idle_in_transaction_session_timeout={_IDLE_IN_TRANSACTION_S}s')
     return {'emit_set_session': False, 'options': options}
@@ -430,15 +493,16 @@ _MAX_CONN_AGE_S = 600
 # reaper reclaims any parked connection automatically. The owning thread's
 # next get_thread_db() health-check reconnects transparently. Set to 0 to
 # disable. Override via TOFU_DB_IDLE_RELEASE_S.
-_IDLE_RELEASE_S = int(getenv_compat('TOFU_DB_IDLE_RELEASE_S', default='120'))
+_IDLE_RELEASE_S = _bounded_env_int(
+    'TOFU_DB_IDLE_RELEASE_S', 120, 0, 86_400)
 
 # Maximum total application-side connections (semaphore-guarded).
-# Default 1000 to support 1000 concurrent DB users out of the box. The PG
-# server's own ``max_connections`` is provisioned higher than this (see
-# _MANAGED_PG_MAX_CONNECTIONS in lib/database/_bootstrap.py) so the app-side
-# semaphore — not PG's hard limit — is always the binding constraint, and an
-# overload surfaces as a clean queue/timeout instead of a PG "too many
-# clients" FATAL. Tunable via env for smaller / larger deployments.
+# Tofu's zero-config contract is a personal, single-process server, so the
+# default is intentionally modest. Hundreds of mostly-idle backends make a
+# one-user restart storm *less* reliable (more memory, locks and context
+# switching) and historically hid thread-local leaks. Multi-user operators can
+# raise the explicit env knob; overload still surfaces as a clean 503 rather
+# than PostgreSQL's hard "too many clients" FATAL.
 
 
 def _pool_knob(name, default):
@@ -489,8 +553,26 @@ def _pool_knob(name, default):
     return env_val if env_val is not None else default
 
 
-_MAX_TOTAL_CONNS = int(_pool_knob('TOFU_DB_MAX_CONNS', default='1000'))
-_CONN_ACQUIRE_TIMEOUT_S = int(_pool_knob('TOFU_DB_ACQUIRE_TIMEOUT', default='30'))
+def _bounded_pool_int(name, default, *, minimum, maximum):
+    """Parse a pool knob without allowing bad config to brick startup."""
+    raw = _pool_knob(name, default=str(default))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning('[DB] Invalid %s=%r — using %d', name, raw, default)
+        value = default
+    if value < minimum or value > maximum:
+        clamped = min(max(value, minimum), maximum)
+        logger.warning('[DB] %s=%s outside safe range [%d, %d] — clamped to %d',
+                       name, value, minimum, maximum, clamped)
+        value = clamped
+    return value
+
+
+_MAX_TOTAL_CONNS = _bounded_pool_int(
+    'TOFU_DB_MAX_CONNS', 64, minimum=4, maximum=4096)
+_CONN_ACQUIRE_TIMEOUT_S = _bounded_pool_int(
+    'TOFU_DB_ACQUIRE_TIMEOUT', 8, minimum=1, maximum=300)
 _conn_semaphore = threading.BoundedSemaphore(_MAX_TOTAL_CONNS)
 _conn_count = 0
 _conn_count_lock = threading.Lock()
@@ -562,7 +644,8 @@ _PG_ZOMBIE_SIGNATURES = (
     'could not open shared memory segment',
 )
 
-_PG_REBOOT_COOLDOWN_S = int(getenv_compat('TOFU_PG_REBOOT_COOLDOWN_S', default='60'))
+_PG_REBOOT_COOLDOWN_S = _bounded_env_int(
+    'TOFU_PG_REBOOT_COOLDOWN_S', 60, 0, 3600)
 # Exponential backoff: consecutive FAILED reboot attempts escalate the
 # cooldown so a persistent issue (e.g. WAL corruption, another host
 # stomping on our pgdata) doesn't spam pg_ctl start / postgresql.log
@@ -838,6 +921,15 @@ class _SqliteDictRow:
         return self._data.get(key, default)
 
 
+class SQLiteWriteDisciplineError(RuntimeError):
+    """A write attempted outside the data layer's SQLite transaction rules.
+
+    This is deliberately distinct from ``sqlite3.OperationalError``: callers
+    must fix the transaction boundary instead of retrying an operation whose
+    WAL snapshot can no longer be upgraded safely.
+    """
+
+
 class _SqliteCursorWrapper:
     """Wraps a sqlite3 cursor to return DictRow objects."""
 
@@ -848,19 +940,30 @@ class _SqliteCursorWrapper:
         self.rowcount = 0
 
     def execute(self, sql, params=None):
+        from lib.database._access_policy import enforce_sql_access
+        enforce_sql_access(sql)
         _t0 = time.monotonic()
+        _is_write = _sqlite_statement_is_write(sql)
         try:
-            if params:
-                self._cursor.execute(sql, params)
-            else:
-                self._cursor.execute(sql)
+            if _is_write:
+                self._conn._assert_write_discipline(sql)
+                self._conn._acquire_write_lane(sql)
+            self._conn._operation_active = True
+            try:
+                if params:
+                    self._cursor.execute(sql, params)
+                else:
+                    self._cursor.execute(sql)
+            finally:
+                self._conn._operation_active = False
             self.description = self._cursor.description
             self.rowcount = self._cursor.rowcount
             self._conn._last_used = time.monotonic()
-            _sql_upper = sql[:30].lstrip().upper()
-            if _sql_upper.startswith(('INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP')):
+            if _is_write:
                 self._conn._dirty = True
+            self._conn._release_write_lane_if_transaction_ended()
         except Exception as e:
+            self._conn._release_write_lane_if_transaction_ended()
             if _sql_errors_suppressed():
                 logger.debug('[DB] SQL execution failed (%s) [suppressed]: %.120s', type(e).__name__, e)
             else:
@@ -876,15 +979,26 @@ class _SqliteCursorWrapper:
         return self
 
     def executemany(self, sql, params_list):
+        from lib.database._access_policy import enforce_sql_access
+        enforce_sql_access(sql)
+        _is_write = _sqlite_statement_is_write(sql)
         try:
-            self._cursor.executemany(sql, params_list)
+            if _is_write:
+                self._conn._assert_write_discipline(sql)
+                self._conn._acquire_write_lane(sql)
+            self._conn._operation_active = True
+            try:
+                self._cursor.executemany(sql, params_list)
+            finally:
+                self._conn._operation_active = False
             self.description = self._cursor.description
             self.rowcount = self._cursor.rowcount
             self._conn._last_used = time.monotonic()
-            _sql_upper = sql[:30].lstrip().upper()
-            if _sql_upper.startswith(('INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP')):
+            if _is_write:
                 self._conn._dirty = True
+            self._conn._release_write_lane_if_transaction_ended()
         except Exception as e:
+            self._conn._release_write_lane_if_transaction_ended()
             logger.error('[DB] SQL executemany failed (%s): %.120s', type(e).__name__, e)
             logger.debug('[DB] executemany error detail: %s\n  SQL: %.200s', e, sql)
             raise
@@ -918,6 +1032,97 @@ class _SqliteCursorWrapper:
         self._cursor.close()
 
 
+# ── Global commit counter (docs/STORAGE_REDESIGN.md §8 acceptance metric) ──
+# Approximate by design (no lock — the GIL makes += good enough for a gauge).
+_COMMIT_TOTAL = 0
+
+# SQLite has one physical writer slot even in WAL mode.  Letting every pooled
+# connection race for that file lock is what turns one leaked/long transaction
+# into a process-wide ``database is locked`` cascade.  This process-level lane
+# queues writers *before* SQLite is touched; the winning connection keeps the
+# lane for its whole transaction and releases it at commit/rollback/close.
+_SQLITE_WRITE_LANE = threading.Lock()
+_SQLITE_WRITE_LANE_STATE = threading.Lock()
+_SQLITE_WRITE_LANE_OWNER = None
+_SQLITE_WRITE_LANE_WAITERS = 0
+_SQLITE_WRITE_LANE_STATS = {
+    'acquires': 0,
+    'contended': 0,
+    'timeouts': 0,
+    'wait_seconds': 0.0,
+    'max_wait_seconds': 0.0,
+    'hold_seconds': 0.0,
+    'max_hold_seconds': 0.0,
+}
+_SQLITE_LEADING_NOISE_RE = re.compile(
+    r'^(?:\s+|--[^\n]*(?:\n|$)|/\*.*?\*/)*', re.DOTALL)
+_SQLITE_WRITE_WORD_RE = re.compile(
+    r'\b(?:INSERT|UPDATE|DELETE|REPLACE)\b', re.IGNORECASE)
+
+
+def _sqlite_statement_head(sql) -> tuple[str, str]:
+    text = str(sql or '')
+    text = _SQLITE_LEADING_NOISE_RE.sub('', text, count=1)
+    match = re.match(r'([A-Za-z]+)', text)
+    return (match.group(1).upper() if match else ''), text
+
+
+def _sqlite_statement_is_write(sql) -> bool:
+    """Conservatively classify statements that can take SQLite's writer lock."""
+    head, text = _sqlite_statement_head(sql)
+    if head in {
+            'INSERT', 'UPDATE', 'DELETE', 'REPLACE', 'CREATE', 'ALTER',
+            'DROP', 'VACUUM', 'REINDEX', 'ATTACH', 'DETACH', 'ANALYZE'}:
+        return True
+    if head == 'WITH':
+        return _SQLITE_WRITE_WORD_RE.search(text) is not None
+    if head in {'BEGIN', 'SAVEPOINT'}:
+        # A deferred read transaction can later fail its read->write upgrade
+        # with SQLITE_BUSY_SNAPSHOT when another connection commits between
+        # the SELECT and first mutation.  Reserve the application writer lane
+        # at every explicit transaction boundary; begin() below additionally
+        # asks SQLite for the physical writer slot immediately.
+        #
+        # A top-level SAVEPOINT also starts a deferred transaction.  The
+        # conversation-message mirror deliberately uses one so it can compose
+        # with an outer transaction, then reads row state before its first
+        # mutation.  Treating SAVEPOINT as read-only recreated the same stale
+        # snapshot upgrade race even though ordinary BEGIN was protected.
+        return True
+    if head == 'PRAGMA':
+        # Read-only introspection (table_info, index_list, foreign_key_check,
+        # etc.) must not pin the lane. Assignment and the explicitly mutating
+        # maintenance pragmas do.
+        return ('=' in text or bool(re.match(
+            r'(?is)^\s*PRAGMA\s+(?:wal_checkpoint|optimize|incremental_vacuum)\b',
+            text)))
+    return False
+
+
+def get_commit_count():
+    """Total DB commits this process has issued (all backends combined)."""
+    return _COMMIT_TOTAL
+
+
+def reset_commit_count():
+    """Reset the commit gauge (acceptance probes snapshot around a workload)."""
+    global _COMMIT_TOTAL
+    _COMMIT_TOTAL = 0
+
+
+def get_sqlite_writer_lane_stats():
+    """Return a non-sensitive snapshot of single-writer pressure metrics."""
+    with _SQLITE_WRITE_LANE_STATE:
+        stats = dict(_SQLITE_WRITE_LANE_STATS)
+        owner = _SQLITE_WRITE_LANE_OWNER
+        stats['waiting'] = _SQLITE_WRITE_LANE_WAITERS
+        stats['held'] = 1 if owner is not None else 0
+        stats['owner_age_seconds'] = (
+            max(0.0, time.monotonic() - owner['since_monotonic'])
+            if owner is not None else 0.0)
+    return stats
+
+
 class _SqliteConnectionWrapper:
     """SQLite connection wrapper providing the same API as PgConnection."""
 
@@ -927,12 +1132,20 @@ class _SqliteConnectionWrapper:
         self._dirty = False
         self._created_at = time.monotonic()
         self._last_used = time.monotonic()
+        self._write_lane_held = False
+        self._write_lane_owner_ident = None
+        self._operation_active = False
         self.row_factory = None
 
     @property
     def raw(self):
         """Access the underlying sqlite3 connection for special operations."""
         return self._conn
+
+    @property
+    def dialect(self):
+        """Stable data-layer capability for backend-specific planner hints."""
+        return 'sqlite'
 
     def execute(self, sql, params=None):
         cur = self._conn.cursor()
@@ -946,16 +1159,155 @@ class _SqliteConnectionWrapper:
 
     def executescript(self, sql):
         """Execute multiple SQL statements separated by semicolons."""
-        self._conn.executescript(sql)
-        self._dirty = True
+        from lib.database._access_policy import enforce_sql_access
+        enforce_sql_access(sql)
+        needs_lane = _sqlite_statement_is_write(sql) or bool(
+            re.search(r'(?is)(?:^|;)\s*(?:INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP|VACUUM|REINDEX|ATTACH|DETACH|ANALYZE)\b',
+                      str(sql or '')))
+        if needs_lane:
+            self._assert_write_discipline(sql)
+            self._acquire_write_lane(sql)
+        self._operation_active = True
+        try:
+            self._conn.executescript(sql)
+            self._dirty = needs_lane
+        finally:
+            self._operation_active = False
+            self._release_write_lane_if_transaction_ended()
+
+    def _acquire_write_lane(self, sql=''):
+        global _SQLITE_WRITE_LANE_OWNER, _SQLITE_WRITE_LANE_WAITERS
+        if self._write_lane_held:
+            if self._write_lane_owner_ident != threading.get_ident():
+                raise SQLiteWriteDisciplineError(
+                    'SQLite write transaction was entered from a different '
+                    'thread than its writer-lane owner')
+            return
+        from lib.database.sqlite_owner import assert_owner
+        assert_owner(
+            getattr(self, '_pool_path', DB_PATH), _DEFAULT_DB_FILE,
+            authority_path=DB_PATH)
+        started = time.monotonic()
+        timeout_s = max(0.001, _BUSY_TIMEOUT_MS / 1000)
+        was_contended = _SQLITE_WRITE_LANE.locked()
+        with _SQLITE_WRITE_LANE_STATE:
+            _SQLITE_WRITE_LANE_WAITERS += 1
+        try:
+            acquired = _SQLITE_WRITE_LANE.acquire(timeout=timeout_s)
+        finally:
+            with _SQLITE_WRITE_LANE_STATE:
+                _SQLITE_WRITE_LANE_WAITERS -= 1
+        waited = time.monotonic() - started
+        if not acquired:
+            with _SQLITE_WRITE_LANE_STATE:
+                owner = _SQLITE_WRITE_LANE_OWNER
+                _SQLITE_WRITE_LANE_STATS['timeouts'] += 1
+                _SQLITE_WRITE_LANE_STATS['wait_seconds'] += waited
+                _SQLITE_WRITE_LANE_STATS['max_wait_seconds'] = max(
+                    _SQLITE_WRITE_LANE_STATS['max_wait_seconds'], waited)
+                owner_thread = owner.get('thread') if owner else None
+                owner_age = (max(0.0, time.monotonic()
+                                 - owner['since_monotonic'])
+                             if owner else 0.0)
+            raise sqlite3.OperationalError(
+                f'SQLite writer lane timed out after {waited:.3f}s; '
+                f'owner_thread={owner_thread!r}; held={owner_age:.3f}s')
+        self._write_lane_held = True
+        self._write_lane_owner_ident = threading.get_ident()
+        with _SQLITE_WRITE_LANE_STATE:
+            _SQLITE_WRITE_LANE_STATS['acquires'] += 1
+            _SQLITE_WRITE_LANE_STATS['wait_seconds'] += waited
+            _SQLITE_WRITE_LANE_STATS['max_wait_seconds'] = max(
+                _SQLITE_WRITE_LANE_STATS['max_wait_seconds'], waited)
+            if was_contended or waited >= 0.001:
+                _SQLITE_WRITE_LANE_STATS['contended'] += 1
+            _SQLITE_WRITE_LANE_OWNER = {
+                'thread': threading.current_thread().name,
+                'since': time.time(),
+                'since_monotonic': time.monotonic(),
+            }
+        if waited >= 0.1:
+            logger.info('[DB] SQLite writer lane waited %.0fms', waited * 1000)
+
+    def _assert_write_discipline(self, sql=''):
+        """Reject stale-snapshot and cross-thread writes before SQLite sees them."""
+        current_ident = threading.get_ident()
+        if self._write_lane_held:
+            if self._write_lane_owner_ident != current_ident:
+                raise SQLiteWriteDisciplineError(
+                    'SQLite write transaction was entered from a different '
+                    'thread than its writer-lane owner')
+            return
+        if self._conn.in_transaction:
+            head, _ = _sqlite_statement_head(sql)
+            raise SQLiteWriteDisciplineError(
+                'SQLite write attempted from an existing transaction without '
+                'reserving the writer before its first read; use db.begin() '
+                f'or write_transaction() (statement={head or "UNKNOWN"})')
+
+    def _release_write_lane(self):
+        if not self._write_lane_held:
+            return
+        self._write_lane_held = False
+        self._write_lane_owner_ident = None
+        global _SQLITE_WRITE_LANE_OWNER
+        with _SQLITE_WRITE_LANE_STATE:
+            owner = _SQLITE_WRITE_LANE_OWNER
+            if owner is not None:
+                held = max(0.0, time.monotonic() - owner['since_monotonic'])
+                _SQLITE_WRITE_LANE_STATS['hold_seconds'] += held
+                _SQLITE_WRITE_LANE_STATS['max_hold_seconds'] = max(
+                    _SQLITE_WRITE_LANE_STATS['max_hold_seconds'], held)
+            _SQLITE_WRITE_LANE_OWNER = None
+        _SQLITE_WRITE_LANE.release()
+
+    def _release_write_lane_if_transaction_ended(self):
+        if self._write_lane_held and not self._conn.in_transaction:
+            self._release_write_lane()
+
+    def begin(self):
+        """Begin an explicit transaction (shared facade with PgConnection)."""
+        # WAL permits readers beside a writer but still has exactly one writer.
+        # BEGIN (DEFERRED) followed by SELECT creates a snapshot that cannot be
+        # upgraded after another writer commits: SQLite raises BUSY_SNAPSHOT
+        # immediately and busy_timeout cannot help.  IMMEDIATE queues before
+        # the first read and makes a read-first atomic transaction reliable.
+        return self.execute('BEGIN IMMEDIATE')
 
     def commit(self):
-        self._conn.commit()
-        self._dirty = False
+        self._operation_active = True
+        try:
+            self._conn.commit()
+            self._dirty = False
+            global _COMMIT_TOTAL
+            _COMMIT_TOTAL += 1
+        except Exception:
+            try:
+                self._conn.rollback()
+            except Exception:
+                try:
+                    self._conn.close()
+                finally:
+                    self._closed = True
+            raise
+        finally:
+            self._operation_active = False
+            self._release_write_lane()
 
     def rollback(self):
-        self._conn.rollback()
-        self._dirty = False
+        self._operation_active = True
+        try:
+            self._conn.rollback()
+            self._dirty = False
+        except Exception:
+            try:
+                self._conn.close()
+            finally:
+                self._closed = True
+            raise
+        finally:
+            self._operation_active = False
+            self._release_write_lane()
 
     def close(self):
         if not self._closed:
@@ -964,6 +1316,8 @@ class _SqliteConnectionWrapper:
                 self._conn.close()
             except Exception as e:
                 logger.debug('[DB] Error closing SQLite connection: %s', e)
+            finally:
+                self._release_write_lane()
 
     def cursor(self):
         cur = self._conn.cursor()
@@ -1012,13 +1366,35 @@ strip_null_bytes_deep = _strip_null_bytes_noop
 #  SQLite Connection Factory
 # ═══════════════════════════════════════════════════════════════════════
 
-# SQLite busy timeout — higher values reduce "database is locked" under concurrency
-_BUSY_TIMEOUT_MS = int(getenv_compat('TOFU_SQLITE_BUSY_TIMEOUT_MS', default='30000'))
+def _bounded_sqlite_setting(name, default, minimum, maximum):
+    """Parse SQLite tuning without letting a typo brick zero-config startup."""
+    raw = getenv_compat(name, default=str(default))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning('[DB] Invalid %s=%r; using %d', name, raw, default)
+        value = default
+    if value < minimum or value > maximum:
+        clamped = min(max(value, minimum), maximum)
+        logger.warning('[DB] %s=%s outside [%d, %d]; clamped to %d',
+                       name, value, minimum, maximum, clamped)
+        value = clamped
+    return value
+
+
+# SQLite busy timeout — the process lane handles ordinary contention; keep a
+# generous file-lock fallback until the historical whole-conversation writes
+# have completed their row-store cutover.
+_BUSY_TIMEOUT_MS = _bounded_sqlite_setting(
+    'TOFU_SQLITE_BUSY_TIMEOUT_MS', 30000, 100, 300000)
+_SQLITE_WAL_AUTOCHECKPOINT_PAGES = _bounded_sqlite_setting(
+    'TOFU_SQLITE_WAL_AUTOCHECKPOINT_PAGES', 4096, 256, 65536)
 
 # SQLite connection pool (connections are cheap but file-handle churn adds up at 1000 users)
 _sqlite_pool = []
 _sqlite_pool_lock = threading.Lock()
-_SQLITE_POOL_MAX = int(getenv_compat('TOFU_SQLITE_POOL_MAX', default='20'))
+_SQLITE_POOL_MAX = _bounded_sqlite_setting(
+    'TOFU_SQLITE_POOL_MAX', 20, 1, 256)
 
 # Every live wrapper, weakly held. The test harness's leaked-transaction
 # reaper (tests/conftest.py) enumerates this to roll back write txns that
@@ -1027,14 +1403,24 @@ _SQLITE_POOL_MAX = int(getenv_compat('TOFU_SQLITE_POOL_MAX', default='20'))
 # Weak refs: zero production cost, no lifetime interference.
 _LIVE_SQLITE_CONNS: 'weakref.WeakSet' = weakref.WeakSet()
 
+# A transaction is allowed to execute a slow SQL statement, but it must never
+# sit idle while application code performs HTTP/LLM/sleep work. SQLite has one
+# writer for the whole process; one forgotten commit otherwise stalls every
+# unrelated subsystem until somebody restarts the server.
+_SQLITE_MAX_IDLE_WRITE_TXN_MS = _bounded_sqlite_setting(
+    'TOFU_SQLITE_MAX_IDLE_WRITE_TXN_MS', 5000, 500, 300000)
+_sqlite_txn_watchdog_lock = threading.Lock()
+_sqlite_txn_watchdog_thread = None
+
 #: Capture each connection's creation stack (tests set this via conftest;
 #: off in production). Read once at import — test sessions set the env
 #: before lib.database is imported.
 _CONN_TRACE = getenv_compat('TOFU_DB_CONN_TRACE', default='').strip() not in ('', '0', 'false', 'no')
 
 
-def reap_idle_write_transactions(idle_s: float = 1.0) -> int:
-    """Roll back sqlite write txns idle past ``idle_s``; return the count.
+def reap_idle_write_transactions(idle_s: float = 1.0,
+                                 owner_ident: int | None = None) -> int:
+    """Roll back leaked sqlite write transactions; return the count.
 
     Test-harness belt (called by an autouse conftest fixture at every test
     boundary): pytest-timeout kills a test's MAIN thread, never its
@@ -1042,47 +1428,115 @@ def reap_idle_write_transactions(idle_s: float = 1.0) -> int:
     txn forever — and in WAL that locks every later test out of the worker
     DB. A genuinely-live background writer touches its connection
     continuously (``_last_used`` is stamped on every execute); only a zombie
-    goes quiet past the threshold. Not used by production paths.
+    goes quiet past the threshold.  ``owner_ident`` lets a test boundary reap
+    a fresh transaction owned by that same runner thread immediately, without
+    racing an unrelated live background writer. Not used by production paths.
     """
     reaped = 0
     now = time.monotonic()
     for w in list(_LIVE_SQLITE_CONNS):
         try:
+            same_owner = (owner_ident is not None
+                          and w._write_lane_owner_ident == owner_ident)
             if (not w._closed and w._conn.in_transaction
-                    and now - w._last_used > idle_s):
+                    and (same_owner or now - w._last_used > idle_s)):
                 logger.warning('[DB] reaping leaked write txn (idle %.1fs) — '
                                'a thread outlived its owner mid-transaction',
                                now - w._last_used)
-                w._conn.rollback()
+                w.rollback()
                 reaped += 1
         except Exception as e:
             logger.debug('[DB] txn reap probe failed: %s', e)
     return reaped
 
 
+def _force_close_idle_write_transactions(idle_s: float) -> int:
+    """Rollback+close production write transactions abandoned between calls.
+
+    Closing (rather than returning the connection to its owner) is deliberate:
+    the owner may resume after a network call believing its old transaction is
+    intact. Its next DB operation must fail loudly and obtain a fresh
+    thread-local connection instead of silently continuing a split unit.
+    Active SQL/commit/rollback calls are never touched.
+    """
+    reaped = 0
+    now = time.monotonic()
+    for w in list(_LIVE_SQLITE_CONNS):
+        try:
+            idle = now - w._last_used
+            if (w._closed or w._operation_active or not w._write_lane_held
+                    or not w._conn.in_transaction or idle <= idle_s):
+                continue
+            owner = w._write_lane_owner_ident
+            logger.critical(
+                '[DB] Force-aborting idle SQLite write transaction after %.1fs '
+                '(owner_ident=%s, max=%.1fs). Business code held the global '
+                'writer across non-DB work; its connection is being closed.',
+                idle, owner, idle_s)
+            try:
+                w._conn.rollback()
+            finally:
+                try:
+                    w._conn.close()
+                finally:
+                    w._closed = True
+                    w._dirty = False
+                    w._release_write_lane()
+            reaped += 1
+        except Exception as e:
+            # Even a broken raw handle must not leave the process lane pinned.
+            try:
+                w._closed = True
+                w._release_write_lane()
+            except Exception as release_error:
+                logger.error('[DB] idle transaction watchdog release failed: %s',
+                             release_error, exc_info=True)
+            logger.error('[DB] idle transaction watchdog failed: %s', e,
+                         exc_info=True)
+    return reaped
+
+
+def _sqlite_txn_watchdog_loop() -> None:
+    idle_s = _SQLITE_MAX_IDLE_WRITE_TXN_MS / 1000.0
+    interval = max(0.25, min(1.0, idle_s / 2.0))
+    while True:
+        time.sleep(interval)
+        _force_close_idle_write_transactions(idle_s)
+
+
+def _ensure_sqlite_txn_watchdog_started() -> bool:
+    """Start the one process-wide leaked-writer circuit breaker."""
+    global _sqlite_txn_watchdog_thread
+    if ('pytest' in sys.modules
+            or os.environ.get('TOFU_SERVER_PROCESS') != '1'
+            or str(os.environ.get('TOFU_SQLITE_TXN_WATCHDOG', '1')).strip()
+            .lower() in ('0', 'false', 'no', 'off')):
+        return False
+    with _sqlite_txn_watchdog_lock:
+        if (_sqlite_txn_watchdog_thread is not None
+                and _sqlite_txn_watchdog_thread.is_alive()):
+            return False
+        thread = threading.Thread(
+            target=_sqlite_txn_watchdog_loop,
+            name='sqlite-txn-watchdog', daemon=True)
+        thread.start()
+        _sqlite_txn_watchdog_thread = thread
+        logger.info('[DB] SQLite idle-write watchdog armed (max_idle=%dms)',
+                    _SQLITE_MAX_IDLE_WRITE_TXN_MS)
+        return True
+
+
 def _new_sqlite_connection():
     """Create a new SQLite connection with WAL mode and optimal settings."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
-    conn = sqlite3.connect(
-        DB_PATH,
-        timeout=_BUSY_TIMEOUT_MS / 1000,
-        check_same_thread=False,
-        isolation_level='DEFERRED',
-    )
-    conn.execute('PRAGMA journal_mode=WAL')
-    conn.execute('PRAGMA synchronous=NORMAL')
-    conn.execute('PRAGMA foreign_keys=ON')
-    conn.execute('PRAGMA cache_size=-8000')
-    # mmap is disabled: when the DB lives on a FUSE mount (beegfs-fuse, NFS,
-    # etc.) and the backend hiccups, already-mapped pages can become invalid
-    # and the next access raises SIGBUS, killing the whole process. Plain
-    # pread() returns EIO and is recoverable. See logs/faulthandler.log
-    # entries from 2026-05-28 for prior crashes traced to FUSE I/O.
-    conn.execute('PRAGMA mmap_size=0')
-    # Reduce WAL checkpoint frequency — fewer I/O stalls under write-heavy load
-    conn.execute('PRAGMA wal_autocheckpoint=1000')
-
+    with allow_sqlite_driver_connection('canonical pool connection'):
+        conn = sqlite3.connect(
+            DB_PATH,
+            timeout=_BUSY_TIMEOUT_MS / 1000,
+            check_same_thread=False,
+            isolation_level='DEFERRED',
+        )
     w = _SqliteConnectionWrapper(conn)
     # Stamp the path this connection was opened for. The pool below is a
     # flat list and DB_PATH can be rebound at runtime (tests do it
@@ -1090,12 +1544,88 @@ def _new_sqlite_connection():
     # connection to a DIFFERENT file and the caller writes/reads the wrong
     # database (CI-only 404 on a committed row, 2026-08-05).
     w._pool_path = os.path.abspath(DB_PATH)
+    try:
+        # journal_mode and auto_vacuum are persistent database state and can
+        # take SQLite's writer lock.  A brand-new authority opts into
+        # INCREMENTAL auto-vacuum before its first table is created: later
+        # bounded maintenance can then return deleted pages to the filesystem
+        # without an exclusive, whole-file VACUUM.  Existing databases are
+        # NEVER rewritten here — changing NONE -> INCREMENTAL after tables
+        # exist requires VACUUM and would turn an ordinary startup into an
+        # unbounded multi-GiB copy.
+        #
+        # Query first: once persistent setup has converged, later reader
+        # connections need no mutating PRAGMA and must not queue behind an
+        # unrelated live writer.  Re-check after acquiring the process lane so
+        # concurrent cold connections share one safe transition.
+        current_mode = conn.execute('PRAGMA journal_mode').fetchone()[0]
+        current_auto_vacuum = conn.execute(
+            'PRAGMA auto_vacuum').fetchone()[0]
+        user_schema_count = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_schema "
+            "WHERE name NOT LIKE 'sqlite_%'").fetchone()[0]
+        needs_persistent_setup = (
+            str(current_mode).lower() != 'wal'
+            or (int(current_auto_vacuum) == 0 and user_schema_count == 0)
+        )
+        if needs_persistent_setup:
+            w._acquire_write_lane('SQLite persistent storage setup')
+            try:
+                # Another cold connection may have completed this while this
+                # connection waited for the lane, so every decision is based
+                # on state observed while ownership is exclusive.
+                current_auto_vacuum = conn.execute(
+                    'PRAGMA auto_vacuum').fetchone()[0]
+                user_schema_count = conn.execute(
+                    "SELECT COUNT(*) FROM sqlite_schema "
+                    "WHERE name NOT LIKE 'sqlite_%'").fetchone()[0]
+                if int(current_auto_vacuum) == 0 and user_schema_count == 0:
+                    conn.execute('PRAGMA auto_vacuum=INCREMENTAL')
+                    selected_auto_vacuum = conn.execute(
+                        'PRAGMA auto_vacuum').fetchone()[0]
+                    if int(selected_auto_vacuum) != 2:
+                        raise sqlite3.OperationalError(
+                            'could not enable SQLite incremental auto-vacuum '
+                            f'(got {selected_auto_vacuum!r})')
+
+                current_mode = conn.execute(
+                    'PRAGMA journal_mode').fetchone()[0]
+                if str(current_mode).lower() != 'wal':
+                    selected_mode = conn.execute(
+                        'PRAGMA journal_mode=WAL').fetchone()[0]
+                    if str(selected_mode).lower() != 'wal':
+                        raise sqlite3.OperationalError(
+                            'could not enable SQLite WAL mode '
+                            f'(got {selected_mode!r})')
+            finally:
+                # These PRAGMAs apply outside a durable user transaction; do
+                # not make request teardown commit setup again.  An exception
+                # also reaches close() below, which releases the lane.
+                w._dirty = False
+                w._release_write_lane_if_transaction_ended()
+        # The remaining pragmas are connection-local tuning. Keep them raw so
+        # they do not create six fake writer-lane acquisitions per connection.
+        conn.execute('PRAGMA synchronous=NORMAL')
+        conn.execute('PRAGMA foreign_keys=ON')
+        conn.execute('PRAGMA cache_size=-8000')
+        # mmap is disabled: when the DB lives on a FUSE mount (beegfs-fuse,
+        # NFS, etc.) and the backend hiccups, mapped pages can become invalid
+        # and the next access raises SIGBUS. Plain pread() returns EIO.
+        conn.execute('PRAGMA mmap_size=0')
+        # Same-mount A/B measured commit p95 223ms at 1,000 pages vs 64ms at
+        # 4,096; 8,192 regressed to 102ms. Keep the measured ~16 MiB knee.
+        conn.execute(
+            f'PRAGMA wal_autocheckpoint={_SQLITE_WAL_AUTOCHECKPOINT_PAGES}')
+    except Exception:
+        w.close()
+        raise
     if _CONN_TRACE:
         # Forensics: which code path opened this connection (the CI-only
         # stale-read/lock hunts). Connects are rare (pool reuse), so a
         # bounded stack capture is affordable even in busy test sessions.
         w._created_stack = ''.join(traceback.format_stack(limit=16)[:-1])
     _LIVE_SQLITE_CONNS.add(w)
+    _ensure_sqlite_txn_watchdog_started()
     return w
 
 
@@ -1264,6 +1794,16 @@ def _test_pg_connection(pg_conn):
         if raw.closed:
             return False
 
+        # Never run the rollback-based liveness probe through a transaction
+        # the caller still owns. A long but valid explicit/CAS transaction can
+        # call get_db()/get_thread_db() again before commit; probing it used to
+        # silently roll its work back. A dead raw connection was already
+        # rejected above, and statement execution will surface later failures
+        # without unsafe replay because the wrapper remains dirty/pinned.
+        if (getattr(pg_conn, '_dirty', False)
+                or getattr(pg_conn, '_transaction_pinned', False)):
+            return True
+
         now = time.monotonic()
 
         age = now - pg_conn._created_at
@@ -1291,6 +1831,10 @@ def _test_pg_connection(pg_conn):
         cur.execute('SELECT 1')
         cur.fetchone()
         cur.close()
+        # psycopg2 autocommit is disabled: SELECT 1 opened a brand-new
+        # transaction after the rollback above.  Finish that probe transaction
+        # or the health check itself parks the backend idle-in-transaction.
+        raw.rollback()
         pg_conn._last_used = now
         pg_conn._last_used_wall = time.time()
         return True
@@ -1364,7 +1908,10 @@ def _column_exists(conn, table, column):
 
 _conn_pool = []
 _conn_pool_lock = threading.Lock()
-_CONN_POOL_MAX = int(getenv_compat('TOFU_DB_POOL_MAX', default='100'))
+_CONN_POOL_MAX = min(
+    _MAX_TOTAL_CONNS,
+    _bounded_pool_int('TOFU_DB_POOL_MAX', 16, minimum=1, maximum=1024),
+)
 
 
 def _pool_get():
@@ -1379,6 +1926,7 @@ def _pool_get():
                 conn = _conn_pool.pop()
                 if _test_connection(conn):
                     conn._dirty = False
+                    conn._transaction_pinned = False
                     return conn
                 try:
                     conn.close()
@@ -1419,10 +1967,14 @@ def _pool_put(conn):
         return
     if _BACKEND == 'pg':
         if conn._conn.closed:
+            # The raw backend may have been killed by
+            # idle_in_transaction_session_timeout.  Closing the wrapper is
+            # still mandatory: it releases the application semaphore slot and
+            # decrements _conn_count.
+            conn.close()
             return
         try:
-            conn._conn.rollback()
-            conn._dirty = False
+            conn.rollback()
         except Exception as e:
             logger.debug('[DB] Rollback failed on PG pool return: %s', e)
             try:
@@ -1441,8 +1993,7 @@ def _pool_put(conn):
     else:
         # SQLite pool — rollback any uncommitted state, then return to pool
         try:
-            conn._conn.rollback()
-            conn._dirty = False
+            conn.rollback()
         except Exception as e:
             logger.debug('[DB] Rollback failed on SQLite pool return: %s', e)
             try:
@@ -1458,6 +2009,131 @@ def _pool_put(conn):
             conn.close()
         except Exception as e:
             logger.debug('[DB] Error closing excess pooled SQLite connection: %s', e)
+
+
+def assert_write_transaction(db, *, label='write helper'):
+    """Fail loudly unless ``db`` is inside an owned write transaction.
+
+    Semantic helper functions that intentionally issue bare ``db.execute``
+    writes use this at entry. It converts the otherwise implicit
+    "caller owns the transaction" convention into a runtime invariant and a
+    static marker consumed by ``tests/test_database_access_boundary.py``.
+    """
+    if db is None:
+        raise TypeError(f'{label} requires a data-layer connection')
+    if isinstance(db, _SqliteConnectionWrapper):
+        if (not db.raw.in_transaction or not db._write_lane_held
+                or db._write_lane_owner_ident != threading.get_ident()):
+            raise SQLiteWriteDisciplineError(
+                f'{label} requires write_transaction() with the SQLite '
+                'writer lane reserved')
+        return db
+    if isinstance(db, sqlite3.Connection):
+        if not db.in_transaction:
+            raise SQLiteWriteDisciplineError(
+                f'{label} requires write_transaction()')
+        return db
+    if not bool(getattr(db, '_transaction_pinned', False)):
+        raise RuntimeError(
+            f'{label} requires write_transaction() with a pinned boundary')
+    return db
+
+
+@contextmanager
+def write_transaction(db, *, label='write'):
+    """Own one atomic write unit on an existing data-layer connection.
+
+    The outermost boundary uses ``db.begin()``.  On SQLite that is
+    ``BEGIN IMMEDIATE``, which reserves both the process lane and SQLite's
+    physical writer slot *before* any read snapshot is taken.  Nested units
+    use a savepoint and therefore roll back only their own work.
+
+    This is the synchronous write primitive application repositories should
+    use instead of hand-written BEGIN/commit/rollback triples.  It commits on
+    clean outer exit, rolls back on every ``BaseException``, and refuses to
+    nest inside a SQLite transaction that bypassed writer reservation.
+    """
+    if db is None:
+        raise TypeError('write_transaction() requires a data-layer connection')
+
+    is_sqlite = isinstance(db, _SqliteConnectionWrapper)
+    # A few repository unit tests deliberately supply an in-memory DB-API
+    # connection. Supporting that protocol here keeps transaction ownership in
+    # the data layer; production code is statically forbidden from opening raw
+    # sqlite3 connections outside lib/database.
+    is_raw_sqlite = isinstance(db, sqlite3.Connection)
+    if is_sqlite or is_raw_sqlite:
+        nested = bool((db.raw if is_sqlite else db).in_transaction)
+        if nested:
+            # Fail before SAVEPOINT can accidentally bless a raw/unclassified
+            # read transaction whose WAL snapshot is unsafe to upgrade.
+            if is_sqlite:
+                db._assert_write_discipline('SAVEPOINT')
+    else:
+        # PgConnection finishes disposable reads immediately.  Durable state
+        # is represented by either a previous write or an explicitly pinned
+        # boundary; those are the only legitimate nesting cases.
+        nested = bool(getattr(db, '_dirty', False)
+                      or getattr(db, '_transaction_pinned', False))
+
+    if not nested:
+        if is_raw_sqlite:
+            db.execute('BEGIN IMMEDIATE')
+        else:
+            db.begin()
+        try:
+            yield db
+        except BaseException:
+            db.rollback()
+            raise
+        else:
+            db.commit()
+        return
+
+    savepoint = (
+        f'tofu_write_tx_{threading.get_ident()}_{time.monotonic_ns()}')
+    db.execute(f'SAVEPOINT {savepoint}')
+    try:
+        yield db
+    except BaseException:
+        try:
+            db.execute(f'ROLLBACK TO SAVEPOINT {savepoint}')
+        finally:
+            db.execute(f'RELEASE SAVEPOINT {savepoint}')
+        raise
+    else:
+        db.execute(f'RELEASE SAVEPOINT {savepoint}')
+
+
+@contextmanager
+def pooled_db(domain=DOMAIN_CHAT):
+    """Borrow one connection for a bounded synchronous unit of work.
+
+    Unlike :func:`get_thread_db`, this lease is not attached to the calling
+    thread.  It is therefore the preferred API for periodic pollers, janitors,
+    short-lived worker callbacks, and other code that may sleep for minutes
+    after a query.  The connection is always rolled back/sanitised by
+    :func:`_pool_put` and returned to the shared pool, including when the body
+    raises.  Writes must still call ``commit()`` explicitly; an accidental
+    uncommitted write is rolled back on exit.
+
+    ``domain`` is accepted for API parity with ``get_thread_db``.  The current
+    dual-backend implementation shares one physical pool across domains.
+    """
+    del domain
+    conn = _pool_get()
+    try:
+        yield conn
+    finally:
+        _pool_put(conn)
+
+
+@contextmanager
+def pooled_write_transaction(domain=DOMAIN_CHAT, *, label='write'):
+    """Borrow, transact, sanitize, and return one synchronous connection."""
+    with pooled_db(domain) as db:
+        with write_transaction(db, label=label):
+            yield db
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1709,7 +2385,18 @@ def _log_pool_metrics():
 
 
 def get_thread_db(domain=DOMAIN_CHAT):
-    """Return a thread-local database connection."""
+    """Return a request-scoped or thread-local database connection.
+
+    Historical callers use this helper from both background workers *and*
+    request handlers. Pinning the latter to a server executor thread leaks one
+    connection per reused worker: the worker lives far longer than the
+    request, so normal app-context teardown cannot return it. Inside a
+    Flask/Quart app context, delegate to :func:`get_db` and let ``close_db``
+    return it after the request. Outside one, preserve the original
+    thread-local contract for task workers and standalone scripts.
+    """
+    if _has_app_context():
+        return get_db(domain)
     attr = f'db_{domain}'
     db = getattr(_thread_local, attr, None)
     if db is not None:
@@ -1816,23 +2503,30 @@ def _reconnect_pg_inplace(db):
         db._last_used_wall = time.time()
         db._closed = False
         db._dirty = False
+        db._transaction_pinned = False
         return True
     except Exception as re_err:
         logger.warning('[DB] In-place PG reconnect failed: %s', re_err)
         return False
 
 
-def db_execute_with_retry(db, sql, params=(), *, commit=True, max_retries=3):
-    """Execute a single SQL write with retry on contention or connection loss."""
+def db_execute_with_retry(db, sql, params=(), *, commit=True, max_retries=3,
+                          return_cursor=False):
+    """Execute one SQL write with bounded transient-error retry.
+
+    ``return_cursor`` is opt-in because the historical contract returned
+    ``None``. It is needed by conditional writes whose ``rowcount`` is the
+    ownership/fencing verdict; the cursor remains usable for metadata after
+    commit on both supported backends.
+    """
     last_err = None
     for attempt in range(max_retries + 1):
         try:
-            db.execute(sql, params)
+            cursor = db.execute(sql, params)
             if commit:
                 db.commit()
-            return
+            return cursor if return_cursor else None
         except Exception as e:
-            err_msg = str(e).lower()
             # Determine if retryable
             is_retryable = False
             if _BACKEND == 'sqlite':
@@ -1840,9 +2534,12 @@ def db_execute_with_retry(db, sql, params=(), *, commit=True, max_retries=3):
                 # mount (backend hiccup → pread/pwrite EIO); a bounded retry
                 # rides out the blip instead of failing the whole task. A
                 # genuinely broken mount still exhausts max_retries and raises.
-                is_retryable = ('database is locked' in err_msg
-                                or 'busy' in err_msg
-                                or 'disk i/o error' in err_msg)
+                sqlite_code = int(getattr(e, 'sqlite_errorcode', 0) or 0) & 0xFF
+                is_retryable = sqlite_code in {
+                    sqlite3.SQLITE_BUSY,
+                    sqlite3.SQLITE_LOCKED,
+                    sqlite3.SQLITE_IOERR,
+                }
             else:
                 # PG: OperationalError, InterfaceError, SerializationFailure
                 etype = type(e).__name__
@@ -2216,12 +2913,13 @@ def stop_local_pg_if_owned():
         logger.warning('[DB] Failed to stop local PG on exit: %s', e)
 
 
-atexit.register(shutdown_pool)
-
-
 # ═══════════════════════════════════════════════════════════════════════
 #  Schema Init (delegates to _schema module)
 # ═══════════════════════════════════════════════════════════════════════
+
+_OPTIONAL_DOMAINS_DISCOVERED = False
+_OPTIONAL_DOMAINS_DISCOVERY_LOCK = threading.Lock()
+
 
 def _register_optional_domains():
     """Wire optional DB-domain schema initializers before init_db() runs.
@@ -2230,10 +2928,29 @@ def _register_optional_domains():
     standalone ``tofu-trading`` package) register via the ``tofu.schema``
     entry-point group. Core defines no optional domains itself.
 
-    Idempotent: safe to call on every ``init_db()``.
+    Discovery is process-once: ``importlib.metadata.entry_points()`` scans
+    every ``sys.path`` root and took 150s in the audited FUSE-heavy developer
+    environment. A plugin installation already requires a process restart for
+    routes/tools to appear, so rescanning on every idempotent schema init adds
+    latency without enabling a supported hot-install flow.
+
+    Ambient third-party entry points are skipped during ordinary pytest DB
+    fixture setup. That both isolates unit schemas and avoids paying the same
+    external-environment scan before every test invocation. Plugin integration
+    tests can opt in with ``TOFU_TEST_SCHEMA_PLUGIN_DISCOVERY=1``.
     """
-    from lib.database.schema_registry import discover_schema_plugins
-    discover_schema_plugins()
+    global _OPTIONAL_DOMAINS_DISCOVERED
+    if (os.environ.get('PYTEST_CURRENT_TEST')
+            and os.environ.get('TOFU_TEST_SCHEMA_PLUGIN_DISCOVERY') != '1'):
+        return
+    if _OPTIONAL_DOMAINS_DISCOVERED:
+        return
+    with _OPTIONAL_DOMAINS_DISCOVERY_LOCK:
+        if _OPTIONAL_DOMAINS_DISCOVERED:
+            return
+        from lib.database.schema_registry import discover_schema_plugins
+        discover_schema_plugins()
+        _OPTIONAL_DOMAINS_DISCOVERED = True
 
 
 def init_db():
@@ -2247,6 +2964,19 @@ def init_db():
     else:
         from lib.database._schema_sqlite import init_db as _sqlite_schema_init
         _sqlite_schema_init(_new_sqlite_connection)
+    # Row authority is an explicit deployment cutover. Validate its cheap,
+    # permanent structural invariants on EVERY boot before the server accepts
+    # traffic; a stale archive must never become an availability fallback.
+    from lib.database._access_policy import rows_authority_configured
+    if rows_authority_configured():
+        authority_db = (_new_pg_connection() if _BACKEND == 'pg'
+                        else _new_sqlite_connection())
+        try:
+            from lib.database.messages_rows import assert_rows_authority_ready
+            assert_rows_authority_ready(authority_db)
+            logger.info('[DB] normalized conversation rows passed authority preflight')
+        finally:
+            authority_db.close()
 
 
 def reset_sqlite_for_tests(db_path: str):
@@ -2373,8 +3103,9 @@ def restore_db_state(snapshot: dict):
 #  Backend Detection & Auto-Start (runs on import)
 # ═══════════════════════════════════════════════════════════════════════
 
-# Force SQLite via env var (for testing or explicit preference)
-_FORCE_SQLITE = getenv_compat('TOFU_DB_BACKEND', default='').lower() == 'sqlite'
+# SQLite is the default; PostgreSQL is selected only by the exact canonical
+# value.  Availability and historical markers never switch this decision.
+_FORCE_SQLITE = _selected_backend() == 'sqlite'
 
 db_available = False
 pg_available = False
@@ -2384,13 +3115,22 @@ pg_available = False
 from lib.database.db_paths import resolve_pgdata_dir  # noqa: E402
 _PGDATA = resolve_pgdata_dir(_DB_DIR)
 
+
+def _claim_sqlite_authority_if_needed():
+    from lib.database.sqlite_owner import claim_owner, guard_required
+    if guard_required(DB_PATH, _DEFAULT_DB_FILE):
+        claim_owner(DB_PATH)
+
+
 if _FORCE_SQLITE:
     _BACKEND = 'sqlite'
     db_available = True
     pg_available = False
-    logger.info('[DB] SQLite backend (forced via TOFU_DB_BACKEND=sqlite): %s '
-                '(busy_timeout=%dms, pool_max=%d)',
-                DB_PATH, _BUSY_TIMEOUT_MS, _SQLITE_POOL_MAX)
+    _claim_sqlite_authority_if_needed()
+    logger.info('[DB] SQLite authority backend: %s '
+                '(busy_timeout=%dms, pool_max=%d, wal_checkpoint_pages=%d)',
+                DB_PATH, _BUSY_TIMEOUT_MS, _SQLITE_POOL_MAX,
+                _SQLITE_WAL_AUTOCHECKPOINT_PAGES)
 else:
     # Try PostgreSQL
     _pg_ok = False
@@ -2405,19 +3145,19 @@ else:
                                 PG_PASSWORD, PG_DBNAME)
         except ImportError as e:
             logger.info('[DB] PG bootstrap unavailable (missing dependency: %s) '
-                        '— will try SQLite', e)
+                        '— selected backend will fail closed', e)
             return None
         except Exception as e:
             logger.warning('[DB] PG bootstrap attempt failed: %s', e)
             return None
 
     # On a self-triggered re-exec the app-owned postmaster is coming back within
-    # seconds. When PG is MANDATORY (TOFU_REQUIRE_PG), wait for it with backoff
+    # seconds. When PostgreSQL is selected, wait for it with backoff
     # up to a real deadline before refusing — a single-shot probe that aborts on
     # the race is the bug. wait=0 when PG is optional → byte-identical single-box.
     _pg_wait_s = _pg_require_wait_s()
     if _pg_wait_s > 0:
-        logger.info('[DB] TOFU_REQUIRE_PG set — waiting up to %.0fs for '
+        logger.info('[DB] PostgreSQL selected — waiting up to %.0fs for '
                     'PostgreSQL (tolerates a self-restart re-exec race) '
                     'before fail-closing.', _pg_wait_s)
     _pg_result = _retry_until(_attempt_pg_bootstrap, deadline_s=_pg_wait_s)
@@ -2477,7 +3217,7 @@ else:
                 logger.debug('[DB] audit_log for PG backend selection failed: %s', _ae)
 
         except ImportError:
-            logger.warning('[DB] psycopg2 not installed — falling back to SQLite')
+            logger.warning('[DB] psycopg2 not installed — selected backend cannot start')
             _pg_ok = False
 
     if not _pg_ok:
@@ -2526,44 +3266,27 @@ else:
                           pgdata=_PGDATA, fallback='sqlite')
             except Exception as _ae:
                 logger.debug('[DB] audit_log for failed PG bootstrap failed: %s', _ae)
-            if getenv_compat('TOFU_DB_STRICT_PG', default='').lower() in ('1', 'true', 'yes'):
-                raise RuntimeError(
-                    f'PostgreSQL cluster at {_PGDATA} exists but failed to start, '
-                    'and TOFU_DB_STRICT_PG is set — refusing to fall back to an '
-                    'empty SQLite and risk masking the real data. Recover PG '
-                    '(see logs/postgresql.log) or unset TOFU_DB_STRICT_PG.')
+            # Data history makes the fallback unsafe regardless of a flag.  A
+            # warning followed by serving a month-old SQLite file is still a
+            # split-brain write path; fail closed before any schema/write code
+            # can touch that file.
+            _assert_sqlite_fallback_has_no_pg_history(True, _PGDATA)
 
         # ── Epic D1: fail-CLOSED PG guarantee for scaled deployments ──
         # Delegates to the testable _assert_pg_available_or_raise helper: when
-        # TOFU_REQUIRE_PG is set and PG is unavailable, raise instead of
-        # degrading to write-serializing SQLite. Unset → byte-identical
-        # graceful fallback below.
+        # PostgreSQL selection is unavailable: raise instead of switching.
         _assert_pg_available_or_raise(False, _PGDATA)
 
-        _BACKEND = 'sqlite'
-        db_available = True
-        pg_available = False
-        # Reset PG config to prevent accidental use
-        PG_HOST = '127.255.255.255'
-        PG_PORT = 0
-        PG_DSN = 'host=127.255.255.255 port=0 dbname=_none_'
-        logger.info('[DB] SQLite fallback backend: %s '
-                    '(busy_timeout=%dms, pool_max=%d)',
-                    DB_PATH, _BUSY_TIMEOUT_MS, _SQLITE_POOL_MAX)
-        # Audit the backend decision symmetrically with the PG branch. The
-        # existing-cluster case already audited 'pg_bootstrap_failed_with_'
-        # 'existing_cluster' above; this also covers the fresh-host /
-        # no-cluster path that previously left NO audit trace of running on
-        # SQLite — so an operator scanning audit.log can always see the
-        # failover and which backend is live.
-        try:
-            from lib.log import audit_log
-            audit_log('db_backend_selected', backend='sqlite',
-                      path=DB_PATH,
-                      reason=('pg_bootstrap_failed_existing_cluster' if _pgdata_exists
-                              else 'pg_unavailable_or_no_cluster'))
-        except Exception as _ae:
-            logger.debug('[DB] audit_log for SQLite backend selection failed: %s', _ae)
+
+# Register teardown only after backend detection imported the SQLite owner
+# module. ``atexit`` is LIFO: drain/close DB connections first, then remove our
+# ownership member. Otherwise a peer host could take over while this process
+# still had writable connections alive during interpreter shutdown.
+if _BACKEND == 'sqlite':
+    from lib.database.sqlite_owner import release_owner as _release_sqlite_owner
+    atexit.unregister(_release_sqlite_owner)
+    atexit.register(_release_sqlite_owner)
+atexit.register(shutdown_pool)
 
 
 # ═══════════════════════════════════════════════════════════════════════

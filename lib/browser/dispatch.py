@@ -199,20 +199,51 @@ BROWSER_HANDLERS = {
 }
 
 
-def execute_browser_tool(fn_name, fn_args, client_id=None):
+def execute_browser_tool(fn_name, fn_args, client_id=None, user_id=None):
     """Execute a browser tool call. Returns a string result for the LLM.
 
     Args:
         fn_name: Browser tool function name.
         fn_args: Tool arguments dict.
         client_id: Target browser extension client ID for per-device routing.
+        user_id: Owning task user. When supplied, client selection is confined
+                 to that user's browser fleet before anything is enqueued.
     """
     # Normalize snake_case LLM args → camelCase handler args (see
     # normalize_browser_args). Accepts legacy camelCase too.
     fn_args = normalize_browser_args(fn_args)
-    # Store client_id in thread-local so send_browser_command can access it
-    # without modifying every handler's signature.
+    caller_user = None if user_id is None else str(user_id or '')
+    if caller_user is not None:
+        from lib.browser.queue import get_connected_clients
+        owned = get_connected_clients(user_id=caller_user)
+        owned_ids = {str(row.get('client_id') or '') for row in owned}
+        if client_id and str(client_id) not in owned_ids:
+            return 'Error: Browser client is not connected for this user'
+        if not client_id and owned:
+            client_id = str(max(
+                owned, key=lambda row: row.get('last_poll', 0)
+            ).get('client_id') or '')
+    # Store the already-scoped client in thread-local so handlers route every
+    # nested command to the same device.
     _set_active_client(client_id)
+    # Policy is independent of the server-side SSRF allowlist: the URL is
+    # resolved from the user's live tab and checked against the user's browser
+    # read-deny/write-grant store.
+    if fn_name != 'browser_preview_page':
+        try:
+            from lib.browser.access import browser_tool_access
+            from lib.browser.queue import client_user_id
+            from lib.browser.protocol import client_protocol
+            resolved_client = client_protocol(client_id or None).get('client_id') or ''
+            browser_tool_access(
+                fn_name, fn_args,
+                user_id=(client_user_id(resolved_client)
+                         if caller_user is None else caller_user),
+                client_id=resolved_client)
+        except Exception as exc:
+            logger.debug('[Browser] tool access check rejected %s: %s',
+                         fn_name, exc)
+            return f'Error: {exc}'
     handler = BROWSER_HANDLERS.get(fn_name)
     if handler is not None:
         return handler(fn_args)

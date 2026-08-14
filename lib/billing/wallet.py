@@ -33,7 +33,13 @@ import threading
 import time
 from dataclasses import dataclass
 
-from lib.database import DOMAIN_SYSTEM, _BACKEND, get_thread_db as get_db
+from lib.database import (
+    DOMAIN_SYSTEM,
+    _BACKEND,
+    assert_write_transaction,
+    get_thread_db as get_db,
+    write_transaction,
+)
 from lib.ids import short_id
 from lib.log import audit_log, get_logger
 
@@ -67,9 +73,9 @@ class WalletSnapshot:
     updated_at: int
 
 
-# Per-user lock keeps the SQLite path race-free without IMMEDIATE
-# transactions (which would block the whole DB). Negligible cost; the
-# real concurrency primitive is the DB-level transaction.
+# Per-user lock avoids avoidable same-user queueing inside this process.  The
+# real cross-thread/process primitive is write_transaction(): BEGIN IMMEDIATE
+# on SQLite and row/CAS locking on PostgreSQL.
 _user_locks: dict = {}
 _user_locks_guard = threading.Lock()
 
@@ -85,7 +91,7 @@ def _lock_for(user_id: str) -> threading.Lock:
 
 def _read_balance(db, user_id: str) -> int:
     """Read the cached wallet balance, locking the row in PG."""
-    if _BACKEND == 'postgresql':
+    if _BACKEND == 'pg':
         row = db.execute(
             'SELECT balance_micro FROM billing_wallets '
             ' WHERE user_id = ? FOR UPDATE',
@@ -100,8 +106,9 @@ def _read_balance(db, user_id: str) -> int:
 
 
 def _upsert_wallet(db, user_id: str, balance_micro: int) -> None:
+    assert_write_transaction(db, label='wallet balance upsert')
     now = int(time.time())
-    if _BACKEND == 'postgresql':
+    if _BACKEND == 'pg':
         db.execute(
             'INSERT INTO billing_wallets '
             '  (user_id, balance_micro, currency, '
@@ -121,33 +128,6 @@ def _upsert_wallet(db, user_id: str, balance_micro: int) -> None:
             '  balance_micro = excluded.balance_micro, '
             '  updated_at    = excluded.updated_at',
             (user_id, balance_micro, 'CREDIT', now))
-
-
-def _begin(db) -> None:
-    # SQLite default DEFERRED transactions can deadlock under concurrent
-    # writers; IMMEDIATE acquires the write lock up front.
-    if _BACKEND != 'postgresql':
-        try:
-            db.execute('BEGIN IMMEDIATE')
-        except Exception as e:
-            # Some wrappers auto-begin; tolerate at debug level.
-            logger.debug('[Billing] BEGIN IMMEDIATE skipped: %s', e)
-
-
-def _commit(db) -> None:
-    try:
-        db.commit()
-    except Exception as e:
-        logger.error('[Billing] commit failed: %s', e, exc_info=True)
-        raise
-
-
-def _rollback(db) -> None:
-    try:
-        db.rollback()
-    except Exception as e:
-        # Rollback during error handling — log but never escalate.
-        logger.debug('[Billing] rollback failed: %s', e)
 
 
 # ── Read-only helpers ────────────────────────────────────────────────
@@ -270,37 +250,33 @@ def settle(
     lock = _lock_for(user_id)
     with lock:
         db = get_db(DOMAIN_SYSTEM)
-        _begin(db)
-        try:
+        changed = False
+        with write_transaction(db, label='settle billing reserve'):
             # Idempotency: if we already settled this ref, return current.
             existing = _ledger.find_existing(
                 user_id, 'debit', 'task', ref_id)
-            if existing is not None:
-                _commit(db)
-                return get_wallet(user_id)
-            balance = _read_balance(db, user_id)
-            new_after_release = balance + reserved_micro
-            new_after_debit = new_after_release - actual_micro
-            _ledger.append_entry(
-                user_id=user_id, amount_micro=+reserved_micro,
-                kind='reserve_release',
-                ref_type='reserve', ref_id=ref_id,
-                balance_after_micro=new_after_release, note=note)
-            _ledger.append_entry(
-                user_id=user_id, amount_micro=-actual_micro,
-                kind='debit',
-                ref_type='task', ref_id=ref_id,
-                balance_after_micro=new_after_debit, note=note)
-            _upsert_wallet(db, user_id, new_after_debit)
-            _commit(db)
+            if existing is None:
+                balance = _read_balance(db, user_id)
+                new_after_release = balance + reserved_micro
+                new_after_debit = new_after_release - actual_micro
+                _ledger.append_entry(
+                    user_id=user_id, amount_micro=+reserved_micro,
+                    kind='reserve_release',
+                    ref_type='reserve', ref_id=ref_id,
+                    balance_after_micro=new_after_release, note=note)
+                _ledger.append_entry(
+                    user_id=user_id, amount_micro=-actual_micro,
+                    kind='debit',
+                    ref_type='task', ref_id=ref_id,
+                    balance_after_micro=new_after_debit, note=note)
+                _upsert_wallet(db, user_id, new_after_debit)
+                changed = True
+        if changed:
             audit_log('billing_settle', user_id=user_id,
                       ref_id=ref_id, reserved_micro=reserved_micro,
                       actual_micro=actual_micro,
                       balance_after_micro=new_after_debit)
-            return get_wallet(user_id)
-        except Exception:
-            _rollback(db)
-            raise
+        return get_wallet(user_id)
 
 
 def _plain_balance(db, user_id: str) -> int:
@@ -332,6 +308,7 @@ def _conditional_apply(db, user_id: str, amount_micro: int,
       * ``('absent', 0)``             — no wallet row exists yet; the caller
         must INSERT the first movement.
     """
+    assert_write_transaction(db, label='conditional wallet balance update')
     now = int(time.time())
     if allow_negative:
         res = db.execute(
@@ -384,42 +361,36 @@ def _apply_signed(
     lock = _lock_for(user_id)
     with lock:
         db = get_db(DOMAIN_SYSTEM)
-        _begin(db)
-        try:
+        changed = False
+        with write_transaction(db, label=f'billing {kind}'):
             # Idempotency.
+            existing = None
             if ref_type and ref_id:
                 existing = _ledger.find_existing(
                     user_id, kind, ref_type, ref_id)
-                if existing is not None:
-                    _commit(db)
-                    return get_wallet(user_id)
-            status, new_balance = _conditional_apply(
-                db, user_id, amount_micro, allow_negative)
-            if status == 'insufficient':
-                _rollback(db)
-                raise InsufficientFunds(user_id, new_balance, -amount_micro)
-            if status == 'absent':
-                # First movement for this user — the conditional UPDATE matched
-                # no row. INSERT the opening balance (still funds-checked).
-                new_balance = amount_micro
-                if new_balance < 0 and not allow_negative:
-                    _rollback(db)
-                    raise InsufficientFunds(user_id, 0, -amount_micro)
-                _upsert_wallet(db, user_id, new_balance)
-            _ledger.append_entry(
-                user_id=user_id, amount_micro=amount_micro,
-                kind=kind, ref_type=ref_type, ref_id=ref_id,
-                balance_after_micro=new_balance, note=note)
-            _commit(db)
+            if existing is None:
+                status, new_balance = _conditional_apply(
+                    db, user_id, amount_micro, allow_negative)
+                if status == 'insufficient':
+                    raise InsufficientFunds(
+                        user_id, new_balance, -amount_micro)
+                if status == 'absent':
+                    # First movement for this user — the conditional UPDATE
+                    # matched no row. INSERT the opening balance.
+                    new_balance = amount_micro
+                    if new_balance < 0 and not allow_negative:
+                        raise InsufficientFunds(user_id, 0, -amount_micro)
+                    _upsert_wallet(db, user_id, new_balance)
+                _ledger.append_entry(
+                    user_id=user_id, amount_micro=amount_micro,
+                    kind=kind, ref_type=ref_type, ref_id=ref_id,
+                    balance_after_micro=new_balance, note=note)
+                changed = True
+        if changed:
             audit_log('billing_' + kind, user_id=user_id,
                       ref_id=ref_id, amount_micro=amount_micro,
                       balance_after_micro=new_balance)
-            return get_wallet(user_id)
-        except InsufficientFunds:
-            raise
-        except Exception:
-            _rollback(db)
-            raise
+        return get_wallet(user_id)
 
 
 def new_ref_id(prefix: str = 'ref') -> str:

@@ -11,6 +11,7 @@ resolves + attributes through the ``_paths`` core and matches through the
 import os
 import tempfile
 import time
+from difflib import SequenceMatcher
 
 from lib.log import get_logger
 from lib.project_mod.modifications import _record_modification
@@ -679,10 +680,12 @@ def _apply_one_diff(base, rel_path, search, replace, description='', conv_id=Non
 
 def tool_apply_diff(base, rel_path, search, replace, description='', conv_id=None, replace_all=False, task_id=None):
     """Apply a single search-and-replace edit (backward-compatible entry point)."""
-    return _apply_one_diff(base, rel_path, search, replace, description, conv_id, replace_all=replace_all, task_id=task_id)
+    result = _apply_one_diff(base, rel_path, search, replace, description, conv_id, replace_all=replace_all, task_id=task_id)
+    _log_legacy_edit_efficiency(search, replace, ok=result.get('ok'))
+    return result
 
 
-def _invalid_edit_entry_msg(i, edit):
+def _invalid_edit_entry_msg(i, edit, expected='{path, search, replace}'):
     """Build an actionable FAIL line for a batch edit that isn't an object.
 
     The common cause is a model emitting the whole ``edits`` array as one
@@ -693,11 +696,79 @@ def _invalid_edit_entry_msg(i, edit):
     """
     if isinstance(edit, str):
         return (f'[{i}] FAIL Invalid edit entry: got a string, expected an '
-                f'object with {{path, search, replace}}. The "edits" array '
+                f'object with {expected}. The "edits" array '
                 f'must be real JSON objects, not a single stringified-JSON '
                 f'blob — re-send each edit as its own object.')
     return (f'[{i}] FAIL Invalid edit entry: expected an object with '
-            f'{{path, search, replace}}, got {type(edit).__name__}.')
+            f'{expected}, got {type(edit).__name__}.')
+
+
+def _pure_addition_stats(search, replace):
+    """Return content-only efficiency stats for an additive replacement.
+
+    No source text is logged. ``repeated_unchanged_chars`` is a conservative
+    estimate of what the legacy search+replace shape needlessly repeats: a
+    unified insertion can use the old search as its anchor and omit that
+    second copy even before choosing a shorter unique anchor.
+    """
+    if not isinstance(search, str) or not isinstance(replace, str):
+        return None
+    if len(replace) <= len(search) or len(search) + len(replace) > 200_000:
+        return None
+    matcher = SequenceMatcher(a=search, b=replace, autojunk=False)
+    inserted = 0
+    saw_insert = False
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'insert':
+            inserted += j2 - j1
+            saw_insert = True
+        elif tag != 'equal':
+            return None
+    if not saw_insert:
+        return None
+    return {
+        'anchor_chars': len(search),
+        'content_chars': inserted,
+        'legacy_arg_chars': len(search) + len(replace),
+        'repeated_unchanged_chars': len(search),
+    }
+
+
+def _pure_wrap_insert(anchor, content):
+    """Detect a replace whose content keeps the anchor verbatim at a boundary.
+
+    Such a replace is a pure insertion wearing replace clothes: the anchor
+    survives unchanged, so the edit is mechanically expressible as
+    ``insert_after`` / ``insert_before`` carrying ONLY the appended/prepended
+    text. Rejecting it pre-execution teaches the operation vocabulary at the
+    one moment the model can still act on it — a post-execution hint arrives
+    after the tokens and the write are already spent.
+
+    Returns ``(operation, trimmed_content)`` or ``None``. Middle-additive
+    replaces (insertion INSIDE the anchor) are deliberately NOT matched:
+    no insert operation can express them with the same anchor, so a
+    rejection there would have no mechanical fix.
+    """
+    if not anchor or not content or len(content) <= len(anchor):
+        return None
+    if content.startswith(anchor):
+        return 'insert_after', content[len(anchor):]
+    if content.endswith(anchor):
+        return 'insert_before', content[:-len(anchor)]
+    return None
+
+
+def _log_legacy_edit_efficiency(search, replace, *, ok):
+    stats = _pure_addition_stats(search, replace)
+    logger.info(
+        '[EditEfficiency] surface=legacy_apply_diff ok=%s pure_additive=%s '
+        'anchor_chars=%d content_chars=%d arg_chars=%d repeated_unchanged_chars=%d',
+        bool(ok), bool(stats),
+        stats['anchor_chars'] if stats else len(search or ''),
+        stats['content_chars'] if stats else len(replace or ''),
+        stats['legacy_arg_chars'] if stats else len(search or '') + len(replace or ''),
+        stats['repeated_unchanged_chars'] if stats else 0,
+    )
 
 
 def tool_apply_diffs(base_path, edits, conv_id=None, task_id=None):
@@ -742,6 +813,7 @@ def tool_apply_diffs(base_path, edits, conv_id=None, task_id=None):
             results.append(f'[{i}] FAIL {rp}: {_rve}')
             continue
         result = _apply_one_diff(bp, resolved_rp, search, replace, desc, conv_id, replace_all=ra, task_id=task_id)
+        _log_legacy_edit_efficiency(search, replace, ok=result['ok'])
 
         if result['ok']:
             ok_count += 1
@@ -1057,4 +1129,144 @@ def tool_insert_contents(base_path, edits, conv_id=None, task_id=None):
     header = f'Inserted {ok_count}/{ok_count + fail_count} edits'
     if fail_count:
         header += f' ({fail_count} failed)'
+    return header + '\n' + '\n'.join(results)
+
+
+# ═══════════════════════════════════════════════════════
+#  edit_file — unified model-facing edit entry point
+# ═══════════════════════════════════════════════════════
+
+_EDIT_OPERATIONS = frozenset({'insert_after', 'insert_before', 'replace'})
+
+
+def tool_edit_file(base_path, edits, conv_id=None, task_id=None):
+    """Apply a sequential mixed batch of replacements and insertions.
+
+    The older four public helpers remain intact for compatibility. This
+    function is intentionally a thin router over their single-edit cores so
+    matching, undo, atomic-write and freshness semantics cannot drift.
+    """
+    if not edits:
+        return 'No edits provided.'
+    if not isinstance(edits, list):
+        return 'Error: edit_file edits must be an array of objects.'
+
+    MAX_EDITS = 30
+    dropped = max(0, len(edits) - MAX_EDITS)
+    edits = edits[:MAX_EDITS]
+
+    from lib.project_mod.tools import _resolve_base
+
+    results = []
+    ok_count = 0
+    fail_count = 0
+    for i, edit in enumerate(edits, 1):
+        if not isinstance(edit, dict):
+            results.append(_invalid_edit_entry_msg(
+                i, edit, '{path, operation, anchor, content}'))
+            fail_count += 1
+            continue
+
+        rp = edit.get('path', '')
+        operation = edit.get('operation', '')
+        anchor = edit.get('anchor', '')
+        content = edit.get('content')
+        desc = edit.get('description', '')
+
+        if (not isinstance(rp, str) or not rp
+                or not isinstance(anchor, str) or not anchor
+                or not isinstance(content, str)):
+            results.append(
+                f'[{i}] FAIL Missing required field (path, anchor, or content)')
+            fail_count += 1
+            continue
+        if not isinstance(operation, str) or operation not in _EDIT_OPERATIONS:
+            results.append(
+                f'[{i}] FAIL Invalid operation: {operation!r} '
+                '(must be insert_after, insert_before, or replace)')
+            fail_count += 1
+            continue
+        if operation != 'replace' and 'replace_all' in edit:
+            results.append(
+                f'[{i}] FAIL replace_all is valid only for operation=replace')
+            fail_count += 1
+            continue
+
+        try:
+            bp, resolved_rp = _resolve_base(base_path, rp, conv_id=conv_id)
+        except ValueError as exc:
+            logger.debug('[write_tools] tool_edit_file path rejected: %s', exc)
+            results.append(f'[{i}] FAIL {rp}: {exc}')
+            fail_count += 1
+            continue
+
+        if operation == 'replace':
+            # Pre-execution wrap gate: a replace whose content repeats the
+            # anchor verbatim at a boundary IS an insertion — refuse it so
+            # the model re-issues with the insert vocabulary (the hint is
+            # only meaningful BEFORE the edit lands). replace_all is exempt:
+            # no insert op has multi-site semantics. Kill switch:
+            # TOFU_EDIT_WRAP_GATE=0.
+            wrap = None
+            if (not edit.get('replace_all')
+                    and os.environ.get('TOFU_EDIT_WRAP_GATE', '1') != '0'):
+                wrap = _pure_wrap_insert(anchor, content)
+            if wrap:
+                op_name, trimmed = wrap
+                logger.info(
+                    '[EditEfficiency] surface=edit_file wrap_rejected=true '
+                    'suggested_op=%s anchor_chars=%d trimmed_chars=%d',
+                    op_name, len(anchor), len(trimmed))
+                fail_count += 1
+                boundary = 'start' if op_name == 'insert_after' else 'end'
+                direction = ('appended' if op_name == 'insert_after'
+                             else 'prepended')
+                results.append(
+                    f'[{i}] FAIL {rp} [replace]: pure insertion rejected — '
+                    f'the content keeps the anchor verbatim at its '
+                    f'{boundary}, re-sending {len(anchor)} unchanged chars. '
+                    f"Re-issue as operation='{op_name}' with ONLY the "
+                    f'{direction} text in content ({len(trimmed)} chars — '
+                    f'do NOT repeat the anchor).')
+                continue
+            result = _apply_one_diff(
+                bp, resolved_rp, anchor, content, desc, conv_id,
+                replace_all=bool(edit.get('replace_all', False)),
+                task_id=task_id,
+            )
+        else:
+            position = 'after' if operation == 'insert_after' else 'before'
+            result = _insert_one(
+                bp, resolved_rp, anchor, content, position, desc, conv_id,
+                task_id=task_id,
+            )
+
+        logger.info(
+            '[EditEfficiency] surface=edit_file operation=%s ok=%s '
+            'anchor_chars=%d content_chars=%d arg_chars=%d',
+            operation, bool(result.get('ok')), len(anchor), len(content),
+            len(anchor) + len(content),
+        )
+        if result['ok']:
+            ok_count += 1
+            if operation == 'replace':
+                detail = f'{result["linesChanged"]} lines changed'
+                if result.get('replacedCount'):
+                    detail += f' [{result["replacedCount"]} occurrences]'
+            else:
+                detail = (f'{result["linesInserted"]} lines inserted '
+                          f'{result["position"]} anchor at L{result["anchorLine"]}')
+            results.append(
+                f'[{i}] OK {result["path"]} [{operation}]: {detail} '
+                f'({result["oldLines"]}L → {result["newLines"]}L)'
+                + (f' — {desc}' if desc else ''))
+        else:
+            fail_count += 1
+            results.append(f'[{i}] FAIL {rp} [{operation}]: {result["error"]}')
+
+    header = f'Applied {ok_count}/{ok_count + fail_count} edits'
+    if fail_count:
+        header += f' ({fail_count} failed)'
+    if dropped:
+        header += f' ({dropped} over the 30-edit limit dropped)'
     return header + '\n' + '\n'.join(results)

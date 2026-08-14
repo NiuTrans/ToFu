@@ -15,6 +15,7 @@ import re
 import time
 import uuid
 
+from lib.json_store import write_bytes_atomic
 from lib.log import get_logger
 
 from lib.file_history.store import (
@@ -488,13 +489,7 @@ def _restore_one(base_path: str, rel: str, version: int) -> tuple[bool, str]:
         # The blob was GC'd or never written (file too large at backup time).
         return False, f'no backup for v{version}'
     try:
-        os.makedirs(os.path.dirname(abs_p) or '.', exist_ok=True)
-        tmp = abs_p + '.fh.tmp'
-        with open(tmp, 'wb') as f:
-            f.write(blob)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, abs_p)
+        write_bytes_atomic(abs_p, blob)
         _nudge_vscode(abs_p)
         return True, 'restored'
     except OSError as e:

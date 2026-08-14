@@ -33,6 +33,7 @@ logger = get_logger(__name__)
 # ── Family detection helpers ──
 from lib.model_info._family import (  # noqa: E402,F401
     claude_line_version,
+    glm_line_version,
     is_claude,
     is_claude_opus_47,
     is_deepseek,
@@ -40,6 +41,7 @@ from lib.model_info._family import (  # noqa: E402,F401
     is_ernie,
     is_gemini,
     is_glm,
+    is_glm53,
     is_gpt,
     is_gpt5,
     is_gpt_56,
@@ -53,9 +55,12 @@ from lib.model_info._family import (  # noqa: E402,F401
 # ── Capability probes (reasoning / replay / vision) ──
 from lib.model_info._capabilities import (  # noqa: E402,F401
     _GEMINI_EFFORT_MAP,
+    _GLM52_EFFORT_MAP,
+    _GLM53_EFFORT_MAP,
     _GPT_EFFORT_MAP,
     _KIMI_K3_EFFORT_MAP,
     gemini_reasoning_effort,
+    glm_reasoning_effort,
     gpt_reasoning_effort,
     kimi_k3_reasoning_effort,
     model_requires_reasoning_content_replay,
@@ -93,14 +98,22 @@ from lib.model_info._video import (  # noqa: E402,F401
     video_frame_budget,
 )
 
+# ── Structured context-window knowledge ──
+from lib.model_info._context import (  # noqa: E402,F401
+    ContextProfile,
+    context_profile,
+    resolved_context_profile,
+)
+
 __all__ = [
     # family detection
-    'claude_line_version',
+    'claude_line_version', 'glm_line_version',
     'is_claude', 'is_claude_opus_47', 'is_deepseek', 'is_doubao', 'is_ernie',
-    'is_gemini', 'is_glm', 'is_gpt', 'is_gpt5', 'is_gpt_56', 'is_kimi',
-    'is_kimi_k3', 'is_longcat', 'is_minimax', 'is_qwen',
+    'is_gemini', 'is_glm', 'is_glm53', 'is_gpt', 'is_gpt5', 'is_gpt_56',
+    'is_kimi', 'is_kimi_k3', 'is_longcat', 'is_minimax', 'is_qwen',
     # capabilities
     'gemini_reasoning_effort', '_GEMINI_EFFORT_MAP',
+    'glm_reasoning_effort', '_GLM52_EFFORT_MAP', '_GLM53_EFFORT_MAP',
     'gpt_reasoning_effort', '_GPT_EFFORT_MAP',
     'kimi_k3_reasoning_effort', '_KIMI_K3_EFFORT_MAP',
     'model_requires_reasoning_content_replay',
@@ -116,4 +129,6 @@ __all__ = [
     '_parse_token_limit_from_error', '_LEARNED_MODEL_LIMITS', '_limits_lock',
     # video frame budget
     'video_frame_budget', 'aggregate_image_cap',
+    # context windows
+    'ContextProfile', 'context_profile', 'resolved_context_profile',
 ]

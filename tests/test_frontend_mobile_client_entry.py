@@ -18,10 +18,12 @@ from pathlib import Path
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parent.parent
-CORE_PANEL = ROOT / "static" / "js" / "settings" / "core_panel.js"
+CORE_PANEL = Path(runtime_section_path('settings/core_panel.js'))
 
 
 def _node() -> str:

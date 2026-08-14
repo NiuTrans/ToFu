@@ -38,22 +38,34 @@ import re
 
 import pytest
 
+from tests._runtime_sections import runtime_section
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 JS = os.path.join(ROOT, 'static', 'js')
 
-# The four lane markers as the frontend writes them (singular form, the
+# The lane markers as the frontend writes them (singular form, the
 # `round._X` flags). The backend tuple is parsed and compared against this
 # set — a newly added backend lane fails HERE first, with instructions.
-_KNOWN_LANES = ('_inboxInject', '_peerInject', '_userSteerInject', '_stallNudge')
+_KNOWN_LANES = (
+    '_inboxInject', '_peerInject', '_userSteerInject', '_stallNudge',
+    '_programSynthetic',
+)
+
+# Program parent rows are synthetic for wire replay, but unlike the four
+# asynchronous injection lanes they are not inserted/repositioned from a
+# message sidecar. Injection-only frontend sites therefore check this subset.
+_INJECT_LANES = _KNOWN_LANES[:-1]
 
 # Display-sidecar names each lane rehydrates from (plural message fields).
 _SIDECARS = ('_inboxInjects', '_peerInjects', '_userSteerInjects', '_stallNudges')
 
 
 def _read(rel):
+    if rel.startswith('static/js/'):
+        return runtime_section(rel.removeprefix('static/js/'))
     with open(os.path.join(ROOT, rel), encoding='utf-8') as fh:
         return fh.read()
 
@@ -117,7 +129,7 @@ def _backend_lanes():
     return set(re.findall(r"'(\w+)'", m.group(1)))
 
 
-def test_backend_lane_vocabulary_is_the_known_four():
+def test_backend_lane_vocabulary_is_the_known_set():
     """If the backend adds a FIFTH inject lane, this fails FIRST and names
     the work: every site in _SITES below must learn the new marker."""
     lanes = _backend_lanes()
@@ -130,7 +142,7 @@ def test_backend_lane_vocabulary_is_the_known_four():
 
 
 def test_every_filter_site_knows_every_lane():
-    lanes = sorted(_backend_lanes())
+    lanes = sorted(_INJECT_LANES)
     failures = []
     for rel, symbol, kind in _SITES:
         src = _read(rel)

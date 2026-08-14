@@ -262,7 +262,9 @@ def test_NC_neuter_bare_dvh_trips_the_guard():
 #
 # Split by governing context on the 837px coarse-pointer tablet:
 #   BASE  — the rule that governs when no media query matches (A + B list).
-#   PHONE — inside @media(max-width:768px)/(max-width:680px) (the ≤768 sweep).
+#   PHONE — inside a compact @media(max-width:…px) block at or below 800px.
+# The 800px ceiling mirrors ORCHESTRATION_LAYOUT_BREAKPOINTS.sheetMax; older
+# overlays still use 768/680px and remain in the same sweep.
 # EXCLUDED (deliberately, decorative / JS-guarded / never-governs — see JOURNAL
 # 2026-07-17): `body` (JS pins px height inline !important), `.paper-report-toc`
 # (sticky doc sidebar, not an overlay), `.preset-dropdown` BASE 50vh (overridden
@@ -322,13 +324,15 @@ def _prelude_has(prelude, selector):
 
 def _bodies_for(css, selector, *, phone):
     """All rule bodies for `selector`. phone=False → base (no @media); phone=True
-    → inside a max-width:768px/680px @media."""
+    → inside a compact max-width media query (≤800px)."""
     hits = []
     for media, prelude, body in _iter_rules(css):
         if not _prelude_has(prelude, selector):
             continue
         joined = ' '.join(media).replace(' ', '')
-        in_phone = ('max-width:768px' in joined) or ('max-width:680px' in joined)
+        max_widths = [int(value) for value in
+                      re.findall(r'max-width:(\d+)px', joined)]
+        in_phone = any(value <= 800 for value in max_widths)
         if phone and in_phone:
             hits.append(body)
         elif (not phone) and (not media):

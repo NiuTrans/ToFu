@@ -18,9 +18,9 @@ did not have:
     unwraps ``.items`` with an ``Array.isArray`` fallback itself.
 
 The other 10: payload passthroughs → api_ok; the admission-control 503
-and SSE-cap 429 carry a typed envelope dict → api_error(dict, status=N)
-(the dict passes through under 'error' verbatim; the 429 site keeps its
-manual Retry-After header — guarded by the shipped-source needle).
+and SSE-cap 429 both use the shared closed-kind ``api_typed_error`` boundary.
+The 429 site keeps its manual Retry-After header — guarded by the
+shipped-source needle.
 
 Layers: PARITY + COORDINATION + SHIPPED-SOURCE, mirroring batches 1-10.
 """
@@ -42,8 +42,8 @@ sys.modules.setdefault('flask', _quart)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _TARGET = os.path.join(_ROOT, 'routes', 'chat.py')
-_API_JS = os.path.join(_ROOT, 'static', 'js', 'api.js')
-_INIT_JS = os.path.join(_ROOT, 'static', 'js', 'main', 'main_init_tasks.js')
+_API_JS = os.path.join(_ROOT, 'frontend', 'src', 'runtime', 'app-runtime.js')
+_INIT_JS = _API_JS
 
 pytestmark = pytest.mark.unit
 
@@ -63,13 +63,15 @@ async def _resolve(resp):
 
 
 def _sites():
-    from lib.api_response import api_error, api_ok
-    capacity_env = {'kind': 'capacity',
-                    'detail': 'Server is at task capacity. Retry shortly.',
-                    'retry_after_s': 3}
-    sse_env = {'kind': 'rate_limited',
-               'detail': 'Too many concurrent streams for this principal.',
-               'retry_after_s': 5}
+    from lib.api_response import api_ok, api_typed_error
+    from lib.error_envelope import make_envelope
+    capacity_env = make_envelope(
+        'server_busy', detail='Server is at task capacity. Retry shortly.',
+        source='routes.chat.admission', extensions={'retry_after_s': 3})
+    sse_env = make_envelope(
+        'ratelimit', detail='Too many concurrent streams for this principal.',
+        source='routes.chat.stream_admission',
+        extensions={'retry_after_s': 5})
     send_ok = {'taskId': 't1', 'convId': 'c1', 'title': 't',
                'userMessage': {'role': 'user'}, 'isNew': False, 'msgCount': 3}
     regen_ok = {'taskId': 't1', 'convId': 'c1', 'title': 't', 'msgCount': 3,
@@ -79,7 +81,11 @@ def _sites():
         ('continue-outcome', {'taskId': 't1', 'resumed': True}, 200,
          lambda: api_ok({'taskId': 't1', 'resumed': True}), False),
         ('admission-503', {'ok': False, 'error': dict(capacity_env)}, 503,
-         lambda: api_error(dict(capacity_env), status=503), True),
+         lambda: api_typed_error(
+             'server_busy', status=503,
+             detail='Server is at task capacity. Retry shortly.',
+             source='routes.chat.admission',
+             extensions={'retry_after_s': 3}), True),
         ('start-taskid', {'taskId': 't1'}, 200,
          lambda: api_ok({'taskId': 't1'}), False),
         ('translate-status', {'statusMessage': 'm', 'statusKind': 'retry'},
@@ -96,12 +102,16 @@ def _sites():
         ('ct-outcome', {'taskId': 't1', 'resumed': True}, 200,
          lambda: api_ok({'taskId': 't1', 'resumed': True}), False),
         ('sse-429', {'ok': False, 'error': dict(sse_env)}, 429,
-         lambda: api_error(dict(sse_env), status=429), True),
+         lambda: api_typed_error(
+             'ratelimit', status=429,
+             detail='Too many concurrent streams for this principal.',
+             source='routes.chat.stream_admission',
+             extensions={'retry_after_s': 5}), True),
     ]
 
 
 def test_envelope_parity():
-    from flask import jsonify
+    from quart import jsonify
     app = _make_app()
 
     async def _t():
@@ -187,6 +197,8 @@ def test_shipped_source_converted():
         'the SSE 429 must keep its manual Retry-After: 5 header — '
         'api_error does not set it (that is api_service_unavailable '
         'territory, and this is a 429)')
+    assert 'api_typed_error(' in src
+    assert "'server_busy'" in src and "'ratelimit'" in src
 
 
 if __name__ == '__main__':

@@ -67,6 +67,16 @@ Env knobs
                                    admission queuing is not. The observed
                                    floor-miss class (~120-140k) sailed past the
                                    old 150k-inherited bar.
+
+Codex subscription overrides (only when ``cache_profile='codex'``):
+``TOFU_CACHE_SETTLE_CODEX_VISIBILITY_MS`` — inferred unmetered-write visibility
+                                   window (default 5000, live-tested on Luna).
+``TOFU_CACHE_SETTLE_CODEX_SEND_INTERVAL_MS`` — minimum start-to-start spacing
+                                   for one prompt_cache_key (default 4200,
+                                   keeping fast loops below ~15 requests/min).
+``TOFU_CACHE_SETTLE_CODEX_MAX_MS`` — hard cap on one Codex hold (default 6000).
+``TOFU_CACHE_SETTLE_CODEX_THRESHOLD_TOKENS`` — Codex cacheability threshold
+                                   (default 1024, matching automatic caching).
 """
 
 from __future__ import annotations
@@ -92,6 +102,8 @@ __all__ = [
     'async_settle_before_send',
     'record_stream_end',
     'is_cold_write',
+    'codex_cache_write_pending',
+    'observe_codex_cache',
     '_reset_settle_for_tests',
 ]
 
@@ -230,6 +242,22 @@ _lock = threading.Lock()
 _ENTRY_TTL_S = 3600.0
 _MAX_ENTRIES = 4096
 
+# ChatGPT's Codex Responses endpoint doesn't expose cache-write tokens.  Keep
+# its send clock and inferred write state separately from Anthropic's metered
+# ``_last_end`` tuple so the mature Anthropic path remains byte-for-byte
+# unchanged.  Values are deliberately plain dicts: this module is hot-loaded
+# during deploys and a schema-less in-process cache is simpler to migrate.
+#
+#   conv_id -> {last_send, last_end, pending_write}
+_codex_timing: dict[str, dict[str, float | bool]] = {}
+
+# Per-conversation cache-read history used only for honest GPT-5.6 diagnostics.
+# It proves append-only wire growth before naming an implicit-breakpoint
+# fallback; it never affects request contents or billing decisions.
+_codex_health: dict[str, dict] = {}
+
+_CODEX_AUTO_CACHE_MIN_TOKENS = 1024
+
 
 def _prune_locked(now: float) -> None:
     """Drop stale entries; if still over the cap, drop the oldest. Caller holds lock."""
@@ -240,6 +268,19 @@ def _prune_locked(now: float) -> None:
         ordered = sorted(_last_end.items(), key=lambda kv: kv[1][0])
         for cid, _ in ordered[:len(_last_end) - _MAX_ENTRIES]:
             del _last_end[cid]
+    for table in (_codex_timing, _codex_health):
+        stale = [cid for cid, value in table.items()
+                 if now - float(value.get('last_end') or
+                                value.get('updated') or 0.0) > _ENTRY_TTL_S]
+        for cid in stale:
+            del table[cid]
+        if len(table) > _MAX_ENTRIES:
+            ordered = sorted(
+                table.items(),
+                key=lambda kv: float(kv[1].get('last_end') or
+                                     kv[1].get('updated') or 0.0))
+            for cid, _ in ordered[:len(table) - _MAX_ENTRIES]:
+                del table[cid]
 
 
 _COLD_WRITE_MIN_TOKENS = 20_000
@@ -264,8 +305,82 @@ def is_cold_write(usage) -> bool:
     return cr < cw
 
 
+def codex_cache_write_pending(usage) -> bool:
+    """Infer an unreported Codex prompt-cache write from Responses usage.
+
+    The ChatGPT subscription wire reports ``cache_write_tokens=0`` even when a
+    later request proves that a write happened.  A cacheable request therefore
+    arms the visibility hold when it was completely cold, or when at least one
+    new 1,024-token cache chunk remains beyond the reported read prefix.
+    """
+    if not isinstance(usage, dict):
+        return False
+    normalized = normalize_usage(usage)
+    try:
+        input_tokens = int(usage.get('prompt_tokens') or
+                           usage.get('input_tokens') or 0)
+    except (TypeError, ValueError) as exc:
+        logger.debug('[CacheSettle] invalid input-token count: %s', exc)
+        return False
+    if input_tokens < _CODEX_AUTO_CACHE_MIN_TOKENS:
+        return False
+    cache_read = max(0, int(normalized['cache_read']))
+    return (cache_read == 0
+            or input_tokens - cache_read >= _CODEX_AUTO_CACHE_MIN_TOKENS)
+
+
+def _codex_visibility_window_ms() -> float:
+    """Post-response visibility window for inferred Codex writes (5s)."""
+    try:
+        value = float(os.environ.get(
+            'TOFU_CACHE_SETTLE_CODEX_VISIBILITY_MS', '5000'))
+        return value if value > 0 else 5000.0
+    except (TypeError, ValueError) as exc:
+        logger.debug('[CacheSettle] Codex visibility window parse failed: %s',
+                     exc)
+        return 5000.0
+
+
+def _codex_send_interval_ms() -> float:
+    """Minimum start-to-start interval per prompt_cache_key (4.2s).
+
+    OpenAI documents reduced cache effectiveness above roughly 15 requests per
+    minute for one prompt-cache key.  4.2 seconds keeps a fast tool loop below
+    that boundary with a little scheduling headroom.
+    """
+    try:
+        value = float(os.environ.get(
+            'TOFU_CACHE_SETTLE_CODEX_SEND_INTERVAL_MS', '4200'))
+        return value if value > 0 else 4200.0
+    except (TypeError, ValueError) as exc:
+        logger.debug('[CacheSettle] Codex send interval parse failed: %s', exc)
+        return 4200.0
+
+
+def _codex_max_wait_ms() -> float:
+    try:
+        value = float(os.environ.get(
+            'TOFU_CACHE_SETTLE_CODEX_MAX_MS', '6000'))
+        return value if value > 0 else 6000.0
+    except (TypeError, ValueError) as exc:
+        logger.debug('[CacheSettle] Codex max wait parse failed: %s', exc)
+        return 6000.0
+
+
+def _codex_threshold_tokens() -> int:
+    try:
+        value = int(os.environ.get(
+            'TOFU_CACHE_SETTLE_CODEX_THRESHOLD_TOKENS',
+            str(_CODEX_AUTO_CACHE_MIN_TOKENS)))
+        return value if value > 0 else _CODEX_AUTO_CACHE_MIN_TOKENS
+    except (TypeError, ValueError) as exc:
+        logger.debug('[CacheSettle] Codex threshold parse failed: %s', exc)
+        return _CODEX_AUTO_CACHE_MIN_TOKENS
+
+
 def record_stream_end(conv_id: str, *, now: float | None = None,
-                      cold_write: bool = False) -> None:
+                      cold_write: bool = False, cache_profile: str = '',
+                      pending_write: bool = False) -> None:
     """Record that ``conv_id``'s current request stream just ENDED.
 
     Called after a successful (or terminal) stream so the NEXT request on the
@@ -282,8 +397,44 @@ def record_stream_end(conv_id: str, *, now: float | None = None,
     ts = now if now is not None else time.time()
     with _lock:
         _last_end[conv_id] = (ts, bool(cold_write))
+        if cache_profile == 'codex':
+            state = _codex_timing.setdefault(conv_id, {})
+            state['last_end'] = ts
+            state['pending_write'] = bool(pending_write)
         if len(_last_end) > _MAX_ENTRIES:
             _prune_locked(ts)
+
+
+def _codex_compute_wait_s(conv_id: str, est_tokens: int,
+                          now: float) -> tuple[float, str]:
+    if est_tokens < _codex_threshold_tokens():
+        return 0.0, ''
+    with _lock:
+        state = dict(_codex_timing.get(conv_id) or {})
+    if not state:
+        return 0.0, ''
+
+    waits: list[tuple[float, str]] = []
+    last_send = float(state.get('last_send') or 0.0)
+    if last_send > 0:
+        waits.append((max(0.0, _codex_send_interval_ms() / 1000.0
+                          - max(0.0, now - last_send)),
+                      'prompt_cache_key rate'))
+    last_end = float(state.get('last_end') or 0.0)
+    if bool(state.get('pending_write')) and last_end > 0:
+        waits.append((max(0.0, _codex_visibility_window_ms() / 1000.0
+                          - max(0.0, now - last_end)),
+                      'unmetered cache write visibility'))
+    wait_s, reason = max(waits, default=(0.0, ''), key=lambda item: item[0])
+    return min(wait_s, _codex_max_wait_ms() / 1000.0), reason
+
+
+def _record_codex_send(conv_id: str, sent_at: float) -> None:
+    with _lock:
+        state = _codex_timing.setdefault(conv_id, {})
+        state['last_send'] = sent_at
+        if len(_codex_timing) > _MAX_ENTRIES:
+            _prune_locked(sent_at)
 
 
 def _compute_wait_s(conv_id: str, est_tokens: int, now: float | None) -> tuple[float, float, float]:
@@ -340,7 +491,8 @@ def _log_hold(wait_s: float, est_tokens: int, conv_id: str, elapsed: float,
 
 def settle_before_send(conv_id: str, est_tokens: int, *,
                        abort_check=None, log_prefix: str = '',
-                       now: float | None = None) -> float:
+                       now: float | None = None,
+                       cache_profile: str = '') -> float:
     """Wait so the prior same-conv round's cache write is visible before send.
 
     Returns the number of seconds actually waited (0.0 when no wait was needed
@@ -353,7 +505,27 @@ def settle_before_send(conv_id: str, est_tokens: int, *,
 
     The wait is the REMAINDER of the settle window since the prior stream end,
     hard-capped by :func:`settle_max_wait_ms`, and is abort-aware."""
-    wait_s, elapsed, window_s = _compute_wait_s(conv_id, est_tokens, now)
+    started_at = now if now is not None else time.time()
+    if (cache_profile == 'codex' and settle_enabled() and conv_id
+            and est_tokens >= _codex_threshold_tokens()):
+        wait_s, reason = _codex_compute_wait_s(
+            conv_id, est_tokens, started_at)
+        if wait_s > 0:
+            logger.info('%s [CacheSettle] holding %.2fs for Codex conv=%s '
+                        '(~%dk tok; %s)', log_prefix, wait_s, conv_id[:8],
+                        est_tokens // 1000, reason)
+            try:
+                from lib.llm._transport import abortable_sleep
+                abortable_sleep(wait_s, abort_check)
+            except ImportError as exc:
+                logger.debug('[CacheSettle] abortable_sleep unavailable, '
+                             'plain sleep: %s', exc)
+                time.sleep(wait_s)
+        _record_codex_send(conv_id, started_at + wait_s)
+        return wait_s
+
+    wait_s, elapsed, window_s = _compute_wait_s(
+        conv_id, est_tokens, started_at)
     if wait_s <= 0:
         return 0.0
     _log_hold(wait_s, est_tokens, conv_id, elapsed, window_s, log_prefix)
@@ -368,11 +540,33 @@ def settle_before_send(conv_id: str, est_tokens: int, *,
 
 async def async_settle_before_send(conv_id: str, est_tokens: int, *,
                                    abort_check=None, log_prefix: str = '',
-                                   now: float | None = None) -> float:
+                                   now: float | None = None,
+                                   cache_profile: str = '') -> float:
     """Async counterpart of :func:`settle_before_send` for the async dispatch
     path. Same timing rules (shared :func:`_compute_wait_s`); uses
     ``async_abortable_sleep`` so it never blocks the event loop."""
-    wait_s, elapsed, window_s = _compute_wait_s(conv_id, est_tokens, now)
+    started_at = now if now is not None else time.time()
+    if (cache_profile == 'codex' and settle_enabled() and conv_id
+            and est_tokens >= _codex_threshold_tokens()):
+        wait_s, reason = _codex_compute_wait_s(
+            conv_id, est_tokens, started_at)
+        if wait_s > 0:
+            logger.info('%s [CacheSettle] holding %.2fs for Codex conv=%s '
+                        '(~%dk tok; %s)', log_prefix, wait_s, conv_id[:8],
+                        est_tokens // 1000, reason)
+            try:
+                from lib.llm._transport import async_abortable_sleep
+                await async_abortable_sleep(wait_s, abort_check)
+            except ImportError as exc:
+                logger.debug('[CacheSettle] async_abortable_sleep unavailable: '
+                             '%s', exc)
+                import asyncio
+                await asyncio.sleep(wait_s)
+        _record_codex_send(conv_id, started_at + wait_s)
+        return wait_s
+
+    wait_s, elapsed, window_s = _compute_wait_s(
+        conv_id, est_tokens, started_at)
     if wait_s <= 0:
         return 0.0
     _log_hold(wait_s, est_tokens, conv_id, elapsed, window_s, log_prefix)
@@ -386,7 +580,109 @@ async def async_settle_before_send(conv_id: str, est_tokens: int, *,
     return wait_s
 
 
+def _wire_is_append_only(previous: dict, usage: dict) -> bool:
+    old = previous.get('wire_bytes')
+    new = usage.get('_wire_bytes')
+    if not isinstance(old, list) or not isinstance(new, list) or not old:
+        return False
+    if len(new) < len(old) or list(new[:len(old)]) != list(old):
+        return False
+    old_region = previous.get('wire_region')
+    new_region = usage.get('_wire_region')
+    if old_region is not None and new_region is not None \
+            and old_region != new_region:
+        return False
+    old_routing = previous.get('wire_routing')
+    new_routing = usage.get('_wire_routing')
+    return not (old_routing is not None and new_routing is not None
+                and old_routing != new_routing)
+
+
+def observe_codex_cache(conv_id: str, usage) -> dict:
+    """Classify one Codex cache result with append-only wire evidence.
+
+    GPT-5.6's subscription endpoint may fall back from a newer implicit cache
+    breakpoint to an older 1,024-token boundary even though the request only
+    appended items.  Generic cache-break detection intentionally ignores a
+    1,024-token fluctuation, so it previously vanished from telemetry.  This
+    observer names that state without claiming the client invalidated bytes.
+    """
+    if not conv_id or not isinstance(usage, dict):
+        return {}
+    normalized = normalize_usage(usage)
+    cache_read = max(0, int(normalized['cache_read']))
+    try:
+        input_tokens = int(usage.get('prompt_tokens') or
+                           usage.get('input_tokens') or 0)
+    except (TypeError, ValueError) as exc:
+        logger.debug('[CacheSettle] invalid observed input-token count: %s', exc)
+        input_tokens = 0
+    now = time.time()
+    with _lock:
+        previous = dict(_codex_health.get(conv_id) or {})
+        call = int(previous.get('call') or 0) + 1
+        append_only = _wire_is_append_only(previous, usage) if previous else False
+        previous_read = int(previous.get('cache_read') or 0)
+        max_read = max(int(previous.get('max_read') or 0), cache_read)
+
+        if input_tokens < _CODEX_AUTO_CACHE_MIN_TOKENS:
+            status = 'not_cacheable'
+        elif call == 1 and cache_read == 0:
+            status = 'cold'
+        elif cache_read == 0 and previous_read == 0:
+            status = 'write_visibility_miss'
+        elif cache_read == 0 and previous_read > 0 and append_only:
+            status = 'upstream_cache_miss'
+        elif (0 < cache_read < previous_read and append_only):
+            status = 'implicit_breakpoint_fallback'
+        elif cache_read > previous_read:
+            status = 'prefix_extended'
+        elif cache_read > 0:
+            status = 'warm'
+        else:
+            status = 'miss_after_wire_change'
+
+        result = {
+            'status': status,
+            'call': call,
+            'input_tokens': input_tokens,
+            'cached_tokens': cache_read,
+            'previous_cached_tokens': previous_read,
+            'max_cached_tokens': max_read,
+            'drop_tokens': max(0, previous_read - cache_read),
+            'wire_append_only': append_only,
+        }
+        _codex_health[conv_id] = {
+            'call': call,
+            'cache_read': cache_read,
+            'max_read': max_read,
+            'wire_bytes': usage.get('_wire_bytes'),
+            'wire_region': usage.get('_wire_region'),
+            'wire_routing': usage.get('_wire_routing'),
+            'updated': now,
+        }
+        if len(_codex_health) > _MAX_ENTRIES:
+            _prune_locked(now)
+
+    usage['_codex_cache'] = result
+    if status in ('implicit_breakpoint_fallback', 'upstream_cache_miss'):
+        logger.warning(
+            '[CodexCache] conv=%s call=%d status=%s cached=%d->%d '
+            'drop=%d input=%d append_only=%s. The client wire and routing '
+            'prefix are unchanged; this is an upstream implicit-breakpoint '
+            'fallback/miss, not a Tofu prefix rewrite.',
+            conv_id[:8], call, status, previous_read, cache_read,
+            result['drop_tokens'], input_tokens, append_only)
+    elif status == 'write_visibility_miss':
+        logger.info('[CodexCache] conv=%s call=%d second cold read; unmetered '
+                    'write was not visible yet (input=%d)',
+                    conv_id[:8], call, input_tokens)
+    return result
+
+
 def _reset_settle_for_tests() -> None:
     """Test hook: clear the recency map."""
     with _lock:
         _last_end.clear()
+        _codex_timing.clear()
+        _codex_health.clear()

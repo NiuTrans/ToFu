@@ -33,13 +33,14 @@ import os
 
 import pytest
 
-from tests._jsdom import JS_DIR, run_harness
+from tests._jsdom import run_harness
+from tests._runtime_sections import runtime_section_path
 
 pytestmark = pytest.mark.unit
 
-VISIBILITY_JS = os.path.join(JS_DIR, 'settings', 'visibility_defaults.js')
-MODEL_HEALTH_JS = os.path.join(JS_DIR, 'core', 'model_health.js')
-MODEL_GROUP_JS = os.path.join(JS_DIR, 'core', 'model_group.js')
+VISIBILITY_JS = runtime_section_path('settings/visibility_defaults.js')
+MODEL_HEALTH_JS = runtime_section_path('core/model_health.js')
+MODEL_GROUP_JS = runtime_section_path('core/model_group.js')
 
 _HTML = ('<!DOCTYPE html><body>'
          '<div id="stgDropdownVisibility"></div>'
@@ -78,6 +79,7 @@ const VIS_SRC = fs.readFileSync(process.argv[2], 'utf8');
 
 /* Bridge window-published judgment + grouping into node global scope. */
 global.foldProbeHealth = window.foldProbeHealth;
+global.effectiveProbeStatus = window.effectiveProbeStatus;
 global.foldRuntimeHealth = window.foldRuntimeHealth;
 global.modelHealthLevelClass = window.modelHealthLevelClass;
 global.modelHealthUsable = window.modelHealthUsable;
@@ -92,7 +94,9 @@ const PROV_A = { id: 'sankuai', name: 'Meituan', base_url: 'https://aigc/v1/open
 const PROV_B = { id: 'sankuai_anthropic', name: 'Meituan (Anthropic native)',
   base_url: 'https://aigc/v1/anthropic', protocol: 'anthropic', enabled: true,
   api_keys: ['k1', 'k2'],
-  models: [ { model_id: 'claude-opus-4.7', capabilities: ['text'] } ] };
+  models: [ { model_id: 'claude-opus-4.7', capabilities: ['text'],
+    request_ids: ['aws.opus-4.7', 'yuju-opus-4.7'],
+    key_access: { '1': { request_ids: ['yuju-opus-4.7'] } } } ] };
 global._stgProviders = window._stgProviders = [PROV_A, PROV_B];
 global._getAllModels = window._getAllModels = function () {
   const out = [];
@@ -105,11 +109,13 @@ global._getAllModels = window._getAllModels = function () {
 const starts = [];
 const NOW = Math.floor(Date.now() / 1000);
 const SNAP = {
-  sankuai: { provider_id: 'sankuai', status: 'done', finished_at: NOW,
-    cells: { '0::kimi-k3': { key_idx: 0, model_id: 'kimi-k3', root_model_id: 'kimi-k3', status: 'ok', detail: 'HTTP 200' } } },
-  sankuai_anthropic: { provider_id: 'sankuai_anthropic', status: 'done', finished_at: NOW,
+  sankuai: { provider_id: 'sankuai', probe_schema_version: 2,
+    status: 'done', finished_at: NOW,
+    cells: { '0::kimi-k3': { key_idx: 0, model_id: 'kimi-k3', root_model_id: 'kimi-k3', status: 'ok', detail: 'HTTP 200', proof: 'generated_text' } } },
+  sankuai_anthropic: { provider_id: 'sankuai_anthropic', probe_schema_version: 2,
+    status: 'done', finished_at: NOW,
     cells: { '0::claude-opus-4.7': { key_idx: 0, model_id: 'aws.opus-4.7', root_model_id: 'claude-opus-4.7', status: 'not_found', detail: 'HTTP 404' },
-             '1::claude-opus-4.7': { key_idx: 1, model_id: 'yuju-opus-4.7', root_model_id: 'claude-opus-4.7', status: 'ok', detail: 'HTTP 200' } } },
+             '1::claude-opus-4.7': { key_idx: 1, model_id: 'yuju-opus-4.7', root_model_id: 'claude-opus-4.7', status: 'ok', detail: 'HTTP 200', proof: 'generated_text' } } },
 };
 global.Api = window.Api = {
   providers: {
@@ -138,6 +144,11 @@ try {
   check('provB_anthropic_protocol', byProv['sankuai_anthropic'].protocol === 'anthropic');
   check('provB_models_sent', (byProv['sankuai_anthropic'].models || [])
     .some((m) => m.model_id === 'claude-opus-4.7'));
+  const claudeBody = byProv['sankuai_anthropic'].models[0];
+  check('dropdown_probe_preserves_wire_pool',
+    JSON.stringify(claudeBody.request_ids) === '["aws.opus-4.7","yuju-opus-4.7"]');
+  check('dropdown_probe_preserves_key_access',
+    claudeBody.key_access['1'].request_ids[0] === 'yuju-opus-4.7');
 
   // ══ 3. Dots paint from the shared pool verdict ══
   check('kimi_dot_ok', dotFor('kimi-k3').className.indexOf('mh-ok') >= 0);
@@ -152,10 +163,40 @@ try {
   check('tooltip_has_protocol', tip.indexOf('anthropic') >= 0);
   check('tooltip_shows_failing_wire', tip.indexOf('aws.opus-4.7') >= 0);
 
-  // ══ 5. Stale snapshot paints 'stale', never green ══
+  // ══ 5. A healthy but DISABLED slot cannot make the picker green ══
+  PROV_A.models[0].key_access = { '0': { disabled_ids: ['kimi-k3'] } };
   _ddProbeSnaps['sankuai'].snapshot = {
-    provider_id: 'sankuai', status: 'done', finished_at: NOW - 3 * 24 * 3600,
-    cells: { '0::kimi-k3': { key_idx: 0, model_id: 'kimi-k3', root_model_id: 'kimi-k3', status: 'ok', detail: 'HTTP 200' } },
+    provider_id: 'sankuai', probe_schema_version: 2,
+    status: 'done', finished_at: NOW,
+    cells: {
+      '0::kimi-k3': { key_idx: 0, model_id: 'kimi-k3', root_model_id: 'kimi-k3',
+        status: 'ok', detail: 'HTTP 200', proof: 'generated_text' },
+      '1::kimi-k3': { key_idx: 1, model_id: 'kimi-k3', root_model_id: 'kimi-k3',
+        status: 'not_found', detail: 'HTTP 404' },
+    },
+  };
+  _renderDropdownProbeHealth();
+  check('disabled_healthy_slot_does_not_mask_enabled_failure',
+    dotFor('kimi-k3').className.indexOf('mh-down') >= 0);
+  delete PROV_A.models[0].key_access;
+
+  // ══ 6. Old backend contradiction: ok + HTTP 400 is red, never green ══
+  _ddProbeSnaps['sankuai'].snapshot = {
+    provider_id: 'sankuai', status: 'done', finished_at: NOW,
+    cells: { '0::kimi-k3': { key_idx: 0, model_id: 'kimi-k3',
+      root_model_id: 'kimi-k3', status: 'ok', detail: 'HTTP 400' } },
+  };
+  _renderDropdownProbeHealth();
+  check('legacy_http400_dot_is_down',
+    dotFor('kimi-k3').className.indexOf('mh-down') >= 0);
+  check('legacy_http400_tooltip_says_bad_request',
+    dotFor('kimi-k3').title.indexOf('bad_request') >= 0);
+
+  // ══ 7. Stale snapshot paints 'stale', never green ══
+  _ddProbeSnaps['sankuai'].snapshot = {
+    provider_id: 'sankuai', probe_schema_version: 2,
+    status: 'done', finished_at: NOW - 3 * 24 * 3600,
+    cells: { '0::kimi-k3': { key_idx: 0, model_id: 'kimi-k3', root_model_id: 'kimi-k3', status: 'ok', detail: 'HTTP 200', proof: 'generated_text' } },
   };
   _renderDropdownProbeHealth();
   check('stale_dot_not_green', dotFor('kimi-k3').className.indexOf('mh-stale') >= 0);

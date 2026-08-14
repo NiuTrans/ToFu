@@ -38,15 +38,23 @@ verified separately (the common subkeys exist in i18n.js).
 from __future__ import annotations
 
 import os
+import json
 import re
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
+pytestmark = pytest.mark.unit
+
 
 # ── Configuration ────────────────────────────────────────────────────
 HERE = os.path.dirname(os.path.abspath(__file__))
-JS_DIR = os.path.normpath(os.path.join(HERE, '..', 'static', 'js'))
-I18N_FILE = os.path.join(JS_DIR, 'i18n.js')
+ROOT = os.path.normpath(os.path.join(HERE, '..'))
+JS_DIR = runtime_sections_dir()
+LOCALE_DIR = os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales')
+I18N_FILE = os.path.join(LOCALE_DIR, 'zh.json')
+I18N_EN_FILE = os.path.join(LOCALE_DIR, 'en.json')
 
 # The namespace this ratchet polices.
 NAMESPACE = 'projectBrain.'
@@ -72,22 +80,13 @@ _KEY_DEF_RE = re.compile(r"""['"](projectBrain\.[A-Za-z0-9_.]+)['"]\s*:""")
 # `t('key', { count: 5 })` as a phantom reference to an undefined key.
 _BUILT_PACK_RE = re.compile(r'^i18n-(?:zh|en)-[0-9a-f]{8}\.js$')
 
-# The deferred FEATURE bundle (Epic-E), same derived-artifact class as
-# bundle-*.js — anchored to the 8-hex hash exactly like
-# lib/js_bundler.py::_BUILT_BUNDLE_RE (and .gitignore): NEVER a bare
-# `feature-*` glob, which would also match the tracked SOURCE
-# feature-loader.js. The bundler's youth-grace deliberately RETAINS stale
-# feature-<hash>.js artifacts beside the current one; their frozen key
-# references (built from older sources) are not a signal — the sources they
-# were minified from are scanned directly. First exposed 2026-08-01 when a
-# key REMOVAL (projectBrain.attnKindConflict/attnOpenTeam) left dangling
-# references in three retained stale artifacts.
-_BUILT_FEATURE_RE = re.compile(r'^feature-[0-9a-f]{8}\.js$')
+_BUILT_SCRIPT_RE = re.compile(
+    r'^(?:bundle|domain-(?:paper|orchestration|settings|memory|skills))-'
+    r'[0-9a-f]{8}\.js$')
 
 
 def _is_generated(name: str) -> bool:
-    return (name.startswith('bundle-') and name.endswith('.js')) or bool(
-        _BUILT_PACK_RE.match(name)) or bool(_BUILT_FEATURE_RE.match(name))
+    return bool(_BUILT_SCRIPT_RE.match(name) or _BUILT_PACK_RE.match(name))
 
 
 def _is_dynamic_prefix(key: str, next_char: str) -> bool:
@@ -142,8 +141,10 @@ def _scan_source_refs() -> dict[str, set[str]]:
 
 def _defined_keys() -> set[str]:
     with open(I18N_FILE, 'r', encoding='utf-8') as f:
-        text = f.read()
-    return set(_KEY_DEF_RE.findall(text))
+        zh = set(json.load(f))
+    with open(I18N_EN_FILE, 'r', encoding='utf-8') as f:
+        en = set(json.load(f))
+    return {key for key in zh & en if key.startswith(NAMESPACE)}
 
 
 # ── Namespace-agnostic coverage (ALL keys, JS + HTML) ────────────────
@@ -180,7 +181,10 @@ _HTML_FILES = (
 
 def _all_defined_keys() -> set[str]:
     with open(I18N_FILE, 'r', encoding='utf-8') as f:
-        return set(_ANY_KEY_DEF_RE.findall(f.read()))
+        zh = set(json.load(f))
+    with open(I18N_EN_FILE, 'r', encoding='utf-8') as f:
+        en = set(json.load(f))
+    return zh & en
 
 
 def _scan_all_refs() -> dict[str, set[str]]:
@@ -231,16 +235,22 @@ def _scan_all_refs() -> dict[str, set[str]]:
 
 # ── Tests ────────────────────────────────────────────────────────────
 def test_i18n_file_exists():
-    assert os.path.isfile(I18N_FILE), 'static/js/i18n.js is missing.'
+    assert os.path.isfile(I18N_FILE), 'frontend zh locale JSON is missing.'
+    assert os.path.isfile(I18N_EN_FILE), 'frontend en locale JSON is missing.'
+    with open(I18N_FILE, encoding='utf-8') as fh:
+        zh = set(json.load(fh))
+    with open(I18N_EN_FILE, encoding='utf-8') as fh:
+        en = set(json.load(fh))
+    assert zh == en, (
+        f'locale key sets differ: zh-only={sorted(zh - en)}, '
+        f'en-only={sorted(en - zh)}')
 
 
-def test_feature_artifacts_are_excluded_but_not_the_loader_source():
-    """The derived deferred bundle is skipped; the tracked feature-loader.js
-    SOURCE is not — a bare `feature-*` glob would blind the scanner to the
-    loader's own key references (the same anchor discipline as .gitignore)."""
-    assert _is_generated('feature-2cb7e8ea.js')
-    assert _is_generated('feature-00000000.js')
-    assert not _is_generated('feature-loader.js')
+def test_generated_artifacts_are_excluded_but_bridge_source_is_not():
+    assert _is_generated('bundle-2cb7e8ea.js')
+    assert _is_generated('domain-paper-00000000.js')
+    assert not _is_generated('feature-bridge.js')
+    assert not _is_generated('feature-00000000.js')
     assert not _is_generated('feature-new.js'), \
         'only the 8-hex content-hash shape is an artifact'
 

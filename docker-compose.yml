@@ -25,6 +25,13 @@ services:
     # image: ghcr.io/rangehow/tofu:latest  # uncomment after publishing
     container_name: tofu
     restart: unless-stopped
+    # PID 1 reaps MCP/browser children; bounded resources make failure local
+    # and let the in-process soft/hard RSS guards act before the kernel does.
+    init: true
+    mem_limit: ${TOFU_MEMORY_LIMIT:-8g}
+    mem_reservation: ${TOFU_MEMORY_RESERVATION:-2g}
+    pids_limit: ${TOFU_PIDS_LIMIT:-1024}
+    stop_grace_period: 45s
     ports:
       - "${PORT:-15000}:15000"
     volumes:
@@ -32,15 +39,24 @@ services:
       - tofu-data:/app/data
       - tofu-logs:/app/logs
       - tofu-uploads:/app/uploads
+      # Optional distinct volume, still mounted at the mandated project-local
+      # data/backups path.
+      - "${TOFU_BACKUP_VOLUME:-tofu-backups}:/app/data/backups"
     environment:
       - PORT=15000
       - BIND_HOST=0.0.0.0
+      # Earlier pressure gates for a dedicated, memory-bounded container.
+      - TOFU_CGROUP_RELIEF_PCT=${TOFU_CGROUP_RELIEF_PCT:-85}
+      - TOFU_CGROUP_REQUEST_PCT=${TOFU_CGROUP_REQUEST_PCT:-90}
+      - TOFU_ADMISSION_CGROUP_PCT=${TOFU_ADMISSION_CGROUP_PCT:-90}
+      - TOFU_PROCESS_RSS_RELIEF_MB=${TOFU_PROCESS_RSS_RELIEF_MB:-}
+      - TOFU_PROCESS_RSS_RECYCLE_MB=${TOFU_PROCESS_RSS_RECYCLE_MB:-}
       # ── LLM API (optional — can also configure via Settings UI) ──
       - LLM_API_KEYS=${LLM_API_KEYS:-}
       - LLM_BASE_URL=${LLM_BASE_URL:-}
       - LLM_MODEL=${LLM_MODEL:-}
-      # ── Database (optional — defaults to data/tofu.db; legacy data/chatui.db auto-picked up) ──
-      - TOFU_DB_PATH=${TOFU_DB_PATH:-${CHATUI_DB_PATH:-}}
+      # ── Storage Sidecar backend (exact selector; no fallback) ──
+      - TOFU_DB_BACKEND=${TOFU_DB_BACKEND:-sqlite}
       # ── Proxy (if needed) ──
       - HTTP_PROXY=${HTTP_PROXY:-}
       - HTTPS_PROXY=${HTTPS_PROXY:-}
@@ -51,13 +67,19 @@ services:
       # ── Trading (disabled by default) ──
       - TRADING_ENABLED=${TRADING_ENABLED:-0}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:15000/"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:15000/api/health"]
       interval: 30s
       timeout: 5s
       start_period: 30s
       retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
 
 volumes:
   tofu-data:
   tofu-logs:
   tofu-uploads:
+  tofu-backups:

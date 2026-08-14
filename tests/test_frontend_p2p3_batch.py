@@ -36,6 +36,8 @@ import os
 
 import pytest
 
+from tests._runtime_sections import runtime_section
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -43,6 +45,8 @@ ROOT = os.path.normpath(os.path.join(HERE, '..'))
 
 
 def _read(rel: str) -> str:
+    if rel.startswith('static/js/'):
+        return runtime_section(rel.removeprefix('static/js/'))
     with open(os.path.join(ROOT, rel), encoding='utf-8') as f:
         return f.read()
 
@@ -77,35 +81,36 @@ def test_NEUTER_history_rewrite_single_guard_fires():
 # ── ② stale-paper guards ──────────────────────────────────────────────────
 
 @pytest.mark.parametrize('rel,state', [
-    ('static/js/paper/podcast.js', '_podcast'),
-    ('static/js/paper/video.js', '_pvideo'),
+    ('frontend/src/features/paper/podcast-runtime.ts', 'state'),
+    ('frontend/src/features/paper/video-runtime.ts', 'state'),
 ])
 def test_stale_paper_guards(rel, state):
     src = _read(rel)
     assert src.count(f'{state}.paperHash !== initHash') >= 2, (
         f'{rel}: _init*Tab must bail on paper switch after each await')
-    assert f'{state}.paperHash !== genHash' in src, (
+    assert f'{state}.paperHash !== generationHash' in src, (
         f'{rel}: _*Generate must bail when the paper switched mid-start')
 
 
 def test_NEUTER_stale_guard_fires():
-    src = _read('static/js/paper/podcast.js')
-    neutered = src.replace('_podcast.paperHash !== initHash', 'false &&', 1)
-    assert neutered.count('_podcast.paperHash !== initHash') < 2
+    src = _read('frontend/src/features/paper/podcast-runtime.ts')
+    neutered = src.replace('state.paperHash !== initHash', 'false &&', 1)
+    assert neutered.count('state.paperHash !== initHash') < 2
 
 
 # ── ③ abort-vs-in-flight-poll guards ──────────────────────────────────────
 
 def test_podcast_poll_rechecks_task_after_await():
-    src = _read('static/js/paper/podcast.js')
-    assert 'var tid = _podcast.taskId;' in src
-    assert '_podcast.taskId !== tid) return;' in src
+    src = _read('frontend/src/features/paper/podcast-runtime.ts')
+    assert 'const taskId = state.taskId;' in src
+    assert 'if (state.taskId !== taskId) return;' in src
 
 
 def test_video_poll_rechecks_task_after_await():
-    src = _read('static/js/paper/video.js')
-    assert ('_pvideo.regenTaskId !== tid' in src
-            and '_pvideo.taskId !== tid' in src), (
+    src = _read('frontend/src/features/paper/video-runtime.ts')
+    assert ('state.regenTaskId === taskId' in src
+            and 'state.taskId === taskId' in src
+            and 'if (!current) return;' in src), (
         'video poll must re-validate the captured tid after the await')
 
 
@@ -154,11 +159,12 @@ def test_oauth_popup_interval_self_terminates():
 # ── ⑦ sleep timer cleared with run state ──────────────────────────────────
 
 def test_podcast_sleep_timer_cleared_on_reset_and_init():
-    src = _read('static/js/paper/podcast.js')
-    reset_body = src[src.find('function _pcResetRun'):src.find('function _pcT')]
-    assert 'clearTimeout(_podcast.sleepTimerId)' in reset_body
-    assert '_podcast.sleepDeadline = 0;' in reset_body
-    assert src.count('clearTimeout(_podcast.sleepTimerId)') >= 2, (
+    src = _read('frontend/src/features/paper/podcast-runtime.ts')
+    reset_body = src[src.find('export function resetPodcastRun'):
+                     src.find('export function stopPodcastPoll')]
+    assert 'window.clearTimeout(state.sleepTimerId)' in reset_body
+    assert 'state.sleepDeadline = 0;' in reset_body
+    assert src.count('window.clearTimeout(state.sleepTimerId)') >= 2, (
         'sleep timer must be cleared on BOTH tab re-init and regenerate')
 
 
@@ -195,7 +201,8 @@ def test_pending_stream_timer_has_dwell_cap():
 def test_NEUTER_pending_timer_without_cap_fires():
     src = _read('static/js/ui/streaming_ui.js')
     neutered = src.replace('_pendingStreamArmTs = Date.now();', '', 1)
-    assert 'Date.now() - (_pendingStreamArmTs || 0) > 30000' not in neutered or True
+    assert '_pendingStreamArmTs = Date.now();' not in neutered, (
+        'the negative control failed to remove the dwell-cap arm')
     # Stronger: removing the cap block entirely must defeat the scan
     import re as _re
     neutered2 = _re.sub(r'if \(_pendingStreamMsg && Date\.now\(\) - \(_pendingStreamArmTs \|\| 0\) > 30000\) \{.*?\n        \}\n', '', src, count=1, flags=_re.DOTALL)

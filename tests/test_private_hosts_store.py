@@ -243,7 +243,7 @@ def _export_excluded_dirs():
 @pytest.mark.parametrize('path', [
     'lib/private_hosts.py',
     'routes/api_v1/private_hosts.py',
-    'static/js/settings/private_hosts.js',
+    'frontend/src/features/settings/private-hosts.ts',
 ])
 def test_feature_code_survives_export(path):
     """Every file the feature needs must live OUTSIDE an excluded directory."""

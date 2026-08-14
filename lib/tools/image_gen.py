@@ -1,9 +1,9 @@
 """lib/tools/image_gen.py — Image generation tool definition and constants.
 
 Provides the ``generate_image`` tool that the LLM can call mid-conversation
-to create images.  The tool is gated by the ``imageGenEnabled`` toggle in
-the frontend — when enabled, the tool appears in the LLM's tool list and
-the executor calls ``lib.image_gen.generate_image()`` to produce the image.
+to create images. ``imageGenEnabled`` controls whether its schema is kept
+always visible; exact-name execution remains available when the configured
+image backend can serve the request.
 
 ``IMAGE_GEN_TOOL_NAMES`` is used by tool-display, executor, and the
 frontend's ``_isRoundImageGen()`` for UI rendering.

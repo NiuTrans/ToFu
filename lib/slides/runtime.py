@@ -35,14 +35,14 @@ def _slides_index_register(key: tuple, task_id: str) -> None:
 
 def _new_slides_task(task_id: str, *, topic: str, workdir: str, lang: str,
                      style: str, max_pages: int, size: tuple,
-                     conv_id: str = ''):
+                     conv_id: str = '', model: str = ''):
     return _production.create_task(
         task_id,
         meta={'topic': topic, 'lang': lang, 'style': style,
-              'max_pages': max_pages},
+              'max_pages': max_pages, 'model': model},
         fields={'topic': topic, 'workdir': workdir, 'lang': lang,
                 'style': style, 'max_pages': max_pages, 'size': tuple(size),
-                'conv_id': conv_id})
+                'conv_id': conv_id, 'model': model})
 
 
 def _append_slides_event(task, event):

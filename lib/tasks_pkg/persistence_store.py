@@ -99,6 +99,24 @@ class DefaultConversationStore:
         from lib.database import close_thread_db
         close_thread_db()
 
+    def next_task_event_id(self, task_id, *, floor=0):
+        """Allocate after the durable and local write-behind event tails."""
+        from lib.database import DOMAIN_CHAT, pooled_db
+        from lib.tasks_pkg.event_log import pending_event_rows
+
+        with pooled_db(DOMAIN_CHAT) as db:
+            row = db.execute(
+                'SELECT MAX(event_id) AS max_event_id FROM task_events '
+                'WHERE task_id=?', (task_id,)).fetchone()
+        highest = -1
+        if row is not None:
+            value = row['max_event_id']
+            if value is not None:
+                highest = int(value)
+        for pending in pending_event_rows(task_id):
+            highest = max(highest, int(pending['event_id']))
+        return max(int(floor), highest + 1)
+
     def load_conversation_messages(self, conv_id):
         """Read ``(messages, updated_at, rev)`` for a conversation, or ``None``.
 
@@ -120,29 +138,21 @@ class DefaultConversationStore:
 
     @staticmethod
     def _load_with_rev(db, conv_id):
-        """``(messages, updated_at, rev)`` from ONE SELECT, or ``None``.
+        """``(messages, updated_at, rev)`` from one repository snapshot.
 
         Shared by the public read and by the internal retry loops so there is a
         single place that decides how a row is turned into a message list.
         """
-        import json
-        row = db.execute(
-            'SELECT messages, updated_at, rev FROM conversations '
-            'WHERE id=? AND user_id=1',
-            (conv_id,),
-        ).fetchone()
-        if not row:
+        from lib.database.conversation_repository import load_conversation
+        snapshot = load_conversation(
+            db, conv_id, metadata_columns=('updated_at',))
+        if snapshot is None:
             return None
-        raw, updated_at, rev = _row_fields(row, 'messages', 'updated_at', 'rev')
-        try:
-            messages = json.loads(raw or '[]')
-            if not isinstance(messages, list):
-                messages = []
-        except (ValueError, TypeError) as e:
-            logger.warning('[Store] load_conversation_messages parse failed conv=%s: %s',
-                           conv_id, e)
-            messages = []
-        return messages, int(updated_at or 0), int(rev or 0)
+        return (
+            snapshot.messages,
+            int(snapshot.get('updated_at') or 0),
+            int(snapshot.get('rev') or 0),
+        )
 
     def save_conversation_messages(self, conv_id, messages, *, expected_rev):
         """Persist ``messages``, but only while the row is still at ``expected_rev``.
@@ -169,24 +179,18 @@ class DefaultConversationStore:
         Returns the new ``updated_at`` timestamp (epoch-ms).
         """
         import time
-        from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        from lib.database.conversation_repository import replace_messages
         db = get_thread_db(DOMAIN_CHAT)
         now_ms = int(time.time() * 1000)
-        cur = db.execute(
-            'UPDATE conversations SET messages=?, updated_at=? '
-            'WHERE id=? AND user_id=1 AND rev=?',
-            (json_dumps_pg(messages), now_ms, conv_id, int(expected_rev)),
-        )
-        db.commit()
-        affected = getattr(cur, 'rowcount', None)
-        affected = affected if affected is not None else 0
-        if not affected:
+        result = replace_messages(
+            db, conv_id, messages, expected_rev=int(expected_rev),
+            metadata={'updated_at': now_ms}, full=True)
+        if not result.applied:
             raise ConcurrentWriteConflict(
                 f'conv={conv_id} changed since it was loaded at '
                 f'rev={expected_rev} — refusing to clobber the concurrent '
                 f'writer. Re-load and re-apply your change.')
-        from lib.database.messages_rows import mirror_write_and_commit
-        mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms, full=True)
         return now_ms
 
     def overwrite_conversation_messages_unconditional(self, conv_id, messages):
@@ -202,18 +206,13 @@ class DefaultConversationStore:
         sanctioned unconditional whole-blob writer.
         """
         import time
-        from lib.database import (DOMAIN_CHAT, db_execute_with_retry,
-                                  get_thread_db, json_dumps_pg)
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        from lib.database.conversation_repository import replace_messages
         db = get_thread_db(DOMAIN_CHAT)
         now_ms = int(time.time() * 1000)
-        db_execute_with_retry(
-            db,
-            'UPDATE conversations SET messages=?, updated_at=? '
-            'WHERE id=? AND user_id=1',
-            (json_dumps_pg(messages), now_ms, conv_id),
-        )
-        from lib.database.messages_rows import mirror_write_and_commit
-        mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms, full=True)
+        replace_messages(
+            db, conv_id, messages,
+            metadata={'updated_at': now_ms}, full=True)
         return now_ms
 
     def patch_message_fields_by_task(self, conv_id, task_id, fields,
@@ -237,7 +236,8 @@ class DefaultConversationStore:
         if not (conv_id and task_id and fields):
             return False
         import time
-        from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        from lib.database.conversation_repository import replace_messages
         db = get_thread_db(DOMAIN_CHAT)
         for attempt in range(1, int(max_attempts) + 1):
             loaded = self._load_with_rev(db, conv_id)
@@ -265,18 +265,11 @@ class DefaultConversationStore:
                 return False
             messages[target_idx].update(fields)
             now_ms = int(time.time() * 1000)
-            cur = db.execute(
-                'UPDATE conversations SET messages=?, updated_at=? '
-                'WHERE id=? AND user_id=1 AND rev=?',
-                (json_dumps_pg(messages), now_ms, conv_id, expected_rev),
-            )
-            db.commit()
-            affected = getattr(cur, 'rowcount', None)
-            affected = affected if affected is not None else 0
-            if affected:
-                from lib.database.messages_rows import mirror_write_and_commit
-                mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms,
-                                        changed_seqs=[target_idx])
+            result = replace_messages(
+                db, conv_id, messages, expected_rev=expected_rev,
+                metadata={'updated_at': now_ms},
+                changed_seqs=[target_idx])
+            if result.applied:
                 return True
             logger.debug('[Store] patch_message_fields_by_task conv=%s lost the '
                          'rev=%s race (attempt %d/%d) — re-reading',
@@ -301,23 +294,14 @@ class DefaultConversationStore:
         switching to a finer timestamp would NOT have fixed this.
         """
         import time
-        from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        from lib.database.conversation_repository import replace_messages
         db = get_thread_db(DOMAIN_CHAT)
         now_ms = int(time.time() * 1000)
-        cur = db.execute(
-            'UPDATE conversations SET messages=?, updated_at=? '
-            'WHERE id=? AND user_id=1 AND rev=?',
-            (json_dumps_pg(messages), now_ms, conv_id, int(expected_rev)),
-        )
-        db.commit()
-        affected = getattr(cur, 'rowcount', None)
-        affected = affected if affected is not None else 0
-        if affected:
-            # Phase 5 dual-write (flag-gated): CAS won — mirror the overwrite.
-            from lib.database.messages_rows import mirror_write_and_commit
-            mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms,
-                                    full=True)
-        return affected
+        result = replace_messages(
+            db, conv_id, messages, expected_rev=int(expected_rev),
+            metadata={'updated_at': now_ms}, full=True)
+        return 1 if result.applied else 0
 
     def cas_sync_conversation_with_search(self, conv_id, messages, expected_rev):
         """CAS overwrite that ALSO refreshes msg_count + search_text + FTS.
@@ -342,48 +326,30 @@ class DefaultConversationStore:
         tail append into a spurious conflict.
         """
         import time
-        from lib.conversations import build_search_text, update_conversation_fts
-        from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
+        from lib.conversations import build_search_text
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        from lib.database.conversation_repository import replace_messages
         db = get_thread_db(DOMAIN_CHAT)
-        messages_json = json_dumps_pg(messages)
         search_text = build_search_text(messages)
         now_ms = int(time.time() * 1000)
-        cur = db.execute(
-            'UPDATE conversations SET messages=?, updated_at=?, msg_count=?, '
-            'search_text=? WHERE id=? AND user_id=1 AND rev=?',
-            (messages_json, now_ms, len(messages), search_text, conv_id,
-             int(expected_rev)),
-        )
-        db.commit()
-        affected = getattr(cur, 'rowcount', None)
-        affected = affected if affected is not None else 0
-        if affected:
-            try:
-                update_conversation_fts(db, conv_id, search_text)
-            except Exception as e:
-                logger.debug('[Store] cas_sync FTS update skipped conv=%s: %s',
-                             conv_id[:8] if conv_id else '?', e)
-            # Phase 5 dual-write (flag-gated): /compact removes messages
-            # (re-sequences) — full rebuild mirror.
-            from lib.database.messages_rows import mirror_write_and_commit
-            mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms,
-                                    full=True)
-        return affected
+        result = replace_messages(
+            db, conv_id, messages, expected_rev=int(expected_rev),
+            metadata={
+                'updated_at': now_ms,
+                'msg_count': len(messages),
+                'search_text': search_text,
+            },
+            full=True)
+        return 1 if result.applied else 0
 
     def ensure_compaction_schema(self):
-        """Create transcript_archive table + index if absent (safety net)."""
+        """Verify central schema bootstrap installed the compaction store."""
         from lib.database import DOMAIN_CHAT, get_thread_db
         db = get_thread_db(DOMAIN_CHAT)
-        db.executescript('''
-            CREATE TABLE IF NOT EXISTS transcript_archive (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conv_id TEXT NOT NULL,
-                messages_json TEXT NOT NULL,
-                summary TEXT NOT NULL DEFAULT '',
-                created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-            );
-            CREATE INDEX IF NOT EXISTS idx_ta_conv ON transcript_archive(conv_id);
-        ''')
+        db.execute(
+            'SELECT id, conv_id, messages_json, summary, trigger, task_id, '
+            'round_num, model, tokens_before, tokens_after, msgs_before, '
+            'msgs_after, reason FROM transcript_archive LIMIT 0')
 
     def archive_transcript(self, conv_id, messages, *, trigger='force',
                            task_id='', round_num=0, model='',
@@ -395,34 +361,26 @@ class DefaultConversationStore:
         RETURNING / lastrowid semantics.  Returns the new id, or None on
         failure.  The store owns serialisation of ``messages``.
         """
-        from lib.database import (DOMAIN_CHAT, db_execute_with_retry,
-                                  get_thread_db, json_dumps_pg)
+        from lib.database import (
+            DOMAIN_CHAT, get_thread_db, json_dumps_pg, write_transaction)
         archive_id = None
         try:
             db = get_thread_db(DOMAIN_CHAT)
             messages_json = json_dumps_pg(messages, default=str)
-            db_execute_with_retry(db,
-                'INSERT INTO transcript_archive '
-                '(conv_id, messages_json, summary, trigger, task_id, round_num, '
-                ' model, tokens_before, tokens_after, msgs_before, msgs_after, reason) '
-                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-                (conv_id, messages_json, '', trigger, task_id,
-                 int(round_num or 0), model,
-                 int(tokens_before or 0), int(tokens_after or 0),
-                 int(msgs_before or 0), int(msgs_after or 0),
-                 (reason or '')[:500]),
-            )
-            try:
-                cur = db.execute(
-                    'SELECT id FROM transcript_archive WHERE conv_id=? '
-                    'ORDER BY id DESC LIMIT 1',
-                    (conv_id,),
-                )
-                row = cur.fetchone()
+            with write_transaction(db, label='transcript-archive-insert'):
+                row = db.execute(
+                    'INSERT INTO transcript_archive '
+                    '(conv_id, messages_json, summary, trigger, task_id, round_num, '
+                    ' model, tokens_before, tokens_after, msgs_before, msgs_after, reason) '
+                    'VALUES (?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id',
+                    (conv_id, messages_json, '', trigger, task_id,
+                     int(round_num or 0), model,
+                     int(tokens_before or 0), int(tokens_after or 0),
+                     int(msgs_before or 0), int(msgs_after or 0),
+                     (reason or '')[:500]),
+                ).fetchone()
                 if row is not None:
                     archive_id = int(row[0] if not isinstance(row, dict) else row.get('id'))
-            except Exception as e_id:
-                logger.debug('[Store] archive id lookup failed: %s', e_id)
         except Exception as e:
             logger.warning('[Store] archive_transcript failed conv=%s: %s',
                            conv_id[:8] if conv_id else '?', e, exc_info=True)
@@ -510,29 +468,23 @@ class DefaultConversationStore:
         Returns the new ``updated_at`` (epoch-ms).
         """
         import time
-        from lib.conversations import build_search_text, update_conversation_fts
-        from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
+        from lib.conversations import build_search_text
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        from lib.database.conversation_repository import replace_messages
         db = get_thread_db(DOMAIN_CHAT)
         cur_messages, cur_rev = list(messages), int(expected_rev)
         for attempt in range(1, int(max_attempts) + 1):
-            messages_json = json_dumps_pg(cur_messages)
             search_text = build_search_text(cur_messages)
             now_ms = int(time.time() * 1000)
-            cur = db.execute(
-                'UPDATE conversations SET messages=?, updated_at=?, '
-                'msg_count=?, search_text=? '
-                'WHERE id=? AND user_id=1 AND rev=?',
-                (messages_json, now_ms, len(cur_messages), search_text,
-                 conv_id, cur_rev),
-            )
-            db.commit()
-            affected = getattr(cur, 'rowcount', None)
-            affected = affected if affected is not None else 0
-            if affected:
-                update_conversation_fts(db, conv_id, search_text)
-                from lib.database.messages_rows import mirror_write_and_commit
-                mirror_write_and_commit(db, conv_id, cur_messages,
-                                        now_ms=now_ms, full=True)
+            result = replace_messages(
+                db, conv_id, cur_messages, expected_rev=cur_rev,
+                metadata={
+                    'updated_at': now_ms,
+                    'msg_count': len(cur_messages),
+                    'search_text': search_text,
+                },
+                full=True)
+            if result.applied:
                 return now_ms
             if rebuild is None:
                 raise ConcurrentWriteConflict(

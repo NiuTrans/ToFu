@@ -15,11 +15,10 @@ clobber earlier translations. Two layers of protection:
    millisecond no longer both pass the guard (RENDER_CONTRACT Phase 4 W6).
 """
 
-import json
 import threading
 import time
 
-from lib.database import DOMAIN_CHAT, json_dumps_pg
+from lib.database import DOMAIN_CHAT
 from lib.log import get_logger
 
 from .constants import DEFAULT_USER_ID
@@ -120,22 +119,20 @@ def _commit_translation_inner(conv_id, msg_idx, field, translated_text,
     for attempt in range(MAX_CAS_ATTEMPTS):
         try:
             db = get_thread_db(DOMAIN_CHAT)
-            row = db.execute(
-                'SELECT messages, updated_at, rev FROM conversations WHERE id=? AND user_id=?',
-                (conv_id, DEFAULT_USER_ID)
-            ).fetchone()
-            if not row:
+            from lib.database.conversation_repository import load_conversation
+            snapshot = load_conversation(db, conv_id, user_id=DEFAULT_USER_ID)
+            if snapshot is None:
                 logger.warning('[Translate] commit: conv=%s not found — skipping',
                                conv_id[:8])
                 return
 
-            messages = json.loads(row['messages'] or '[]')
+            messages = snapshot.messages
             # CAS token: rev (RENDER_CONTRACT Phase 4 W6). The trigger bumps rev
             # on every messages change, so the terminal sync / a sibling
             # translate thread advancing rev between our SELECT and UPDATE makes
             # us MISS (re-read + retry) rather than clobber. updated_at is still
             # stamped in SET for freshness but is no longer the CAS token.
-            prev_rev = row['rev']
+            prev_rev = snapshot['rev']
 
             # Resolution: id → idx → content. ID lookup is index-free and
             # the canonical path; idx is a legacy position fallback.
@@ -183,11 +180,13 @@ def _commit_translation_inner(conv_id, msg_idx, field, translated_text,
             idx = resolved_idx if resolved_idx is not None else (
                 int(msg_idx) if msg_idx is not None else -1
             )
+            needs_base_rewrite = False
             # Backfill the message's stable id if the caller passed one and
             # the message lacks it (e.g. translation started before the id
             # backfill landed).  This makes future PATCHes id-addressable.
             if msg_id and not msg.get('_msgId'):
                 msg['_msgId'] = msg_id
+                needs_base_rewrite = True
 
             if field == 'translatedContent':
                 msg['translatedContent'] = translated_text
@@ -196,6 +195,7 @@ def _commit_translation_inner(conv_id, msg_idx, field, translated_text,
                 if model:
                     msg['_translateModel'] = model
             elif field == 'content':
+                needs_base_rewrite = True
                 if not msg.get('originalContent'):
                     msg['originalContent'] = msg.get('content', '')
                 msg['content'] = translated_text
@@ -207,6 +207,7 @@ def _commit_translation_inner(conv_id, msg_idx, field, translated_text,
                 # and ONLY the interleaved narration segments are stamped below.
                 pass
             else:
+                needs_base_rewrite = True
                 msg[field] = translated_text
 
             # ★ Per-round narration stamp — PATH-INDEPENDENT. Runs for a
@@ -234,6 +235,7 @@ def _commit_translation_inner(conv_id, msg_idx, field, translated_text,
                         and isinstance(fallback_segments, list)
                         and fallback_segments):
                     msg['segments'] = fallback_segments
+                    needs_base_rewrite = True
                     logger.info('[Translate] commit: DB msg had no segments '
                                 '— spliced %d authoritative segments before '
                                 'stamp (conv=%s)', len(fallback_segments),
@@ -247,19 +249,29 @@ def _commit_translation_inner(conv_id, msg_idx, field, translated_text,
             # so the row count will be 0 and we'll re-read and retry.
             # ``rev`` is the WHERE token only — NEVER written in SET (the
             # conversations_rev_bump_trg trigger is the sole bumper).
-            # NOTE: we call db.execute directly (not db_execute_with_retry)
-            # because we need access to ``rowcount`` for the CAS check —
-            # the retry helper returns None.  The outer for-loop provides
-            # the retry semantics (including CAS-miss retries).
-            cur = db.execute(
-                'UPDATE conversations SET messages=?, updated_at=? '
-                'WHERE id=? AND user_id=? AND rev=?',
-                (json_dumps_pg(messages), new_updated,
-                 conv_id, DEFAULT_USER_ID, prev_rev)
+            # The repository returns the CAS outcome while committing the blob
+            # and canonical rows together. The outer loop owns retry policy.
+            from lib.database.conversation_repository import (
+                conversation_rows_authoritative,
+                replace_messages,
+                update_message_translation_overlay,
             )
-            db.commit()
-            rowcount = getattr(cur, 'rowcount', None)
-            if rowcount == 0:
+            if (conversation_rows_authoritative()
+                    and not needs_base_rewrite
+                    and field in ('translatedContent', None)):
+                result = update_message_translation_overlay(
+                    db, conv_id, idx, msg, messages,
+                    user_id=DEFAULT_USER_ID,
+                    expected_rev=prev_rev,
+                    updated_at=new_updated,
+                )
+            else:
+                result = replace_messages(
+                    db, conv_id, messages, user_id=DEFAULT_USER_ID,
+                    expected_rev=prev_rev,
+                    metadata={'updated_at': new_updated},
+                    changed_seqs=[idx])
+            if not result.applied:
                 # CAS miss — someone else wrote first.  Retry with fresh read.
                 logger.info('[Translate] commit CAS miss on conv=%s msg=%d '
                             '(attempt %d/%d) — retrying',
@@ -267,11 +279,6 @@ def _commit_translation_inner(conv_id, msg_idx, field, translated_text,
                 # Small sleep to avoid hot-spinning on a contended row.
                 time.sleep(0.05 * (attempt + 1))
                 continue
-            # Phase 5 dual-write (flag-gated, inert when off): the CAS won —
-            # one message edited at a known index → seq-hint mirror.
-            from lib.database.messages_rows import mirror_write_and_commit
-            mirror_write_and_commit(db, conv_id, messages, now_ms=new_updated,
-                                    changed_seqs=[idx])
             logger.info('[Translate] Committed %s to conv=%s msg=%d via=%s '
                         '(%d chars, attempt=%d)',
                         field, conv_id[:8], idx, resolved_via or 'idx',

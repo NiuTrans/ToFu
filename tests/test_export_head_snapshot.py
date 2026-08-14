@@ -33,6 +33,8 @@ Run:  python -B -m pytest tests/test_export_head_snapshot.py
 
 from __future__ import annotations
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {'lib/core.py', 'lib/wip_module.py'}
+
 import subprocess
 from pathlib import Path
 

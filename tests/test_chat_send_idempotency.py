@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Test #5 of the sync-robustness pass (2026-06-25): the UI send path
-(/api/v1/chat/start and /api/v1/chat/send) is idempotent.
+"""UI task-start mutations are idempotent.
 
 A retried POST (client never received the first response, network retry) used
 to spawn a SECOND task — wasting the first's work and double-charging tokens.
@@ -10,15 +9,18 @@ decorator (lib/idempotency.py) so a duplicate `Idempotency-Key` replays the
 cached `{taskId}` instead of creating a new task. No-op when the header is
 absent (fully backward-compatible).
 
+The same contract covers Continue: the frontend keeps one attempt key across a
+lost response, and the backend single-flights concurrent duplicates so a retry
+cannot abort the first resumed task and create another billed run.
+
 NOTE: the headless `/api/v1/chat/completions` endpoint was ALREADY idempotent
 (tests/test_api_v1_chat_route.py::test_idempotency_key_replays). This covers
 the DISTINCT UI send path (chat_start / chat_send in routes/chat.py), which
 was not.
 
-This test installs the quart→flask shim (server.py does this at boot) so
-routes/chat.py imports, then introspects that both handlers carry the
-idempotency wrapper. The replay MECHANISM itself is covered end-to-end by
-test_api_v1_chat_route.py against the same decorator + cache.
+The test imports the native Quart route module and introspects that both
+handlers carry the idempotency wrapper. The replay mechanism itself is covered
+end-to-end by test_api_v1_chat_route.py against the same decorator + cache.
 """
 import os
 import sys
@@ -30,19 +32,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 pytestmark = pytest.mark.unit
 
 
-def _install_shim():
-    """Map flask→quart so routes/* import (mirrors server.py + the
-    test_api_v1_chat_route harness). Quart provides .websocket on blueprints."""
-    import quart
-    sys.modules['flask'] = quart
-    for attr in ('json', 'globals', 'helpers', 'wrappers', 'ctx'):
-        qs = f'quart.{attr}'
-        if qs in sys.modules:
-            sys.modules[f'flask.{attr}'] = sys.modules[qs]
-
-
-def test_chat_send_path_is_idempotent_decorated():
-    """Assert the UI send handlers are decorated with @idempotent_post().
+def test_chat_task_start_paths_are_idempotent_decorated():
+    """Assert UI start/send/continue handlers use @idempotent_post().
 
     Introspecting the wrapper chain is ambiguous (functools.wraps makes both
     require_scope's and idempotent_post's layers report co_name='wrapper' +
@@ -50,7 +41,6 @@ def test_chat_send_path_is_idempotent_decorated():
     unambiguous, stable signal that the decorator is wired on each handler.
     """
     pytest.importorskip('quart')
-    _install_shim()
     import inspect
 
     import routes.chat as c
@@ -69,6 +59,33 @@ def test_chat_send_path_is_idempotent_decorated():
 
     assert _decorated('chat_start('), 'chat_start missing @idempotent_post()'
     assert _decorated('chat_send('), 'chat_send missing @idempotent_post()'
+    assert _decorated('chat_continue('), 'chat_continue missing @idempotent_post()'
+
+
+def test_continue_frontend_reuses_attempt_key_and_skips_retry_put():
+    """A lost Continue response must retry with the same key and no stale PUT."""
+    src_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        'frontend', 'src', 'runtime', 'app-runtime.js')
+    with open(src_path, encoding='utf-8') as f:
+        src = f.read()
+    start = src.index('async function continueAssistant()')
+    body = src[start:]
+    assert "'Idempotency-Key': _continueIdempotencyKey" in body
+    assert '_continueAttemptKeys.get(_attemptSlot)' in body
+    assert '_continueAttemptKeys.set(_attemptSlot' in body
+    assert '_newContinueAttemptKey(conv, assistantMsg)' in body
+    assert 'const producer = assistantMsg._taskId' in src
+    sync_pos = body.index('await syncConversationToServer(conv);')
+    miss_guard = body.rfind('if (!_continueIdempotencyKey)', 0, sync_pos)
+    assert miss_guard >= 0, (
+        'Continue preflight PUT must run only for the first attempt; a lost-ACK '
+        'retry would otherwise overwrite the live resumed task with stale UI state')
+    catch_pos = body.index('} catch (e) {', sync_pos)
+    delete_pos = body.find('_continueAttemptKeys.delete(_attemptSlot)', sync_pos)
+    assert delete_pos > catch_pos, (
+        'the attempt key was cleared on network failure, so a retry would mint '
+        'a new key and start a duplicate billed task')
 
 
 def test_idempotency_noop_without_header():
@@ -100,7 +117,6 @@ def test_build_user_msg_preserves_client_msgId():
 
     autoTranslate is left OFF so the builder is a pure transform (no LLM call)."""
     pytest.importorskip('quart')
-    _install_shim()
     from lib.chat.turn_builder import build_user_msg_from_payload
 
     payload = {'text': 'hello world', 'timestamp': 1234567890, '_msgId': 'tmp_abc123'}

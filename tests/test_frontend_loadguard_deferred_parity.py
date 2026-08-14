@@ -14,16 +14,12 @@ stub installed instead, the same click would load the feature bundle and
 dispatch.
 
 Rule: LoadGuard is for CORE functions only (its window is "core bundle
-not yet executed"). Deferred functions (_DEFERRED_ENTRY_POINTS members)
+not yet executed"). Deferred functions (_FEATURE_ENTRY_POINTS members)
 never belong in its list.
 
-The LEGACY_WELCOME four (openOrchestration / openTaskMode /
-togglePaperMode / enterImageGenMode) are the deliberate exception,
-ratcheted to exactly four: they are the welcome-screen's primary
-affordances, where a graceful "please wait" during the CORE-load window
-(on slow networks, far longer than the deferred-prefetch window) is
-worth more than arming a deferred load that the idle prefetch will
-cover a beat later anyway. New deferred entries must NOT join them.
+There is no exception: the Vite bridge queues a first click while its module
+entry initializes, so welcome-screen affordances also belong exclusively to
+feature-loader.
 
 History: openDailyReport was added to LoadGuard in sub-6 before the
 rule existed (pt_248c41b0 — the only reverse-direction residue after
@@ -42,19 +38,19 @@ pytestmark = pytest.mark.unit
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 INDEX_HTML = ROOT / 'index.html'
-BUNDLER_PY = ROOT / 'lib' / 'js_bundler.py'
+MAIN_TS = ROOT / 'frontend' / 'src' / 'main.ts'
 
-# The deliberate welcome-screen exception (see module docstring). Ratchet:
-# this set must never grow.
-LEGACY_WELCOME = frozenset({
-    'openOrchestration', 'openTaskMode', 'togglePaperMode', 'enterImageGenMode',
-})
+LEGACY_WELCOME = frozenset()
 
 
 def _loadguard_stubs() -> set[str]:
     html = INDEX_HTML.read_text()
     m = re.search(r'var stubs = \[(.*?)\];', html, re.S)
-    assert m, 'LoadGuard stub list not found in index.html'
+    if not m:
+        assert 'LoadGuard' not in html, (
+            'a partial classic LoadGuard remains in index.html without its '
+            'auditable stub list')
+        return set()
     # Removal comments inside the list ALSO quote names ('toggleMemory'
     # REMOVED …) — strip /* … */ before extracting, or a removed name
     # reads back as present.
@@ -63,9 +59,10 @@ def _loadguard_stubs() -> set[str]:
 
 
 def _deferred_entry_points() -> set[str]:
-    import lib.js_bundler as jb
-    _bf, _df, ep, _crit = jb._extract_manifest_from_source(str(BUNDLER_PY))
-    return set(ep)
+    source = MAIN_TS.read_text()
+    bodies = re.findall(r'\w+Entries\s*=\s*new Set\(\[(.*?)\]\)', source, re.S)
+    assert bodies, 'Vite feature-domain entry sets not found in frontend/src/main.ts'
+    return set(re.findall(r"['\"]([A-Za-z_$][\w$]*)['\"]", '\n'.join(bodies)))
 
 
 def test_open_daily_report_not_in_loadguard():
@@ -79,9 +76,8 @@ def test_open_daily_report_not_in_loadguard():
 
 
 def test_deferred_entry_points_never_in_loadguard():
-    """The rule, both directions: no _DEFERRED_ENTRY_POINTS member may
-    appear in the LoadGuard stubs list — except the ratcheted
-    LEGACY_WELCOME four."""
+    """The rule, both directions: no _FEATURE_ENTRY_POINTS member may
+    appear in the LoadGuard stubs list."""
     overlap = _deferred_entry_points() & _loadguard_stubs()
     assert overlap <= LEGACY_WELCOME, (
         f'deferred entry points pre-stubbed by LoadGuard (lazy stub would '
@@ -89,18 +85,17 @@ def test_deferred_entry_points_never_in_loadguard():
 
 
 def test_legacy_welcome_ratchet():
-    """The exception must not grow: exactly these four, no more."""
+    """The Vite bridge removed the last LoadGuard exception."""
     overlap = _deferred_entry_points() & _loadguard_stubs()
     assert overlap == LEGACY_WELCOME, (
-        f'the LoadGuard∩deferred overlap must stay exactly the '
-        f'LEGACY_WELCOME four, got {sorted(overlap)} — removing one is '
-        'fine (then shrink this set), adding one is forbidden')
+        f'the LoadGuard∩deferred overlap must stay empty, got {sorted(overlap)}')
 
 
 def test_loadguard_still_covers_core_handlers():
-    """Control: the LoadGuard list keeps its CORE boot handlers (its
-    raison d'être — graceful clicks while the core bundle is loading)."""
-    stubs = _loadguard_stubs()
+    """Core handlers use the Vite action registry after LoadGuard removal."""
+    assert not _loadguard_stubs()
+    html = INDEX_HTML.read_text()
+    main = MAIN_TS.read_text()
     for name in ('sendMessage', 'newChat', 'handleKeyDown'):
-        assert name in stubs, (
-            f'{name} must stay LoadGuard-stubbed — it is a core function')
+        assert name in html, f'{name} has no declarative HTML action surface'
+    assert 'installActionRegistry' in main

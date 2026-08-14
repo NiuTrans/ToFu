@@ -8,6 +8,7 @@ liveness clock, and terminal-notify wiring.
 and steerable through the package facade.
 """
 
+from contextlib import nullcontext
 import uuid
 
 from lib.log import get_logger
@@ -132,6 +133,30 @@ def _strip_base64_for_snapshot(messages):
     return stripped
 
 
+def reset_task_text(task, *, content='', thinking=''):
+    """Replace live text and advance the snapshot generation atomically."""
+    # Runtime-owned tasks always carry the lock. Legacy/recovered task-shaped
+    # mappings (and extension/test seams) may predate that field; they are not
+    # live stream writers, so a no-op guard preserves read/reset compatibility
+    # without mutating the mapping just to inspect it.
+    with task.get('content_lock') or nullcontext():
+        task['content'] = content
+        task['thinking'] = thinking
+        epoch = int(task.get('_contentEpoch') or 0) + 1
+        task['_contentEpoch'] = epoch
+    return epoch
+
+
+def snapshot_task_text(task):
+    """Return content, thinking, and generation from one locked snapshot."""
+    with task.get('content_lock') or nullcontext():
+        return (
+            task.get('content') or '',
+            task.get('thinking') or '',
+            int(task.get('_contentEpoch') or 0),
+        )
+
+
 def append_event(task, event):
     """Append an event to the task's event log (chat-specific behaviour).
 
@@ -156,6 +181,15 @@ def append_event(task, event):
     if task.get('_suppressEvents'):
         return
 
+    # Keep the correlation envelope identical on the TaskRuntime and legacy
+    # fallback paths.  ``taskId``/``requestId`` are data fields, never metric
+    # labels, so they remain safe for end-to-end diagnostics.
+    event.setdefault('taskId', task.get('id', ''))
+    if task.get('_requestId'):
+        event.setdefault('requestId', task['_requestId'])
+    if event.get('type') in ('delta_reset', 'retry_reset'):
+        event.setdefault('contentEpoch', int(task.get('_contentEpoch') or 0))
+
     # ★ Per-task wire transform (2026-07-26, VU-carrier stream contract).
     #   A VU carrier sub-task installs ``_vu_event_transform`` so its OWN
     #   stream / push channel / persisted event log all carry the VU
@@ -178,6 +212,15 @@ def append_event(task, event):
             _wire = event
 
     if _wire is not None:
+        _wire.setdefault('taskId', task.get('id', ''))
+        if task.get('_requestId'):
+            _wire.setdefault('requestId', task['_requestId'])
+        if task.get('_turnProtocolV2'):
+            _wire.setdefault('conversationId', task.get('convId', ''))
+            _wire.setdefault('turnId', task.get('_turnId', ''))
+            _wire.setdefault('attemptId', task.get('_attemptId', ''))
+
+    if _wire is not None:
         # ★ Durable-before-visible ordering: the persistent task_events row MUST
         #   commit before the frame is pushed to the client, so a cold reconnect
         #   folding the log (event_fold.fold_cold_state_text) can never be behind
@@ -187,6 +230,11 @@ def append_event(task, event):
         def _persist_before_push(_seq):
             from lib.tasks_pkg.event_log import append_persistent_event
             append_persistent_event(task['id'], _seq, _wire)
+            if task.get('_turnProtocolV2'):
+                from lib.turn_lifecycle import record_task_event
+                if not record_task_event(task, _wire):
+                    raise RuntimeError(
+                        'v2 event rejected: attempt is stale or no longer current')
 
         seq = _chat_runtime.append_event(task['id'], _wire,
                                          before_push=_persist_before_push)
@@ -203,16 +251,25 @@ def append_event(task, event):
                 task['events'].append(_wire)
             # Persist BEFORE the fallback push too (same durable-before-visible
             # ordering as the runtime path above).
+            _fallback_visible = True
             try:
                 _persist_before_push(seq)
             except Exception as e:
-                logger.debug('[Manager] legacy-path persist failed (non-fatal): %s', e)
-            try:
-                from lib.push import push_event
-                push_event('chat', task['id'], _wire)
-            except Exception as e:
-                logger.warning('[Task] push_event fallback failed task=%s: %s',
-                               task['id'][:8], e)
+                if task.get('_turnProtocolV2'):
+                    _fallback_visible = False
+                    logger.error('[Manager] v2 fallback persistence failed; '
+                                 'withholding push task=%s: %s',
+                                 task['id'][:8], e)
+                else:
+                    logger.debug('[Manager] legacy-path persist failed '
+                                 '(non-fatal): %s', e)
+            if _fallback_visible:
+                try:
+                    from lib.push import push_event
+                    push_event('chat', task['id'], _wire)
+                except Exception as e:
+                    logger.warning('[Task] push_event fallback failed task=%s: %s',
+                                   task['id'][:8], e)
 
     # ★ Liveness clock #1 (see reap_stuck_running_tasks): REAL progress events
     #   — deltas / tool results / tool stdout chunks / retry & waiting phases —

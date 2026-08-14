@@ -18,7 +18,6 @@ from lib.llm.json_extract import extract_first_json_object
 
 from ._config import (
     _INSIGHT_TEMPERATURE,
-    _MAX_INSIGHT_TOOL_ROUNDS,
     _REPAIR_MAX_TOKENS,
 )
 from ..insight_prompts import insight_system_prompt
@@ -197,7 +196,6 @@ def _research_and_synthesize(paper_text, report_md, reader_context, ui_lang, *,
 
     run_agent_loop(
         abort=abort_signal,
-        max_tool_rounds=_MAX_INSIGHT_TOOL_ROUNDS,
         round_tools=_REPORT_TOOLS,
         dispatch=_dispatch,
         execute_tool=_execute_tool,

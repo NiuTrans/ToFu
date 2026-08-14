@@ -30,6 +30,7 @@ import ast
 import inspect
 import os
 import re
+from pathlib import Path
 
 import pytest
 
@@ -289,10 +290,16 @@ def test_adoption_asks_for_the_advisory_verdict_not_the_plain_one():
     from tests._source_scan import strip_comments
     from lib.motion_video import _scene_author
 
-    src = inspect.getsource(_scene_author.author_scene)
-    doc = inspect.getdoc(_scene_author.author_scene) or ''
-    if doc:
-        src = src.replace(doc, '')
+    # This is a source-wiring assertion. Read the source of truth rather than
+    # whichever function object a preceding behavioural test temporarily
+    # installed on the shared module; full-suite monkeypatch state must not
+    # turn a present call site into an order-dependent false failure.
+    module_src = Path(_scene_author.__file__).read_text(encoding='utf-8')
+    tree = ast.parse(module_src)
+    node = next(n for n in tree.body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and n.name == 'author_scene')
+    src = ast.get_source_segment(module_src, node) or ''
     live = strip_comments(src, lang='python')
     idx = live.find('_full_gate(resumed')
     assert idx != -1, 'the adoption pre-check call was not found'
@@ -446,6 +453,24 @@ def test_pre_marker_fallback_card_is_still_recognised_as_a_template():
                             total_scenes=6), (
         'a marker-less fallback card must still be recognised, or the resume '
         'path adopts it as authored and pins the scene to the gradient')
+
+
+def test_pre_marker_cdn_fallback_survives_runtime_localisation():
+    """A managed-runtime migration must not pin old gradient cards forever."""
+    from lib.motion_video._template import (TEMPLATE_MARKER,
+                                            matches_template,
+                                            render_scene_html)
+
+    scene = {'id': 'scene-004', 'start': 30.476, 'end': 40.714,
+             'text': '旁白', 'on_screen': '旧卡片'}
+    current = render_scene_html(scene, duration=10.238, scene_index=4,
+                                total_scenes=6)
+    legacy = current.replace(TEMPLATE_MARKER, '').replace(
+        'assets/gsap-3.14.2.min.js',
+        'https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js')
+
+    assert matches_template(legacy, scene, duration=10.238, scene_index=4,
+                            total_scenes=6)
 
 
 def test_matches_template_does_not_flag_a_genuine_composition():

@@ -1,4 +1,4 @@
-"""routes/api_v1/memory.py — Memory CRUD + personal-preference profile.
+"""Memory CRUD, structured My Context, and legacy profile compatibility.
 
 MEMORY ONLY. Skill packages (a different noun — user-installed capability
 packs) are served by ``routes/api_v1/skills.py`` under ``/api/v1/skills``.
@@ -24,10 +24,13 @@ from __future__ import annotations
 
 import os
 
-from flask import Blueprint, request
+from quart import Blueprint, request
+
+from lib.quart_sync import request_json
 
 from lib.api_response import (
-    api_bad_request, api_created, api_not_found, api_ok,
+    api_bad_request, api_conflict, api_created, api_error, api_forbidden,
+    api_not_found, api_ok,
 )
 from lib.log import get_logger
 from lib.openapi import api_meta
@@ -57,7 +60,7 @@ def _project_path() -> str:
     if request.is_json:
         # Parse the body ONCE (each get_json is a cross-thread hop to the loop
         # under the sync shim); the JSON branch still takes precedence.
-        explicit = (request.get_json(silent=True) or {}).get('project_path')
+        explicit = (request_json(silent=True) or {}).get('project_path')
     if not explicit:
         from lib.request_parser import decode_proxy_path_arg
         explicit = decode_proxy_path_arg('project_path')
@@ -210,14 +213,123 @@ def toggle_memory_v1(memory_id):
     return api_ok(mem)
 
 
-# ── Personal-preference profile ──────────────────────────────────────
+@api_v1_memory_bp.route('/api/v1/memory/actions/clear', methods=['GET'])
+@require_auth
+@api_meta(summary='Preview clearing visible experience memories', tags=['memory'])
+def preview_clear_memories_v1():
+    from lib.auth_mode import is_multi_user
+    if is_multi_user():
+        return api_forbidden('Bulk memory clearing is disabled in multi-user mode')
+    from lib.memory import clear_memories
+    return api_ok(clear_memories(project_path=_project_path(), dry_run=True))
+
+
+@api_v1_memory_bp.route('/api/v1/memory/actions/clear', methods=['POST'])
+@require_auth
+@api_meta(summary='Clear visible experience memories', tags=['memory'])
+def clear_memories_v1():
+    from lib.auth_mode import is_multi_user
+    if is_multi_user():
+        return api_forbidden('Bulk memory clearing is disabled in multi-user mode')
+    data = parse_body()
+    if data.get('confirm') is not True:
+        return api_bad_request('confirm=true is required')
+    from lib.memory import clear_memories
+    result = clear_memories(project_path=_project_path(), dry_run=False)
+    logger.warning('[Memory.v1] cleared %d visible memories (%d failed)',
+                   len(result['deleted_ids']), len(result['failed_ids']))
+    return api_ok(result)
+
+
+# ── Structured "My Context" CRUD ───────────────────────────────────
+
+def _context_scope() -> str:
+    from lib.memory import user_profile as up
+    from .auth import current_auth
+    return up.resolve_profile_scope(current_auth())
+
+
+@api_v1_memory_bp.route('/api/v1/context', methods=['GET'])
+@require_auth
+@api_meta(summary='Get durable user context', tags=['memory'])
+def get_user_context_v1():
+    from lib.memory import user_profile as up
+    return api_ok(up.context_status(_context_scope()))
+
+
+@api_v1_memory_bp.route('/api/v1/context', methods=['PUT'])
+@require_auth
+@api_meta(summary='Replace durable user context', tags=['memory'])
+def put_user_context_v1():
+    from lib.memory import user_profile as up
+    data = parse_body()
+    try:
+        result = up.save_context_items(data.get('items'), _context_scope())
+    except up.ContextValidationError as exc:
+        return api_bad_request(str(exc), cap=up.CONTEXT_CHAR_CAP)
+    return api_ok(result)
+
+
+@api_v1_memory_bp.route('/api/v1/context', methods=['POST'])
+@require_auth
+@api_meta(summary='Create one durable user-context item', tags=['memory'])
+def create_user_context_v1():
+    from lib.memory import user_profile as up
+    data = parse_body()
+    try:
+        result = up.create_context_item(data, _context_scope(), source='manual')
+    except up.ContextValidationError as exc:
+        return api_bad_request(str(exc), cap=up.CONTEXT_CHAR_CAP)
+    return api_created(result)
+
+
+@api_v1_memory_bp.route('/api/v1/context/<item_id>', methods=['PUT'])
+@require_auth
+@api_meta(summary='Update one durable user-context item', tags=['memory'])
+def update_user_context_v1(item_id):
+    from lib.memory import user_profile as up
+    try:
+        result = up.update_context_item(item_id, parse_body(), _context_scope())
+    except up.ContextValidationError as exc:
+        return api_bad_request(str(exc), cap=up.CONTEXT_CHAR_CAP)
+    if result is None:
+        return api_not_found('Context item not found')
+    return api_ok(result)
+
+
+@api_v1_memory_bp.route('/api/v1/context/<item_id>', methods=['DELETE'])
+@require_auth
+@api_meta(summary='Delete one durable user-context item', tags=['memory'])
+def delete_user_context_v1(item_id):
+    from lib.memory import user_profile as up
+    if not up.delete_context_item(item_id, _context_scope()):
+        return api_not_found('Context item not found')
+    return api_ok(deleted=True)
+
+
+@api_v1_memory_bp.route('/api/v1/context/changes/<change_id>/undo',
+                         methods=['POST'])
+@require_auth
+@api_meta(summary='Undo an assistant-learned context change', tags=['memory'])
+def undo_user_context_change_v1(change_id):
+    from lib.memory import user_profile as up
+    try:
+        result = up.undo_context_change(change_id, _context_scope())
+    except up.ContextConflictError as exc:
+        return api_conflict(str(exc))
+    if result.get('not_found'):
+        return api_not_found('Context change not found')
+    return api_ok(result)
+
+
+# ── Legacy profile compatibility ────────────────────────────────────
 
 @api_v1_memory_bp.route('/api/v1/profile', methods=['GET'])
 @require_auth
 @api_meta(
-    summary='Get the personal-preference profile',
+    summary='Get the legacy profile projection',
     description=('Returns ``{body, items, chars, cap, over_cap, pending}`` — '
-                 'the bounded, always-injected user-preference profile. '
+                 'a compatibility projection of structured My Context. '
                  '``items`` is the structured per-preference view '
                  '(``[{header, text}]``) the settings UI edits; ``body`` is '
                  'the raw markdown. ``pending`` is retained for back-compat '
@@ -235,14 +347,14 @@ def get_user_profile_v1():
         'chars': len(body),
         'cap': up.USER_PROFILE_CHAR_CAP,
         'over_cap': up.profile_over_cap(body, scope),
-        'pending': up.load_pending(),
+        'pending': up.load_pending(scope),
     })
 
 
 @api_v1_memory_bp.route('/api/v1/profile', methods=['PUT'])
 @require_auth
 @api_meta(
-    summary='Hand-edit the personal-preference profile',
+    summary='Edit My Context through the legacy profile shape',
     description=('Body: ``{items: [{header, text}]}`` (structured, preferred) '
                  'OR ``{body}`` (raw markdown). An empty items list / body '
                  'clears the profile. Returns the save-result plus the '
@@ -276,9 +388,16 @@ def put_user_profile_v1():
 )
 def resolve_profile_pending_v1(pending_id):
     from lib.memory import user_profile as up
+    from .auth import current_auth
+    scope = up.resolve_profile_scope(current_auth())
     data = parse_body()
     res = up.resolve_pending(pending_id, accept=bool(data.get('accept')),
-                             edited_text=data.get('text'))
+                             edited_text=data.get('text'), scope=scope)
+    if res.get('busy'):
+        return api_error('Pending proposal is already being resolved',
+                         status=409)
+    if res.get('error'):
+        return api_error('Pending proposal could not be resolved', status=500)
     if not res.get('resolved'):
         return api_not_found('Pending proposal not found')
     return api_ok(res)

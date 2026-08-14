@@ -116,12 +116,14 @@ class TestVisibilityGate(_PluginSpecMixin, unittest.TestCase):
         self.assertIn('read_files', _names(tl))
 
     def test_visible_when_allow_listed(self):
-        tl, _ = assemble_tool_list(_ctx(enabled_plugins={self.PLUGIN}))
-        self.assertIn(self.TOOL, _names(tl))
+        ctx = _ctx(enabled_plugins={self.PLUGIN})
+        assemble_tool_list(ctx)
+        self.assertIn(self.TOOL, _names(ctx.enabled_tool_catalog))
 
     def test_visible_when_gate_open(self):
-        tl, _ = assemble_tool_list(_ctx(enabled_plugins=None))
-        self.assertIn(self.TOOL, _names(tl))
+        ctx = _ctx(enabled_plugins=None)
+        assemble_tool_list(ctx)
+        self.assertIn(self.TOOL, _names(ctx.enabled_tool_catalog))
 
     def test_other_plugin_name_does_not_unlock(self):
         tl, _ = assemble_tool_list(_ctx(enabled_plugins={'some_other'}))
@@ -154,8 +156,9 @@ class TestEmptyPluginNameFailsClosed(unittest.TestCase):
         _reg.register_tool_spec(spec)
         tl_closed, _ = assemble_tool_list(_ctx(enabled_plugins={'anything'}))
         self.assertNotIn(self.TOOL, _names(tl_closed))
-        tl_open, _ = assemble_tool_list(_ctx(enabled_plugins=None))
-        self.assertIn(self.TOOL, _names(tl_open))
+        ctx_open = _ctx(enabled_plugins=None)
+        assemble_tool_list(ctx_open)
+        self.assertIn(self.TOOL, _names(ctx_open.enabled_tool_catalog))
 
 
 class TestAutoStamping(unittest.TestCase):

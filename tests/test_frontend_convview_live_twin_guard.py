@@ -46,21 +46,40 @@ Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q \\
 
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
 
-from tests._jsdom import run_harness, JS_DIR, ROOT
+from tests._jsdom import run_harness, ROOT
+from tests._runtime_sections import runtime_section_path
 
 pytestmark = pytest.mark.unit
 
-CONV_VIEW = os.path.join(JS_DIR, 'conv_view.js')
+CONV_VIEW = runtime_section_path('conv_view.js')
+_RUNTIME_PATHS = {
+    name: runtime_section_path(name)
+    for name in (
+        'core/conv_reducers.js',
+        'core/translation_model.js',
+        'core/chatinner_dom.js',
+        'ui/stream_session.js',
+        'ui/streaming_render.js',
+        'ui/streaming_ui.js',
+        'ui/chat_render.js',
+        'ui/stream_lifecycle.js',
+        'ui/translation_render.js',
+        'ui/sse_handlers_misc.js',
+        'ui/finish_info.js',
+    )
+}
 
 _BODY = r"""
 const fs = require('fs');
 const path = require('path');
 const ROOT = process.argv[3];
-const JS = (...p) => path.join(ROOT, 'static', 'js', ...p);
+const JS_PATHS = __RUNTIME_PATHS__;
+const JS = (...p) => JS_PATHS[p.join('/')];
 const { setup } = require(process.env.JSDOM_HARNESS);
 
 const conversations = [];
@@ -208,6 +227,8 @@ check('same-task non-bound object: drift warn BEACONS too',
 
 report();
 """
+
+_BODY = _BODY.replace('__RUNTIME_PATHS__', json.dumps(_RUNTIME_PATHS))
 
 _NEUTER_BODY = _BODY.replace(
     "check('twin repro: apply after msgId drift is refused', refused === false);",

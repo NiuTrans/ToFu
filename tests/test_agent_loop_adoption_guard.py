@@ -68,7 +68,7 @@ _LLM_CALL_NAMES = frozenset({
 _TOOL_TOKENS = ('tool_calls', 'execute_tool', 'tool_call_id')
 
 # Grandfathered private agent loops, each verified by audit (2026-07-27):
-#   * orchestrator/_run.py:520  — run_task's while (premature-retry ceiling);
+#   * orchestrator/_run.py — run_task's naturally completing while loop;
 #     migration blocked on pt_03f4cdf1 (~30 cross-iteration locals).
 #   * endpoint/_run.py:220      — Planner→Worker→Critic driver while; its
 #     worker turn delegates to _run_single_turn (nested run_task), so the
@@ -82,7 +82,7 @@ _TOOL_TOKENS = ('tool_calls', 'execute_tool', 'tool_call_id')
 # the import appears and the pin goes red — remove the entry then.
 _GRANDFATHERED = {
     'lib/tasks_pkg/orchestrator/_run.py':
-        'round_num + 1 <= max_tool_rounds + _premature_retry_count',
+        'while not _prep_aborted:',
     'lib/tasks_pkg/endpoint/_run.py':
         '_run_single_turn(task,',
 }
@@ -107,7 +107,7 @@ _MIN_LOOP_IMPORTERS = 9
 
 
 def _py_files():
-    """Tracked Python files under lib/ + routes/.
+    """Tracked, present Python files under lib/ + routes/.
 
     Enumerated via ``git ls-files`` (the repo index), NOT os.walk: walking
     the tree stats every untracked artefact on this FUSE mount and takes
@@ -118,7 +118,11 @@ def _py_files():
     out = subprocess.check_output(
         ['git', 'ls-files', 'lib/*.py', 'routes/*.py'],
         cwd=ROOT, text=True)
-    return [os.path.join(ROOT, p) for p in out.split()]
+    # ``git ls-files`` retains index entries for unstaged deletions.  Those
+    # files are absent from the current executable tree and must not turn a
+    # loop census into FileNotFoundError halfway through a migration.
+    paths = [os.path.join(ROOT, p) for p in out.split()]
+    return [path for path in paths if os.path.isfile(path)]
 
 
 def _call_name(node: ast.Call) -> str:

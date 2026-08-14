@@ -25,7 +25,7 @@
             <!-- Provider selector -->
             <div class="settings-section-title" style="display:flex;align-items:center;gap:8px">
               <span data-i18n="settings.mtProvider">翻译服务商</span>
-              <select id="settingMtProvider" class="mt-provider-select" onchange="_switchMtProvider(this.value)">
+              <select id="settingMtProvider" class="mt-provider-select" data-tofu-action-change="_switchMtProvider(this.value)">
                 <option value="niutrans" data-i18n="settings.mtProviderNiutrans">小牛翻译 NiuTrans</option>
                 <option value="custom" data-i18n="settings.mtProviderCustom">自定义 Custom</option>
               </select>
@@ -69,7 +69,7 @@
                 </div>
 
                 <div class="settings-row" style="align-items:center;gap:12px;margin-top:4px">
-                  <button class="stg-btn-secondary" onclick="_testMtProvider()" id="mtTestBtn">
+                  <button class="stg-btn-secondary" data-tofu-action="_testMtProvider()" id="mtTestBtn">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
                     <span data-i18n="settings.mtTestBtn">测试连接</span>
                   </button>
@@ -114,7 +114,7 @@
                   </div>
                 </div>
                 <div class="settings-row" style="align-items:center;gap:12px;margin-top:4px">
-                  <button class="stg-btn-secondary" onclick="_testMtProvider()" id="mtTestBtnCustom">
+                  <button class="stg-btn-secondary" data-tofu-action="_testMtProvider()" id="mtTestBtnCustom">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
                     <span data-i18n="settings.mtTestBtn">测试连接</span>
                   </button>

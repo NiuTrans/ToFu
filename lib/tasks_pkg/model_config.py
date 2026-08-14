@@ -13,7 +13,9 @@ logger = get_logger(__name__)
 import re
 
 import lib as _lib  # module ref for hot-reload (Settings changes take effect without restart)
-from lib.tools import ToolContext, assemble_tool_list, resolve_enabled_plugins
+from lib.tools import (
+    ToolContext, all_specs, assemble_tool_list, resolve_enabled_plugins,
+)
 
 
 def _build_search_addendum() -> str:
@@ -204,8 +206,9 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
                          messages=None, conv_id=''):
     """Build the tool_list based on enabled features.
 
-    Returns (tool_list, has_real_tools, max_tool_rounds) where tool_list may be
-    None if no tools are enabled.
+    Returns ``(tool_list, has_real_tools)`` where ``tool_list`` may be ``None``
+    if no tools are enabled. Tool availability is not coupled to a round
+    budget: a model keeps the same tool surface until it naturally stops.
 
     **Caller-supplied tools take precedence.** When ``cfg['tools']`` is a
     non-empty list (set by OpenAI/Anthropic compat adapters or by API
@@ -227,9 +230,31 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
                 logger.warning('[Task %s] dropping malformed tool[%d]: %r',
                                tid, i, t)
         if ok:
+            # Explicit schemas are the strongest possible caller/frontend
+            # selection.  Native Tool Search must never defer or hide them.
+            _explicit_names = []
+            for _tool in ok:
+                _fn = _tool.get('function') or {}
+                _name = (_fn.get('name') if isinstance(_fn, dict) else '') \
+                    or _tool.get('name') or ''
+                if _name:
+                    _explicit_names.append(str(_name))
+            cfg['_frontendSelectedToolNames'] = sorted(set(_explicit_names))
+            cfg['_toolNamespaceByName'] = {
+                name: 'custom' for name in _explicit_names}
+            cfg['_enabledToolNamespaceByName'] = dict(
+                cfg['_toolNamespaceByName'])
+            cfg['_enabledToolCatalog'] = list(ok)
+            cfg['_executableToolCatalog'] = list(ok)
+            cfg['_toolDiscoveryPolicyByName'] = {
+                name: 'eager' for name in _explicit_names}
+            cfg['_toolScriptSafeByName'] = {
+                name: False for name in _explicit_names}
+            cfg['_enabledToolSearchTextByName'] = {
+                name: 'custom caller supplied tool' for name in _explicit_names}
             logger.info('[Task %s] using %d caller-supplied tool(s); '
                         'auto-derived tools disabled', tid, len(ok))
-            return ok, True, 999_999_999
+            return ok, True
 
     # ── Declarative assembly — the per-feature if-ladder now lives as
     #    self-describing ToolSpec objects in lib/tools/registry.py.  Native
@@ -262,36 +287,93 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
         enabled_plugins=enabled_plugins, conv_id=conv_id,
     )
     tool_list, has_real_tools = assemble_tool_list(ctx)
+    # Preserve the complete task-level execution authority before any routed
+    # exposure is applied. The historical
+    # ``_enabled*`` alias stays during migration; new code should say
+    # executable because composer exposure toggles no longer grant authority.
+    cfg['_enabledToolCatalog'] = list(ctx.enabled_tool_catalog)
+    cfg['_executableToolCatalog'] = list(ctx.enabled_tool_catalog)
+    try:
+        from lib.context_experiment_flags import (
+            normalize_context_experiment_flags)
+        cfg['_toolExecutionScope'] = normalize_context_experiment_flags(
+            cfg)['tools']['executionScope']
+    except Exception as exc:
+        logger.debug('[ModelConfig] context experiment flags unavailable: %s', exc)
+        cfg['_toolExecutionScope'] = 'available'
+    cfg['_toolDiscoveryPolicyByName'] = dict(
+        ctx.discovery_policy_by_name)
+    cfg['_toolScriptSafeByName'] = dict(ctx.script_safe_by_name)
+    cfg['_enabledToolNamespaceByName'] = dict(ctx.tool_namespace_by_name)
+    cfg['_enabledToolSearchTextByName'] = dict(ctx.search_text_by_name)
 
-    # ── Per-conversation tool-schema latch (root fix for tools-array cache
-    #    breaks). Freeze the EXACT tool list this conversation first used and
-    #    serve it byte-identical on every later round, so a mid-conversation
-    #    toggle (Swarm/Scheduler/Browser/…) cannot invalidate the cached
-    #    prefix. The change is deferred to the next NEW conversation (or to an
-    #    explicit "Apply now" that clears the latch). `diverged` signals the
-    #    frontend that a pending change is being held. conv_id='' (stateless
-    #    assembly / compat adapters) or TOFU_TOOLSET_LATCH=0 → no-op.
-    from lib.tools import latch_tool_list, tool_list_diff
-    tool_list, _toolset_diverged = latch_tool_list(conv_id, tool_list)
-    if _toolset_diverged:
-        _diff = tool_list_diff(conv_id)
-        logger.info('[Task %s] 🔒 tool-schema latch held a pending toggle '
-                    'change (conv=%s) added=%s removed=%s — deferring to next '
-                    'conversation / Apply-now to keep prompt cache intact',
-                    tid, conv_id[:8], _diff.get('added'), _diff.get('removed'))
-        cfg['_toolsetDiff'] = _diff
-    # Surface the flag so the orchestrator can attach it to the done event.
-    cfg['_toolsetDiverged'] = bool(_toolset_diverged)
+    # Request-local routing telemetry describes this assembly's live surface.
+    try:
+        from lib.context_experiment_flags import (
+            normalize_context_experiment_flags)
+        from lib.context_telemetry import stamp_tool_exposure
+        _mode = normalize_context_experiment_flags(
+            cfg)['tools']['nativeExposure']
+        _available = sum(
+            len(spec.provides) for spec in all_specs()
+            if spec.source == 'builtin')
+        _holder: dict = {}
+        stamp_tool_exposure(
+            _holder, mode=_mode, available=_available,
+            exposed=len(tool_list),
+            routed_keys=sorted(ctx.routed_spec_keys),
+            omitted_keys=sorted(ctx.omitted_spec_keys))
+        cfg['_toolExposureTelemetry'] = _holder['_toolExposureTelemetry']
+    except Exception as _telemetry_exc:
+        logger.debug('[Task %s] tool exposure telemetry skipped: %s',
+                     tid, _telemetry_exc)
+
+    # Preserve registry provenance across the later canonical-body boundary.
+    # Every value below comes from this assembly, so tool toggles, MCP changes,
+    # and Tool Search settings take effect on the next model round.
+    _wire_names = set()
+    for _tool in tool_list or ():
+        if not isinstance(_tool, dict):
+            continue
+        _fn = _tool.get('function')
+        _name = (_fn.get('name') if isinstance(_fn, dict) else '') \
+            or _tool.get('name') or ''
+        if _name:
+            _wire_names.add(str(_name))
+    _live_pins = ctx.frontend_selected_tool_names & _wire_names
+    _live_namespaces = {
+        name: namespace
+        for name, namespace in ctx.tool_namespace_by_name.items()
+        if name in _wire_names
+    }
+    _live_discovery_policy = {
+        name: ctx.discovery_policy_by_name.get(name, 'eager')
+        for name in _wire_names
+    }
+    _searchable_count = sum(
+        ctx.discovery_policy_by_name.get(name, 'eager') == 'searchable'
+        for name in {
+            str(((tool.get('function') or {}).get('name') or ''))
+            for tool in ctx.enabled_tool_catalog if isinstance(tool, dict)
+        }
+        if name
+    )
+    from lib.context_experiment_flags import normalize_context_experiment_flags
+    _live_tool_search_mode = normalize_context_experiment_flags(
+        cfg)['tools']['toolSearch']
+    cfg['_frontendSelectedToolNames'] = sorted(
+        _live_pins & _wire_names)
+    cfg['_toolNamespaceByName'] = {
+        name: namespace
+        for name, namespace in _live_namespaces.items()
+        if name in _wire_names
+    }
+    cfg['_toolDiscoveryPolicyByName'] = _live_discovery_policy
+    cfg['_toolSearchCatalogSize'] = len(ctx.enabled_tool_catalog)
+    cfg['_toolSearchableCount'] = _searchable_count
+    cfg['_toolSearchMode'] = _live_tool_search_mode
 
     if not tool_list:
         tool_list = None
-        max_tool_rounds = 0
-    else:
-        # ★ NO tool round limit — the model decides when to stop.
-        # ★ 禁止在此处添加任何轮数上限。模型自行判断何时停止。
-        # ★ 任何形式的 max_tool_rounds 硬性限制、预算警告、重复检测强制停止
-        #   都不允许加入。如果模型陷入循环，应从 prompt 质量层面解决，
-        #   而不是在 orchestrator 里粗暴截断。
-        max_tool_rounds = 999_999_999  # effectively unlimited
 
-    return tool_list, has_real_tools, max_tool_rounds
+    return tool_list, has_real_tools

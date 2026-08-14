@@ -305,7 +305,10 @@ class TestRunCommandSeam:
         from lib.tasks_pkg.executor._finalize import _attach_terminal_qr
         results = [None, 'a string', {'toolName': 'run_command'},
                    {'toolName': 'run_command', 'output': None}]
-        _attach_terminal_qr(results)  # must not raise
+        before = list(results)
+        result = _attach_terminal_qr(results)
+        assert result is None
+        assert results == before
 
     def test_qr_is_attached_before_the_event_is_emitted(self):
         """Ordering invariant: the descriptors must exist BEFORE the SSE event

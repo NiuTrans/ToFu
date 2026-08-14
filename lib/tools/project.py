@@ -1,6 +1,7 @@
 """lib/tools/project.py — Project co-pilot tool definitions."""
 
 import copy
+import os
 
 PROJECT_TOOL_LIST_DIR = {
     "type": "function",
@@ -124,9 +125,8 @@ PROJECT_TOOL_WRITE_FILE = {
             "exist. Overwrites the entire file.\n\n"
             "**When to use which write tool:**\n"
             "  • write_file — new files, or major rewrites of an entire file\n"
-            "  • apply_diff — small targeted changes to part of an existing file\n"
-            "  • insert_content — purely additive changes (new import, new function, "
-            "new config entry) where existing code is left intact\n\n"
+            "  • edit_file — targeted changes to existing files; select an insert "
+            "operation when existing anchor text remains intact\n\n"
             "IMPORTANT: Always read_files first to understand existing code before "
             "writing. Include ALL content — not just the changed parts. Otherwise the "
             "rest of the file is lost.\n\n"
@@ -135,7 +135,7 @@ PROJECT_TOOL_WRITE_FILE = {
             "directly — its containing directory is auto-registered as a workspace "
             "root on first write, so you do NOT need create_project first. Only "
             "genuine system paths (/etc, /usr, $HOME itself, …) are refused. The "
-            "same applies to apply_diff / insert_content."
+            "same applies to edit_file."
         ),
         "parameters": {
             "type": "object",
@@ -331,6 +331,88 @@ PROJECT_TOOL_INSERT_CONTENTS = {
     }
 }
 
+
+# ``edit_file`` is the only edit surface shown to new model turns.  The four
+# older schemas above deliberately remain module-level constants: persisted
+# conversations, input repair and the rollback switch still need to understand
+# their exact wire shapes, but making all five visible recreates the tool-choice
+# competition this unified entry point exists to remove.
+PROJECT_TOOL_EDIT_FILE = {
+    "type": "function",
+    "function": {
+        "name": "edit_file",
+        "description": (
+            "Edit one or more existing files with exact anchors. Choose "
+            "insert_after or insert_before whenever the anchor must remain "
+            "unchanged; choose replace only when the anchor itself must be "
+            "changed or removed. For example, to add B between existing A and "
+            "C, use anchor A + content B + operation insert_after (or anchor C "
+            "+ content B + insert_before). Do not repeat A/C in content. A "
+            "replace whose content repeats the anchor verbatim at either end "
+            "is REJECTED as a pure insertion — re-issue it as "
+            "insert_after/insert_before carrying only the new text.\n\n"
+            "Read-before-edit is enforced: each target file must have been read "
+            "or written in an earlier tool round. Edits run sequentially, so a "
+            "later edit sees earlier changes. A failed edit does not stop or "
+            "roll back the remaining edits. Anchors must match exactly once "
+            "unless replace_all is used with operation=replace."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "maxLength": 120,
+                    "description": (
+                        "Required pre-edit intent shown to the user before execution. "
+                        "Write one short sentence describing the change."
+                    ),
+                },
+                "edits": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 30,
+                    "description": (
+                        "Ordered edit operations (max 30). Keep anchors as short "
+                        "as possible while still matching exactly once."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Relative file path"},
+                            "operation": {
+                                "type": "string",
+                                "enum": ["insert_after", "insert_before", "replace"],
+                                "description": (
+                                    "Use insert_after/insert_before for purely additive "
+                                    "changes; use replace only to modify/remove anchor."
+                                ),
+                            },
+                            "anchor": {
+                                "type": "string",
+                                "description": "Exact existing text; must normally match once",
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": (
+                                    "Only the new text to insert, or the replacement text. "
+                                    "Never repeat the anchor for insert operations."
+                                ),
+                            },
+                            "replace_all": {
+                                "type": "boolean",
+                                "description": "Replace every anchor match; valid only for operation=replace",
+                            },
+                        },
+                        "required": ["path", "operation", "anchor", "content"],
+                    },
+                },
+            },
+            "required": ["description", "edits"],
+        },
+    },
+}
+
 PROJECT_TOOL_RUN_COMMAND = {
     "type": "function",
     "function": {
@@ -361,7 +443,8 @@ PROJECT_TOOL_RUN_COMMAND = {
             "  • Reading files → use **read_files** (line numbers, batch reads, auto image/PDF/Office support)\n"
             "  • Searching file content → use **grep_search** (5x+ faster than `grep -r`, auto-respects .gitignore, batch mode)\n"
             "  • Finding files by name → use **find_files** (max_results, ignored-dir filter)\n"
-            "  • Editing files → use **apply_diff / insert_content / write_file**\n"
+            "  • Editing existing files → use **edit_file**; creating or fully "
+            "rewriting files → use **write_file**\n"
             "Reaching for `cat` / `grep` / `find` / `sed` / `awk` is almost always a smell — there is a dedicated tool that's faster, safer, and easier for the user to review.\n"
             "**Pipelines do NOT excuse this** — `grep -rn 'foo' lib/ | head -20` is the WORST case: on a FUSE-mounted or large tree, the recursive `grep -rn` walks every untracked dir (caches, .project_sessions, vendor) and can take >120s, while `grep_search(pattern='foo', path='lib', max_results=20)` finishes in <1s. Use grep_search and pass `max_results` instead of piping to `head`.\n\n"
             "**Enforced:** a `grep`/`egrep`/`fgrep` reading the filesystem "
@@ -394,6 +477,12 @@ PROJECT_TOOL_RUN_COMMAND = {
                 "working_dir": {
                     "type": "string",
                     "description": "Working directory for the command (optional). In multi-root workspaces, use 'rootname:subdir' to run in a specific root. STICKY: once you set it (or `cd` inside a command), later run_command calls in this conversation resume from that directory automatically — so you do NOT need to repeat `cd <project>` or use absolute paths for `python`/`pip` every call. Default: the conversation's last working directory, else project root."
+                },
+                "credentials": {
+                    "type": "array",
+                    "description": "Vault entry names to inject into THIS child process only. Default empty. Use only names shown in <credential_vault>; values never enter the command or chat. Unknown, skill-scoped, or unreadable entries are rejected before execution.",
+                    "items": {"type": "string"},
+                    "maxItems": 16
                 }
             },
             "required": ["command"]
@@ -409,7 +498,7 @@ PROJECT_TOOL_CREATE_PROJECT = {
             "create_project: Create a new, initially-empty project directory at the given path and register it "
             "as an EXTRA workspace root, and (optionally) give it a short root name.\n\n"
             "NOTE: You usually do NOT need this just to write files outside the current "
-            "project — write_file / apply_diff / insert_content already accept absolute "
+            "project — write_file / edit_file already accept absolute "
             "paths and auto-register the target directory on first write. Use "
             "create_project only when you want to (a) pre-create an empty directory "
             "before writing into it, or (b) assign an explicit short 'name:' prefix for "
@@ -608,6 +697,11 @@ _REMOTE_EXEC_HINT = (
     "relative to the bound remote root and file changes happen on the "
     "user's own disk (with a local snapshot before every write)."
 )
+_REMOTE_RUN_COMMAND_CREDENTIAL_HINT = (
+    " Server vault credentials are unavailable on remote worktrees; do not "
+    "pass the `credentials` field. Configure credentials on the desktop "
+    "agent or run the command in a server workspace."
+)
 
 
 def with_remote_hint(tools):
@@ -626,20 +720,46 @@ def with_remote_hint(tools):
         desc = fn.get('description', '') or ''
         if _REMOTE_EXEC_HINT.strip() not in desc:
             fn['description'] = desc + _REMOTE_EXEC_HINT
+        if fn.get('name') == 'run_command':
+            fn['description'] += _REMOTE_RUN_COMMAND_CREDENTIAL_HINT
         out.append(t)
     return out
 
 
-PROJECT_TOOLS = [
+PROJECT_TOOLS_UNIFIED = [
+    PROJECT_TOOL_LIST_DIR,
+    PROJECT_TOOL_GREP, PROJECT_TOOL_FIND,
+    PROJECT_TOOL_WRITE_FILE, PROJECT_TOOL_EDIT_FILE,
+    PROJECT_TOOL_CREATE_PROJECT, PROJECT_TOOL_RUN_COMMAND,
+]
+
+PROJECT_TOOLS_LEGACY = [
     PROJECT_TOOL_LIST_DIR,
     PROJECT_TOOL_GREP, PROJECT_TOOL_FIND,
     PROJECT_TOOL_WRITE_FILE, PROJECT_TOOL_APPLY_DIFF, PROJECT_TOOL_APPLY_DIFFS,
     PROJECT_TOOL_INSERT_CONTENT, PROJECT_TOOL_INSERT_CONTENTS,
     PROJECT_TOOL_CREATE_PROJECT, PROJECT_TOOL_RUN_COMMAND,
 ]
+
+
+def project_tools_for_runtime():
+    """Return the model-visible project surface.
+
+    The environment switch is an emergency rollback for new turns. Existing
+    conversations already latch their tool schema in the task runtime, so the
+    switch never rewrites persisted tool history.
+    """
+    enabled = os.environ.get('TOFU_UNIFIED_EDIT_TOOL', '1').strip().lower()
+    return (PROJECT_TOOLS_LEGACY if enabled in ('0', 'false', 'no', 'off')
+            else PROJECT_TOOLS_UNIFIED)
+
+
+# Default/static export used by schema introspection. Runtime assembly calls
+# ``project_tools_for_runtime`` so operators retain the rollback switch.
+PROJECT_TOOLS = PROJECT_TOOLS_UNIFIED
 PROJECT_TOOL_NAMES = {
     'list_dir', 'grep_search', 'find_files',
-    'write_file', 'apply_diff', 'apply_diffs',
+    'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
     'insert_content', 'insert_contents',
     'create_project', 'run_command',
 }
@@ -647,9 +767,11 @@ PROJECT_TOOL_NAMES = {
 __all__ = [
     'PROJECT_TOOL_LIST_DIR', 'READ_FILES_TOOL',
     'PROJECT_TOOL_GREP', 'PROJECT_TOOL_FIND',
-    'PROJECT_TOOL_WRITE_FILE', 'PROJECT_TOOL_APPLY_DIFF', 'PROJECT_TOOL_APPLY_DIFFS',
+    'PROJECT_TOOL_WRITE_FILE', 'PROJECT_TOOL_EDIT_FILE',
+    'PROJECT_TOOL_APPLY_DIFF', 'PROJECT_TOOL_APPLY_DIFFS',
     'PROJECT_TOOL_INSERT_CONTENT', 'PROJECT_TOOL_INSERT_CONTENTS',
     'PROJECT_TOOL_CREATE_PROJECT', 'PROJECT_TOOL_RUN_COMMAND',
-    'PROJECT_TOOLS', 'PROJECT_TOOL_NAMES', 'with_multiroot_hint',
+    'PROJECT_TOOLS', 'PROJECT_TOOLS_UNIFIED', 'PROJECT_TOOLS_LEGACY',
+    'PROJECT_TOOL_NAMES', 'project_tools_for_runtime', 'with_multiroot_hint',
     'with_remote_hint',
 ]

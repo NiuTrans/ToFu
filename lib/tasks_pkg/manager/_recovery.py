@@ -196,8 +196,7 @@ def _conv_has_live_task_for_recovery(conv_id, db) -> bool:
 
 
 def _project_display_fields(rounds):
-    """Attach the DISPLAY projection (roundNum/query/results) the live pipeline
-    would have attached, onto recovery-rebuilt rounds that lack it.
+    """Attach the DISPLAY projection the live pipeline would have attached.
 
     ``_rounds_view_from_segments`` is a wire-replay view: it produces only
     toolCallId/toolName/toolArgs/toolContent/status/llmRound. Persisting THAT
@@ -208,11 +207,12 @@ def _project_display_fields(rounds):
       * ``roundNum`` — sequential (the persisted segments carry no roundNum).
       * ``query`` — ``tool_round_label`` (the SAME builder the live pipeline
         uses) over the round's decoded args.
-      * ``results`` — a single SYNTHETIC entry marked ``recovered: True``
-        (this is a recovery projection, not live-fidelity data) carrying the
-        label + a toolContent excerpt. Live results entries are built
-        per-tool at execution time and cannot be faithfully rebuilt from the
-        persisted segments — the material does not exist (JOURNAL 续49).
+      * ``results`` — a single SYNTHETIC entry marked ``recovered: True``.
+        Most tools get the generic label + toolContent excerpt because their
+        live result metadata cannot be faithfully rebuilt from thin segments.
+        ``run_command`` / ``code_exec`` are the exception: their structured
+        terminal metadata is deterministically derivable from the preserved
+        args + toolContent, so recovery uses the same builder as the live path.
 
     Idempotent: rounds that already carry live display fields (e.g. source 1,
     the tool_rounds column) are left untouched.
@@ -225,7 +225,16 @@ def _project_display_fields(rounds):
             r['roundNum'] = i + 1
         name = r.get('toolName') or ''
         label = ''
-        if name and (not r.get('query') or not r.get('results')):
+        args = {}
+        results = r.get('results')
+        first_result = (results[0] if isinstance(results, list) and results
+                        and isinstance(results[0], dict) else None)
+        command_tool = name in ('run_command', 'code_exec')
+        needs_command_upgrade = bool(
+            command_tool and first_result and first_result.get('recovered')
+            and first_result.get('command') is None
+            and first_result.get('output') is None)
+        if name and (not r.get('query') or not results or needs_command_upgrade):
             args = r.get('toolArgs')
             if isinstance(args, str):
                 try:
@@ -242,14 +251,28 @@ def _project_display_fields(rounds):
                 label = ''
         if not r.get('query'):
             r['query'] = label or name
-        if not isinstance(r.get('results'), list) or not r['results']:
-            r['results'] = [{
-                'toolName': name,
-                'badge': r.get('status') or '',
-                'title': label or name,
-                'snippet': (r.get('toolContent') or '')[:200],
-                'recovered': True,
-            }]
+        if not isinstance(results, list) or not results or needs_command_upgrade:
+            recovered_meta = None
+            tool_content = r.get('toolContent')
+            if command_tool and isinstance(tool_content, str):
+                try:
+                    from lib.tools.meta import build_project_tool_meta
+                    recovered_meta = build_project_tool_meta(
+                        'run_command', args, tool_content)
+                    recovered_meta['toolName'] = name
+                    recovered_meta['title'] = label or name
+                except Exception as e:
+                    logger.debug('[Startup] command display rebuild failed for %s: %s',
+                                 name, e)
+            if recovered_meta is None:
+                recovered_meta = dict(first_result) if first_result else {
+                    'toolName': name,
+                    'badge': r.get('status') or '',
+                    'title': label or name,
+                    'snippet': (tool_content or '')[:200],
+                }
+            recovered_meta['recovered'] = True
+            r['results'] = [recovered_meta]
     return rounds
 
 
@@ -308,7 +331,8 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
 
         # ── Step 1: Mark stale running tasks as interrupted ──
         stale_rows = db.execute(
-            "SELECT task_id, conv_id, content, thinking, created_at FROM task_results WHERE status='running'"
+            "SELECT task_id, conv_id, content, thinking, created_at, metadata "
+            "FROM task_results WHERE status='running'"
         ).fetchall()
 
         # conv_id → task_id of the interrupted task to merge.
@@ -338,10 +362,22 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
                 logger.info('[Startup] Marking stale task %s (conv=%s) as interrupted: '
                             'content=%dchars thinking=%dchars',
                             tid[:8], cid[:8], clen, tlen)
+                try:
+                    _row_meta = json.loads(row['metadata'] or '{}')
+                except (json.JSONDecodeError, TypeError):
+                    _row_meta = {}
+                if _row_meta.get('turnProtocolV2'):
+                    # TurnLifecycle already preserved/settled this projection
+                    # before this compatibility sweep. Never dual-write the
+                    # archived conversation message array during recovery.
+                    continue
                 if cid:
                     _by_conv.setdefault(cid, []).append(row)
-            db.execute("UPDATE task_results SET status='interrupted' WHERE status='running'")
-            db.commit()
+            from lib.database import db_execute_with_retry
+            db_execute_with_retry(
+                db,
+                "UPDATE task_results SET status='interrupted' "
+                "WHERE status='running'")
             for cid, rows in _by_conv.items():
                 rows.sort(key=lambda r: int(r['created_at'] or 0), reverse=True)
                 for row in rows:
@@ -366,19 +402,21 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
         #          task_results.conv_id — AUTHORITATIVE; recovers the turn even
         #          when activeTaskId was never persisted (the mid-stream-crash
         #          case that used to orphan the interrupted content entirely).
-        conv_rows = db.execute(
-            "SELECT id, settings, messages FROM conversations WHERE user_id=1 "
+        active_ids = db.execute(
+            "SELECT id FROM conversations WHERE user_id=1 "
             "AND json_extract(settings, '$.activeTaskId') IS NOT NULL"
         ).fetchall()
+        from lib.database.conversation_repository import list_conversation_snapshots
+        conv_rows = list_conversation_snapshots(
+            db, user_id=1, ids=[r['id'] for r in active_ids],
+            metadata_columns=('settings',)) if active_ids else []
         conv_by_id = {r['id']: r for r in conv_rows}
 
         _missing_ids = [c for c in interrupted_task_by_conv if c not in conv_by_id]
         if _missing_ids:
-            _ph = ','.join('?' for _ in _missing_ids)
-            for r in db.execute(
-                "SELECT id, settings, messages FROM conversations WHERE user_id=1 "
-                f"AND id IN ({_ph})", tuple(_missing_ids)
-            ).fetchall():
+            for r in list_conversation_snapshots(
+                    db, user_id=1, ids=_missing_ids,
+                    metadata_columns=('settings',)):
                 conv_by_id[r['id']] = r
             logger.info('[Startup] %d interrupted-owning conv(s) had NO activeTaskId '
                         '(recovered via task_results.conv_id): %s',
@@ -386,10 +424,9 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
 
         cleared = 0
         recovered_conv_ids: list = []
-        _mirror_pending: list = []  # (cid, messages) for the Phase-5 post-commit mirror
         for cid, crow in conv_by_id.items():
             try:
-                settings = json.loads(crow['settings'] or '{}')
+                settings = json.loads(crow.get('settings') or '{}')
             except (json.JSONDecodeError, TypeError) as _e_audit:
                 logger.debug('[manager] recover_stale_tasks_on_startup caught %s: %s', type(_e_audit).__name__, _e_audit)
                 continue
@@ -431,9 +468,17 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
             if task_row:
                 task_content = task_row['content'] or ''
                 task_thinking = task_row['thinking'] or ''
-                if task_content or task_thinking:
+                _task_meta = {}
+                if task_row['metadata']:
                     try:
-                        messages = json.loads(crow['messages'] or '[]')
+                        _task_meta = json.loads(task_row['metadata']) or {}
+                    except (json.JSONDecodeError, TypeError):
+                        _task_meta = {}
+                _recovery_rounds = _tool_rounds_from_task_row(task_row)
+                if (task_content or task_thinking or _recovery_rounds
+                        or _task_meta.get('todoState')):
+                    try:
+                        messages = list(crow.messages)
                         if messages:
                             # GATE 1 (task home): if this task ALREADY has a
                             # durable home in the conversation (a message
@@ -501,18 +546,14 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
                                 # whose messages copy lagged the crash point had
                                 # NO recoverable rounds → Continue regenerated
                                 # from scratch (the OS-kill bug).
-                                _rec_tr = _tool_rounds_from_task_row(task_row)
+                                _rec_tr = _recovery_rounds
                                 if _rec_tr and len(_rec_tr) > len(last_msg.get('toolRounds') or []):
                                     last_msg['toolRounds'] = _rec_tr
                                 # Merge metadata
-                                if task_row['metadata']:
-                                    try:
-                                        meta = json.loads(task_row['metadata'])
-                                        if meta.get('model') and not last_msg.get('model'):
-                                            last_msg['model'] = meta['model']
-                                    except (json.JSONDecodeError, TypeError) as _e_audit:
-                                        logger.debug('[manager] recover_stale_tasks_on_startup caught %s: %s', type(_e_audit).__name__, _e_audit)
-                                        pass
+                                if _task_meta.get('model') and not last_msg.get('model'):
+                                    last_msg['model'] = _task_meta['model']
+                                if _task_meta.get('todoState'):
+                                    last_msg['todoState'] = _task_meta['todoState']
                                 messages_json = json_dumps_pg(messages)
                             elif last_msg.get('role') == 'user':
                                 # Task started but no assistant msg was appended yet.
@@ -538,17 +579,13 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
                                 }
                                 if _interrupt_reason:
                                     new_msg['interruptedReason'] = _interrupt_reason
-                                _rec_tr = _tool_rounds_from_task_row(task_row)
+                                _rec_tr = _recovery_rounds
                                 if _rec_tr:
                                     new_msg['toolRounds'] = _rec_tr
-                                if task_row['metadata']:
-                                    try:
-                                        meta = json.loads(task_row['metadata'])
-                                        if meta.get('model'):
-                                            new_msg['model'] = meta['model']
-                                    except (json.JSONDecodeError, TypeError) as _e_audit:
-                                        logger.debug('[manager] recover_stale_tasks_on_startup caught %s: %s', type(_e_audit).__name__, _e_audit)
-                                        pass
+                                if _task_meta.get('model'):
+                                    new_msg['model'] = _task_meta['model']
+                                if _task_meta.get('todoState'):
+                                    new_msg['todoState'] = _task_meta['todoState']
                                 messages.append(new_msg)
                                 messages_json = json_dumps_pg(messages)
                     except (json.JSONDecodeError, TypeError) as exc:
@@ -571,7 +608,7 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
             #    that is notify_compaction's job, the opposite signal).
             try:
                 _base_msgs = (json.loads(messages_json) if messages_json
-                              else json.loads(crow['messages'] or '[]'))
+                              else list(crow.messages))
             except (json.JSONDecodeError, TypeError):
                 _base_msgs = []
             if _base_msgs:
@@ -607,7 +644,8 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
             # then fold into settings_json so it rides the same atomic UPDATE —
             # NOT a separate SELECT→mutate→UPDATE (that would clobber).
             try:
-                _final_msgs = json.loads(messages_json) if messages_json else json.loads(crow['messages'] or '[]')
+                _final_msgs = (json.loads(messages_json) if messages_json
+                               else list(crow.messages))
             except (json.JSONDecodeError, TypeError) as e:
                 logger.debug('[Manager] final_msgs JSON parse failed, using fallback: %s', e)
                 _final_msgs = []
@@ -629,20 +667,28 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
             if messages_json:
                 from lib.conversations import build_search_text
                 messages_parsed = json.loads(messages_json)
-                # Phase 5: collect for the post-commit mirror below (inert
-                # unless TOFU_MESSAGES_ROWS; recovery rewrites arbitrarily).
-                from lib.database.messages_rows import rows_write_enabled as _rwe
-                if _rwe():
-                    _mirror_pending.append((cid, messages_parsed))
                 search_text = build_search_text(messages_parsed)
-                db.execute(
-                    "UPDATE conversations SET settings=?, messages=?, updated_at=?, "
-                    "msg_count=?, search_text=? WHERE id=? AND user_id=1",
-                    (settings_json, messages_json, now_ms,
-                     len(messages_parsed), search_text, cid)
+                from lib.database.conversation_repository import replace_messages
+                result = replace_messages(
+                    db, cid, messages_parsed,
+                    metadata={
+                        'settings': settings_json,
+                        'updated_at': now_ms,
+                        'msg_count': len(messages_parsed),
+                        'search_text': search_text,
+                    },
+                    # Startup recovery may merge, append, delete ghosts, and
+                    # re-sequence arbitrary positions.
+                    full=True,
                 )
+                if not result.applied:
+                    logger.warning('[Startup] conv=%s vanished during recovery write',
+                                   cid[:8])
+                    continue
             else:
-                db.execute(
+                from lib.database import db_execute_with_retry
+                db_execute_with_retry(
+                    db,
                     "UPDATE conversations SET settings=?, updated_at=? WHERE id=? AND user_id=1",
                     (settings_json, now_ms, cid)
                 )
@@ -665,18 +711,8 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
                         bool(atid), bool(messages_json))
 
         if cleared:
-            db.commit()
             logger.info('[Startup] Recovered %d conversation(s) (merged interrupted '
                         'content + cleared any dead activeTaskId)', cleared)
-            # Phase 5 dual-write (flag-gated; collection above is flag-gated
-            # too, so this loop is empty when off): recovery merges + ghost
-            # reconciles rewrite the array arbitrarily → full rebuild mirror
-            # per conv, AFTER the authoritative commit (transaction shape
-            # unchanged — pt_7e4afe73 discipline).
-            if _mirror_pending:
-                from lib.database.messages_rows import mirror_write_and_commit
-                for _cid, _msgs in _mirror_pending:
-                    mirror_write_and_commit(db, _cid, _msgs, full=True)
 
         total = len(stale_rows) + cleared
         if total:
@@ -847,5 +883,3 @@ def run_deferred_boot_dispatch(recovery_result, *, should_continue=None,
     except Exception as e:
         logger.warning('[Startup] killed-turn recovery failed '
                        '(non-fatal): %s', e, exc_info=True)
-
-

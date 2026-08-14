@@ -34,9 +34,11 @@ from lib.pricing._tables import (  # noqa: E402,F401
 from lib.pricing._provider import (  # noqa: E402,F401
     PROVIDER_PRICING,
     _provider_pricing_lock,
+    build_rate_card,
     clear_provider_pricing,
     get_provider_pricing_snapshot,
     lookup_pricing,
+    normalize_pricing,
     set_provider_pricing,
 )
 
@@ -54,6 +56,7 @@ from lib.pricing._refresh import (  # noqa: E402,F401
     _update_pricing_locked,
     get_pricing_data,
     refresh_pricing_async,
+    stop_pricing_refresh,
 )
 
 __all__ = [
@@ -67,9 +70,12 @@ __all__ = [
     'clear_provider_pricing',
     'lookup_pricing',
     'get_provider_pricing_snapshot',
+    'normalize_pricing',
+    'build_rate_card',
     # peak schedules
     'peak_multiplier',
     # refresh
     'get_pricing_data',
     'refresh_pricing_async',
+    'stop_pricing_refresh',
 ]

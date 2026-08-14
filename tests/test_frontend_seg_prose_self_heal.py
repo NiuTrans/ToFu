@@ -103,7 +103,7 @@ win.conversations=global.conversations=[]; global.activeConvId=win.activeConvId=
 let SUI = fs.readFileSync(process.argv[3], 'utf8');
 let TR = fs.readFileSync(process.argv[4], 'utf8');
 if (NEUTER === 'think') {
-  SUI = SUI.replace('thinkEl._lastThink !== _think || _txtEl.textContent !== _think',
+  SUI = SUI.replace('thinkEl._lastThink !== _think || _thinkStale',
                     'thinkEl._lastThink !== _think /* NEUTER */');
   if (SUI.indexOf('/* NEUTER */') < 0) { console.log('FAIL neuter_applied_think'); process.exit(0); }
 }

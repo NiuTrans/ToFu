@@ -1,23 +1,30 @@
 """lib/key_stats/_record.py — Hot-path outcome recording.
 
 ``record_outcome`` / ``record_rate_limit`` / ``record_gateway_error`` /
-``mark_key_exhausted`` mutate the shared in-memory cache under ``_lock``
-and persist on write.  All state lives in ``lib.key_stats._state`` and is
+``mark_key_exhausted`` apply semantic increments to the latest durable
+document under ``_lock``. All state lives in ``lib.key_stats._state`` and is
 imported here BY REFERENCE.
 """
 
 from lib.log import get_logger
 
 from lib.key_stats._state import (
-    _cache,
-    _ensure_fresh_unlocked,
     _lock,
     _new_entry,
     _pair_key,
-    _save_unlocked,
+    _update_store_unlocked,
 )
 
 logger = get_logger(__name__)
+
+
+def _entry_for_update(stats: dict, pk: str) -> dict:
+    """Return a mutable entry, repairing a malformed leaf defensively."""
+    entry = stats.get(pk)
+    if not isinstance(entry, dict):
+        entry = _new_entry()
+        stats[pk] = entry
+    return entry
 
 
 def record_outcome(provider_id: str, key_name: str, success: bool,
@@ -34,12 +41,9 @@ def record_outcome(provider_id: str, key_name: str, success: bool,
     if not key_name:
         return
     pk = _pair_key(provider_id, key_name)
-    with _lock:
-        _ensure_fresh_unlocked()
-        entry = _cache['stats'].get(pk)
-        if entry is None:
-            entry = _new_entry()
-            _cache['stats'][pk] = entry
+
+    def _mutate(stats, _overrides):
+        entry = _entry_for_update(stats, pk)
         # Any non-429 outcome (success OR hard failure) breaks a 429 streak —
         # the key is clearly capable of returning something else.
         entry['consecutive_429'] = 0
@@ -49,7 +53,9 @@ def record_outcome(provider_id: str, key_name: str, success: bool,
             entry['failure'] = int(entry.get('failure') or 0) + 1
             if error:
                 entry['last_error'] = str(error)[:200]
-        _save_unlocked()
+
+    with _lock:
+        _update_store_unlocked(_mutate)
 
 
 def record_rate_limit(provider_id: str, key_name: str,
@@ -74,15 +80,14 @@ def record_rate_limit(provider_id: str, key_name: str,
     if not key_name:
         return
     pk = _pair_key(provider_id, key_name)
-    with _lock:
-        _ensure_fresh_unlocked()
-        entry = _cache['stats'].get(pk)
-        if entry is None:
-            entry = _new_entry()
-            _cache['stats'][pk] = entry
+
+    def _mutate(stats, _overrides):
+        entry = _entry_for_update(stats, pk)
         entry['rate_limited'] = int(entry.get('rate_limited') or 0) + 1
         entry['consecutive_429'] = int(entry.get('consecutive_429') or 0) + 1
-        _save_unlocked()
+
+    with _lock:
+        _update_store_unlocked(_mutate)
 
 
 def record_gateway_error(provider_id: str, key_name: str,
@@ -113,14 +118,13 @@ def record_gateway_error(provider_id: str, key_name: str,
     if not key_name:
         return
     pk = _pair_key(provider_id, key_name)
-    with _lock:
-        _ensure_fresh_unlocked()
-        entry = _cache['stats'].get(pk)
-        if entry is None:
-            entry = _new_entry()
-            _cache['stats'][pk] = entry
+
+    def _mutate(stats, _overrides):
+        entry = _entry_for_update(stats, pk)
         entry['gateway_errors'] = int(entry.get('gateway_errors') or 0) + 1
-        _save_unlocked()
+
+    with _lock:
+        _update_store_unlocked(_mutate)
 
 
 def mark_key_exhausted(provider_id: str, key_name: str,
@@ -167,21 +171,23 @@ def mark_key_exhausted(provider_id: str, key_name: str,
     if not key_name:
         return
     pk = _pair_key(provider_id, key_name)
-    with _lock:
-        _ensure_fresh_unlocked()
-        entry = _cache['stats'].get(pk)
-        if entry is None:
-            entry = _new_entry()
-            _cache['stats'][pk] = entry
+
+    def _mutate(stats, _overrides):
+        entry = _entry_for_update(stats, pk)
         # Count this as a failure too so the success-rate column reflects it.
         entry['failure'] = int(entry.get('failure') or 0) + 1
         if model:
-            entry.setdefault('exhausted_models', {})[model] = \
-                str(reason or '')[:200]
+            exhausted_models = entry.get('exhausted_models')
+            if not isinstance(exhausted_models, dict):
+                exhausted_models = {}
+                entry['exhausted_models'] = exhausted_models
+            exhausted_models[model] = str(reason or '')[:200]
         else:
             entry['exhausted'] = True
         if reason:
             entry['last_error'] = str(reason)[:200]
-        _save_unlocked()
+
+    with _lock:
+        _update_store_unlocked(_mutate)
     logger.warning('[KeyStats] %s exhausted for today (model=%s): %s',
                    pk, model or '<key-wide>', (reason or '')[:200])

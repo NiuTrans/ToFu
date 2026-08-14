@@ -262,6 +262,10 @@ def build_update_search_settings_tool() -> dict:
                 "Call with NO arguments to read the current effective values first — "
                 "always do this before proposing a change.\n\n"
                 "Adjustable knobs (all optional; integers are clamped to safe ranges):\n"
+                "- profile (fast/balanced/deep): 3 pages/30k/no filter; "
+                "6 pages/60k/gate; or 10 pages/100k/gate+link deepening.\n"
+                "- overrides: optional profile-key overrides; legacy concrete knobs "
+                "below remain accepted and are stored as overrides.\n"
                 "- fetch_top_n (1-20): pages auto-fetched per search. Higher = more "
                 "complete, slower, more tokens.\n"
                 "- fetch_timeout (5-120s): per-page fetch timeout.\n"
@@ -282,6 +286,20 @@ def build_update_search_settings_tool() -> dict:
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "profile": {
+                        "type": "string", "enum": ["fast", "balanced", "deep"],
+                        "description": "Search depth preset."
+                    },
+                    "overrides": {
+                        "type": "object",
+                        "description": "Optional custom overrides on top of the preset.",
+                        "properties": {
+                            "fetch_top_n": {"type": "integer"},
+                            "max_chars_search": {"type": "integer"},
+                            "llm_content_filter": {"type": "boolean"},
+                            "deepen_enabled": {"type": "boolean"}
+                        }
+                    },
                     "fetch_top_n": {
                         "type": "integer",
                         "description": "Pages auto-fetched per search (1-20)."

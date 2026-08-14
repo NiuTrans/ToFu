@@ -63,8 +63,14 @@ def log_task_open(task, tid) -> float:
     _t_run_start = time.time()
     _t_created = task.get('_t_created')
     if _t_created:
+        _queue_wait = max(0.0, _t_run_start - _t_created)
         logger.info('[Timing:%s] queue_wait=%.3fs (create→run_task)',
-                    tid, _t_run_start - _t_created)
+                    tid, _queue_wait)
+        try:
+            from lib.observability import record_task_queue_wait
+            record_task_queue_wait(task.get('kind') or 'chat', _queue_wait)
+        except Exception as exc:
+            logger.debug('[Timing:%s] queue-wait metric skipped: %s', tid, exc)
     logger.info('[Task:%s] ▶ START conv=%s msgs=%d',
                 task['id'], task.get('convId', '') or '-',
                 len(task.get('messages') or []))

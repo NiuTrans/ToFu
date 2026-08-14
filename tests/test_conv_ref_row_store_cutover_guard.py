@@ -38,17 +38,28 @@ pytestmark = pytest.mark.unit
 class _FakeDB:
     """Row-store shaped DB whose backfill state is controllable."""
 
-    def __init__(self, n_rows):
+    def __init__(self, n_rows, *, rev=3, mirror_rev=3, msg_count=None,
+                 light_rows=None):
         self.n_rows = n_rows
+        self.light_rows = n_rows if light_rows is None else light_rows
+        self.rev = rev
+        self.mirror_rev = mirror_rev
+        self.msg_count = n_rows if msg_count is None else msg_count
 
     def execute(self, sql, params=()):
         outer = self
 
         class _Cur:
             def fetchone(self):
-                return {'n': outer.n_rows}
+                return {'n': outer.n_rows, 'light_n': outer.light_rows}
 
             def fetchall(self):
+                if 'from conversations' in sql.lower():
+                    return [{
+                        'rev': outer.rev,
+                        'messages_rows_rev': outer.mirror_rev,
+                        'msg_count': outer.msg_count,
+                    }]
                 rows = [{'meta': '{}', 'seq': i} for i in range(outer.n_rows)]
                 s = sql.lower().replace(' ', '')
                 if 'seq<' in s:
@@ -95,17 +106,40 @@ class TestFailsOpenWhenNotBackfilled:
 
     def test_complete_row_store_is_usable(self):
         from lib.conv_ref._detail import row_window_usable
-        assert row_window_usable(_FakeDB(20), 'c1', blob_count=20) is True
+        assert row_window_usable(
+            _FakeDB(20, msg_count=20), 'c1', blob_count=20) is True
 
-    def test_row_store_ahead_of_blob_is_usable(self):
-        """Rows ahead of the blob = a dual-write landed first. Not a loss."""
+    def test_missing_light_projection_fails_closed(self):
+        """A byte-complete mirror is not yet fast-read-complete after v47."""
         from lib.conv_ref._detail import row_window_usable
-        assert row_window_usable(_FakeDB(21), 'c1', blob_count=20) is True
+        assert row_window_usable(
+            _FakeDB(20, msg_count=20, light_rows=19),
+            'c1', blob_count=20) is False
+
+    def test_row_store_ahead_of_blob_is_rejected_as_stale_tail(self):
+        """Extra rows can be a failed truncation mirror; never serve them."""
+        from lib.conv_ref._detail import row_window_usable
+        assert row_window_usable(_FakeDB(21), 'c1', blob_count=20) is False
 
     def test_genuinely_empty_conversation_is_fine(self):
         """0 rows for a 0-message conv is agreement, not a missing backfill."""
         from lib.conv_ref._detail import row_window_usable
-        assert row_window_usable(_FakeDB(0), 'c1', blob_count=0) is True
+        assert row_window_usable(
+            _FakeDB(0, msg_count=0), 'c1', blob_count=0) is True
+
+    def test_revision_zero_marker_is_not_treated_as_missing(self):
+        """Freshly-created rev=0 rows are a valid, current mirror."""
+        from lib.conv_ref._detail import row_window_usable
+        assert row_window_usable(
+            _FakeDB(0, rev=0, mirror_rev=0, msg_count=0),
+            'c1', blob_count=0) is True
+
+    def test_equal_count_but_stale_revision_is_rejected(self):
+        """The old count-only gate accepted this silent-corruption shape."""
+        from lib.conv_ref._detail import row_window_usable
+        assert row_window_usable(
+            _FakeDB(20, rev=4, mirror_rev=3, msg_count=20),
+            'c1', blob_count=20) is False
 
     def test_db_error_fails_open(self):
         """Any error must choose the authoritative blob, never the row store."""
@@ -177,6 +211,7 @@ class TestPartialBackfillEndToEnd:
             'id': 'p1', 'user_id': 1, 'title': 'T',
             'messages': json.dumps(msgs), 'created_at': 1, 'updated_at': 2,
             'settings': '{}', 'msg_count': total, 'rev': 1,
+            'messages_rows_rev': 1,
         }
 
         class _Cur:
@@ -187,17 +222,35 @@ class TestPartialBackfillEndToEnd:
                 return self.v
 
             def fetchall(self):
-                return self.v
+                return self.v if isinstance(self.v, list) else [self.v]
 
         class _DB:
             def execute(self, sql, params=()):
                 low = sql.lower()
                 if 'count(*)' in low:
-                    return _Cur({'n': backfilled})
+                    return _Cur({'n': backfilled, 'light_n': backfilled})
+                if ('from conversations' in low
+                        and 'messages_rows_rev' in low):
+                    return _Cur({
+                        'rev': row['rev'],
+                        'messages_rows_rev': row['messages_rows_rev'],
+                        'msg_count': row['msg_count'],
+                    })
                 if 'from conversation_messages' in low:
-                    rows = [{'meta': json.dumps(msgs[i]), 'seq': i}
-                            for i in range(backfilled)]
-                    return _Cur(list(reversed(rows[-int(params[-1]):])))
+                    all_rows = [{'meta': json.dumps(msgs[i]), 'seq': i}
+                                for i in range(backfilled)]
+                    if 'union all' in low:
+                        head = int(params[1])
+                        start, end = int(params[3]), int(params[4])
+                        selected = ([r for r in all_rows if r['seq'] < head]
+                                    + [r for r in all_rows
+                                       if start <= r['seq'] < end])
+                        return _Cur(selected)
+                    if 'seq<' in low.replace(' ', '') and 'limit' not in low:
+                        end = int(params[1])
+                        return _Cur([r for r in all_rows if r['seq'] < end])
+                    return _Cur(list(reversed(
+                        all_rows[-int(params[-1]):])))
                 return _Cur(row)
         return _DB()
 
@@ -245,4 +298,5 @@ class TestLiveBackfillIsIncomplete:
         from lib.conv_ref._detail import row_window_usable
         # 3,696 of 4,160 backfilled → the 464 remainder look empty.
         assert row_window_usable(_FakeDB(0), 'not-backfilled', blob_count=6) is False
-        assert row_window_usable(_FakeDB(6), 'backfilled', blob_count=6) is True
+        assert row_window_usable(
+            _FakeDB(6, msg_count=6), 'backfilled', blob_count=6) is True

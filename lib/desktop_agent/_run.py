@@ -20,7 +20,7 @@ import uuid
 import requests
 
 from lib.desktop_agent._dispatch import COMMANDS, dispatch_command
-from lib.desktop_agent.config import load_config, save_config
+from lib.desktop_agent.config import load_config, update_config
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -123,18 +123,23 @@ def _ensure_agent_id():
     ~/.tofu/desktop_agent.json) so restarts keep the same identity — the
     server-side registry and command addressing key on it (RWA P0).
     """
-    cfg = load_config()
-    agent_id = (cfg.get('agent_id') or '').strip()
-    if agent_id:
-        return agent_id
-    agent_id = uuid.uuid4().hex
-    cfg['agent_id'] = agent_id
+    candidate = uuid.uuid4().hex
+    outcome = {'agent_id': candidate}
+
+    def _mutate(cfg):
+        existing = (cfg.get('agent_id') or '').strip()
+        if existing:
+            outcome['agent_id'] = existing
+            return None
+        cfg['agent_id'] = candidate
+        return cfg
+
     try:
-        save_config(cfg)
+        update_config(_mutate)
     except Exception as e:
         logger.warning('[Agent] could not persist agent_id (a new one will '
                        'be generated on next start): %s', e)
-    return agent_id
+    return outcome['agent_id']
 
 
 def _agent_version() -> str:
@@ -187,7 +192,8 @@ _ROUTE_REPAIR_COOLDOWN_S = 300.0
 
 
 def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
-              stop_event=None, on_status=None, route_repair=None):
+              stop_event=None, on_status=None, route_repair=None,
+              browser_relay=None):
     """Main agent loop — polls server for commands, executes locally, returns results.
 
     Args:
@@ -218,6 +224,12 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
             hoping the dead address recovers (2026-08-06: without it a
             gateway-intercepted attachment polled the same wall forever
             while the tray text claimed re-discovery was running).
+        browser_relay: optional ``BrowserRelay`` started by the packaged
+            launcher.  When an authenticated Tofu page has discovered the
+            loopback broker, desktop polls ride that page's gateway cookies.
+            This is the viable transport for web-only Codelab / VS Code
+            ``/proxy/<port>`` deployments where the standalone process is
+            rejected by the SSO edge before it can reach Tofu.
     """
 
     endpoint = f'{server_url.rstrip("/")}/api/desktop/poll'
@@ -228,12 +240,15 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
     if bridge_secret:
         headers['X-Bridge-Secret'] = bridge_secret
 
-    _last_status = {'state': None}
+    _last_status = {'state': None, 'transport': None}
 
     def _emit(state, **extra):
-        if state == _last_status['state']:
+        transport = extra.get('transport')
+        if (state == _last_status['state'] and
+                transport == _last_status['transport']):
             return
         _last_status['state'] = state
+        _last_status['transport'] = transport
         if on_status is None:
             return
         try:
@@ -315,20 +330,32 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
             with io_lock:
                 out_results = list(result_queue)
                 out_streams = list(stream_outbox)
-            resp = requests.post(
-                endpoint,
-                json={'results': out_results, 'streams': out_streams,
-                      'agent': agent_frame},
-                headers=headers,
-                timeout=15,
-                proxies={'no_proxy': '*'}  # localhost — always bypass env proxy
-            )
-            with io_lock:
-                # Prefix-delete only what was actually sent — frames appended
-                # by runner threads while the POST was in flight must survive.
-                del result_queue[:len(out_results)]
-                del stream_outbox[:len(out_streams)]
-            consecutive_errors = 0
+            poll_payload = {'results': out_results,
+                            'streams': out_streams,
+                            'agent': agent_frame}
+            resp = None
+            via_browser = False
+            # A live page is strictly preferred over retrying a URL already
+            # known to sit behind an SSO wall.  BrowserRelay returns a
+            # requests.Response-shaped object, so everything below remains
+            # the one command/result implementation.
+            if browser_relay is not None:
+                try:
+                    if browser_relay.browser_available():
+                        resp = browser_relay.request(
+                            endpoint, poll_payload, headers, timeout=20)
+                        via_browser = resp is not None
+                except Exception as e:
+                    logger.warning('[Agent] browser relay poll failed: %s', e)
+                    resp = None
+            if resp is None:
+                resp = requests.post(
+                    endpoint,
+                    json=poll_payload,
+                    headers=headers,
+                    timeout=15,
+                    proxies={'no_proxy': '*'}
+                )
 
             if resp.status_code == 401:
                 # Two utterly different refusals share this status. Tofu's
@@ -366,7 +393,16 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
                 time.sleep(poll_interval * 3)
                 continue
 
-            _emit('ok')
+            # A request rejected by an SSO edge / server must NOT consume
+            # queued command results.  The old unconditional delete happened
+            # before status inspection, silently losing results on every 401.
+            # A 200 is the only acknowledgement that the server accepted this
+            # exact prefix.  Frames appended while in flight remain queued.
+            with io_lock:
+                del result_queue[:len(out_results)]
+                del stream_outbox[:len(out_streams)]
+            consecutive_errors = 0
+            _emit('ok', transport='browser' if via_browser else 'direct')
             _route_alive()
             data = resp.json()
             commands = data.get('commands', [])
@@ -509,12 +545,16 @@ Examples:
 
     if args.root:
         from lib.desktop_agent.config import merge_cli_roots
-        cfg = load_config()
+
+        def _merge_roots(cfg):
+            cfg['share_roots'] = merge_cli_roots(
+                cfg.get('share_roots'), args.root)
+            return cfg
+
         try:
-            cfg['share_roots'] = merge_cli_roots(cfg.get('share_roots'), args.root)
+            cfg = update_config(_merge_roots)
         except ValueError as e:
             parser.error(str(e))
-        save_config(cfg)
         for r in cfg['share_roots']:
             if not os.path.isdir(os.path.expanduser(str(r.get('path', '')))):
                 logger.warning('[Agent] share root %r path does not exist: %s',

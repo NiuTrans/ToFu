@@ -3,28 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import os
-import sys
 import tempfile
 import unittest
-
-
-def _install_shim():
-    import quart
-    sys.modules['flask'] = quart
-    for attr in ('json', 'globals', 'helpers', 'wrappers', 'ctx'):
-        qs = f'quart.{attr}'
-        if qs in sys.modules:
-            sys.modules[f'flask.{attr}'] = sys.modules[qs]
-    from quart.wrappers import Request as _QR
-    if inspect.iscoroutinefunction(_QR.get_json):
-        _orig = _QR.get_json
-
-        def _sync(self, *a, **kw):
-            return asyncio.run(_orig(self, *a, **kw))
-        _QR.get_json = _sync
 
 
 def _new_loop_run(coro):
@@ -39,7 +21,6 @@ class ConvConfigRouteTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        _install_shim()
         cls._tmp = tempfile.TemporaryDirectory()
         from lib import api_keys
         cls._orig_path = api_keys._STORE_PATH
@@ -49,7 +30,8 @@ class ConvConfigRouteTest(unittest.TestCase):
         os.environ['TUNNEL_TOKEN'] = 'tt'
 
         from quart import Quart
-        cls.app = Quart(__name__)
+        cls.app = Quart(__name__, static_folder=None)
+        cls.app.config.setdefault('PROVIDE_AUTOMATIC_OPTIONS', True)
         cls.app.config['TESTING'] = True
         from routes.api_v1.auth import (
             attach_rate_headers, bearer_auth_before_request,

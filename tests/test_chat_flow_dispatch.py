@@ -14,6 +14,11 @@ import os
 import threading
 import unittest
 
+import pytest
+
+
+pytestmark = pytest.mark.unit
+
 
 class FlagGateTest(unittest.TestCase):
     def setUp(self):
@@ -114,6 +119,43 @@ class ResolveEntryTest(unittest.TestCase):
                       run_flow_via_chat)
 
 
+def test_chat_flow_selection_policy_has_one_physical_owner():
+    from pathlib import Path
+
+    import lib.orchestration_chat_flow_selection as selection
+    import lib.orchestration_endpoint_runner as runner
+    from lib.conv_config import _KNOWN_FLOW_BUILTINS
+
+    runner_source = Path('lib/orchestration_endpoint_runner.py').read_text()
+    policy_source = Path(
+        'lib/orchestration_chat_flow_selection.py').read_text()
+
+    assert runner.endpoint_via_flow_enabled is selection.endpoint_via_flow_enabled
+    assert runner.autopilot_via_flow_enabled is selection.autopilot_via_flow_enabled
+    assert _KNOWN_FLOW_BUILTINS is selection.CHAT_FLOW_BUILTINS
+    assert 'getenv_compat' in policy_source
+    assert 'DefinitionServiceError' in policy_source
+    assert 'getenv_compat' not in runner_source
+    assert 'DefinitionServiceError' not in runner_source
+    assert "config.get('endpointMode')" not in runner_source
+
+
+def test_explicit_chat_flow_selection_does_not_evaluate_rollout_flags():
+    from lib.orchestration_chat_flow_selection import (
+        CHAT_FLOW_ENTRY_SELECTED,
+        select_chat_flow_entry,
+    )
+
+    def unexpected_flag_read():
+        raise AssertionError('explicit selections must bypass rollout flags')
+
+    assert select_chat_flow_entry(
+        {'flowId': 'orch_selected'},
+        endpoint_enabled=unexpected_flag_read,
+        autopilot_enabled=unexpected_flag_read,
+    ) == CHAT_FLOW_ENTRY_SELECTED
+
+
 class ResolveDefinitionTest(unittest.TestCase):
     def test_inline_definition(self):
         from lib.orchestration_endpoint_runner import resolve_chat_flow_definition
@@ -138,20 +180,183 @@ class ResolveDefinitionTest(unittest.TestCase):
         self.assertEqual(src, '')
 
     def test_stored_id_resolved_via_loader(self):
-        import lib.orchestration_endpoint_runner as rm
+        from lib.orchestration_endpoint_runner import resolve_chat_flow_definition
         from lib.orchestration import build_endpoint_definition
-        orig = rm._load_stored_definition
-        rm._load_stored_definition = lambda fid: (build_endpoint_definition()
-                                                  if fid == 'orch_known' else None)
-        try:
-            defn, src = rm.resolve_chat_flow_definition({'flowId': 'orch_known'})
-            self.assertIsNotNone(defn)
-            self.assertEqual(src, 'stored:orch_known')
-            # unknown id → nothing
-            defn2, src2 = rm.resolve_chat_flow_definition({'flowId': 'orch_missing'})
-            self.assertIsNone(defn2)
-        finally:
-            rm._load_stored_definition = orig
+
+        class Definitions:
+            def resolve(self, *, inline=None, builtin='', stored_id='',
+                        require_inline_nodes=False):
+                self.request = {
+                    'inline': inline,
+                    'builtin': builtin,
+                    'stored_id': stored_id,
+                    'require_inline_nodes': require_inline_nodes,
+                }
+                definition = (build_endpoint_definition()
+                              if stored_id == 'orch_known' else None)
+                return type('Resolved', (), {
+                    'definition': definition,
+                    'source': f'stored:{stored_id}' if definition else '',
+                })()
+
+        service = Definitions()
+        defn, src = resolve_chat_flow_definition(
+            {'flowId': 'orch_known'}, definition_service=service)
+        self.assertIsNotNone(defn)
+        self.assertEqual(src, 'stored:orch_known')
+        self.assertEqual(service.request, {
+            'inline': None,
+            'builtin': '',
+            'stored_id': 'orch_known',
+            'require_inline_nodes': True,
+        })
+        # unknown id → nothing
+        defn2, src2 = resolve_chat_flow_definition(
+            {'flowId': 'orch_missing'}, definition_service=service)
+        self.assertIsNone(defn2)
+        self.assertEqual(src2, '')
+
+    def test_definition_service_failure_reports_unresolved_selection(self):
+        from lib.orchestration_endpoint_runner import resolve_chat_flow_definition
+        from lib.orchestration.errors import DefinitionServiceError
+
+        class OfflineDefinitions:
+            def resolve(self, **_kwargs):
+                raise DefinitionServiceError('offline')
+
+        self.assertEqual(
+            resolve_chat_flow_definition(
+                {'flowId': 'orch_offline'},
+                definition_service=OfflineDefinitions(),
+            ),
+            (None, ''),
+        )
+
+    def test_definition_programmer_error_is_not_mislabeled_as_missing(self):
+        from lib.orchestration_endpoint_runner import resolve_chat_flow_definition
+
+        class BrokenDefinitions:
+            def resolve(self, **_kwargs):
+                raise RuntimeError('resolver contract bug')
+
+        with self.assertRaisesRegex(RuntimeError, 'resolver contract bug'):
+            resolve_chat_flow_definition(
+                {'flowId': 'orch-broken'},
+                definition_service=BrokenDefinitions(),
+            )
+
+    def test_chat_launch_reuses_definition_service_for_nested_flows(self):
+        from pathlib import Path
+
+        source = Path('lib/orchestration_endpoint_runner.py').read_text()
+        start = source.index('def run_flow_via_chat(')
+        end = source.index('\ndef _run_flow_as_endpoint_task(', start)
+        launch = source[start:end]
+
+        self.assertIn('definitions = _definition_service()', launch)
+        self.assertIn('definition_service=definitions', launch)
+        self.assertNotIn('OrchestrationDefinitionService.from_path', launch)
+
+
+def test_missing_selected_flow_fails_closed_instead_of_running_endpoint(
+        monkeypatch):
+    import lib.orchestration_endpoint_runner as runner
+    import lib.tasks_pkg.manager as manager
+
+    class MissingDefinitions:
+        def resolve(self, **_kwargs):
+            return type('Resolved', (), {
+                'definition': None,
+                'source': '',
+            })()
+
+    failed = []
+    monkeypatch.setattr(runner, '_definition_service', MissingDefinitions)
+    monkeypatch.setattr(
+        runner,
+        '_run_flow_as_endpoint_task',
+        lambda *_args, **_kwargs: pytest.fail(
+            'an unavailable selection must not run a fallback graph'),
+    )
+    monkeypatch.setattr(
+        manager,
+        'finalize_chat_task_error',
+        lambda task, error, **kwargs: failed.append((task, error, kwargs)),
+    )
+
+    task = {
+        'id': 'missing-flow-task-0001',
+        'config': {'flowId': 'orch_deleted', 'model': 'test-model'},
+    }
+    runner.run_flow_via_chat(task)
+
+    assert len(failed) == 1
+    owner, error, kwargs = failed[0]
+    assert owner is task
+    assert error['kind'] == 'bad_request'
+    assert error['retryable'] is False
+    assert 'stored:orch_deleted' in error['detail']
+    assert kwargs['endpoint_reason'] == 'definition_unavailable'
+    assert task['_flow_label'] == 'flow(stored:orch_deleted)'
+
+
+def test_flow_worker_crash_uses_shared_chat_terminal_boundary(monkeypatch):
+    import lib.orchestration_endpoint_runner as runner
+    import lib.tasks_pkg.manager as manager
+
+    failed = []
+    monkeypatch.setattr(
+        runner,
+        '_execute_flow_as_endpoint_task',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError('executor exploded')),
+    )
+    monkeypatch.setattr(
+        manager,
+        'finalize_chat_task_error',
+        lambda task, error, **kwargs: failed.append((task, error, kwargs)),
+    )
+    task = {
+        'id': 'crashed-flow-task-0001',
+        'config': {'model': 'test-model'},
+        'status': 'running',
+    }
+
+    assert runner._run_flow_as_endpoint_task(
+        task, {'nodes': [], 'edges': []}, label='flow(stored:x)', max_iter=3,
+    ) is None
+
+    assert len(failed) == 1
+    owner, error, kwargs = failed[0]
+    assert owner is task
+    assert error['kind'] == 'internal'
+    assert error['context'] == 'orchestration-flow-fatal'
+    assert error['model'] == 'test-model'
+    assert 'executor exploded' in error['raw']
+    assert kwargs['endpoint_reason'] == 'fatal'
+
+
+class FlowChatContextParityTest(unittest.TestCase):
+    def test_full_history_and_system_prompt_are_kept_on_separate_channels(self):
+        from lib.orchestration_endpoint_runner import (
+            _build_flow_initial_context,
+            _extract_system_prompt,
+        )
+
+        task = {'messages': [
+            {'role': 'system', 'content': 'PROJECT RULES'},
+            {'role': 'user', 'content': 'first requirement'},
+            {'role': 'assistant', 'content': 'earlier implementation state'},
+            {'role': 'user', 'content': [
+                {'type': 'text', 'text': 'latest requirement'},
+            ]},
+        ]}
+        context = _build_flow_initial_context(task)
+        self.assertIn('[user] first requirement', context)
+        self.assertIn('[assistant] earlier implementation state', context)
+        self.assertIn('[user] latest requirement', context)
+        self.assertNotIn('PROJECT RULES', context)
+        self.assertEqual(_extract_system_prompt(task), 'PROJECT RULES')
 
 
 class AutopilotE2ETest(unittest.TestCase):
@@ -237,16 +442,22 @@ class AutopilotE2ETest(unittest.TestCase):
 
         # VU stopped the loop after the 2nd reply.
         self.assertEqual(vu['n'], 2)
-        # Turns alternate worker(assistant) → vu(user) → worker → vu. VU user
-        # turns are stamped ``_isVirtualUser`` (a routable lane, NO endpoint
-        # marker — see EndpointEventAdapter._mark_user_side), NOT
-        # ``_isEndpointReview`` (the endpoint critic's display-only lane).
+        # Turns alternate worker(assistant) → vu(user) → worker. The
+        # terminal VU sentinel is control-plane only, matching standalone
+        # Autopilot: it stops the graph and cancels the eager live placeholder
+        # without becoming a visible/persisted user message.
         self.assertEqual(captured_turns,
                          [('assistant', False, False), ('user', False, True),
-                          ('assistant', False, False), ('user', False, True)])
+                          ('assistant', False, False)])
         types = [e.get('type') for e in captured]
         self.assertIn('endpoint_iteration', types)   # worker (assistant) turns
         self.assertIn('endpoint_critic_msg', types)   # VU (user) turns
+        terminal_vu = [e for e in captured
+                       if e.get('type') == 'endpoint_critic_msg'
+                       and e.get('turnRole') == 'virtual_user'
+                       and e.get('next_phase') == 'stop']
+        self.assertEqual(len(terminal_vu), 1)
+        self.assertTrue(terminal_vu[0].get('discard'))
         self.assertIn('done', types)
         self.assertEqual(task['status'], 'done')
         self.assertTrue(task.get('_endpoint_via_flow'))

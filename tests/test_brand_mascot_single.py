@@ -47,11 +47,11 @@ from lib.mcp.registry import is_opensource_build
 pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parent.parent
-BRAND_LOGO = ROOT / "static" / "js" / "core" / "brand_logo.js"
+BRAND_LOGO = ROOT / "frontend" / "src" / "runtime" / "app-runtime.js"
 INDEX = ROOT / "index.html"
 PANEL = ROOT / "static" / "settings_panels" / "general.html"
-CORE_PANEL = ROOT / "static" / "js" / "settings" / "core_panel.js"
-I18N = ROOT / "static" / "js" / "i18n.js"
+CORE_PANEL = BRAND_LOGO
+I18N = ROOT / "frontend" / "src" / "i18n" / "index.ts"
 STYLES = ROOT / "static" / "styles.css"
 
 MASCOT = "tofu-welcome.svg"
@@ -88,6 +88,7 @@ HARNESS = textwrap.dedent("""
     global.document = dom.window.document;
     global.localStorage = dom.window.localStorage;
     global.BASE_PATH = '';
+    global.runtimeScope = window;
 
     // ---- BEGIN real shipped module ----
     {source}
@@ -118,7 +119,10 @@ def _run(source: str) -> dict:
 
 
 def _source() -> str:
-    return BRAND_LOGO.read_text(encoding="utf-8")
+    source = BRAND_LOGO.read_text(encoding="utf-8")
+    start = source.index('/* ===== migrated source: core/brand_logo.js ===== */')
+    end = source.index('/* ===== migrated source:', start + 20)
+    return source[start:end]
 
 
 def _static_mascot_tokens() -> list:
@@ -265,9 +269,9 @@ def test_NC_reintroducing_a_skin_export_is_caught():
     """Neuter: re-export one skin symbol → the ratchet must red."""
     src = _source()
     poisoned = src.replace(
-        "  window.LOGO_VER = LOGO_VER;",
-        "  window.listLogoSkins = function () { return []; };\n"
-        "  window.LOGO_VER = LOGO_VER;",
+        "  runtimeScope.LOGO_VER = LOGO_VER;",
+        "  runtimeScope.listLogoSkins = function () { return []; };\n"
+        "  runtimeScope.LOGO_VER = LOGO_VER;",
     )
     assert poisoned != src, "neuter did not apply — re-anchor it"
     assert _run(poisoned)["exported"] == ["listLogoSkins"], (

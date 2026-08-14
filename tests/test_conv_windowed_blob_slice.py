@@ -43,7 +43,11 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+from tests._runtime_sections import (
+    runtime_section_names, runtime_section_path,
+)
+
+CONV_WINDOW = runtime_section_path('conv_window.js')
 
 
 def _fake_row(messages, *, rev=7, settings=None):
@@ -69,6 +73,27 @@ def _big_messages(n):
     return msgs
 
 
+def test_full_put_loads_old_state_once_through_repository():
+    """Preservation guards share one authority-aware repository snapshot."""
+    import inspect
+    from routes.conversations import _save_conv_blocking
+
+    src = inspect.getsource(_save_conv_blocking)
+    assert src.count('load_conversation(') == 1
+    assert 'SELECT messages FROM conversations' not in src
+
+
+def test_row_mirror_fast_path_has_a_per_conversation_coverage_gate():
+    """A global feature flag cannot prove this particular mirror is whole."""
+    import inspect
+    from routes.conversations import get_conv
+
+    src = inspect.getsource(get_conv)
+    assert 'row_window_usable' in src
+    assert 'msg_count' in src
+    assert '_authority or not _is_live' in src
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  Backend: blob tail-slice bounds the body + correct envelope
 # ═══════════════════════════════════════════════════════════════════════
@@ -77,6 +102,114 @@ def _big_messages(n):
 def _slice():
     from routes.conversations import _windowed_blob_slice_readonly
     return _windowed_blob_slice_readonly
+
+
+def test_sqlite_projects_tail_before_python_and_preserves_envelope():
+    """The authoritative SQL projection, not Python slicing, bounds DB I/O."""
+    import sqlite3
+    from routes.conversations import (
+        _projected_blob_window_sql, _windowed_projected_blob_readonly,
+    )
+
+    msgs = _big_messages(200)
+    full_json = json.dumps(msgs, ensure_ascii=False)
+    conn = sqlite3.connect(':memory:')
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        'CREATE TABLE conversations '
+        '(id TEXT, user_id INTEGER, title TEXT, messages TEXT, '
+        'created_at INTEGER, updated_at INTEGER, settings TEXT, rev INTEGER)')
+    conn.execute('INSERT INTO conversations VALUES (?,?,?,?,?,?,?,?)',
+                 ('bigconv', 1, 'Big Conversation', full_json,
+                  1000, 2000, '{}', 7))
+
+    sql, has_before = _projected_blob_window_sql('sqlite', None)
+    assert has_before is False
+    r = conn.execute(sql, ('bigconv', 1, 60)).fetchone()
+    projected_json = r['messages']
+    assert len(projected_json) < len(full_json) / 2
+    assert len(json.loads(projected_json)) == 60
+
+    class _NoFullFetch:
+        def execute(self, *args, **kwargs):
+            raise AssertionError('unchanged projected tail must not fetch full blob')
+
+    served, changed, cleaned, _ = _windowed_projected_blob_readonly(
+        _NoFullFetch(), 'bigconv', r, before_seq=None)
+    conn.close()
+    assert changed is False and cleaned is None
+    assert served['firstLoadedSeq'] == 140
+    assert served['lastLoadedSeq'] == 199
+    assert served['totalCount'] == 200 and served['hasMore'] is True
+    assert served['messages'][0]['content'].endswith('#140')
+
+
+def test_sqlite_projected_page_up_uses_absolute_cursor():
+    import sqlite3
+    from routes.conversations import _projected_blob_window_sql
+
+    msgs = _big_messages(200)
+    conn = sqlite3.connect(':memory:')
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        'CREATE TABLE conversations '
+        '(id TEXT, user_id INTEGER, title TEXT, messages TEXT, '
+        'created_at INTEGER, updated_at INTEGER, settings TEXT, rev INTEGER)')
+    conn.execute('INSERT INTO conversations VALUES (?,?,?,?,?,?,?,?)',
+                 ('bigconv', 1, 'Big Conversation', json.dumps(msgs),
+                  1000, 2000, '{}', 7))
+    sql, has_before = _projected_blob_window_sql('sqlite', 140)
+    assert has_before is True
+    r = conn.execute(sql, ('bigconv', 1, 140, 60)).fetchone()
+    page = json.loads(r['messages'])
+    conn.close()
+    assert r['slice_start'] == 80 and r['slice_end'] == 140
+    assert len(page) == 60
+    assert page[0]['content'].endswith('#80')
+    assert page[-1]['content'].endswith('#139')
+
+
+def test_pg_projection_uses_indexed_element_slice_not_full_return():
+    from routes.conversations import _projected_blob_window_sql
+
+    sql, _ = _projected_blob_window_sql('pg', None)
+    assert 'generate_series(slice_start, slice_end - 1)' in sql
+    assert 'jsonb_agg(' in sql
+    assert "all_messages -> g.i" in sql
+    assert "- 'segments' - 'toolRounds'" in sql
+    assert 'all_messages AS messages' not in sql
+    assert 'ORDER BY i)' in sql
+
+
+def test_sqlite_projection_strips_heavy_fields_before_python():
+    """One huge message must stay bounded even when N exceeds msg_count."""
+    import sqlite3
+    from routes.conversations import _projected_blob_window_sql
+
+    heavy = [{
+        'role': 'assistant', 'content': 'answer', '_msgId': 'a1',
+        'segments': [{'type': 'tool', 'payload': 'x' * 500_000}],
+        'toolRounds': [{'result': 'y' * 500_000}],
+    }]
+    conn = sqlite3.connect(':memory:')
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        'CREATE TABLE conversations '
+        '(id TEXT, user_id INTEGER, title TEXT, messages TEXT, '
+        'created_at INTEGER, updated_at INTEGER, settings TEXT, rev INTEGER)')
+    conn.execute('INSERT INTO conversations VALUES (?,?,?,?,?,?,?,?)',
+                 ('heavy', 1, 'Heavy', json.dumps(heavy), 1, 2, '{}', 1))
+    sql, _ = _projected_blob_window_sql('sqlite', None)
+    row = conn.execute(sql, ('heavy', 1, 60)).fetchone()
+    conn.close()
+
+    projected = json.loads(row['messages'])
+    assert len(row['messages']) < 2000
+    assert projected[0]['content'] == 'answer'
+    assert projected[0]['_trimmed'] is True
+    assert projected[0]['_trimmedToolRoundCount'] == 1
+    assert 'segments' not in projected[0]
+    assert 'toolRounds' not in projected[0]
 
 
 def test_tail_window_bounds_body_and_envelope():
@@ -191,8 +324,8 @@ def test_trailing_ghost_in_tail_is_reconciled():
 _HEAVY = ('toolRounds', 'segments', '_continueToolRounds', 'toolSummary')
 # Heavy fields the windowed serve deliberately KEEPS: the cost popover's
 # per-round breakdown reads apiRounds and is never refilled by
-# hydrateFullConversation, so trimming it silently killed the table on a
-# reloaded long conversation. (Its ~226 KB/round _wire_fp bulk is already
+# loadMessageActivity, so trimming it would silently kill the table until the
+# user opens execution history. (Its ~226 KB/round _wire_fp bulk is already
 # stripped at persist time; the residual usage/toolCalls dicts are tiny.)
 _KEPT_HEAVY = ('apiRounds', '_continueApiRounds')
 
@@ -248,6 +381,48 @@ def test_trim_bounds_body_by_bytes():
 
     # Envelope advertises the trim so the frontend knows to lazy-hydrate.
     assert served['trimmed'] is True
+
+
+def test_trim_keeps_api_round_costs_but_drops_historical_wire_diagnostics():
+    """Old blobs predate the persist sanitizer and can carry MB-scale
+    ``usage._wire_*`` values.  Windowed GET keeps the cost table but must not
+    send backend-only diagnostics to the browser."""
+    fn = _slice()
+    msgs = [{
+        'role': 'assistant', 'content': 'answer', '_msgId': 'a1',
+        'usage': {'completion_tokens': 4, '_wire_markers': ['x'] * 1000},
+        'apiRounds': [{
+            'round': 1, 'cost': {'costCny': 0.2},
+            'usage': {'prompt_tokens': 12, '_dispatch': {'provider': 'p'},
+                      '_wire_bytes': list(range(4000)),
+                      '_wire_field_bytes': {'messages': 'x' * 200000},
+                      '_wire_markers': {'ttls': ['5m'] * 1000}},
+        }],
+        '_continueApiRounds': [{
+            'round': 2,
+            'usage': {'completion_tokens': 3, 'trace_id': 'continue',
+                      '_wire_bytes': list(range(1000))},
+        }],
+        '_liveLastRoundUsage': {
+            'tokensIn': 12,
+            'usage': {'prompt_tokens': 12, '_wire_fp': list(range(1000))},
+        },
+    }]
+    served, _, _, _ = fn('oldfat', _fake_row(msgs), window=60, before_seq=None)
+    got = served['messages'][0]['apiRounds'][0]
+    assert got['cost'] == {'costCny': 0.2}
+    assert got['usage']['prompt_tokens'] == 12
+    assert got['usage']['_dispatch'] == {'provider': 'p'}
+    assert not any(k.startswith('_wire_') for k in got['usage'])
+    projected = served['messages'][0]
+    assert projected['usage'] == {'completion_tokens': 4}
+    assert projected['_continueApiRounds'][0]['usage'] == {
+        'completion_tokens': 3, 'trace_id': 'continue',
+    }
+    assert projected['_liveLastRoundUsage'] == {
+        'tokensIn': 12, 'usage': {'prompt_tokens': 12},
+    }
+    assert len(json.dumps(served, ensure_ascii=False)) < 5000
 
 
 def test_trim_is_readonly_on_input():
@@ -430,15 +605,20 @@ def _conv_family():
     (_setCacheVerifying & co) need the whole family, not a two-file
     inline list (2026-08-01 RED)."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from _conv_bundle_sources import conv_family_sources
-    return conv_family_sources()
+    names = [
+        name for name in runtime_section_names()
+        if name == 'core/conversations.js'
+        or name.startswith('core/conv_')
+        or name == 'core/pending_sync.js'
+    ]
+    return [runtime_section_path(name) for name in names]
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_frontend_default_window_param_active(tmp_path):
     harness = tmp_path / '_win_param_harness.js'
     harness.write_text(_HARNESS, encoding='utf-8')
     proc = subprocess.run(
-        ['node', str(harness), os.path.join(JS_DIR, 'conv_window.js')],
+        ['node', str(harness), CONV_WINDOW],
         capture_output=True, text=True, timeout=60)
     out = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{out}'
@@ -454,7 +634,7 @@ def test_initial_open_sends_window_param(tmp_path):
     harness.write_text(_INITIAL_OPEN_HARNESS, encoding='utf-8')
     proc = subprocess.run(
         ['node', str(harness),
-         os.path.join(JS_DIR, 'conv_window.js'),
+         CONV_WINDOW,
          *_conv_family()],
         capture_output=True, text=True, timeout=60)
     out = proc.stdout.strip()
@@ -574,21 +754,23 @@ const EARLIER = {
       _trimmed:true, _trimmedToolRoundCount:3 },
   ],
 };
-// Full (window=0) hydrate source: a0 carries the heavy toolRounds.
-const FULL = {
-  windowed:false, messages: [
-    { role:'user', content:'older-q', _msgId:'u0', timestamp:1 },
-    { role:'assistant', content:'older-a', _msgId:'a0', timestamp:2,
-      toolRounds:[{roundNum:0,status:'done',big:'X'}], segments:[{type:'tool'}] },
-    { role:'user', content:'q', _msgId:'u2', timestamp:3 },
-  ],
+const ACTIVITY = {
+  ok:true, msgId:'a0', idx:1,
+  activity:{
+    toolRounds:[{roundNum:0,status:'done',big:'X'}],
+    segments:[{type:'tool'}],
+  },
 };
+let activityCalls = 0;
 global.Api = { conversations: {
   get: async (id, opts) => {
     const q = (opts && opts.query) || {};
-    if (String(q.window) === '0') return FULL;       // hydrate full
-    if (q.before_seq !== undefined) return EARLIER;  // page-up
+    if (q.before_seq !== undefined) return EARLIER;
     return null;
+  },
+  messageActivity: async (id, msgId) => {
+    activityCalls++;
+    return ACTIVITY;
   },
 }};
 
@@ -598,11 +780,12 @@ global.Api = { conversations: {
   check('page_up_prepended', n === 2 && conv.messages.length === 3);
   // 2) the scroll-in trimmed message RE-ARMS conv._trimmed (was false).
   check('scrollup_rearms_trimmed', conv._trimmed === true);
-  // 3) expanding that scrolled-in message hydrates: heavy fields refilled by _msgId.
-  const ok = await hydrateFullConversation('c1');
+  // 3) expanding that scrolled-in message loads only its execution history.
+  const ok = await loadMessageActivity('c1', 'a0');
   const a0 = conv.messages.find(m => m._msgId === 'a0');
-  check('hydrate_refilled_scrollin_msg',
-        ok === true && Array.isArray(a0.toolRounds) && a0.toolRounds.length === 1
+  check('message_activity_refilled_scrollin_msg',
+        ok === true && activityCalls === 1
+        && Array.isArray(a0.toolRounds) && a0.toolRounds.length === 1
         && !a0._trimmed);
   console.log(out.join('\n'));
   process.exit(0);
@@ -611,14 +794,13 @@ global.Api = { conversations: {
 
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
-def test_scrollup_rearms_trimmed_and_hydrates(tmp_path):
-    """Edge case: after a windowed open, scroll-up prepends an EARLIER trimmed
-    page; that must re-arm conv._trimmed so expanding a scrolled-in message's
-    tool timeline still hydrates its heavy fields (by _msgId)."""
+def test_scrollup_rearms_trimmed_and_loads_message_activity(tmp_path):
+    """A scrolled-in trimmed message loads only its own execution fields by
+    stable _msgId; the surrounding conversation is not hydrated."""
     harness = tmp_path / '_scrollup_harness.js'
     harness.write_text(_SCROLLUP_HYDRATE_HARNESS, encoding='utf-8')
     proc = subprocess.run(
-        ['node', str(harness), os.path.join(JS_DIR, 'conv_window.js')],
+        ['node', str(harness), CONV_WINDOW],
         capture_output=True, text=True, timeout=60)
     out = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{out}'
@@ -697,7 +879,7 @@ def test_scroll_anchor_preserved_on_prepend(tmp_path):
     harness = tmp_path / '_scroll_anchor_harness.js'
     harness.write_text(_SCROLL_ANCHOR_HARNESS, encoding='utf-8')
     proc = subprocess.run(
-        ['node', str(harness), os.path.join(JS_DIR, 'conv_window.js')],
+        ['node', str(harness), CONV_WINDOW],
         capture_output=True, text=True, timeout=60)
     out = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{out}'

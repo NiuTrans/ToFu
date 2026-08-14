@@ -58,7 +58,9 @@ import pytest
 pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parent.parent
-LC_JS = ROOT / "static" / "js" / "local-control.js"
+from tests._runtime_sections import runtime_section_path
+
+LC_JS = Path(runtime_section_path('local-control.js'))
 STYLES = ROOT / "static" / "styles.css"
 
 _ROUTE_TOKEN = '_lc_probe_test_token__'

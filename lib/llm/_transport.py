@@ -17,6 +17,31 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
+
+def _bounded_env_int(name, default, minimum, maximum):
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        logger.warning('[Transport] invalid %s=%r; using %s',
+                       name, os.environ.get(name), default)
+        value = int(default)
+    return max(minimum, min(maximum, value))
+
+
+# Personal-server defaults: allow a burst of parallel agents without retaining
+# one idle socket per completed branch forever.  requests/httpx only discover a
+# peer-closed keep-alive when the pool is used again; a large idle pool can
+# therefore sit in CLOSE_WAIT between turns. Four warm sockets preserve
+# sequential/short-burst reuse, while the active connection ceiling remains 32.
+LLM_MAX_CONNECTIONS = _bounded_env_int(
+    'TOFU_LLM_MAX_CONNECTIONS', 32, 4, 256)
+LLM_MAX_KEEPALIVE_CONNECTIONS = min(
+    LLM_MAX_CONNECTIONS,
+    _bounded_env_int('TOFU_LLM_MAX_KEEPALIVE_CONNECTIONS', 4, 1, 64),
+)
+LLM_KEEPALIVE_EXPIRY_S = _bounded_env_int(
+    'TOFU_LLM_KEEPALIVE_EXPIRY_SECS', 15, 1, 300)
+
 # ── Connect-phase timeout (seconds) ──
 # How long to wait for the TCP/TLS handshake to the model endpoint before
 # declaring it unreachable. Kept short (default 10s) so a dead self-hosted
@@ -325,6 +350,17 @@ def get_sync_session() -> "requests.Session":
         with _sync_session_lock:
             if _sync_session is None:
                 _sync_session = requests.Session()
+                adapter = requests.adapters.HTTPAdapter(
+                    pool_connections=LLM_MAX_KEEPALIVE_CONNECTIONS,
+                    pool_maxsize=LLM_MAX_KEEPALIVE_CONNECTIONS,
+                    max_retries=0,
+                    # Never turn the retained-idle cap into an active-request
+                    # semaphore. Parallel agents may exceed four connections;
+                    # the surplus sockets simply are not kept after use.
+                    pool_block=False,
+                )
+                _sync_session.mount('http://', adapter)
+                _sync_session.mount('https://', adapter)
                 logger.debug('[Transport] Created shared requests.Session')
     return _sync_session
 
@@ -362,6 +398,12 @@ def get_async_client(proxy_url) -> "httpx.AsyncClient":
         if client is None or client.is_closed:
             client = httpx.AsyncClient(
                 proxy=proxy_url,
+                # ``proxy=None`` means an EXPLICIT direct route.  httpx would
+                # otherwise re-read HTTP(S)_PROXY from the environment and
+                # silently turn that direct candidate back into the env route.
+                # async_proxy_for/subscription_routes already resolve the env
+                # proxy to an explicit URL when it is wanted.
+                trust_env=False,
                 # read=None: no read timeout. A slow generation is not a
                 # failure; a Stop is honored by StreamIdleWatchdog's abort
                 # poll instead. write/pool stay bounded — neither is a wait
@@ -370,11 +412,21 @@ def get_async_client(proxy_url) -> "httpx.AsyncClient":
                 # pool wait would deadlock silently rather than wait.
                 timeout=httpx.Timeout(connect=CONNECT_TIMEOUT, read=None,
                                       write=60, pool=60),
-                follow_redirects=True,
+                limits=httpx.Limits(
+                    max_connections=LLM_MAX_CONNECTIONS,
+                    max_keepalive_connections=LLM_MAX_KEEPALIVE_CONNECTIONS,
+                    keepalive_expiry=LLM_KEEPALIVE_EXPIRY_S,
+                ),
+                # Completion endpoints are exact POST targets. Following a
+                # provider-controlled 30x can bypass the base_url egress check
+                # and can rewrite POST to GET, so fail visibly instead.
+                follow_redirects=False,
             )
             by_proxy[proxy_url] = client
-            logger.debug('[Transport] Created shared httpx.AsyncClient proxy=%s',
-                         proxy_url or '(direct)')
+            # proxy_url may contain vault-injected userinfo. Never put it in a
+            # log record, including DEBUG/error aggregation sinks.
+            logger.debug('[Transport] Created shared httpx.AsyncClient route=%s',
+                         'configured-proxy' if proxy_url else 'direct')
         return client
 
 

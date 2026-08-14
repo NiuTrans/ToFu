@@ -14,6 +14,7 @@ Run:  pytest tests/test_netpath.py -v
 """
 from __future__ import annotations
 
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -246,6 +247,63 @@ class TestPersistence:
         monkeypatch.setattr(netpath, '_STORE_PATH', str(store))
         netpath._load()
         assert 'old.example.com' not in netpath._states
+
+    def test_failed_save_stays_dirty_and_retries_without_fixed_tmp(
+            self, monkeypatch):
+        _note('retry-save.example.com')
+        # Keep report_outcome from performing the first automatic save.
+        monkeypatch.setattr(netpath, '_last_save', netpath.time.time())
+        _feed('retry-save.example.com', 'direct', lat=80, n=1)
+        assert netpath._dirty is True
+        real_write = netpath.write_json_atomic
+        monkeypatch.setattr(
+            netpath, 'write_json_atomic',
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError('injected disk failure')))
+
+        netpath._save()
+
+        assert netpath._dirty is True
+        assert not os.path.exists(netpath._STORE_PATH + '.tmp')
+        monkeypatch.setattr(netpath, 'write_json_atomic', real_write)
+        netpath._save()
+        assert netpath._dirty is False
+        assert os.path.isfile(netpath._STORE_PATH)
+
+    def test_proxy_reset_is_persisted_before_restart(self):
+        _note('proxy-reset.example.com')
+        _feed('proxy-reset.example.com', 'proxy', lat=20, n=2)
+        assert netpath._states['proxy-reset.example.com']['paths'][
+            'proxy']['ewma_ms'] == 20
+
+        netpath.reset_proxy_stats()
+        netpath.reset_for_test()
+        netpath._load()
+
+        restored = netpath._states['proxy-reset.example.com']
+        assert restored['paths']['proxy']['ewma_ms'] is None
+        assert restored['paths']['proxy']['samples'] == 0
+
+    def test_load_never_probes_a_sample_url_for_a_different_host(
+            self, tmp_path, monkeypatch):
+        import json
+        store = tmp_path / 'netpath.json'
+        store.write_text(json.dumps({
+            'version': netpath._STORE_VERSION,
+            'hosts': [{
+                'host': 'api.example.org',
+                'sample_url': 'http://127.0.0.1/private',
+                'decision': 'sideways',
+                'paths': {},
+            }],
+        }))
+        monkeypatch.setattr(netpath, '_STORE_PATH', str(store))
+
+        netpath._load()
+
+        restored = netpath._states['api.example.org']
+        assert restored['sample_url'] == 'https://api.example.org/'
+        assert restored['decision'] is None
 
 
 # ═══════════════════════════════════════════════════════════

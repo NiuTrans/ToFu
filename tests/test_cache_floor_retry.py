@@ -517,7 +517,7 @@ def test_llm_call_with_fallback_bills_discarded_into_api_rounds(monkeypatch):
         # _llm_call_with_fallback signature — see lib/tasks_pkg/llm_fallback/_call.py
         result = _fb._llm_call_with_fallback(
             task, _body(), 'aws.claude-opus-4.8', 0, 4096,
-            tool_call_happened=False, tool_list=None, max_tool_rounds=10,
+            tool_call_happened=False, tool_list=None,
             messages=_body()['messages'], preset='opus',
             thinking_enabled=False,
             accumulated_usage=accumulated, api_rounds=api_rounds,

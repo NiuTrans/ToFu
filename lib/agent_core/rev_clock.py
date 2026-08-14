@@ -48,6 +48,7 @@ conditions. This scheme needs no storage at all.
 """
 
 import os
+import threading
 import time
 
 from lib.log import get_logger
@@ -71,6 +72,14 @@ logger = get_logger(__name__)
 #: second replica by re-anchoring; production never writes it.
 _BOOT_EPOCH_NS = time.time_ns() - time.monotonic_ns()
 
+# ``time.monotonic_ns`` is monotonic, but the API only promises that values do
+# not move backwards; two reads may be equal on a coarse clock.  The frontend
+# deliberately accepts only a STRICTLY newer revision, so equality would drop
+# a legitimate state frame.  Serialize the tiny mint operation and advance by
+# one nanosecond when the underlying clock has not advanced yet.
+_MINT_LOCK = threading.Lock()
+_LAST_MINTED_NS = 0
+
 
 def _replica_id() -> str:
     """Resolve THIS replica's stable id — same rule PushHub uses."""
@@ -92,11 +101,16 @@ def _running_task_ids_rev() -> list:
     silently reintroduce a process-relative clock.
 
     Each call yields a strictly-later ns than the previous call in the same
-    process (guaranteed by ``time.monotonic_ns()``; measured 0 non-increasing
-    pairs in 200k consecutive mints at 1 ns clock resolution). Two callers on
-    different replicas break ties by replica_id lex compare.
+    process, including concurrent calls and platforms whose monotonic clock can
+    return the same value twice. Two callers on different replicas break ties
+    by replica_id lex compare.
     """
-    return [_BOOT_EPOCH_NS + time.monotonic_ns(), _replica_id()]
+    global _LAST_MINTED_NS
+    candidate = _BOOT_EPOCH_NS + time.monotonic_ns()
+    with _MINT_LOCK:
+        minted = max(candidate, _LAST_MINTED_NS + 1)
+        _LAST_MINTED_NS = minted
+    return [minted, _replica_id()]
 
 
 __all__ = ['_BOOT_EPOCH_NS', '_replica_id', '_running_task_ids_rev']

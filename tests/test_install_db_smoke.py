@@ -5,15 +5,15 @@ Background — the "SQLite is our default but is it actually usable on THIS
 box?" concern (2026-07):
   After the SQLite-default + uv-fast-path optimization, the installer picks a
   DB backend but never PROVED the chosen backend could actually open, create a
-  table, and read/write. The smoke test closes that gap: it runs a
-  create → insert → read-back → delete → drop round-trip through the same
-  interpreter and resolved DB target the server will use, and ABORTS the
+  table, and read/write. The smoke test closes that gap: it runs an
+  authenticated Sidecar write → read → delete round-trip through the same
+  storage boundary and resolved DB target the server will use, and ABORTS the
   install (fail) if it can't — giving the default SQLite user PG-grade
   confidence without paying conda's cost.
 
   These tests pin the contract by static analysis (no network, no DB, no
   server): the step exists in the shared tail (covers both uv + conda),
-  runs the full round-trip via $ENV_PYTHON, drops its temp table, ABORTS
+  runs the full round-trip via $ENV_PYTHON, leaves no probe record, ABORTS
   (fail, not warn) on failure, and its backend hint never tells a failed-PG
   user to switch to PG.
 """
@@ -43,7 +43,7 @@ def _install_sh() -> str:
 
 def _smoke_block(text: str) -> str:
     """The install.sh region from the smoke step to the next step marker."""
-    start = text.index('step "Verifying the database backend works')
+    start = text.index('step "Verifying the storage Sidecar works')
     tail = text[start:]
     nxt = re.search(r'\nstep "', tail[10:])
     end = start + 10 + (nxt.start() if nxt else len(tail) - 10)
@@ -55,7 +55,7 @@ def test_smoke_step_exists_after_env_before_launch():
     it runs on the shared tail (covering both the uv and conda paths)."""
     text = _install_sh()
     env_idx = text.index('ok ".env ready (PORT=${PORT})"')
-    smoke_idx = text.index('step "Verifying the database backend works')
+    smoke_idx = text.index('step "Verifying the storage Sidecar works')
     launch_idx = text.index('#  Step 10: Launch or print completion')
     assert env_idx < smoke_idx < launch_idx, \
         'DB smoke step is not positioned between .env-ready and Step 10 launch'
@@ -63,30 +63,48 @@ def test_smoke_step_exists_after_env_before_launch():
 
 
 def test_smoke_runs_full_round_trip():
-    """The heredoc must do create → insert → read-back → delete, and assert
-    the read-back value (not just run SQL blindly)."""
+    """The heredoc drives the authenticated storage boundary end to end."""
     block = _smoke_block(_install_sh())
-    for frag in ('CREATE TABLE IF NOT EXISTS _tofu_install_smoke',
-                 'INSERT INTO _tofu_install_smoke',
-                 'SELECT v FROM _tofu_install_smoke',
-                 'DELETE FROM _tofu_install_smoke'):
-        assert frag in block, f'smoke round-trip missing: {frag}'
-    assert re.search(r"row\[0\] == 'ok'", block), \
-        'smoke test does not assert the read-back value'
-    _ok('smoke test performs a full create/insert/read-back/delete round-trip')
+    for fragment in ('from lib.storage import StorageSupervisor',
+                     "'record.put'", "'record.get'", "'record.delete'",
+                     "storage.client.health()['backend']"):
+        assert fragment in block, f'Sidecar smoke round-trip missing: {fragment}'
+    _ok('smoke test performs Sidecar health/write/read/delete')
 
 
-def test_smoke_drops_temp_table_in_finally():
-    """DROP TABLE must run in a finally so no _tofu_install_smoke residue is
-    left in the user's real DB, even if the round-trip raised midway."""
+def test_smoke_script_has_no_raw_driver_or_runtime_ddl():
+    """Installer must not become a second connection/schema implementation."""
     block = _smoke_block(_install_sh())
-    assert 'finally:' in block, 'smoke test has no finally block for cleanup'
-    # The DROP must live in the finally region (after `finally:`), and be
-    # IF EXISTS so it's safe even when the table was never created.
-    finally_region = block[block.index('finally:'):]
-    assert 'DROP TABLE IF EXISTS _tofu_install_smoke' in finally_region, \
-        'temp table is not dropped (IF EXISTS) in the finally block'
-    _ok('smoke test drops its temp table in a finally (no residue)')
+    for forbidden in ('sqlite3.connect', 'psycopg2.connect',
+                      'CREATE TABLE', 'DROP TABLE', '.commit()'):
+        assert forbidden not in block, f'installer bypasses data layer: {forbidden}'
+    _ok('installer owns no driver connections, DDL, or transaction boundary')
+
+
+def test_sidecar_smoke_roundtrip_leaves_no_probe_record(tmp_path):
+    """The same semantic API commits, reads back, and cleans up."""
+    from lib.storage import StorageSupervisor
+
+    key = 'installer-contract-probe'
+    with StorageSupervisor(
+            project_root=tmp_path / 'storage', backend='sqlite') as storage:
+        assert storage.client.health()['backend'] == 'sqlite'
+        storage.client.command(
+            'record.put',
+            {'namespace': 'system.install_smoke', 'key': key, 'value': True},
+            'put-installer-contract-probe')
+        stored = storage.client.query(
+            'record.get',
+            {'namespace': 'system.install_smoke', 'key': key})
+        assert stored is not None and stored['value'] is True
+        storage.client.command(
+            'record.delete',
+            {'namespace': 'system.install_smoke', 'key': key},
+            'delete-installer-contract-probe')
+        assert storage.client.query(
+            'record.get',
+            {'namespace': 'system.install_smoke', 'key': key}) is None
+    _ok('Sidecar smoke probe leaves no storage record')
 
 
 def test_smoke_failure_aborts_install():
@@ -109,24 +127,20 @@ def test_smoke_backend_hint_does_not_misdirect():
     failure hint must not tell a failed-PG user to switch to PG (or a failed-
     SQLite user to switch to SQLite)."""
     block = _smoke_block(_install_sh())
-    # Backend derivation present.
-    assert '_SMOKE_BACKEND="sqlite"' in block, 'smoke backend does not default to sqlite'
-    assert 'PG_INSTALLED_MAJOR' in block and 'DB_BACKEND_CHOICE' in block, \
-        'smoke backend is not derived from the install DB decision vars'
+    # Backend derivation uses the decision already persisted to .env.
+    assert '_SMOKE_BACKEND="$DB_BACKEND_CHOICE"' in block, \
+        'smoke backend does not use the selected install backend'
     # Both backend branches exist in the failure hint.
     assert re.search(r'if \[\[ "\$_SMOKE_BACKEND" == "sqlite" \]\]; then', block), \
         'failure hint does not branch on the backend'
-    # The SQLite-failure hint points at PG; the PG-failure hint points at SQLite.
+    # Each failure describes its own backend and refuses an implicit fallback.
     sqlite_hint = re.search(r'SQLite backend failed.*?"', block, re.S)
     pg_hint = re.search(r'PostgreSQL backend failed.*?"', block, re.S)
-    assert sqlite_hint and '--with-postgres' in sqlite_hint.group(0), \
-        'SQLite-failure hint should suggest --with-postgres'
-    assert pg_hint and '--force-sqlite' in pg_hint.group(0), \
-        'PG-failure hint should suggest --force-sqlite (never "switch to PG")'
-    # Guard against the misdirect: the PG-failure hint must NOT suggest --with-postgres.
-    assert '--with-postgres' not in pg_hint.group(0), \
-        'PG-failure hint wrongly tells a failed-PG user to use PG'
-    _ok('backend derived correctly; failure hints never misdirect the user')
+    assert sqlite_hint and 'disk space/write permissions' in sqlite_hint.group(0)
+    assert pg_hint and 'storage-postgresql.log' in pg_hint.group(0)
+    assert 'Refusing backend fallback' in sqlite_hint.group(0)
+    assert 'Refusing backend fallback' in pg_hint.group(0)
+    _ok('selected backend is preserved; failure hints never silently redirect')
 
 
 def test_smoke_uses_env_python():
@@ -146,7 +160,7 @@ def main():
     tests = [
         test_smoke_step_exists_after_env_before_launch,
         test_smoke_runs_full_round_trip,
-        test_smoke_drops_temp_table_in_finally,
+        test_smoke_script_has_no_raw_driver_or_runtime_ddl,
         test_smoke_failure_aborts_install,
         test_smoke_backend_hint_does_not_misdirect,
         test_smoke_uses_env_python,
@@ -166,4 +180,6 @@ def main():
 
 
 if __name__ == '__main__':
+    from tests._standalone_guard import guard_standalone_db
+    guard_standalone_db('test_install_db_smoke.standalone')
     main()

@@ -290,9 +290,22 @@ def start_fs_keepalive():
     _thread.start()
 
 
-def stop_fs_keepalive():
-    """Stop the keepalive daemon (for clean shutdown)."""
-    global _running
+def stop_fs_keepalive(timeout: float = 2.0) -> bool:
+    """Stop and bounded-join the keepalive daemon."""
+    global _running, _thread
     _running = False
-    if _thread is not None:
-        _thread.join(timeout=5)
+    thread = _thread
+    if thread is None:
+        return True
+    try:
+        wait_seconds = max(0.0, float(timeout))
+    except (TypeError, ValueError, OverflowError) as exc:
+        logger.debug('[FS-Keepalive] invalid stop timeout; using 2.0: %s', exc)
+        wait_seconds = 2.0
+    if thread is not threading.current_thread():
+        thread.join(timeout=wait_seconds)
+    if thread.is_alive():
+        return False
+    if _thread is thread:
+        _thread = None
+    return True

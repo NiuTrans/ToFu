@@ -27,6 +27,14 @@
 set -u
 
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Unified lifecycle owner. Tests and old exported copies that contain only
+# this script fall through to the proven legacy implementation below.
+if [[ -f "$BASE_DIR/serverctl.py" ]]; then
+    exec "${TOFU_SUPERVISOR_PYTHON:-python3}" "$BASE_DIR/serverctl.py" stop \
+        --source legacy-stop.sh
+fi
+
 LOCK="$BASE_DIR/data/.server.lock"
 GRACEFUL_SECS=12   # > server.py hconfig.graceful_timeout (10s)
 

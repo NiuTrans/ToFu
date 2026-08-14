@@ -9,12 +9,24 @@ uploads/
 .github
 .chatui/
 .project_sessions/
-__pycache__
+.tofu/
+.coverage
+__pycache__/
 *.pyc
-.pytest_cache
-.ruff_cache
+.pytest_cache/
+.ruff_cache/
+node_modules/
+node_modules.*/
+tofu.egg-info/
 debug/
 tests/
+benchmarks/
+evaluations/
+outputs/
+swebench_*/
+*.log
+*.tmp
+*.tmp.*
 
 # ── Documentation & meta ──
 CLAUDE.md

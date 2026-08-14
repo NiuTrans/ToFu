@@ -11,12 +11,14 @@ Public API:
 """
 
 import asyncio
+import contextlib
 import time
 
 import httpx
 
 from lib.llm._sse_core import (
     SSEAccumulator,
+    activate_native_tool_search_fallback,
     classify_status_error,
     prepare_request,
 )
@@ -43,6 +45,7 @@ from lib.llm_errors import (
 from lib.log import get_logger
 from lib.proxy import async_proxy_for as _async_proxy_for
 from lib.proxy import report_outcome as _proxy_report_outcome
+from lib.subscription_quota import record_codex_quota
 
 logger = get_logger(__name__)
 
@@ -53,6 +56,72 @@ def _httpx_proxy_url(url: str):
     ``no_proxy`` exactly like the sync one (httpx alone ignores it once an
     explicit ``proxy=`` is set)."""
     return _async_proxy_for(url)
+
+
+def _close_abandoned_raw_dumper(plan, log_prefix: str, reason: str) -> None:
+    """Close a prepared plan that will not enter the async transport."""
+    try:
+        if plan.raw_dumper.enabled and plan.raw_dumper._fh is not None:
+            plan.raw_dumper.finish(error=True)
+    except Exception as error:
+        logger.debug('%s RawSSEDumper close before %s raised: %s',
+                     log_prefix, reason, error)
+
+
+@contextlib.asynccontextmanager
+async def _open_server_stream(plan, log_prefix: str = ''):
+    """Open response headers over the shared subscription route plan.
+
+    The probe race is synchronous network I/O, so it runs in a worker.  Real
+    requests remain native-httpx and sequential: only a connect-phase error
+    advances to the next route; once headers arrive the response is final.
+    """
+    from lib.proxy import (
+        report_subscription_route,
+        subscription_route_candidates,
+    )
+
+    routes = await asyncio.to_thread(subscription_route_candidates, plan.url)
+    if not routes:
+        client = get_async_client(_httpx_proxy_url(plan.url))
+        async with client.stream(
+                'POST', plan.url, headers=plan.hdrs, json=plan.body) as resp:
+            yield resp, None
+        return
+
+    attempted = set()
+    for route in routes:
+        attempted.add(route.route_id)
+        client = get_async_client(route.async_proxy_url())
+        stream_context = client.stream(
+            'POST', plan.url, headers=plan.hdrs, json=plan.body)
+        started = time.monotonic()
+        try:
+            response = await stream_context.__aenter__()
+        except (httpx.ConnectTimeout, httpx.ConnectError):
+            report_subscription_route(plan.url, route, False)
+            logger.info('%s connection failed via %s — trying next '
+                        'subscription route', log_prefix, route.label)
+            known = {item.route_id for item in routes}
+            refreshed = await asyncio.to_thread(
+                subscription_route_candidates, plan.url)
+            for candidate in refreshed:
+                if (candidate.route_id not in attempted
+                        and candidate.route_id not in known):
+                    routes.append(candidate)
+                    known.add(candidate.route_id)
+            continue
+        report_subscription_route(
+            plan.url, route, True,
+            (time.monotonic() - started) * 1000.0)
+        try:
+            yield response, route
+        finally:
+            await stream_context.__aexit__(None, None, None)
+        return
+    raise EndpointUnreachableError(
+        'all server subscription routes failed during connection setup',
+        base_url=plan.url) from None
 
 
 async def async_stream_chat(body, *, on_thinking=None, on_content=None,
@@ -135,20 +204,37 @@ async def _async_stream_chat_once(body, *, on_thinking=None, on_content=None,
         api_key=api_key, base_url=base_url, extra_headers=extra_headers,
         api_protocol=api_protocol, oauth=oauth)
 
-    proxy_url = _httpx_proxy_url(plan.url)
+    # Desktop-agent fallback still uses the proven sync bridge reader.  Keep
+    # it off the event loop; server-side direct/proxy routes stay native async
+    # below and share the same health plan as the sync transport.
+    from lib.desktop import egress as _eg
+    try:
+        egress_route = await asyncio.to_thread(
+            _eg.route_request, plan.url, user_id='')
+    except _eg.EgressUnavailable as e:
+        _close_abandoned_raw_dumper(plan, log_prefix, 'egress failure')
+        raise EndpointUnreachableError(str(e), base_url=plan.url) from e
+    if egress_route != 'direct':
+        # The sync bridge attempt prepares its own plan; close this abandoned
+        # async plan first so debug raw-dump file descriptors never leak.
+        _close_abandoned_raw_dumper(plan, log_prefix, 'egress handoff')
+        from lib.llm.stream import _stream_chat_once as _sync_stream_once
+        return await asyncio.to_thread(
+            _sync_stream_once, body,
+            on_thinking=on_thinking, on_content=on_content,
+            on_tool_call_ready=on_tool_call_ready,
+            abort_check=abort_check, log_prefix=log_prefix, attempt=attempt,
+            api_key=api_key, base_url=base_url, extra_headers=extra_headers,
+            api_protocol=api_protocol, oauth=oauth, adapter=adapter,
+            on_first_byte_wait=on_first_byte_wait)
 
-    # Borrow a pooled, keep-alive client (one per event-loop+proxy) so the
-    # TCP/TLS handshake is reused across turns instead of paid per call. The
-    # client is NOT closed here — only ``client.stream`` releases its
-    # connection back to the pool on exit.
-    client = get_async_client(proxy_url)
     _conn_t0 = time.monotonic()
     try:
-        async with client.stream(
-            'POST', plan.url, headers=plan.hdrs, json=plan.body,
-        ) as resp:
-            _proxy_report_outcome(
-                plan.url, True, (time.monotonic() - _conn_t0) * 1000.0)
+        async with _open_server_stream(plan, log_prefix) as (resp, route):
+            if route is None:
+                _proxy_report_outcome(
+                    plan.url, True,
+                    (time.monotonic() - _conn_t0) * 1000.0)
             resp_trace = resp.headers.get('M-TraceId', '')
             if resp_trace and resp_trace != plan.trace_id:
                 logger.debug('%s resp M-TraceId=%s', log_prefix, resp_trace)
@@ -159,6 +245,12 @@ async def _async_stream_chat_once(body, *, on_thinking=None, on_content=None,
                 # UTF-8), so a correct UTF-8 decode still yields mojibake.
                 err_body = repair_mojibake(
                     (await resp.aread()).decode('utf-8', errors='replace'))
+                if activate_native_tool_search_fallback(
+                        resp.status_code, err_body, plan=plan,
+                        canonical_body=body):
+                    raise RetryableAPIError(
+                        'native Tool Search rejected; retrying locally',
+                        status_code=resp.status_code)
                 classify_status_error(resp.status_code, err_body, body=plan.body,
                                       log_prefix=log_prefix, raw_dumper=plan.raw_dumper)
 
@@ -254,7 +346,11 @@ async def _async_stream_chat_once(body, *, on_thinking=None, on_content=None,
                 raise AbortedError('User aborted while waiting on %s' % plan.url)
 
             acc.fire_final_tool_callback()
-            return acc.finalize(resp_trace=resp_trace)
+            msg, finish_reason, usage = acc.finalize(resp_trace=resp_trace)
+            _quota_scope = 'oauth_codex' if oauth == 'codex' else 'codex'
+            usage = record_codex_quota(
+                resp.headers, usage, cache_key=_quota_scope)
+            return msg, finish_reason, usage
 
     except httpx.ConnectTimeout as e:
         # Connect-phase timeout = endpoint down → fail over (dispatch).

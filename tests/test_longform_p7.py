@@ -215,6 +215,7 @@ def test_produce_report_tool_is_registered_and_ungated_by_project():
                       search_enabled=True, fetch_enabled=False,
                       code_exec_enabled=False, browser_enabled=False,
                       desktop_enabled=False, swarm_enabled=False)
-    names = {t['function']['name'] for t in assemble_tool_list(ctx)[0]}
+    assemble_tool_list(ctx)
+    names = {t['function']['name'] for t in ctx.enabled_tool_catalog}
     assert 'produce_report' in names
     assert 'produce_video' in names

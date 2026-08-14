@@ -5,18 +5,14 @@ This is a THIRD memory placement, distinct from the two that already exist:
   1. System-prefix injection (BP1–3, always-on) — cache-poison for anything
      that changes; the memory-count hint was ripped out for exactly this
      reason (see ``.tofu/memories/memory-count-hint-mutates-cached-system-prefix.md``).
-  2. Per-turn BM25 prefetch (``<relevant_memories>`` in the tail) — cache-safe,
-     but its cheap-LLM reranker is *designed to drop* anything without a
-     concrete task step, so a standing preference ("always answer in Chinese")
-     never survives.
+  2. Per-turn local memory selection (``<relevant_memories>`` in the tail) —
+     metadata-ranked and deliberately precision-first, so standing preferences
+     belong in the profile rather than retrieval evidence.
 
 A personal preference needs to be BOTH always-on AND cache-stable. The trick
 (validated by Hermes Agent + our own CLAUDE.md placement): put it in the
-prepended ``_isMeta`` user message — the BP4 5-min-TTL tail segment — NOT the
-system prefix. When the profile changes, only the cheap tail re-writes once;
-the expensive system+tools prefix stays cached. The injection helper lives in
-``lib/tasks_pkg/system_context.py`` and calls ``notify_compaction`` so the
-cache-tracker doesn't false-positive the mutation.
+Composer-owned head/tail ``_isMeta`` messages rather than rewriting real user
+history. When the profile changes, only the synthetic context carrier changes.
 
 Design choices (locked by the user):
   * Hard-capped (~800 tokens ≈ 2.5 KB).
@@ -55,8 +51,27 @@ from lib.memory.user_profile._paths import (  # noqa: E402,F401
     _pending_path,
     _sanitize_scope,
     _server_memories_dir,
+    context_changes_path,
+    context_path,
     profile_path,
     resolve_profile_scope,
+)
+
+# ── Structured user context + undo history (._context) ──
+from lib.memory.user_profile._context import (  # noqa: E402,F401
+    CONTEXT_CHAR_CAP,
+    CONTEXT_TYPES,
+    ContextConflictError,
+    ContextValidationError,
+    context_char_count,
+    context_markdown,
+    context_status,
+    create_context_item,
+    delete_context_item,
+    load_context,
+    save_context_items,
+    undo_context_change,
+    update_context_item,
 )
 
 # ── Body persistence + markers + structured items (._io) ──
@@ -102,6 +117,21 @@ __all__ = [
     'USER_PROFILE_CHAR_CAP',
     'resolve_profile_scope',
     'profile_path',
+    'context_path',
+    'context_changes_path',
+    'CONTEXT_CHAR_CAP',
+    'CONTEXT_TYPES',
+    'ContextValidationError',
+    'ContextConflictError',
+    'load_context',
+    'context_status',
+    'context_markdown',
+    'context_char_count',
+    'save_context_items',
+    'create_context_item',
+    'update_context_item',
+    'delete_context_item',
+    'undo_context_change',
     'load_profile',
     'save_profile',
     'profile_char_count',

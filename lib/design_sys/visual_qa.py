@@ -31,6 +31,7 @@ import os
 import re
 
 from lib.log import get_logger
+from lib.production.contracts import normalise_findings
 
 logger = get_logger(__name__)
 
@@ -48,12 +49,28 @@ QA_CHECKLIST: tuple = (
     ('occlusion-layer', '内容是否被上层元素遮挡'),
     ('theme-fidelity', '是否忠于绑定主题(配色/字族/单一强调色)——出现主题外'
                        '的颜色体系即判违例'),
+    ('temporal-staging', '若图像是从左到右的动画时序接触表:开场/中段/收束是否'
+                         '都可读,是否存在空白开场、跳变、碰撞或未完成的收束'),
+    ('semantic-consistency', '数字、标签、图表和状态在各时刻是否与叙事'
+                            '一致;动画中途不得出现错误数据或互相矛盾的标签'),
+    ('deck-coherence', '若图像是整套页面接触表:视觉身份、网格、页边距、'
+                       '字体层级和强调色是否连贯,同时仍有清晰节奏变化'),
+    ('layout-repetition', '若是整套页面:是否连续重复同一种卡片/分栏模板,'
+                         '或每页都像换文案不换构图'),
+    ('asset-relevance', '图片/插画是否真正支撑该页判断,而不是泛化装饰、'
+                       '错误主体、虚构数据或与文字无关的素材'),
+    ('annotation-grounding', '逐条沿引线/箭头/圆点从标注文案追到端点:端点'
+                             '是否真的落在能证明该文案的可见物体或部位上;'
+                             '不得指着窗户写地板、指着座椅写滑轨'),
     ('ai-slop', '是否有 AI 味套路(卡片墙、蓝紫渐变、玻璃拟态、辉光描边、'
                 '2x2 矩阵摆拍、无意义装饰)'),
 )
 
 _QA_PROMPT_ZH = """你是一名苛刻的视觉设计评审。下面是一张{subject}的渲染图{theme_line}。
-请逐项核查清单,只报告**真实可见**的问题(不要臆测,不要报清单外项目):
+请逐项核查清单,只报告**真实可见**的问题(不要臆测,不要报清单外项目)。
+若页面含引线、箭头、圆点或贴图标注,必须逐条从标注文字沿线检查到端点,
+确认端点实际落到的物体/部位与文案一致；不要只看文本框和图片是否相邻。
+例如端点落在窗户却写“纯平地板”,必须报告 annotation-grounding:
 
 {checklist}
 
@@ -116,7 +133,7 @@ def screenshot_composition(scene_dir: str, out_path: str, *,
     except Exception as e:
         logger.debug('[VisualQA] chromium_env shim unavailable: %s', e)
 
-    index = os.path.join(scene_dir, 'index.html')
+    index = os.path.abspath(os.path.join(scene_dir, 'index.html'))
     if not os.path.isfile(index):
         raise FileNotFoundError(f'no composition at {index}')
     with open(index, encoding='utf-8') as fh:
@@ -204,6 +221,7 @@ def qa_frame(image_path: str, *, theme=None, label: str = '',
                 {'type': 'image_url', 'image_url': {'url': data_uri}},
             ]}],
             max_tokens=max_tokens, temperature=0.1, prefer_model=model,
+            strict_model=True,
             log_prefix=f'[VisualQA:{label}]')
     except Exception as e:
         out['reason'] = f'VLM dispatch failed: {e}'
@@ -241,21 +259,8 @@ def _parse_findings(content: str) -> list | None:
     items = raw.get('findings')
     if not isinstance(items, list):
         return None
-    out = []
     valid_checks = {cid for cid, _ in QA_CHECKLIST}
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        sev = str(it.get('severity') or 'minor').lower()
-        out.append({
-            'check': str(it.get('check') or '')
-                     if str(it.get('check') or '') in valid_checks else '',
-            'element': str(it.get('element') or '')[:200],
-            'issue': str(it.get('issue') or '')[:400],
-            'severity': sev if sev in ('blocker', 'major', 'minor') else 'minor',
-            'fix': str(it.get('fix') or '')[:400],
-        })
-    return [f for f in out if f['issue']]
+    return normalise_findings(items, valid_checks=valid_checks)
 
 
 def findings_text(findings: list, *, limit: int = 6) -> str:

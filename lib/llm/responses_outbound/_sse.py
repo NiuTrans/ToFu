@@ -20,9 +20,10 @@ pt_b7a29ea7) with four generalisations the Codex-only original lacked:
      ``_handle_sse_error`` classifier (429 → RateLimitError, 5xx →
      RetryableAPIError, …) decides retry/failover. The old path dropped
      them and the stream ended EMPTY — the '无结果' failure shape.
-  4. **usage details** — ``input_tokens_details.cached_tokens`` and
-     ``output_tokens_details.reasoning_tokens`` are carried into the
-     OpenAI usage spelling (cache-hit accounting depends on them).
+  4. **usage details** — cache read/write and reasoning token counts are
+     carried into the OpenAI usage spelling (cost accounting depends on them).
+  5. **opaque state** — completed ``reasoning`` / ``compaction`` output items
+     are retained for stateless replay on the next Responses request.
 
 Terminal events (``response.completed`` / ``response.incomplete``) emit
 the finish chunk + the ``'[DONE]'`` sentinel — a Responses stream has no
@@ -35,6 +36,9 @@ import json
 import time
 
 from lib.log import get_logger
+from lib.llm.responses_outbound._to_responses import (
+    _REPLAY_RESPONSE_ITEM_TYPES,
+)
 
 logger = get_logger(__name__)
 
@@ -49,6 +53,22 @@ _ERROR_HTTP = {
     'overloaded': '529',
 }
 
+_CAPTURE_ITEM_TYPES = _REPLAY_RESPONSE_ITEM_TYPES | frozenset({'compaction'})
+_KNOWN_IGNORED_EVENTS = frozenset({
+    'response.created', 'response.in_progress', 'response.queued',
+    'response.content_part.added', 'response.content_part.done',
+    'response.output_text.done', 'response.refusal.done',
+    'response.reasoning_summary_part.done',
+    'response.reasoning_summary_text.done', 'response.reasoning_text.done',
+    'response.function_call_arguments.done',
+})
+_KNOWN_PROGRESS_PREFIXES = (
+    'response.tool_search_call.', 'response.web_search_call.',
+    'response.file_search_call.', 'response.code_interpreter_call.',
+    'response.shell_call.', 'response.computer_call.',
+    'response.multi_agent_',
+)
+
 
 def _usage_to_openai(usage: dict) -> dict:
     """Responses usage → OpenAI Chat Completions usage spelling."""
@@ -62,13 +82,41 @@ def _usage_to_openai(usage: dict) -> dict:
             usage.get('input_tokens', 0) + usage.get('output_tokens', 0)),
     }
     itd = usage.get('input_tokens_details')
-    if isinstance(itd, dict) and 'cached_tokens' in itd:
-        out['prompt_tokens_details'] = {'cached_tokens': itd['cached_tokens']}
+    if isinstance(itd, dict):
+        details = {}
+        if 'cached_tokens' in itd:
+            details['cached_tokens'] = itd['cached_tokens']
+        if 'cache_write_tokens' in itd:
+            details['cache_write_tokens'] = itd['cache_write_tokens']
+            out['cache_write_tokens'] = itd['cache_write_tokens']
+        if details:
+            out['prompt_tokens_details'] = details
     otd = usage.get('output_tokens_details')
     if isinstance(otd, dict) and 'reasoning_tokens' in otd:
         out['completion_tokens_details'] = {
             'reasoning_tokens': otd['reasoning_tokens']}
     return out
+
+
+def _program_needs_followup(output) -> bool:
+    """A program_output without a final message requires another response."""
+    items = [item for item in (output or []) if isinstance(item, dict)]
+    return (any(item.get('type') == 'program_output' for item in items)
+            and not any(item.get('type') == 'message' for item in items))
+
+
+def _multi_agent_message_is_user_visible(item: dict) -> bool:
+    """Return whether a Responses message belongs on the user surface.
+
+    Ordinary Responses messages have no ``agent`` attribution and remain
+    visible.  Native Multi-agent responses can contain root commentary and
+    subagent messages; the public result is only the root ``final_answer``.
+    """
+    agent = item.get('agent')
+    if not isinstance(agent, dict) or not agent.get('agent_name'):
+        return True
+    return (str(agent['agent_name']) == '/root'
+            and item.get('phase') == 'final_answer')
 
 
 class ResponsesSSETranslator:
@@ -88,12 +136,63 @@ class ResponsesSSETranslator:
         # routing argument deltas of PARALLEL calls.
         self._tc_count = 0
         self._item_slot: dict = {}
+        # Multi-agent streams interleave root and subagent text.  The API's
+        # output_index is the stable routing key for deciding which deltas
+        # belong on the user-visible assistant surface.
+        self._hidden_text_output_indices: set[int] = set()
         # Per-request {truncated: original} tool-name map, stamped by the
         # caller from the request converter's second return value — the
         # model echoes the TRUNCATED name and the executor's lookup would
         # miss without the restore (mirrors AnthropicSSETranslator's
         # ``tool_name_reverse``).
         self.tool_name_reverse: dict = {}
+        # Final Responses output items that must be replayed when store=false.
+        # SSEAccumulator copies this list onto the canonical assistant message.
+        self.response_items: list[dict] = []
+        self.response_id = ''
+        self.response_output: list[dict] = []
+        self.unknown_event_types: set[str] = set()
+        self.unknown_item_types: set[str] = set()
+        # Reasoning-summary paragraph tracking: OpenAI emits a summary as N
+        # parts, each a markdown headline ('**…**'), and the text deltas
+        # carry NO separator — concatenating parts fuses adjacent headlines
+        # into '**A****B**'. Part/item boundaries re-insert the '\n\n'.
+        # ``_reasoning_open`` = unseparated reasoning text since the last
+        # boundary, so an item boundary followed by its first part boundary
+        # emits ONE separator, not two.
+        self._reasoning_open = False
+
+    def _capture_response_items(self, items) -> None:
+        """Upsert opaque replay items by their stable id."""
+        for item in items or ():
+            if (not isinstance(item, dict)
+                    or item.get('type') not in _CAPTURE_ITEM_TYPES):
+                continue
+            saved = dict(item)
+            item_id = saved.get('id')
+            if item_id:
+                for index, prior in enumerate(self.response_items):
+                    if prior.get('id') == item_id:
+                        self.response_items[index] = saved
+                        break
+                else:
+                    self.response_items.append(saved)
+            elif saved not in self.response_items:
+                self.response_items.append(saved)
+
+    def _observe_item_type(self, item) -> None:
+        if not isinstance(item, dict):
+            return
+        item_type = str(item.get('type') or '')
+        if (not item_type
+                or item_type in _CAPTURE_ITEM_TYPES
+                or item_type in ('message', 'function_call')):
+            return
+        if item_type not in self.unknown_item_types:
+            self.unknown_item_types.add(item_type)
+            logger.warning('[Responses] unhandled output item type=%s; '
+                           'preserving the stream but not replaying the item',
+                           item_type)
 
     # ──────────────────────────────────────────────────────────
 
@@ -143,15 +242,46 @@ class ResponsesSSETranslator:
         out: list = []
 
         if etype == 'response.output_text.delta':
+            output_index = event.get('output_index')
+            agent = event.get('agent')
+            hidden_by_agent = (isinstance(agent, dict)
+                               and agent.get('agent_name') != '/root')
+            if (output_index not in self._hidden_text_output_indices
+                    and not hidden_by_agent):
+                out.append(self._chunk(
+                    delta={'content': event.get('delta', '')}))
+
+        elif etype == 'response.refusal.delta':
             out.append(self._chunk(delta={'content': event.get('delta', '')}))
 
         elif etype in ('response.reasoning_summary_text.delta',
                        'response.reasoning_text.delta'):
             out.append(self._chunk(
                 delta={'reasoning_content': event.get('delta', '')}))
+            self._reasoning_open = True
+
+        elif etype == 'response.reasoning_summary_part.added':
+            # A new summary paragraph begins — separate it from the previous
+            # one (no-op for the very first part).
+            if self._reasoning_open:
+                self._reasoning_open = False
+                out.append(self._chunk(
+                    delta={'reasoning_content': '\n\n'}))
 
         elif etype == 'response.output_item.added':
             item = event.get('item') or {}
+            self._observe_item_type(item)
+            output_index = event.get('output_index')
+            if (item.get('type') == 'message'
+                    and isinstance(output_index, int)
+                    and not _multi_agent_message_is_user_visible(item)):
+                self._hidden_text_output_indices.add(output_index)
+            if (item.get('type') == 'reasoning'
+                    and self._reasoning_open):
+                # A second reasoning block in one response — same boundary.
+                self._reasoning_open = False
+                out.append(self._chunk(
+                    delta={'reasoning_content': '\n\n'}))
             if item.get('type') == 'function_call':
                 slot = self._tc_count
                 self._tc_count += 1
@@ -161,12 +291,21 @@ class ResponsesSSETranslator:
                 name = item.get('name', '')
                 if self.tool_name_reverse:
                     name = self.tool_name_reverse.get(name, name)
-                out.append(self._chunk(delta={'tool_calls': [{
+                tool_call = {
                     'index': slot,
                     'id': item.get('call_id', ''),
                     'type': 'function',
                     'function': {'name': name,
-                                 'arguments': ''}}]}))
+                                 'arguments': ''},
+                }
+                if isinstance(item.get('caller'), dict):
+                    tool_call['caller'] = dict(item['caller'])
+                agent = item.get('agent') or event.get('agent')
+                if isinstance(agent, dict) and agent.get('agent_name'):
+                    tool_call.setdefault('caller', {
+                        'type': 'multi_agent',
+                    })['agent_name'] = str(agent['agent_name'])
+                out.append(self._chunk(delta={'tool_calls': [tool_call]}))
 
         elif etype == 'response.function_call_arguments.delta':
             slot = self._slot_for(event)
@@ -175,16 +314,40 @@ class ResponsesSSETranslator:
                     'index': slot,
                     'function': {'arguments': event.get('delta', '')}}]}))
 
+        elif etype == 'response.output_item.done':
+            item = event.get('item') or {}
+            self._observe_item_type(item)
+            self._capture_response_items([item])
+
         elif etype == 'response.completed':
             resp = event.get('response') or {}
+            response_output = resp.get('output') or []
+            self.response_id = str(resp.get('id') or '')
+            self.response_output = [dict(item) for item in response_output
+                                    if isinstance(item, dict)]
+            for item in response_output:
+                self._observe_item_type(item)
+            self._capture_response_items(response_output)
             finish = 'tool_calls' if self._tc_count > 0 else 'stop'
             usage = _usage_to_openai(resp.get('usage') or {})
+            if _program_needs_followup(response_output):
+                # OpenAI may deliver the final assistant message in the next
+                # response after program_output. The orchestrator recognizes
+                # this private marker and replays the opaque item once more.
+                usage['_program_pending'] = True
             out.append(self._chunk(finish_reason=finish,
                                    usage=usage or None))
             out.append('[DONE]')
 
         elif etype == 'response.incomplete':
             resp = event.get('response') or {}
+            response_output = resp.get('output') or []
+            self.response_id = str(resp.get('id') or '')
+            self.response_output = [dict(item) for item in response_output
+                                    if isinstance(item, dict)]
+            for item in response_output:
+                self._observe_item_type(item)
+            self._capture_response_items(response_output)
             reason = (resp.get('incomplete_details') or {}).get('reason', '')
             if reason and reason != 'max_output_tokens':
                 # content_filter & friends are failures, not finishes.
@@ -196,6 +359,8 @@ class ResponsesSSETranslator:
                 finish = 'length' if reason == 'max_output_tokens' else (
                     'tool_calls' if self._tc_count > 0 else 'stop')
                 usage = _usage_to_openai(resp.get('usage') or {})
+                if _program_needs_followup(response_output):
+                    usage['_program_pending'] = True
                 out.append(self._chunk(finish_reason=finish,
                                        usage=usage or None))
             out.append('[DONE]')
@@ -210,8 +375,16 @@ class ResponsesSSETranslator:
                 'type': code,
                 'http_code': _ERROR_HTTP.get(code, '')}})
 
+        elif (etype and etype not in _KNOWN_IGNORED_EVENTS
+              and not any(etype.startswith(prefix)
+                          for prefix in _KNOWN_PROGRESS_PREFIXES)):
+            if etype not in self.unknown_event_types:
+                self.unknown_event_types.add(etype)
+                logger.warning('[Responses] unhandled SSE event type=%s; '
+                               'stream remains active', etype)
+
         # Everything else — response.created / in_progress / queued,
-        # output_item.done, content_part.*, output_text.done,
-        # function_call_arguments.done, reasoning_summary_part.*,
+        # content_part.*, output_text.done, reasoning_summary_part.done,
+        # function_call_arguments.done, reasoning_summary_text.done,
         # web_search_call.*, … — carries no delta we need.
         return out

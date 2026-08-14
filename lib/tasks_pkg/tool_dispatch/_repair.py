@@ -68,13 +68,18 @@ def _build_repair_summary(json_repaired: bool, repair_log, tool_name_aliased: st
 
 def _apply_repair_to_round(round_entry: dict, fn_name: str, fn_args: dict,
                            repair_summary: dict, project_enabled: bool,
-                           conv_id) -> None:
+                           conv_id) -> str | None:
     """Patch a stale (early-announced) round entry after a late repair.
 
     The streaming early-announce path renders the round display BEFORE the
     schema-repair pass runs, so a malformed arg (e.g. ``reads`` as a JSON
     string) produces a garbled display line.  Once repaired, rebuild the
     display from the corrected args and attach the ``_repaired`` descriptor.
+
+    Returns the refreshed display query when it actually CHANGED, else
+    ``None``.  The caller uses that signal to push a live display-patch
+    frame — the garbled early-announce line is already on the user's screen,
+    and the settle frame may be a long command away.
     """
     round_entry['_repaired'] = repair_summary
     try:
@@ -85,9 +90,13 @@ def _apply_repair_to_round(round_entry: dict, fn_name: str, fn_args: dict,
         )
         # Only refresh the human-facing display string; keep roundNum, status,
         # llmRound, toolCallId, etc. intact on the live entry.
-        if fresh_entry.get('query'):
-            round_entry['query'] = fresh_entry['query']
+        fresh_query = fresh_entry.get('query')
+        changed = bool(fresh_query) and fresh_query != round_entry.get('query')
+        if fresh_query:
+            round_entry['query'] = fresh_query
         round_entry['toolArgs'] = tc_args_str
+        return fresh_query if changed else None
     except Exception as e:
         logger.debug('[ToolDispatch] repair display refresh failed for %s: %s',
                      fn_name, e)
+        return None

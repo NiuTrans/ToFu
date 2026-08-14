@@ -73,6 +73,10 @@ def test_caphit_reports_max_iterations_not_completed():
     assert res['status'] == 'completed'      # walk finished (no crash)
     assert res['ok'] is False, 'a burned-budget loop must not be ok'
     assert res['stop_reason'] == 'max_iterations', res.get('stop_reason')
+    assert res['outcome']['category'] == 'incomplete'
+    assert res['outcome']['lifecycle_status'] == 'error'
+    assert res['outcome']['chat_status'] == 'done'
+    assert res['outcome']['finish_reason'] == 'incomplete'
     exits = res.get('loop_exits') or []
     assert any(e['reason'] == 'max_iterations' for e in exits), exits
 

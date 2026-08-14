@@ -79,6 +79,11 @@ _AGENT_ASSET_SIZES = {
     'TofuAgent-0.16.0-linux-x86_64.tar.gz': 20_000_000,
 }
 
+_FRONTEND_ASSET_SIZES = {
+    'frontend-dist-0.16.0.tar.gz': 4_000_000,
+    'frontend-dist-0.16.0.tar.gz.sha256': 96,
+}
+
 
 def _load():
     spec = importlib.util.spec_from_file_location('_ra_test', _SCRIPT)
@@ -92,6 +97,7 @@ def test_hollow_windows_installer_is_rejected():
     m = _load()
     sizes = dict(_V0142_SIZES)
     sizes.update(_AGENT_ASSET_SIZES)  # name-complete across BOTH tables
+    sizes.update(_FRONTEND_ASSET_SIZES)
     sizes['Tofu-Setup-0.15.2-win64.exe'] = _HOLLOW_WINDOWS_BYTES
     del sizes['Tofu-Setup-0.14.2-win64.exe']
 
@@ -183,9 +189,13 @@ def test_every_consumer_agrees_on_the_row_shape():
 def test_derived_label_glob_view_still_matches_the_table():
     """REQUIRED_PLATFORM_ASSETS is derived; it must not drift from the source."""
     m = _load()
-    assert m.REQUIRED_PLATFORM_ASSETS == tuple(
+    platform_assets = tuple(
         (label, pattern) for _os, _arch, label, pattern, _min in (
             m.PLATFORM_ASSETS + m.AGENT_PLATFORM_ASSETS))
+    assert m.REQUIRED_PLATFORM_ASSETS == platform_assets + (
+        ('prebuilt frontend graph', 'frontend-dist-*.tar.gz'),
+        ('prebuilt frontend SHA-256', 'frontend-dist-*.tar.gz.sha256'),
+    )
 
 
 def test_undetermined_contract_survives_a_non_release_body():

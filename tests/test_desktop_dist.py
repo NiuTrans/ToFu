@@ -136,10 +136,78 @@ def test_resolve_file_drops_entries_whose_file_vanished(tmp_store):
 
 
 @pytest.mark.unit
+def test_artifact_paths_reject_remote_path_material_and_symlinks(
+        tmp_store, tmp_path):
+    outside = tmp_path.parent / 'outside-installer.exe'
+    outside.write_bytes(b'secret')
+    for bad in ('../outside-installer.exe', r'..\\outside-installer.exe',
+                '/tmp/installer.exe', r'C:\\installer.exe', 'manifest.json',
+                'partial.exe.part', ' bad.exe'):
+        assert store.artifact_path(bad) is None, bad
+        store.record_artifact(_entry(bad))
+        assert bad not in store.artifacts()
+
+    link = tmp_store / 'Tofu-Setup-0.14.2-win64.exe'
+    link.symlink_to(outside)
+    store.record_artifact(_entry(link.name))
+    assert store.resolve_file(link.name) is None
+
+
+@pytest.mark.unit
 def test_a_corrupt_manifest_is_an_empty_store_not_a_crash(tmp_store):
     (tmp_store / 'manifest.json').write_text('{not json', encoding='utf-8')
     assert store.artifacts() == {}
     assert store.find_for_platform('windows', 'x86_64') == []
+
+
+@pytest.mark.unit
+def test_prune_is_atomic_preserves_concurrent_entries_and_never_escapes(
+        tmp_store, tmp_path, monkeypatch):
+    stale = 'Tofu-Setup-0.13.0-win64.exe'
+    _seed(tmp_store, stale)
+    outside = tmp_path.parent / 'outside-prune-target.exe'
+    outside.write_bytes(b'keep me')
+    manifest = store.load_manifest()
+    manifest['artifacts']['../outside-prune-target.exe'] = _entry(
+        '../outside-prune-target.exe')
+    store.save_manifest(manifest)
+
+    real_update = store.update_json_atomic
+    injected = {'done': False}
+
+    def _update(path, mutator, **kwargs):
+        result = real_update(path, mutator, **kwargs)
+        if result is not None and not injected['done']:
+            injected['done'] = True
+            store.record_artifact(_entry(
+                'Tofu-0.16.0-linux-x86_64.tar.gz', os_key='linux'))
+        return result
+
+    monkeypatch.setattr(store, 'update_json_atomic', _update)
+    removed = store.remove_not_in(set())
+
+    assert stale in removed
+    assert '../outside-prune-target.exe' in removed
+    assert outside.read_bytes() == b'keep me'
+    assert not (tmp_store / stale).exists()
+    assert 'Tofu-0.16.0-linux-x86_64.tar.gz' in store.artifacts()
+
+
+@pytest.mark.unit
+def test_prune_write_failure_keeps_manifest_and_file(tmp_store, monkeypatch):
+    stale = 'Tofu-Setup-0.13.0-win64.exe'
+    _seed(tmp_store, stale)
+    before = store.load_manifest()
+
+    def _fail(*_args, **_kwargs):
+        raise OSError('disk full')
+
+    monkeypatch.setattr(store, 'update_json_atomic', _fail)
+    with pytest.raises(OSError, match='disk full'):
+        store.remove_not_in(set())
+
+    assert (tmp_store / stale).is_file()
+    assert store.load_manifest() == before
 
 
 @pytest.mark.unit
@@ -233,6 +301,26 @@ def test_refresh_downloads_every_matching_asset_once(tmp_store, fake_net):
     m = store.load_manifest()
     assert m['tag'] == 'v0.14.2' and m['refreshed_at'] > 0
     assert m['last_error'] is None
+
+
+@pytest.mark.unit
+def test_refresh_rejects_a_path_bearing_release_asset(tmp_store, fake_net,
+                                                      tmp_path):
+    outside = tmp_path.parent / 'Tofu-Setup-9.9.9-win64.exe'
+    outside.write_bytes(b'unchanged')
+    fake_net['probe'] = {
+        'tag': 'v9.9.9',
+        'assets': [{
+            'name': '../Tofu-Setup-9.9.9-win64.exe',
+            'url': 'https://example.test/malicious',
+            'size': 123,
+        }],
+    }
+
+    assert mirror.refresh_now() is False
+    assert fake_net['downloads'] == []
+    assert outside.read_bytes() == b'unchanged'
+    assert store.artifacts() == {}
 
 
 @pytest.mark.unit

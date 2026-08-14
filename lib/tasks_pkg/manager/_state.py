@@ -99,6 +99,21 @@ except (ValueError, TypeError) as _e:
     logger.debug('[Checkpoint] CHECKPOINT_MIN_DELTA_CHARS parse failed, using default: %s', _e)
     CHECKPOINT_MIN_DELTA_CHARS = 160
 
+# Above this stored transcript size, a mid-stream checkpoint persists only the
+# task_results/segments/event-log recovery record. Rewriting a multi-megabyte
+# conversations.messages JSON value every five seconds creates large Python
+# objects plus PostgreSQL TOAST/WAL churn; terminal sync still writes the full
+# settled conversation once. 0 restores the legacy unlimited behaviour.
+try:
+    CHECKPOINT_CONV_BLOB_MAX_BYTES = int(
+        os.environ.get('CHECKPOINT_CONV_BLOB_MAX_BYTES', str(2 * 1024 * 1024)))
+    if CHECKPOINT_CONV_BLOB_MAX_BYTES < 0:
+        CHECKPOINT_CONV_BLOB_MAX_BYTES = 0
+except (ValueError, TypeError) as _e:
+    logger.debug('[Checkpoint] CHECKPOINT_CONV_BLOB_MAX_BYTES parse failed, '
+                 'using default: %s', _e)
+    CHECKPOINT_CONV_BLOB_MAX_BYTES = 2 * 1024 * 1024
+
 
 def _record_latest_task(conv_id: str, task_id: str) -> None:
     with _conv_latest_task_lock:

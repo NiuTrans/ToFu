@@ -211,8 +211,9 @@ class TestNoAutoExhaustPathSurvives:
         producer anymore — its i18n mapping and label must not linger."""
         src = self._stripped('lib/llm_dispatch/retry_i18n.py', 'python')
         assert 'keyAutoExhausted' not in src
-        js = self._stripped('static/js/i18n.js', 'js')
-        assert 'keyAutoExhausted' not in js
+        for relpath in ('frontend/src/i18n/locales/zh.json',
+                        'frontend/src/i18n/locales/en.json'):
+            assert 'keyAutoExhausted' not in self._stripped(relpath, 'js')
 
     def test_threshold_constant_gone(self):
         """MAX_CONSECUTIVE_429 was the kill threshold — with the policy
@@ -224,7 +225,7 @@ class TestNoAutoExhaustPathSurvives:
             src = self._stripped(relpath, 'python')
             assert 'MAX_CONSECUTIVE_429' not in src, (
                 f'{relpath} still references the removed kill threshold')
-        js = self._stripped('static/js/settings/key_stats.js', 'js')
+        js = self._stripped('frontend/src/features/settings/key-stats.ts', 'js')
         assert 'max_consecutive_429' not in js
 
 

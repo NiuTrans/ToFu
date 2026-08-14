@@ -88,6 +88,86 @@
                 color: var(--text-dim); }
   .admin-gate h2 { color: var(--text); }
 </style>
+<script>
+(function () {
+  'use strict';
+  var ready = false;
+  var firstFailure = null;
+  var retryKey = 'tofu:vite-preload-reload';
+  function report(error, asset, response) {
+    var value = {
+      time: new Date().toISOString(), page: location.href, asset: asset || '',
+      error: error && (error.stack || error.message || String(error)) || 'startup timeout',
+      userAgent: navigator.userAgent
+    };
+    if (response) {
+      value.httpStatus = response.status;
+      value.contentType = response.headers.get('content-type') || '';
+    }
+    return value;
+  }
+  function showFailure(error, asset, response) {
+    if (ready || document.getElementById('tofu-boot-failure')) return;
+    var diagnostics = report(error, asset, response);
+    var root = document.createElement('main');
+    root.id = 'tofu-boot-failure';
+    root.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:#17151b;color:#f8f5ed;padding:clamp(24px,6vw,72px);font:15px/1.55 system-ui,sans-serif;overflow:auto';
+    var title = document.createElement('h1');
+    title.textContent = 'Tofu 无法启动 / Tofu could not start';
+    var message = document.createElement('p');
+    message.textContent = '前端资源加载失败。请检查网络或代理后重试。 / A frontend asset failed to load. Check your network or proxy, then retry.';
+    var pre = document.createElement('pre');
+    pre.style.cssText = 'white-space:pre-wrap;background:#0d0c10;padding:16px;border-radius:10px;max-width:960px';
+    pre.textContent = JSON.stringify(diagnostics, null, 2);
+    var reload = document.createElement('button');
+    reload.textContent = '重新加载 / Reload';
+    reload.addEventListener('click', function () { location.reload(); });
+    var copy = document.createElement('button');
+    copy.textContent = '复制诊断 / Copy diagnostics';
+    copy.style.marginLeft = '10px';
+    copy.addEventListener('click', function () {
+      navigator.clipboard.writeText(pre.textContent || '').then(function () {
+        copy.textContent = '已复制 / Copied';
+      }).catch(function () {});
+    });
+    root.append(title, message, pre, reload, copy);
+    (document.body || document.documentElement).appendChild(root);
+  }
+  function diagnose(error, asset) {
+    if (!asset) { showFailure(error, asset); return; }
+    fetch(asset, { method: 'HEAD', cache: 'no-store' }).then(function (response) {
+      showFailure(error, asset, response);
+    }).catch(function () { showFailure(error, asset); });
+  }
+  window.addEventListener('vite:preloadError', function (event) {
+    event.preventDefault();
+    var error = event.payload || event.detail || new Error('dynamic import failed');
+    var asset = error && (error.url || error.src) || '';
+    if (!sessionStorage.getItem(retryKey)) {
+      sessionStorage.setItem(retryKey, '1');
+      location.reload();
+      return;
+    }
+    diagnose(error, asset);
+  });
+  window.addEventListener('error', function (event) {
+    if (!ready) firstFailure = firstFailure || event.error || new Error(event.message || 'module load failed');
+  }, true);
+  window.addEventListener('unhandledrejection', function (event) {
+    if (!ready) firstFailure = firstFailure || event.reason;
+  });
+  window.addEventListener('tofu:app-ready', function () {
+    ready = true;
+    sessionStorage.removeItem(retryKey);
+  }, { once: true });
+  window.addEventListener('tofu:app-failed', function (event) {
+    diagnose(event.detail && event.detail.error || firstFailure);
+  }, { once: true });
+  window.setTimeout(function () {
+    if (!ready) diagnose(firstFailure || new Error('startup timed out after 20 seconds'));
+  }, 20000);
+})();
+</script>
 </head>
 <body>
 <header>
@@ -114,10 +194,10 @@
     <code>billing_enabled</code> / <code>model_relay_enabled</code>（二者互相独立）。</span>
   </div>
   <div class="nav-tabs">
-    <button data-pane="relayUsers"    onclick="relayAdminSwitch('relayUsers')" data-i18n="relayAdmin.page.tabUsers">用户</button>
-    <button data-pane="relayPricing"  onclick="relayAdminSwitch('relayPricing')" data-i18n="relayAdmin.page.tabPricing">定价</button>
-    <button data-pane="relayCodes"    onclick="relayAdminSwitch('relayCodes')" data-i18n="relayAdmin.page.tabCodes">兑换码</button>
-    <button data-pane="relayPayments" onclick="relayAdminSwitch('relayPayments')" data-i18n="relayAdmin.page.tabPayments">支付</button>
+    <button data-pane="relayUsers"    data-tofu-action="relayAdminSwitch" data-i18n="relayAdmin.page.tabUsers">用户</button>
+    <button data-pane="relayPricing"  data-tofu-action="relayAdminSwitch" data-i18n="relayAdmin.page.tabPricing">定价</button>
+    <button data-pane="relayCodes"    data-tofu-action="relayAdminSwitch" data-i18n="relayAdmin.page.tabCodes">兑换码</button>
+    <button data-pane="relayPayments" data-tofu-action="relayAdminSwitch" data-i18n="relayAdmin.page.tabPayments">支付</button>
   </div>
 
   <!-- ═══ Users ═══ -->
@@ -149,39 +229,6 @@
   </section>
 </main>
 
-<script>
-'use strict';
-// Mark this as the standalone admin page so relay-admin.js renders the
-// panels directly instead of monkey-patching the (absent) Settings modal.
-window.__RELAY_ADMIN_PAGE = true;
-
-// relay-admin.js expects these globals from index.html. Provide minimal
-// browser-native shims so it runs unmodified here.
-window.apiUrl = window.apiUrl || function(p) { return p; };
-window.escapeHtml = window.escapeHtml || function(s) {
-  return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-};
-window.showAlert = window.showAlert || function(msg) { window.alert(msg); };
-window.showConfirm = window.showConfirm || async function(msg) {
-  return window.confirm(msg);
-};
-window.showPrompt = window.showPrompt || async function(msg, opts) {
-  return window.prompt(msg, (opts && opts.defaultValue) || '');
-};
-</script>
-<!-- i18n.js MUST load before relay-admin.js: the admin panels resolve every
-     label through the global t(). It is self-contained (reads localStorage +
-     a DOMContentLoaded hook with null-safe DOM queries) and respects the UI
-     language the user picked in the main app (same-origin localStorage). -->
-<script defer src="static/js/i18n.js?v=0.16.0"></script>
-<!-- api.js is the unified backend client (window.Api). relay-admin.js routes
-     all its /api/v1/* calls through Api.request (CLAUDE.md §3.2.0); it is
-     self-contained (its _base() falls back to location.pathname when core.js's
-     apiUrl() is absent, as it is on this standalone page). MUST load before
-     relay-admin.js. -->
-<script defer src="static/js/api.js?v=0.16.0"></script>
-<script defer src="static/js/relay-admin.js?v=0.16.0"></script>
+<!-- TOFU_ADMIN_ASSETS -->
 </body>
 </html>

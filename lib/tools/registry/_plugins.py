@@ -24,7 +24,7 @@ from lib.log import get_logger
 
 from lib.tools.registry._spec import (
     ToolSpec,
-    _TOOL_SPECS,
+    all_specs,
     register_tool_spec,
 )
 
@@ -107,7 +107,7 @@ def available_plugins() -> dict[str, list[str]]:
     Built-in specs are excluded.
     """
     out: dict[str, list[str]] = {}
-    for spec in _TOOL_SPECS:
+    for spec in all_specs():
         if spec.source == 'plugin' and spec.plugin_name:
             out.setdefault(spec.plugin_name, []).append(spec.key)
     return out

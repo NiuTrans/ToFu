@@ -146,12 +146,13 @@ async def stream_openai_chunks(task, model: str, requested_id: str = '',
     emitted_role = False
     cursor = 0
     task_id = task.get('id') or ''
+    from lib.task_replay import task_memory_replay_page
 
     try:
       while True:
-        with task['events_lock']:
-            new_events = list(task['events'][cursor:])
-            cursor = len(task['events'])
+        page = task_memory_replay_page(task, cursor)
+        new_events = page.events
+        cursor = page.next_cursor
 
         for ev in new_events:
             etype = ev.get('type', '')

@@ -116,6 +116,11 @@ def drain_and_inject_inbox(
                     messages.append({
                         'role':    'user',
                         'content': '\n\n'.join(_payloads),
+                        # Internal classification for compaction/query
+                        # extraction. Provider sanitization strips underscore
+                        # fields; the model still receives the same role/text.
+                        '_isInboxInject': True,
+                        '_containsHumanSteer': bool(_steer_items),
                     })
                     # Items already partitioned by the two drains above:
                     # ``_swarm_items`` (sub-agent results, carry agent_id)

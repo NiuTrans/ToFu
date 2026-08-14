@@ -22,6 +22,9 @@ we monkeypatch the SOURCE modules.
 """
 
 import sqlite3
+import threading
+import time
+from contextlib import contextmanager
 
 import pytest
 
@@ -44,6 +47,10 @@ def _make_db():
         ' trigger TEXT NOT NULL DEFAULT \'manual\', '
         ' ts INTEGER NOT NULL DEFAULT 0, '
         ' PRIMARY KEY (project_path, seq))')
+    conn.execute(
+        'CREATE TABLE scoped_sequences ('
+        ' namespace TEXT NOT NULL, scope_key TEXT NOT NULL, value INTEGER NOT NULL,'
+        ' PRIMARY KEY (namespace, scope_key))')
     conn.commit()
     return conn
 
@@ -51,7 +58,12 @@ def _make_db():
 @pytest.fixture
 def db(monkeypatch):
     conn = _make_db()
-    monkeypatch.setattr(pstat, 'get_thread_db', lambda *a, **k: conn)
+
+    @contextmanager
+    def _lease(*_a, **_k):
+        yield conn
+
+    monkeypatch.setattr(pstat, 'pooled_db', _lease)
     yield conn
     conn.close()
 
@@ -345,6 +357,52 @@ def test_get_status_view_force_warms_even_when_quiescent(db, monkeypatch):
     assert view['refreshing'] is True
     assert len(warm_calls) == 1
     assert warm_calls[0].get('force') is True and warm_calls[0].get('blocking') is False
+
+
+def test_background_warms_are_bounded_and_coalesced(monkeypatch):
+    """A commit burst must not spawn one LLM thread per event."""
+    gate = threading.Event()
+    two_active = threading.Event()
+    lock = threading.Lock()
+    calls = []
+    active = 0
+    peak = 0
+
+    def _blocking(path, *, trigger, force):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            calls.append((path, trigger, force))
+            if active >= 2:
+                two_active.set()
+        gate.wait(5)
+        with lock:
+            active -= 1
+
+    monkeypatch.setattr(pstat, '_build_status_snapshot_blocking', _blocking)
+    prefix = f'/bounded-{time.time_ns()}'
+    # More unique projects than the lane width prove the global cap; repeated
+    # updates for one project prove per-key coalescing.
+    for index in range(8):
+        pstat._schedule_background_snapshot(
+            f'{prefix}/{index}', trigger=f'event-{index}', force=False)
+    repeated = f'{prefix}/repeat'
+    pstat._schedule_background_snapshot(
+        repeated, trigger='first', force=False)
+    for index in range(20):
+        pstat._schedule_background_snapshot(
+            repeated, trigger=f'latest-{index}', force=index == 19)
+
+    assert two_active.wait(2), 'bounded lane did not start its two workers'
+    with lock:
+        assert peak == pstat._BACKGROUND_WORKERS == 2
+    gate.set()
+    assert pstat._wait_for_background_status(5), 'background lane did not drain'
+    repeated_calls = [call for call in calls if call[0] == repeated]
+    assert len(repeated_calls) == 1, (
+        'updates queued before execution should collapse to one latest pass')
+    assert repeated_calls[0][1:] == ('latest-19', True)
 
 
 # ════════════════════════════════════════════════════════════════════

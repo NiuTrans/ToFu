@@ -28,7 +28,11 @@ import time
 from dataclasses import dataclass
 from typing import List, Optional
 
-from lib.database import DOMAIN_SYSTEM, get_thread_db as get_db
+from lib.database import (
+    DOMAIN_SYSTEM,
+    get_thread_db as get_db,
+    write_transaction,
+)
 from lib.ids import short_id
 from lib.log import get_logger
 
@@ -121,8 +125,12 @@ def append_entry(
     note: str = '',
     ts: Optional[int] = None,
 ) -> LedgerEntry:
-    """Insert one ledger row. Caller is responsible for the surrounding
-    transaction (see :mod:`lib.billing.wallet`).
+    """Insert one ledger row with an owned/nested transaction boundary.
+
+    Wallet operations already hold an outer atomic transaction, so this nests
+    as a savepoint there. Direct maintenance/test callers get a complete
+    standalone commit instead of leaving a write pending for an unrelated
+    future operation.
 
     Validation:
       * ``kind`` must be in :data:`LEDGER_KINDS`.
@@ -136,14 +144,15 @@ def append_entry(
     led_id = _new_id()
     ts = ts if ts is not None else int(time.time())
     db = get_db(DOMAIN_SYSTEM)
-    db.execute(
-        'INSERT INTO billing_ledger '
-        '  (id, user_id, ts, amount_micro, kind, ref_type, ref_id, '
-        '   balance_after_micro, note) '
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        (led_id, user_id, ts, amount_micro, kind,
-         ref_type, ref_id, balance_after_micro, note),
-    )
+    with write_transaction(db, label='billing ledger append'):
+        db.execute(
+            'INSERT INTO billing_ledger '
+            '  (id, user_id, ts, amount_micro, kind, ref_type, ref_id, '
+            '   balance_after_micro, note) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (led_id, user_id, ts, amount_micro, kind,
+             ref_type, ref_id, balance_after_micro, note),
+        )
     return LedgerEntry(
         id=led_id, user_id=user_id, ts=ts,
         amount_micro=amount_micro, kind=kind,

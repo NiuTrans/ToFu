@@ -188,6 +188,8 @@ def get_oauth_status(provider: str) -> dict:
 
     stored = load_token(provider)
     authenticated = bool(stored and stored.get('access_token'))
+    from lib.oauth.outbound import managed_oauth_provider_status
+    provider_status = managed_oauth_provider_status(provider)
 
     return {
         'provider': provider,
@@ -195,6 +197,7 @@ def get_oauth_status(provider: str) -> dict:
         'error': flow.get('error'),
         'email': flow.get('email') or (stored.get('email', '') if stored else ''),
         'authenticated': authenticated,
+        **provider_status,
         'expire': stored.get('expire') if stored else None,
         # A page reload mid-flow re-renders the card from THIS payload alone.
         # Without the mode the UI cannot restore truthful instructions or the

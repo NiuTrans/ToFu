@@ -85,15 +85,14 @@ def update_conversation_fts(db, conv_id, search_text):
     Args:
         db: Open DB connection/cursor handle.
         conv_id: Conversation id whose FTS row to refresh.
-        search_text: Flattened search text (from ``build_search_text``);
-            falsy values are ignored.
+        search_text: Flattened search text (from ``build_search_text``). An
+            empty value removes any previously indexed terms for the row.
     """
-    if not search_text:
-        return
     from lib.database import _core
     if getattr(_core, '_BACKEND', 'sqlite') != 'sqlite':
         return
     try:
+        from lib.database import write_transaction
         # ``conversations_fts`` is a CONTENTLESS FTS5 table (content='').
         # In that mode the inverted index has no backing row to diff
         # against, so a plain ``INSERT OR REPLACE`` does NOT retract the
@@ -101,18 +100,25 @@ def update_conversation_fts(db, conv_id, search_text):
         # on top. After a conversation EDIT the OLD text would still MATCH
         # in Phase-1 FTS (a stale search hit). Explicitly DELETE the rowid's
         # index entry first, then insert the fresh tokens.
-        row = db.execute(
-            "SELECT rowid FROM conversations WHERE id = ?", (conv_id,)
-        ).fetchone()
-        if row is None:
-            return
-        rowid = row['rowid'] if isinstance(row, dict) else row[0]
-        db.execute("DELETE FROM conversations_fts WHERE rowid = ?", (rowid,))
-        db.execute(
-            "INSERT INTO conversations_fts (rowid, search_text) VALUES (?, ?)",
-            (rowid, search_text)
-        )
-        db.commit()
+        # The shared write boundary makes FTS refresh atomic on its own and a
+        # nested savepoint when a conversation repository already owns the
+        # outer blob+row transaction.  A failed derived-index refresh is then
+        # rolled back cleanly rather than leaving DELETE-without-INSERT state.
+        with write_transaction(db, label='conversation FTS refresh'):
+            row = db.execute(
+                "SELECT rowid FROM conversations WHERE id = ?", (conv_id,)
+            ).fetchone()
+            if row is None:
+                return
+            rowid = row['rowid'] if isinstance(row, dict) else row[0]
+            db.execute(
+                "DELETE FROM conversations_fts WHERE rowid = ?", (rowid,))
+            if search_text:
+                db.execute(
+                    "INSERT INTO conversations_fts (rowid, search_text) "
+                    "VALUES (?, ?)",
+                    (rowid, search_text)
+                )
     except Exception as e:
         logger.debug('[FTS] update failed for conv=%s (non-fatal): %s', conv_id, e)
 

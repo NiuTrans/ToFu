@@ -12,67 +12,8 @@ Covers improvements layered on top of the original BYO surface:
 
 import asyncio
 import os
-import sys
 import tempfile
 import unittest
-
-
-def _install_shim():
-    """Install the flask→quart import shim + PROVIDE_AUTOMATIC_OPTIONS.
-
-    This is SAFE to call at module-import time: it only rebinds
-    ``sys.modules['flask']`` and patches Quart's default_config. It does
-    NOT touch ``Request.get_json`` — that global clobber leaks across the
-    whole pytest session and corrupts every later native-async handler
-    (conversation/search PUTs persist empty bodies), so it lives in
-    ``_patch_sync_get_json`` and must be reverted per-test-class.
-    """
-    import quart
-    sys.modules['flask'] = quart
-    for attr in ('json', 'globals', 'helpers', 'wrappers', 'ctx'):
-        qs = f'quart.{attr}'
-        if qs in sys.modules:
-            sys.modules[f'flask.{attr}'] = sys.modules[qs]
-    # Newer Flask sansio (3.1+) reads config['PROVIDE_AUTOMATIC_OPTIONS']
-    # in add_url_rule, but the installed Quart dropped it from
-    # default_config → bare Quart(__name__) raises KeyError on
-    # construction. server.py patches this at import time; replicate it
-    # here so this module builds its own app standalone.
-    from quart import Quart
-    if 'PROVIDE_AUTOMATIC_OPTIONS' not in Quart.default_config:
-        Quart.default_config = {**Quart.default_config,
-                                'PROVIDE_AUTOMATIC_OPTIONS': True}
-
-
-def _patch_sync_get_json():
-    """Make ``Request.get_json`` sync-callable; return a restorer or None.
-
-    PROCESS-WIDE mutation — the caller MUST run the returned restorer on
-    teardown (e.g. via ``addClassCleanup``) or later async handlers break.
-    """
-    import inspect
-
-    from quart.wrappers import Request as _QR
-    if inspect.iscoroutinefunction(_QR.get_json):
-        _orig = _QR.get_json
-
-        def _sync_get_json(self, *a, **kw):
-            import asyncio as _a
-            coro = _orig(self, *a, **kw)
-            return _a.run(coro)
-        _QR.get_json = _sync_get_json
-
-        def _restore():
-            _QR.get_json = _orig
-        return _restore
-    return None
-
-
-# Install ONLY the import shim at module load time so any subsequent
-# `from routes.api_v1.providers import …` (including the inline imports
-# inside HeaderAllowlistTest) sees the patched flask. The get_json clobber
-# is applied per-class (with restoration) in setUpClass, NOT here.
-_install_shim()
 
 
 def _new_loop_run(coro):
@@ -144,13 +85,6 @@ class ModelsBYOSurfaceTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        _install_shim()
-        # Sync-callable Request.get_json for this class's standalone app,
-        # reverted after the class so the global patch never leaks into
-        # later native-async test modules.
-        _restore = _patch_sync_get_json()
-        if _restore is not None:
-            cls.addClassCleanup(_restore)
         cls._tmp = tempfile.TemporaryDirectory()
 
         from lib import api_keys, byo_providers
@@ -165,7 +99,8 @@ class ModelsBYOSurfaceTest(unittest.TestCase):
         os.environ['TUNNEL_TOKEN'] = 'test-no-real'
 
         from quart import Quart
-        cls.app = Quart(__name__)
+        cls.app = Quart(__name__, static_folder=None)
+        cls.app.config.setdefault('PROVIDE_AUTOMATIC_OPTIONS', True)
         cls.app.config['TESTING'] = True
         from routes.api_v1.auth import (
             attach_rate_headers, bearer_auth_before_request,

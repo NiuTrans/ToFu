@@ -95,6 +95,27 @@ stage 契约（`lib/production/stages.py` checkpoint）都是好的——**缺�
   仅程序化闸门，并在产物元数据里标记 `visual_qa: skipped`。
 - 模型选择走既有 provider 链（需图像输入能力）；零图像能力时自动跳过。
 
+在 VLM 之前另有确定性的 `lib/slides/layout_qa.py`：同一 HTML 预览在
+webfont 加载完成后读取每个文本节点的真实 `Range.getClientRects()`，逐页检查
+字形越出文本框与不同文本元素的实际行框碰撞。它不拿整个 bounds 相交冒充
+遮挡，因而能避开相邻但没有碰字的误报。由于 PowerPoint 与 Chromium 对同一
+CJK 字体可能选择不同的 ascent/descent 表，多行文本另保留最高半个 em 的
+Office 安全区；同时按 DOM/OOXML 层级检查**后置图片**是否进入这块安全区，
+捕获“Chrome 里差几像素没碰、PPT 里溢出后被图片盖住”的问题。确属品牌排版的装饰字符可在单元素上
+显式写 `allowOverlap: true`，但该标记不豁免溢出。findings 会带元素 ID 回到
+当前页面 YAML 的最小修复回路，候选只有在发现数下降时才落盘。
+
+### 3.4 生产内容内核 `lib/production/{research,contracts}.py`
+
+PPT 与视频共用的层不止字体和 VLM。两边现在消费同一种 evidence bundle：每张卡有
+稳定 `S#`、真实 URL、发布日期、检索车道与研究截止时间，并用同一个当前事实闸检查
+发布/预售/价格矛盾。月度（deck）和周度（news video）只是 freshness profile，不能
+各维护一套搜索实现。页/镜头也共用 `narrative_role + narrative_why`、素材
+`role/prompt`、`source_ids` 和结构化 quality finding 契约。
+
+边界保持严格：PPTD/OOXML/字形行框是静态空间 adapter；HyperFrames/TTS/时间轴是
+视频 adapter。共用内容内核不拥有媒介 renderer，避免“为了复用”把 PPTD 强塞进动效。
+
 ---
 
 ## 4. Epic B：对话内 PPT 能力 `lib/slides/`
@@ -135,6 +156,11 @@ deck/
 主题 token 可解析、媒体存在且禁越界（复用参考仓的路径安全规则：拒绝绝对路径
 与 `..`）。**schema 校验失败 = 作者阶段内修复，绝不到渲染期**。
 
+调用方给入的本地参考图也必须先收编进 `deck/media/`：公共配方边界把相对
+`workdir` 归一为绝对路径，将存在的本地图片按内容散列复制成 deck-relative
+引用；缺失或不支持的文件进入 `asset_findings`，不得把宿主绝对路径交给页作者。
+这样预览、视觉 QA 与 PPTX 导出读取的是同一份自包含资产，而不是各自猜路径。
+
 ### 4.3 渲染器 `lib/slides/render.py`（PPTD → 预览图）
 
 - PPTD 元素 → HTML/CSS 确定性映射（1280×720 画布，截图按 2x 出 2560×1440）。
@@ -160,23 +186,54 @@ deck/
   （或按 960×540pt=13.33×7.5in，导出尺寸随 deck.size）。
 - 切换动画：默认淡入淡出——导出后 zip/XML 后处理写入
   `<p:transition><p:fade/>`，并按 CT_Slide 子序校验（手法见 §2.6）。
-- 字体嵌入：v1 不嵌（目标机无该字体时 PowerPoint 自动替换）；v2 评估
-  fntdata 嵌入（OOXML `ppt/fonts/` + `embeddedFontLst`）。
-- 导出验收：ZIP 完整性 + slide 数 + transition 校验 + 用 DJI 金样做
+- 字体嵌入：按**实际文字 run × 实际样式槽**收集字符，只为真正用到的
+  regular/bold/italic/boldItalic 写 fntdata；每个字体用 FontTools 做 Unicode +
+  GSUB/GPOS 闭包子集，保留多语言 name 表与 fsType 权限，未用的主题/default
+  字体不进入包。只有一个源字重但实际按粗体使用时，同一最近源写入 bold 槽，
+  避免“字体已嵌入但 PowerPoint 仍报缺粗体”。`fsType` 禁止子集时保留全字体，
+  禁止轮廓嵌入时明确跳过。
+- 导出验收：ZIP 完整性 + presentation/slide XML 可解析 + slide 数 + transition
+  校验 + fntdata 字形/槽位检查 + 用 DJI 金样做
   「渲染图 vs PowerPoint 打开截图」人工抽审。
 
 ### 4.5 Recipe 阶段图（`lib/slides/recipe.py`）
 
 ```
-research?(有事实性主题时) → outline(分页大纲+每页读者任务)
+research(带 URL 的事实卡；不可用时明确 degraded)
+  → outline(分页大纲+每页读者任务+来源 ID+版式/素材计划)
   → design(定场景→设计圣经+主题 token+字体对)
-  → author_pages(逐页 LLM 写 .page；schema 校验内环；失败页降级=结构最简单的
-    标题+正文页，永不失败整部)
-  → assets(图搜/图生/下载入资产库)
+  → asset_preflight(主视觉图生并发+断点缓存，返回真实 deck 相对路径)
+  → author_pages(整套创意合同→逐页 LLM 写 .page；schema/素材使用校验内环；
+    失败页降级=结构最简单的标题+正文页，永不失败整部)
+  → assets(远程图下载并本地化)
   → render(整页预览 PNG)
-  → visual_qa(§3.3，findings→单页修复循环，≤2 轮)
+  → layout_qa(真实字形行框的溢出/碰撞检查→当前页最小修复→复测)
+  → visual_qa(单页清单 + 整套带页码接触表；可定位 findings→单页修复)
   → export(PPTX) → deliver(artifacts 登记)
 ```
+
+`research` 不是把用户的创意描述原样搜一次：它并发运行「近一月最新状态」、
+「官方来源候选」和「背景材料」三条互补车道，卡片保留 `published_at`、
+`query_lanes` 与整次研究的 `as_of`。`outline` 必须优先处理较新、真正第一方的
+证据，明确区分预售价、最终售价、传闻和估算；零 LLM gate 会拒绝完全未引用
+最新状态卡、遗漏已公布价格，或用“尚未公布”与新证据直接冲突的大纲。视觉 VLM
+只负责画面与素材语义，不能代替这条事实 QA 车道。金额信号另按独立 host 聚合，
+把「至少两站一致」与「单站摘要」分别送给大纲模型；精确数字须第一方或跨站一致，
+不能把一个二手摘要（例如 29.9 vs 29.99）静默修圆；预计/网传/猜测价格以及
+订金、意向金、优惠、补贴等附属金额不会进入价格共识。官方候选车道允许一跳
+深挖并优先保留 URL 含产品专名的页面，但这些只算候选提示，绝不自动盖章官方。
+事实 gate 的拒绝理由会注入
+下一次 outline retry，让重试执行明确修订而不是随机重抽。
+
+研究 checkpoint 使用 production evidence schema 版本和 6 小时共用 TTL，再按
+`month` profile 标识。版本变化或超时会原子失效 research
+及其全部下游 checkpoint，随后整条依赖后缀重跑，避免“新研究 + 旧大纲/页面/导出”
+混成一次产物；TTL 内的进程崩溃仍按原 checkpoint 恢复。
+
+`outline` 产物不是孤立页面数组：每页固定携带 `narrative_role`、
+`layout_archetype`、`density`、相邻页信息与 `asset_mode`。页作者仍按页隔离以控制
+成本/失败半径，但提示内含整套上下文；连续内容页的版式原型不得重复。主视觉义务
+在作者运行前物化，页面 YAML 若不引用已生成路径则继续修复，不能“生成了等于没用”。
 
 每阶段 checkpoint；`author_pages` 按页可重入。成本护栏：页数上限
 （默认 ≤20）、QA 轮上限、图像生成配额——与 motion_video 的拍板同型。
@@ -223,7 +280,7 @@ PPTD 是静态版式语言，没有时间轴/GSAP 动效语义；强融会两头
 | P1 | §3.1 字体库 + §3.2 圣经/主题 + motion_video 注入（§5.1-5.2） | 同一主题 A/B 出片对照；字体注册表测试（许可存证齐）；既有 motion 测试全绿 |
 | P2 | §3.3 视觉质检共享阶段（video 先接入） | 金样片逐场景 QA findings 落 job.json；降级路径（无多模态）实测；防退化/预算测试 |
 | P3 | slides v1：DSL+校验器+渲染器+导出器+produce_slides+对话产物卡 | DJI 金样 deck 过渲染器/导出器；自产 deck 在 PowerPoint/WPS 打开人工验收；stage checkpoint 杀进程重入实测；API 信封契约测试 |
-| P4 | 原生 chart、PPTX→PPTD 导入（模板复刻）、字体嵌入、对话编辑回路打磨 | 另起设计评审 |
+| P4 | 原生 chart、PPTX→PPTD 导入（模板复刻）、按实际字形/样式槽子集嵌入、确定性文字碰撞闸、对话编辑回路打磨 | PPTX 可回读；子集字符覆盖；未用字体不进包；金样 layout findings=0 |
 
 **风险登记：**
 - 字体许可证是 P1 硬门槛——核验不过的字体宁可缺位。

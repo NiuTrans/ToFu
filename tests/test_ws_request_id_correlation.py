@@ -2,7 +2,7 @@
 
 Why this exists
 ---------------
-Every ``fetch`` from ``static/js/api.js`` sends ``X-Request-ID``, and
+Every ``fetch`` from the Vite transport sends ``X-Request-ID``, and
 ``server.py``'s ``before_request`` adopts it so all log lines for the request
 carry the client's id. The ``/api/push`` WebSocket was the ONE transport left
 outside that axis: Quart's ``before_request`` does not run on WS routes, and a
@@ -42,7 +42,7 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 PUSH_PY = os.path.join(ROOT, 'routes', 'push.py')
-PUSH_JS = os.path.join(ROOT, 'static', 'js', 'push.js')
+PUSH_JS = os.path.join(ROOT, 'frontend', 'src', 'runtime', 'app-runtime.js')
 
 
 def _push_py_src() -> str:
@@ -128,7 +128,7 @@ def test_client_puts_the_rid_on_the_socket_url():
     with open(PUSH_JS, encoding='utf-8') as fh:
         js = fh.read()
     assert '_rid=' in js, (
-        'static/js/push.js::_buildUrl must append `_rid=<id>` to the WS URL; '
+        'the migrated push transport must append `_rid=<id>` to the WS URL; '
         'without it the server mints its own and the client keeps no join key.'
     )
     assert 'encodeURIComponent' in js, (

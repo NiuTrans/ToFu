@@ -51,6 +51,7 @@ class CostBreakdown:
     margin_micro: int           # added on top of base
     matched_model: str          # model id the cost engine priced
     components: dict            # {'input': µ, 'output': µ, 'cache_read': µ, ...}
+    snapshot: dict              # immutable/explainable pricing decision
 
 
 def _apply_margin(base_micro: int, margin: float) -> int:
@@ -78,6 +79,7 @@ def compute_request_cost(
     reasoning_tokens: int = 0,
     provider_id: str | None = None,
     margin: float = -1.0,
+    raw_usage: dict | None = None,
 ) -> CostBreakdown:
     """Compute the cost of a single completed LLM request, in micro-credits.
 
@@ -114,7 +116,7 @@ def compute_request_cost(
     #   instead of 4000 — 52500µ vs the displayed 37500µ). synthesize_usage
     #   picks the spelling that preserves the scalars' meaning.
     from lib.cost import synthesize_usage
-    usage = synthesize_usage(
+    usage = dict(raw_usage) if isinstance(raw_usage, dict) else synthesize_usage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cache_read_tokens=cache_read_tokens,
@@ -141,6 +143,12 @@ def compute_request_cost(
         margin_micro=margin_micro,
         matched_model=model or '',
         components=components,
+        snapshot={
+            **dict((cc or {}).get('pricingSnapshot') or {}),
+            'componentsMicro': dict(components),
+            'baseMicro': base, 'marginMicro': margin_micro,
+            'totalMicro': base + margin_micro,
+        },
     )
 
 

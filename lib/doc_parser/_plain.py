@@ -52,8 +52,17 @@ def _extract_plaintext(file_bytes: bytes, filename: str, limit: int) -> dict:
     warnings = []
     text = None
 
-    # Try UTF-8 first, then common fallbacks
-    for encoding in ('utf-8', 'utf-8-sig', 'gbk', 'gb18030', 'latin-1'):
+    # BOM-aware Unicode first. UTF-16/32 files otherwise contain many NULs and
+    # latin-1 would "successfully" turn them into mojibake before a better
+    # decoder had a chance.
+    if file_bytes.startswith((b'\xff\xfe\x00\x00', b'\x00\x00\xfe\xff')):
+        candidates = ('utf-32', 'utf-8', 'gb18030')
+    elif file_bytes.startswith((b'\xff\xfe', b'\xfe\xff')):
+        candidates = ('utf-16', 'utf-8', 'gb18030')
+    else:
+        candidates = ('utf-8-sig', 'utf-8', 'gb18030', 'gbk')
+
+    for encoding in candidates:
         try:
             text = file_bytes.decode(encoding)
             if encoding not in ('utf-8', 'utf-8-sig'):
@@ -62,6 +71,28 @@ def _extract_plaintext(file_bytes: bytes, filename: str, limit: int) -> dict:
         except (UnicodeDecodeError, LookupError) as _e_audit:
             logger.debug('[doc_parser] _extract_plaintext caught %s: %s', type(_e_audit).__name__, _e_audit)
             continue
+
+    # charset-normalizer is already a transitive dependency on most installs
+    # and handles Shift-JIS/Big5/Windows code pages better than guessing. It is
+    # optional so a minimal offline install still works.
+    if text is None:
+        try:
+            from charset_normalizer import from_bytes
+            best = from_bytes(file_bytes).best()
+            if best is not None:
+                text = str(best)
+                logger.debug('[DocParser] Decoded %s with charset-normalizer (%s)',
+                             filename, getattr(best, 'encoding', '?'))
+        except Exception as exc:
+            logger.debug('[DocParser] charset-normalizer unavailable/failed: %s', exc)
+
+    if text is None:
+        try:
+            text = file_bytes.decode('latin-1')
+            warnings.append('Encoding was uncertain; decoded as latin-1')
+        except UnicodeDecodeError as exc:
+            logger.debug('[DocParser] latin-1 fallback decode failed: %s', exc)
+            text = None
 
     if text is None:
         # Last resort: lossy decode

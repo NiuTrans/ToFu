@@ -213,7 +213,9 @@ win from the completion refactor to the whole event stream.)
 | Lifecycle | `state`, `phase`, `done`, `error`, `retry_reset` | `state` = full rebuild of the live message; `done` projects `committedMessage` verbatim; `retry_reset` clears content+thinking+rounds; `error` sets error envelope |
 | Content | `delta`, `delta_reset` | append content/thinking; `delta_reset` clears prose (keeps rounds) |
 | Tool | `tool_start`, `tool_progress`, `tool_result`, `tool_complete`, `tool_compacted` | open/fill/close a tool-round entry on the message |
-| Context | `round_usage`, `round_committed`, `messages_snapshot`, `compaction(_done)`, `memory_prefetch`, `preferences_applied`, `preference_learned`, `related_conversations`, `project_external_edit`, `workspace_root_added` | provenance chips/segments on the message |
+| Context | `round_usage`, `round_committed`, `messages_snapshot`, `compaction(_done)`, `memory_prefetch`, `preferences_applied`, `preference_learned`, `related_conversations`, `workspace_root_added` | provenance chips/segments on the message |
+
+*(`project_external_edit` stays on the wire as a pure file-history audit record but is deliberately NOT rendered — the drift toast advertised an undo the UI had no path for. Its consumer is the file-history timeline, not the user.)*
 | Interaction | `human_guidance_request`, `write_approval_request`, `approval_required`, `stdin_request`, `stdin_resolved` | render a pending-input affordance; `requires_response=True` |
 | Endpoint / Swarm / Autopilot / Presence / Steer | `endpoint_*`, `swarm_*`, `autopilot_*`, `presence`, `peer_inbox_inject`, `user_steer_inject` | fold into the message's panels / timeline chips |
 | Transport | `ping`, `sse_timeout` | not rendered (`TRANSPORT_TYPES`) |

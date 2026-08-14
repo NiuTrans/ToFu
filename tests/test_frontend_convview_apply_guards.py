@@ -66,18 +66,29 @@ Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q \\
 
 from __future__ import annotations
 
-import glob
 import os
 import re
 
 import pytest
 
-from tests._jsdom import run_harness, JS_DIR, ROOT
+from tests._jsdom import run_harness, ROOT
+from tests._runtime_sections import (
+    runtime_section,
+    runtime_section_names,
+    runtime_section_path,
+)
 
 pytestmark = pytest.mark.unit
 
-CONV_VIEW = os.path.join(JS_DIR, 'conv_view.js')
+CONV_VIEW = runtime_section_path('conv_view.js')
+MAIN_JS = runtime_section_path('main.js')
 STYLES = os.path.join(ROOT, 'static', 'styles.css')
+
+
+def _runtime_sources():
+    """Yield migrated runtime sections with their former diagnostic labels."""
+    for name in runtime_section_names():
+        yield f'static/js/{name}', runtime_section(name)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -400,7 +411,7 @@ def _is_scan_exempt_artifact(base: str) -> bool:
     * ``feature-<8hex>.js`` — the deferred-feature content-hashed runtime
       artifacts (Epic-E deferral bundles), gitignored build outputs in the
       SAME class as bundle-* (.gitignore:163-167). Anchored to the exact
-      8-hex shape so the tracked SOURCE ``feature-loader.js`` never matches.
+      8-hex shape so the tracked SOURCE ``feature-bridge.js`` never matches.
     """
     if base.endswith('.nc_copy.js') or base.startswith('bundle-'):
         return True
@@ -478,14 +489,10 @@ def test_stream_seg_narration_gone_from_production_js():
     a query selector — both would resurrect the fork).
     """
     offenders = []
-    for path in glob.glob(os.path.join(JS_DIR, '**', '*.js'), recursive=True):
-        base = os.path.basename(path)
-        if _is_scan_exempt_artifact(base):
-            continue
-        with open(path, encoding='utf-8') as f:
-            code = _strip_js_comments(f.read())
+    for rel, source in _runtime_sources():
+        code = _strip_js_comments(source)
         if _RETIRED_TOKEN in code:
-            offenders.append(os.path.relpath(path, ROOT))
+            offenders.append(rel)
     assert not offenders, (
         'retired class `stream-seg-narration` reappeared in production JS '
         'CODE (comments excluded): ' + ', '.join(offenders) +
@@ -546,8 +553,7 @@ def test_no_convview_missing_raw_fallbacks():
     """
     offenders = []
     for rel in _FALLBACK_FILES:
-        with open(os.path.join(ROOT, rel), encoding='utf-8') as f:
-            code = _strip_js_comments(f.read())
+        code = _strip_js_comments(runtime_section(rel.removeprefix('static/js/')))
         if re.search(r'typeof\s+window\.ConvView\.', code):
             offenders.append(f'{rel}: typeof-guard on window.ConvView')
         if re.search(r'\}\s*else[^{]*\{[^}]*insertAdjacentHTML[^;]*_streamingBubbleHTML',
@@ -572,15 +578,10 @@ def test_full_repaints_route_through_replaceAll():
     (chat_render.js) — named individually, no pattern exemption.
     """
     offenders = []
-    for path in glob.glob(os.path.join(JS_DIR, '**', '*.js'), recursive=True):
-        base = os.path.basename(path)
-        if _is_scan_exempt_artifact(base):
-            continue
-        rel = os.path.relpath(path, ROOT)
+    for rel, source in _runtime_sources():
         if rel in _SEAM_FILES:
             continue
-        with open(path, encoding='utf-8') as f:
-            code = _strip_js_comments(f.read())
+        code = _strip_js_comments(source)
         # strings hold no CALLS — for a call-site scan, drop string contents
         code = re.sub(r'"(?:\\.|[^"\\])*"', '""', code)
         code = re.sub(r"'(?:\\.|[^'\\])*'", "''", code)
@@ -654,7 +655,7 @@ def test_boot_check_fires_when_convview_missing():
         output = run_harness(
             target_js=capture_path,
             body_js=_boot_body(_BOOT_ASSERT_FIRES),
-            extra_targets=[os.path.join(JS_DIR, 'main.js')],
+            extra_targets=[MAIN_JS],
             min_pass=3,
             label='boot-check-fires',
         )
@@ -683,7 +684,7 @@ def test_NEUTER_boot_check_silent_when_present():
         output = run_harness(
             target_js=capture_path,
             body_js=body,
-            extra_targets=[os.path.join(JS_DIR, 'main.js')],
+            extra_targets=[MAIN_JS],
             min_pass=2,
             label='boot-check-neuter',
         )
@@ -698,7 +699,7 @@ def test_NEUTER_boot_check_silent_when_present():
 # ⑥ §7 — streamBufs retirement (static guards)
 # ════════════════════════════════════════════════════════════════════
 
-_STREAM_SESSION = os.path.join(JS_DIR, 'ui', 'stream_session.js')
+_STREAM_SESSION = runtime_section_path('ui/stream_session.js')
 _SESSION_WRITER_ALLOWLIST = {
     'static/js/ui/sse_pipeline.js',       # PHASE handler + delta phase mgmt
     'static/js/ui/sse_poll_fallback.js',  # poll truth for phase
@@ -715,14 +716,10 @@ def test_streambufs_fully_retired():
     anti-treadmill: any new buffer access anywhere fails CI.
     """
     offenders = []
-    for path in glob.glob(os.path.join(JS_DIR, '**', '*.js'), recursive=True):
-        base = os.path.basename(path)
-        if _is_scan_exempt_artifact(base):
-            continue
-        with open(path, encoding='utf-8') as f:
-            code = _strip_js_comments(f.read())
+    for rel, source in _runtime_sources():
+        code = _strip_js_comments(source)
         if re.search(r'\bstreamBufs\b', code):
-            offenders.append(os.path.relpath(path, ROOT))
+            offenders.append(rel)
     assert not offenders, (
         'streamBufs resurrected in production JS code: ' + ', '.join(offenders)
         + ' — the §7 retirement deleted it (content/thinking/rounds → the '
@@ -806,13 +803,8 @@ def test_stream_session_keys_are_phase_only():
         r'streamSessions\.get\([^)]*\)', r'getStreamSession\([^)]*\)',
         r'\b_sess\b', r'\bsess\b', r'\bsession\b', r'\bSess\b',
     )
-    for path in glob.glob(os.path.join(JS_DIR, '**', '*.js'), recursive=True):
-        base = os.path.basename(path)
-        if _is_scan_exempt_artifact(base):
-            continue
-        rel = os.path.relpath(path, ROOT)
-        with open(path, encoding='utf-8') as f:
-            code = _strip_js_comments(f.read())
+    for rel, source in _runtime_sources():
+        code = _strip_js_comments(source)
         # (3) alias data-flow closure: collect session aliases first.
         aliases = _collect_session_aliases(code)
         all_exprs = list(sess_exprs) + [r'\b' + re.escape(a) + r'\b'
@@ -845,15 +837,10 @@ def test_stream_session_reader_surface_pinned():
     to the allowlist AND the doc header in the same commit).
     """
     readers = set()
-    for path in glob.glob(os.path.join(JS_DIR, '**', '*.js'), recursive=True):
-        base = os.path.basename(path)
-        if _is_scan_exempt_artifact(base):
-            continue
-        rel = os.path.relpath(path, ROOT)
+    for rel, source in _runtime_sources():
         if rel == 'static/js/ui/stream_session.js':
             continue
-        with open(path, encoding='utf-8') as f:
-            code = _strip_js_comments(f.read())
+        code = _strip_js_comments(source)
         if re.search(r'\bstreamSessions\.get\s*\(|\bgetStreamSession\s*\(', code):
             readers.add(rel)
     assert readers == _SESSION_READER_ALLOWLIST, (
@@ -917,25 +904,18 @@ def test_stream_session_module_contract():
         'would resurrect a session the paint readers treat as "stream exists"')
     # Writer allowlist: setStreamPhase called only from the three writers.
     writers = []
-    for path in glob.glob(os.path.join(JS_DIR, '**', '*.js'), recursive=True):
-        base = os.path.basename(path)
-        if _is_scan_exempt_artifact(base):
-            continue
-        with open(path, encoding='utf-8') as f:
-            code = _strip_js_comments(f.read())
+    for rel, source in _runtime_sources():
+        code = _strip_js_comments(source)
         if re.search(r'\bsetStreamPhase\s*\(', code):
-            rel = os.path.relpath(path, ROOT)
             if rel != 'static/js/ui/stream_session.js':
                 writers.append(rel)
     assert sorted(writers) == sorted(_SESSION_WRITER_ALLOWLIST), (
         f'setStreamPhase writer surface changed: {sorted(writers)} != '
         f'{sorted(_SESSION_WRITER_ALLOWLIST)} — the session is written only '
         'by the PHASE handler, the poll fallback, and the VU delta path')
-    # Bundle membership (the §3.2.1 silent-no-op trap).
-    with open(os.path.join(ROOT, 'lib', 'js_bundler.py'), encoding='utf-8') as f:
-        bundler = f.read()
-    assert 'ui/stream_session.js' in bundler, (
-        'ui/stream_session.js missing from _BUNDLE_FILES — it would silently '
+    # Runtime membership (the §3.2.1 silent-no-op trap).
+    assert 'ui/stream_session.js' in runtime_section_names(), (
+        'ui/stream_session.js missing from the Vite runtime — it would silently '
         'no-op in production')
 
 
@@ -956,7 +936,7 @@ def test_stream_session_module_contract():
 # static pins make a same-class stale replay fail CI instantly.
 # ════════════════════════════════════════════════════════════════════
 
-_STREAMING_RENDER = os.path.join(JS_DIR, 'ui', 'streaming_render.js')
+_STREAMING_RENDER = runtime_section_path('ui/streaming_render.js')
 
 # The MODERN public surface other files call into (exact parameter names —
 # a stale replay keeps the function NAME but reverts the signature, which is

@@ -11,9 +11,8 @@ ArrayBuffer through its own proxy-correct URL and hands pdf.js
 ``getDocument({data})`` instead of ``getDocument({url})``, bypassing the
 transport entirely.
 
-Staged DORMANT behind ``localStorage['tofu_paper_pdf_data']==='1'`` (a no-build
-console flip). This harness drives the REAL ``_loadPaperPdf`` from
-``static/js/paper-reader.js`` and asserts:
+The explicit data-mode switch remains available for hostile proxies. This
+harness compiles the native PDF owner and asserts:
   • flag OFF → pdf.js ``getDocument`` receives the URL string (default path).
   • flag ON  → pdf.js ``getDocument`` receives ``{data: <bytes>}`` fetched by
     the client, byte-matching what ``fetch`` returned.
@@ -31,9 +30,14 @@ import tempfile
 
 import pytest
 
+from tests._esm_feature_harness import compile_feature_owner
+
 pytestmark = pytest.mark.unit
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VIEWER_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'pdf-viewer.ts')
+ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
 
 
 def _node_deps_available():
@@ -62,9 +66,9 @@ global.localStorage = _lsShim;
 try { Object.defineProperty(dom.window, 'localStorage', { value: _lsShim, configurable: true }); } catch (e) {}
 
 // Minimal deps _loadPaperPdf touches on the pre-render path.
-global.apiUrl = (u) => u;                 // identity → canonical /api/... path
-global.debugLog = () => {};
-global.escapeHtml = (s) => String(s == null ? '' : s);
+global.apiUrl = window.apiUrl = (u) => u; // identity → canonical /api/... path
+global.debugLog = window.debugLog = () => {};
+global.escapeHtml = window.escapeHtml = (s) => String(s == null ? '' : s);
 global._saveActivePaperState = () => {};
 global._getActivePaperEntry = () => null;
 global._persistPaperEntry = () => {};
@@ -107,7 +111,7 @@ function _makeDoc(kind) {
     destroy: () => {},
   };
 }
-global.pdfjsLib = {
+global.pdfjsLib = window.pdfjsLib = {
   getDocument: (param) => {
     captured.push(param);
     const isData = (param && typeof param === 'object' && !!param.data);
@@ -130,14 +134,14 @@ global._autoRefitIfOverflowing = () => {};
 global._paperViewerPadX = () => 0;
 global._updateZoomLabel = () => {};
 
-// The pdf.js load/render/zoom pipeline was extracted to paper/pdf_viewer.js
-// (Epic E cut #5). Eval it BEFORE the core file in the same scope (mirrors the
-// _DEFERRED_FILES concatenation order) so _loadPaperPdf / _openPaperPdfDoc /
-// _renderAllPages / _fetchPdfArrayBuffer / _shouldFetchPdfAsData resolve.
-const _viewerSrc = fs.readFileSync(path.join(ROOT, 'static', 'js', 'paper', 'pdf_viewer.js'), 'utf8');
+// Load the compiled native PDF owner through the same injected private service
+// table used by the production Vite entry.
+const _viewerSrc = fs.readFileSync(process.argv[3], 'utf8');
 (0, eval)(_viewerSrc);
-const src = fs.readFileSync(path.join(ROOT, 'static', 'js', 'paper-reader.js'), 'utf8');
-(0, eval)(src);  // indirect eval → defs land on globalThis (mirrors the bundle)
+for (const name of ['_loadPaperPdf', '_renderAllPages', '_fetchPdfArrayBuffer',
+  '_shouldFetchPdfAsData', '_openPaperPdfDoc', '_maybeReopenViaData']) {
+  if (typeof window[name] === 'function') global[name] = window[name];
+}
 
 const URL_IN = '/api/paper/pdf/arxiv_x.pdf';
 const out = {};
@@ -194,12 +198,12 @@ out.openfn_exists = (typeof _openPaperPdfDoc === 'function');
 """
 
 
-def _run_harness():
+def _run_harness(viewer_js: str):
     with tempfile.NamedTemporaryFile('w', suffix='.js', delete=False, dir=ROOT) as f:
         harness = f.name
         f.write(_HARNESS)
     try:
-        proc = subprocess.run(['node', harness, ROOT],
+        proc = subprocess.run(['node', harness, ROOT, viewer_js],
                               capture_output=True, text=True, timeout=60)
     finally:
         try:
@@ -213,10 +217,7 @@ def _run_harness():
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_paper_pdf_data_gate():
-    out = _run_harness()
+def _assert_data_gate(out):
     assert '_threw' not in out, f'harness threw: {out.get("_threw")}'
     assert out['loadfn_exists'], '_loadPaperPdf not defined'
     assert out['fetch_helper_exists'], '_fetchPdfArrayBuffer not defined'
@@ -259,9 +260,11 @@ def test_paper_pdf_data_gate():
         'render-retry: after the {data} re-render, no per-page error should remain in the DOM'
 
 
-if __name__ == '__main__':
-    if _node_deps_available():
-        test_paper_pdf_data_gate()
-        print('\033[32m✓ paper pdf data gate\033[0m')
-    else:
-        print('\033[33m• jsdom not installed — skipped\033[0m')
+@pytest.mark.skipif(not _node_deps_available() or not os.path.isfile(ESBUILD),
+                    reason='node + jsdom + esbuild dev-deps not installed')
+def test_vite_pdf_viewer_preserves_data_fallback_contract(tmp_path):
+    built = tmp_path / 'paper-pdf-viewer.js'
+    compiled = compile_feature_owner(ESBUILD, VIEWER_TS, built, tmp_path)
+    assert compiled.returncode == 0, compiled.stderr
+    out = _run_harness(str(built))
+    _assert_data_gate(out)

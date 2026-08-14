@@ -19,10 +19,9 @@ half-built, and never wired up. This module is the missing half.
 
 DESIGN NOTES
 ------------
-**One writer, not a second one.** Rows go through
-``lib.database._core_schema.upsert(db, PAPER_REPORTS, …)`` — the exact call
-:func:`lib.paper.insight_engine._run._persist_insight` uses. Same schema, same
-upsert semantics, same PG/SQLite bridge. No hand-rolled SQL lives here.
+**One writer, not a second one.** Rows go through versioned Storage Sidecar
+operations. The Sidecar owns the same legacy-compatible ``paper_reports``
+shape on SQLite and PostgreSQL; this module never opens a database connection.
 
 **Identity: a direction is not a paper.** ``paper_reports.paper_hash`` is
 content-addressable for papers. A research *direction* is free text a human
@@ -50,8 +49,8 @@ Persistence failing must never take down a run that already did the work.
 from __future__ import annotations
 
 import hashlib
-import json
 import time
+import uuid
 
 from lib.log import get_logger
 
@@ -86,25 +85,28 @@ def research_direction_hash(direction) -> str:
 
 def _upsert_row(phash: str, lang_key: str, report: str, meta: dict,
                 model: str) -> None:
-    """Write one row through the report engine's canonical upsert path.
+    """Write one row through the Sidecar's research artifact operation.
 
     Isolated as its own function so the failure posture above is testable
     (a guard patches this to raise and asserts the artifact still survives).
     """
-    from lib.database import get_thread_db
-    from lib.database._core_schema import PAPER_REPORTS, upsert
-    upsert(get_thread_db(), PAPER_REPORTS, {
+    _storage(write=True).command('research.artifact.upsert', {
         'paper_hash': phash,
-        'lang': lang_key,
+        'lang_key': lang_key,
         'report': report or '',
         'model': model or '',
-        'meta': json.dumps(meta, ensure_ascii=False),
+        'meta': meta,
         'created_at': int(time.time()),
-    }, retry=True)
+    }, f'research.artifact.upsert:{uuid.uuid4().hex}')
+
+
+def _storage(*, write: bool = False):
+    from lib.storage import get_storage_client
+    return get_storage_client(write=write)
 
 
 def persist_survey(direction: str, lang: str, survey_md: str, open_gaps: dict,
-                   *, model: str = '') -> bool:
+                   *, usage: dict | None = None, model: str = '') -> bool:
     """Persist a survey + its open-gap map under ``survey:<lang>``.
 
     The gap map is R3's frozen input contract, so it is stored verbatim in
@@ -121,9 +123,11 @@ def persist_survey(direction: str, lang: str, survey_md: str, open_gaps: dict,
                        'a blank direction identity')
         return False
     try:
-        _upsert_row(phash, survey_lang_key(lang), survey_md or '',
-                    {'kind': 'survey', 'direction': direction,
-                     'open_gaps': open_gaps or {}}, model)
+        meta = {'kind': 'survey', 'direction': direction,
+                'open_gaps': open_gaps or {}}
+        if usage:
+            meta['usage'] = usage
+        _upsert_row(phash, survey_lang_key(lang), survey_md or '', meta, model)
     except Exception as e:
         logger.error('[Research:Persist] survey persist FAILED for %.60s: %s',
                      direction, e, exc_info=True)
@@ -159,6 +163,10 @@ def persist_ideate(direction: str, lang: str, artifact: dict, *,
             'accepted': accepted, 'rejected': rejected,
             'threshold': art.get('threshold'),
             'gate_reached': art.get('gate_reached')}
+    if isinstance(art.get('evaluation'), dict):
+        meta['evaluation'] = art['evaluation']
+    if art.get('usage'):
+        meta['usage'] = art['usage']
     if art.get('degraded'):
         meta['degraded'] = True
         meta['degraded_reason'] = art.get('degraded_reason') or ''
@@ -221,49 +229,17 @@ def list_research_directions(limit: int = 50) -> list:
           'gate_reached', 'degraded', 'has_survey', 'has_ideas'}, ...]
     """
     try:
-        from lib.database import get_thread_db
-        rows = get_thread_db().execute(
-            "SELECT lang, meta, created_at FROM paper_reports "
-            "WHERE lang LIKE 'survey:%' OR lang LIKE 'ideate:%' "
-            'ORDER BY created_at DESC').fetchall()
+        try:
+            normalized_limit = max(1, min(1000, int(limit or 50)))
+        except (TypeError, ValueError) as e:
+            logger.debug('[Research:Persist] invalid direction limit: %s', e)
+            normalized_limit = 50
+        rows = _storage().query(
+            'research.directions.list', {'limit': normalized_limit})
     except Exception as e:
         logger.warning('[Research:Persist] list failed: %s', e)
         return []
-
-    folded: dict = {}
-    for row in rows or []:
-        try:
-            meta = json.loads(row['meta'] or '{}')
-        except Exception as e:
-            logger.warning('[Research:Persist] unparseable meta on %s: %s',
-                           row['lang'], e)
-            continue
-        direction = (meta.get('direction') or '').strip()
-        if not direction:
-            # Pre-contract row with no recorded text: it cannot be addressed
-            # by a human, so listing it would only offer a dead link.
-            continue
-        lang_key = row['lang'] or ''
-        lang = lang_key.split(':', 1)[1] if ':' in lang_key else 'en'
-        entry = folded.setdefault((research_direction_hash(direction), lang), {
-            'direction': direction, 'lang': lang,
-            'created_at': int(row['created_at'] or 0),
-            'accepted': 0, 'rejected': 0, 'gate_reached': '',
-            'degraded': False, 'has_survey': False, 'has_ideas': False,
-        })
-        entry['created_at'] = max(entry['created_at'],
-                                  int(row['created_at'] or 0))
-        if meta.get('kind') == 'survey':
-            entry['has_survey'] = True
-        elif meta.get('kind') == 'ideate':
-            entry['has_ideas'] = True
-            entry['accepted'] = len(meta.get('accepted') or [])
-            entry['rejected'] = len(meta.get('rejected') or [])
-            entry['gate_reached'] = meta.get('gate_reached') or ''
-            entry['degraded'] = bool(meta.get('degraded'))
-
-    out = sorted(folded.values(), key=lambda e: e['created_at'], reverse=True)
-    return out[:max(1, int(limit or 50))]
+    return rows if isinstance(rows, list) else []
 
 
 def load_research_artifacts(direction: str, lang: str = 'en') -> dict:
@@ -281,39 +257,32 @@ def load_research_artifacts(direction: str, lang: str = 'en') -> dict:
          'threshold': float|None, 'gate_reached': str,
          'degraded': bool, 'degraded_reason': str}
     """
-    from lib.paper.ideate import ideate_lang_key
-    from lib.paper.survey import survey_lang_key
-
     out = {'found': False, 'direction': direction, 'lang': lang,
            'survey_md': '', 'open_gaps': {}, 'accepted': [], 'rejected': [],
            'threshold': None, 'gate_reached': '', 'degraded': False,
-           'degraded_reason': ''}
+           'degraded_reason': '', 'evaluation': {}, 'usage': {}}
     phash = research_direction_hash(direction)
     if not phash:
         return out
     try:
-        from lib.database import get_thread_db
-        db = get_thread_db()
-        rows = db.execute(
-            'SELECT lang, report, meta FROM paper_reports WHERE paper_hash=? '
-            'AND lang IN (?, ?)',
-            (phash, survey_lang_key(lang), ideate_lang_key(lang))).fetchall()
+        rows = _storage().query('research.artifacts.get', {
+            'paper_hash': phash, 'lang': lang,
+        })
     except Exception as e:
         logger.warning('[Research:Persist] lookup failed for %.60s: %s',
                        direction, e)
         return out
 
+    stage_usage = {'survey': {}, 'ideate': {}, 'evaluate': None}
     for row in rows or []:
-        try:
-            meta = json.loads(row['meta'] or '{}')
-        except Exception as e:
-            logger.warning('[Research:Persist] unparseable meta on %s: %s',
-                           row['lang'], e)
+        meta = row.get('meta') if isinstance(row, dict) else None
+        if not isinstance(meta, dict):
             continue
         out['found'] = True
         if meta.get('kind') == 'survey':
-            out['survey_md'] = row['report'] or ''
+            out['survey_md'] = row.get('report') or ''
             out['open_gaps'] = meta.get('open_gaps') or {}
+            stage_usage['survey'] = meta.get('usage') or {}
         elif meta.get('kind') == 'ideate':
             out['accepted'] = meta.get('accepted') or []
             out['rejected'] = meta.get('rejected') or []
@@ -321,4 +290,13 @@ def load_research_artifacts(direction: str, lang: str = 'en') -> dict:
             out['gate_reached'] = meta.get('gate_reached') or ''
             out['degraded'] = bool(meta.get('degraded'))
             out['degraded_reason'] = meta.get('degraded_reason') or ''
+            stage_usage['ideate'] = meta.get('usage') or {}
+            if isinstance(meta.get('evaluation'), dict):
+                out['evaluation'] = meta['evaluation']
+                stage_usage['evaluate'] = meta['evaluation'].get('usage') or {}
+    if any(stage_usage.values()):
+        from lib.research.telemetry import aggregate_research_usage
+        out['usage'] = aggregate_research_usage(stage_usage['survey'],
+                                                 stage_usage['ideate'],
+                                                 stage_usage['evaluate'])
     return out

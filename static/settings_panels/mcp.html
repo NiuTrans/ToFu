@@ -8,14 +8,14 @@
             </div>
             <div class="mcp-store-header-spacer"></div>
             <div class="skills-scope-tabs" id="mcpScopeTabs">
-              <button class="skills-scope-tab active" data-scope="all" onclick="_mcpSetScope('all')" data-i18n="mcp.scopeAll">全部</button>
-              <button class="skills-scope-tab" data-scope="installed" onclick="_mcpSetScope('installed')" data-i18n="mcp.scopeInstalled">已安装</button>
-              <button class="skills-scope-tab" data-scope="available" onclick="_mcpSetScope('available')" data-i18n="mcp.scopeAvailable">未安装</button>
+              <button class="skills-scope-tab active" data-scope="all" data-tofu-action="_mcpSetScope('all')" data-i18n="mcp.scopeAll">全部</button>
+              <button class="skills-scope-tab" data-scope="installed" data-tofu-action="_mcpSetScope('installed')" data-i18n="mcp.scopeInstalled">已安装</button>
+              <button class="skills-scope-tab" data-scope="available" data-tofu-action="_mcpSetScope('available')" data-i18n="mcp.scopeAvailable">未安装</button>
             </div>
-            <button class="btn btn-secondary btn-xs" id="mcpAddCustomBtn" onclick="_mcpOpenAddModal()" data-i18n="mcp.addCustom">+ 添加</button>
-            <button class="btn btn-primary btn-xs mcp-connect-all-btn" id="mcpConnectAllBtn" onclick="_mcpConnectAll()" style="display:none;" data-i18n="settings.connectAll">全部连接</button>
+            <button class="btn btn-secondary btn-xs" id="mcpAddCustomBtn" data-tofu-action="_mcpOpenAddModal()" data-i18n="mcp.addCustom">+ 添加</button>
+            <button class="btn btn-primary btn-xs mcp-connect-all-btn" id="mcpConnectAllBtn" data-tofu-action="_mcpConnectAll()" style="display:none;" data-i18n="settings.connectAll">全部连接</button>
             <input type="text" class="mcp-search" id="mcpSearch" placeholder="搜索 Apps…" data-i18n-placeholder="settings.searchApps"
-                   oninput="_mcpFilterCatalog(this.value)">
+                   data-tofu-action-input="_mcpFilterCatalog(this.value)">
           </div>
 
           <!-- Category filter pills -->

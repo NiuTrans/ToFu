@@ -24,7 +24,8 @@ class TestRoundGatesWireParity:
     def test_signature_accepts_required_kwargs(self):
         sig = inspect.signature(_round_gates.check_round_gates)
         params = set(sig.parameters.keys())
-        assert {'task', 'rs', 'round_num', 'tid', 'max_tool_rounds', 'cfg'} <= params
+        assert {'task', 'rs', 'round_num', 'tid', 'cfg'} <= params
+        assert 'max_tool_rounds' not in params
 
     def test_returns_bool(self):
         sig = inspect.signature(_round_gates.check_round_gates)
@@ -36,23 +37,16 @@ class TestRoundGatesWireParity:
         assert "reason='budget'" in src
         assert "EventType.ROUND_END" in src
 
-    def test_tool_rounds_gate_emits_round_end_with_reason_budget(self):
-        """On tool-rounds exhaust, the helper must emit ROUND_END(reason='budget')."""
-        src = inspect.getsource(_round_gates.check_round_gates)
-        assert "reason='budget'" in src
-        assert "tool_rounds_exhausted" in src
-
     def test_budget_gate_sets_error_envelope(self):
         """Budget gate must stamp task['error'] with budget_exceeded."""
         src = inspect.getsource(_round_gates.check_round_gates)
         assert "task['error']" in src
         assert "budget_exceeded" in src
 
-    def test_tool_rounds_gate_sets_error_envelope(self):
-        """Tool-rounds gate must stamp task['error'] with tool_rounds_exhausted."""
+    def test_tool_round_gate_is_absent(self):
         src = inspect.getsource(_round_gates.check_round_gates)
-        assert "tool_rounds_exhausted" in src
-        assert "task['error']" in src
+        assert 'max_tool_rounds' not in src
+        assert 'tool_rounds_exhausted' not in src
 
     def test_per_round_diagnostic_logged(self):
         """The per-round INFO diagnostic must be present."""

@@ -36,7 +36,7 @@ def _emit(task: dict, event: dict) -> None:
 
 #: Task fields persisted so a crashed process can re-spawn this job.
 _MANIFEST_FIELDS = ('task_id', 'topic', 'lang', 'style', 'max_pages', 'size',
-                    'conv_id', 'workdir')
+                    'conv_id', 'workdir', 'model')
 
 
 def _write_manifest(task: dict, state: str) -> None:
@@ -105,7 +105,7 @@ def resume_interrupted_decks() -> int:
             lang=m.get('lang') or 'zh', style=m.get('style') or '',
             max_pages=int(m.get('max_pages') or 12),
             size=tuple(m.get('size') or (1280, 720)),
-            conv_id=m.get('conv_id') or '')
+            conv_id=m.get('conv_id') or '', model=m.get('model') or '')
         _slides_runtime.spawn(task_id, run_slides_task, task)
 
     return resume_running_jobs(
@@ -116,7 +116,7 @@ def resume_interrupted_decks() -> int:
 
 def start_slides_job(topic: str, *, lang: str = 'zh', style: str = '',
                      max_pages: int = 12, size=(1280, 720),
-                     conv_id: str = '') -> dict:
+                     conv_id: str = '', model: str = '') -> dict:
     """Create + spawn a deck job; returns {task_id, deduped}."""
     from lib.slides.runtime import (
         _cleanup_stale_slides_tasks, _new_slides_task,
@@ -124,7 +124,8 @@ def start_slides_job(topic: str, *, lang: str = 'zh', style: str = '',
         _slides_task_id)
 
     _cleanup_stale_slides_tasks()
-    key = (topic.strip(), lang, style.strip(), int(max_pages), tuple(size))
+    key = (topic.strip(), lang, style.strip(), int(max_pages), tuple(size),
+           model.strip())
     existing = _slides_index_get(key)
     if existing:
         return {'task_id': existing, 'deduped': True}
@@ -133,7 +134,8 @@ def start_slides_job(topic: str, *, lang: str = 'zh', style: str = '',
     os.makedirs(wd, exist_ok=True)
     task = _new_slides_task(tid, topic=topic.strip(), workdir=wd, lang=lang,
                             style=style.strip(), max_pages=int(max_pages),
-                            size=tuple(size), conv_id=conv_id)
+                            size=tuple(size), conv_id=conv_id,
+                            model=model.strip())
     _slides_index_register(key, tid)
     _slides_runtime.spawn(tid, run_slides_task, task)
     logger.info('[Slides] started %s topic=%r lang=%s pages=%d',

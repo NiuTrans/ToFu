@@ -118,19 +118,19 @@ def test_wait_is_zero_when_pg_not_required(monkeypatch):
 
 
 def test_wait_defaults_to_60_when_pg_required(monkeypatch):
-    monkeypatch.setenv('TOFU_REQUIRE_PG', '1')
+    monkeypatch.setenv('TOFU_DB_BACKEND', 'postgres')
     monkeypatch.delenv('TOFU_PG_REQUIRE_WAIT_S', raising=False)
     assert _core._pg_require_wait_s() == 60.0
 
 
 def test_wait_is_env_tunable_when_pg_required(monkeypatch):
-    monkeypatch.setenv('TOFU_REQUIRE_PG', '1')
+    monkeypatch.setenv('TOFU_DB_BACKEND', 'postgres')
     monkeypatch.setenv('TOFU_PG_REQUIRE_WAIT_S', '25')
     assert _core._pg_require_wait_s() == 25.0
 
 
 def test_wait_invalid_env_falls_back_to_60(monkeypatch):
-    monkeypatch.setenv('TOFU_REQUIRE_PG', '1')
+    monkeypatch.setenv('TOFU_DB_BACKEND', 'postgres')
     monkeypatch.setenv('TOFU_PG_REQUIRE_WAIT_S', 'not-a-number')
     assert _core._pg_require_wait_s() == 60.0
 

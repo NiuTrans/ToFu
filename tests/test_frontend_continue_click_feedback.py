@@ -68,12 +68,14 @@ import re
 
 import pytest
 
-from tests._jsdom import JS_DIR, ROOT, run_harness
+from tests._jsdom import ROOT, run_harness
+from tests._runtime_sections import runtime_section_path
 
 pytestmark = pytest.mark.unit
 
-SRC_JS = os.path.join(JS_DIR, 'main', 'main_regen_continue.js')
-STREAMING_JS = os.path.join(JS_DIR, 'ui', 'streaming_render.js')
+SRC_JS = runtime_section_path('main/main_regen_continue.js')
+STREAMING_JS = runtime_section_path('ui/streaming_render.js')
+CONV_VIEW_JS = runtime_section_path('conv_view.js')
 
 
 # ── Shared harness prologue: DOM + stubs + a scene reset ────────────────────
@@ -676,7 +678,7 @@ def test_raise_shell_resolves_by_stable_id_not_position():
     with open(SRC_JS, encoding='utf-8') as f:
         src = f.read()
     start = src.index('function _raiseContinueShell(')
-    end = src.index('window._raiseContinueShell = _raiseContinueShell;')
+    end = src.index('runtimeScope._raiseContinueShell = _raiseContinueShell;')
     body = src[start:end]
     code = re.sub(r'/\*.*?\*/', '', body, flags=re.S)
     code = re.sub(r'^\s*//.*$', '', code, flags=re.M)
@@ -712,7 +714,7 @@ def test_convview_find_seam_is_identity_first():
     and inside ``_findMsgEl`` the ``data-msg-id`` match must precede the
     positional ``msg-`` fallback.
     """
-    conv_view = os.path.join(JS_DIR, 'conv_view.js')
+    conv_view = CONV_VIEW_JS
     with open(conv_view, encoding='utf-8') as f:
         src = f.read()
     assert 'findMessageEl:' in src, (
@@ -863,7 +865,7 @@ global._lastRenderedFingerprint = window._lastRenderedFingerprint = '';
 
 def test_failed_continue_keeps_the_bubble_under_index_drift():
     run_harness(target_js=SRC_JS, body_js=_BODY_DRIFT_FAILURE, min_pass=13,
-                extra_targets=[os.path.join(JS_DIR, 'conv_view.js')],
+                extra_targets=[CONV_VIEW_JS],
                 label='continue-drift-x-failure')
 
 
@@ -877,7 +879,7 @@ def test_finalize_streaming_keeps_the_node_it_just_created():
     index shift), and ``getElementById`` returns the FIRST — so the sweep keeps
     the wrong node and evicts the one it just restored.
     """
-    conv_view = os.path.join(JS_DIR, 'conv_view.js')
+    conv_view = CONV_VIEW_JS
     with open(conv_view, encoding='utf-8') as f:
         src = f.read()
     start = src.index('finalizeStreaming: function')

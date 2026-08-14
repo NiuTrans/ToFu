@@ -39,10 +39,11 @@ def test_debug_route_disabled_by_default(flask_client, monkeypatch):
     assert captured == [], 'disabled route must broadcast nothing'
 
 
-def test_debug_route_enabled_emits_presence_frames(flask_client, monkeypatch):
+def test_debug_route_enabled_emits_presence_frames(flask_client, monkeypatch,
+                                                   tmp_path):
     """With the flag set, the route fires the scenario and broadcasts frames."""
     monkeypatch.setenv('TOFU_PRESENCE_DEBUG', '1')
-    root = '/tmp/presence_test_root_enabled'
+    root = str(tmp_path / 'presence-enabled')
     from lib.push import hub
     captured = []
     listener = lambda ch, tid, payload: captured.append({'ch': ch, **payload})  # noqa: E731
@@ -62,20 +63,17 @@ def test_debug_route_enabled_emits_presence_frames(flask_client, monkeypatch):
         assert kinds.get('conflict', 0) >= 1, 'shared-file overlap must advise'
     finally:
         hub.remove_listener(listener)
-        try:
-            from lib import presence
-            presence.depart(root, 'dbg-peer-1')
-            presence.depart(root, 'dbg-peer-2')
-        except Exception:
-            pass
-        import shutil
-        shutil.rmtree(os.path.join(root, '.tofu'), ignore_errors=True)
+        from lib import presence
+        presence.depart(root, 'dbg-peer-1')
+        presence.depart(root, 'dbg-peer-2')
 
 
-def test_debug_route_subagents_emits_within_conv_conflict(flask_client, monkeypatch):
+def test_debug_route_subagents_emits_within_conv_conflict(flask_client,
+                                                          monkeypatch,
+                                                          tmp_path):
     """The 'subagents' action fires a within-conversation conflict + nested peers."""
     monkeypatch.setenv('TOFU_PRESENCE_DEBUG', '1')
-    root = '/tmp/presence_test_root_subagents'
+    root = str(tmp_path / 'presence-subagents')
     from lib.push import hub
     captured = []
     listener = lambda ch, tid, payload: captured.append({'ch': ch, **payload})  # noqa: E731
@@ -94,15 +92,10 @@ def test_debug_route_subagents_emits_within_conv_conflict(flask_client, monkeypa
         assert peers == {'dbg-swarm#agent-coder-1', 'dbg-swarm#agent-coder-2'}
     finally:
         hub.remove_listener(listener)
-        try:
-            from lib import presence
-            presence.depart(root, 'dbg-swarm', agent_id='agent-coder-1')
-            presence.depart(root, 'dbg-swarm', agent_id='agent-coder-2')
-            presence.depart(root, 'dbg-swarm')
-        except Exception:
-            pass
-        import shutil
-        shutil.rmtree(os.path.join(root, '.tofu'), ignore_errors=True)
+        from lib import presence
+        presence.depart(root, 'dbg-swarm', agent_id='agent-coder-1')
+        presence.depart(root, 'dbg-swarm', agent_id='agent-coder-2')
+        presence.depart(root, 'dbg-swarm')
 
 
 if __name__ == '__main__':

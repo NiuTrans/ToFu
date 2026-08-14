@@ -44,12 +44,13 @@ The `kind` enum is closed — callers must pick one of these values:
   - ``prompt_too_long``     context window overflow (after auto-compact)
   - ``stream_only``         model rejects non-streaming
   - ``model_limit``         max_tokens exceeds learned model cap
-  - ``tool_rounds_exhausted`` orchestrator hit the per-task tool budget
+  - ``tool_rounds_exhausted`` legacy persisted turns from the retired cap
   - ``tool_timeout``        repeated tool-execution timeouts
   - ``premature_close``     SSE stream cut off (retries exhausted)
   - ``abnormal_stop``       missing finish marker, partial reply
   - ``aborted``             user clicked Stop (rare in error path)
   - ``server_offline``      frontend lost contact with the server
+  - ``server_busy``         backend admission capacity is temporarily full
   - ``internal``            backend bug / unhandled exception
   - ``generic``             unrecognized — last-resort fallback
 
@@ -96,6 +97,7 @@ from lib.error_envelope._classify import _classify_exception  # noqa: E402,F401
 from lib.error_envelope._build import (  # noqa: E402,F401
     make_envelope,
     from_exception,
+    normalize_envelope,
 )
 
 # ── Persistence helpers ───────────────────────────────────────────────
@@ -105,13 +107,20 @@ from lib.error_envelope._serde import (  # noqa: E402,F401
     is_envelope,
 )
 
+# ── Wire-contract schema ──────────────────────────────────────────────
+from lib.error_envelope._schema import (  # noqa: E402,F401
+    typed_error_envelope_schema,
+)
+
 
 __all__ = [
     'KINDS',
     'make_envelope',
     'from_exception',
+    'normalize_envelope',
     'to_json',
     'from_json',
     'is_envelope',
+    'typed_error_envelope_schema',
     '_classify_exception',
 ]

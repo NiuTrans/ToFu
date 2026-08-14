@@ -52,9 +52,10 @@ def _unit(fn):
 
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_LEAF = os.path.join(_ROOT, 'static/js/core/conv_image_hydrate.js')
-_CONV = os.path.join(_ROOT, 'static/js/core/conversations.js')
-_BUNDLER = os.path.join(_ROOT, 'lib/js_bundler.py')
+from tests._runtime_sections import runtime_section_names, runtime_section_path
+
+_LEAF = runtime_section_path('core/conv_image_hydrate.js')
+_CONV = runtime_section_path('core/conversations.js')
 
 
 @_unit
@@ -91,18 +92,9 @@ def test_bundler_lists_leaf_before_conversations_js():
     the manifest order consistent with slices 1-3 avoids surprising a
     future reader who greps for the pattern).
     """
-    with open(_BUNDLER, encoding='utf-8') as f:
-        src = f.read()
-    leaf_idx = src.find("'core/conv_image_hydrate.js'")
-    conv_idx = src.find("'core/conversations.js'")
-    assert leaf_idx != -1, (
-        "lib/js_bundler.py::_BUNDLE_FILES must list "
-        "'core/conv_image_hydrate.js' after slice 4"
-    )
-    assert conv_idx != -1, (
-        "lib/js_bundler.py::_BUNDLE_FILES sanity: "
-        "'core/conversations.js' entry missing"
-    )
+    owners = runtime_section_names()
+    leaf_idx = owners.index('core/conv_image_hydrate.js')
+    conv_idx = owners.index('core/conversations.js')
     assert leaf_idx < conv_idx, (
         f'conv_image_hydrate.js at pos {leaf_idx} must come BEFORE '
         f'conversations.js at pos {conv_idx} in _BUNDLE_FILES — same '

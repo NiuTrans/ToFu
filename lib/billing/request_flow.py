@@ -142,43 +142,40 @@ def settle_task(task: dict, *, user_id: str, model: str) -> Optional[dict]:
         # also maps vendor spellings (kimi cached_tokens, DeepSeek
         # prompt_cache_hit_tokens, nested prompt_tokens_details) onto the
         # canonical keys so those hits are billed at the read multiplier.
-        from lib.cost import normalize_usage, split_input_tokens
-        _nu = normalize_usage(u)
-        # ★ Pass the UNCACHED RESIDUAL, not normalize_usage()['input'].
-        #   compute_request_cost takes loose SCALARS and has to re-infer the
-        #   convention from them (synthesize_usage). On a HYBRID payload that
-        #   re-inference lands somewhere else than the display engine does, and
-        #   the two surfaces drift — measured 2.246x apart ($48.56 displayed vs
-        #   $21.62 debited) on a real sankuai_anthropic turn, even though both
-        #   modules' docstrings claim they "can NEVER drift". Resolving the
-        #   split HERE, at the one seam that owns the convention decision,
-        #   removes the second guess entirely.
-        _uncached, _ = split_input_tokens(u)
         cost = compute_request_cost(
-            model or '',
-            input_tokens=_uncached,
-            output_tokens=_nu['output'],
-            cache_read_tokens=_nu['cache_read'],
-            cache_write_tokens=_nu['cache_write'],
-            reasoning_tokens=_nu['thinking'],
-            provider_id=task.get('provider_id') or None)
+            model or '', provider_id=task.get('provider_id') or None,
+            raw_usage=u)
+        import json
+        snapshot = dict(cost.snapshot)
+        task['_billing_cost_snapshot'] = snapshot
+        note_payload = {
+            'v': 1, 'm': model or '', 'src': snapshot.get('source'),
+            'p': snapshot.get('selectedPromptTokens'),
+            't': snapshot.get('tierId'), 'lim': snapshot.get('maxPromptTokens'),
+            'r': snapshot.get('rates'), 'c': snapshot.get('componentsMicro'),
+            'total': cost.micro,
+        }
+        note = json.dumps(note_payload, separators=(',', ':'),
+                          ensure_ascii=True)[:900]
         reserved = int(task.get('_billing_reservation_micro') or 0)
         if reserved > 0:
             snap = settle(user_id, reserved_micro=reserved,
                           actual_micro=cost.micro, ref_id=task['id'],
-                          note=f'settle {model or "?"}')
+                          note=note)
             return {'cost_micro': cost.micro, 'reserved_micro': reserved,
                     'balance_micro': snap.balance_micro,
-                    'matched_model': cost.matched_model}
+                    'matched_model': cost.matched_model,
+                    'cost_snapshot': snapshot}
         if cost.micro > 0:
             try:
                 snap = debit(user_id, cost.micro, kind='debit',
                              ref_type='task', ref_id=task['id'],
-                             note=f'completion ({model or "?"})',
+                             note=note,
                              allow_negative=True)  # never reject after work
                 return {'cost_micro': cost.micro,
                         'balance_micro': snap.balance_micro,
-                        'matched_model': cost.matched_model}
+                        'matched_model': cost.matched_model,
+                        'cost_snapshot': snapshot}
             except InsufficientFunds as e:
                 logger.warning('[Billing] debit failed: %s', e)
     except Exception as e:

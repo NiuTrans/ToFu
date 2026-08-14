@@ -1,4 +1,4 @@
-"""routes/ — Flask Blueprints for each domain.
+"""routes/ — Quart blueprints for each domain.
 
 Each module is self-contained and registers its own routes.
 Shared helpers: lib/database/, lib/llm/ (package), lib/__init__.py (config).
@@ -39,6 +39,7 @@ from .compat_openai import compat_openai_bp
 from .compat_anthropic import compat_anthropic_bp
 from .api_docs import api_docs_bp
 from .metrics import metrics_bp
+from .turns_v2 import turns_v2_bp
 from .legacy_redirects import legacy_redirects_bp
 
 # ── Core (always-on) blueprints ──
@@ -59,12 +60,144 @@ ALL_BLUEPRINTS = [
     compat_anthropic_bp,
     api_docs_bp,
     metrics_bp,
+    turns_v2_bp,
     legacy_redirects_bp,
 ]
 
 
-def register_all(app):
-    """Register all blueprints on the Flask app."""
+def start_registered_background_services(app):
+    """Start route-owned schedulers/plugin workers once for a serving app.
+
+    Blueprint registration is intentionally import-safe.  Tests, desktop
+    smoke checks and WSGI/ASGI tooling all import ``server.app`` merely to
+    inspect routes; starting production workers in that import path caused
+    real network/DB work to outlive the importing process.  The real server
+    calls this only after database initialisation from its startup lifecycle.
+    ``app.extensions`` supplies a per-app idempotence latch so an embedder that
+    explicitly starts services twice cannot duplicate scheduler threads.
+    """
+    import logging
+    _log = logging.getLogger(__name__)
+    extensions = getattr(app, 'extensions', None)
+    if extensions is None:
+        extensions = {}
+        app.extensions = extensions
+    marker = 'tofu_registered_background_services'
+    if extensions.get(marker):
+        return 0
+    # Latch before invoking plugins: a hook can indirectly re-enter app setup.
+    extensions[marker] = True
+    started = 0
+
+    # ── Start daily report background scheduler ──
+    try:
+        from lib.daily_report import start_report_scheduler
+        start_report_scheduler()
+        started += 1
+    except Exception as e:
+        _log.warning('Daily report scheduler start deferred (DB unavailable): %s', e)
+
+    # ── Start proactive agent / cron scheduler ──
+    try:
+        from lib.scheduler import start_scheduler_worker
+        start_scheduler_worker()
+        started += 1
+    except Exception as e:
+        _log.warning('Scheduler worker start deferred (DB unavailable): %s', e)
+
+    # ── Refresh the authenticated Codex `/model` catalogue ──
+    try:
+        from lib.oauth.codex_catalog import start_codex_catalog_refresher
+        start_codex_catalog_refresher()
+        started += 1
+    except Exception as e:
+        _log.warning('Codex model catalogue refresher start deferred: %s', e)
+
+    # ── Reconcile ordinary API-provider /models catalogues ──
+    try:
+        from lib.llm_dispatch.model_catalog_sync import start_model_catalog_sync
+        start_model_catalog_sync()
+        started += 1
+    except Exception as e:
+        _log.warning('Provider model catalogue sync start deferred: %s', e)
+
+    # ── Resume consented local-knowledge image descriptions ──
+    try:
+        from lib.knowledge.enrichment import start_visual_enrichment
+        if start_visual_enrichment():
+            started += 1
+    except Exception as e:
+        _log.warning('Knowledge visual enrichment start deferred: %s', e)
+
+    # ── Plugin startup hooks (tofu.startup entry-point group) ──
+    try:
+        from .plugin_registry import run_startup_hooks
+        started += int(run_startup_hooks(app) or 0)
+    except Exception as e:
+        _log.warning('Plugin startup hooks deferred: %s', e)
+    return started
+
+
+def stop_registered_background_services(app, *, timeout: float = 2.0) -> int:
+    """Stop route/plugin-owned workers with bounded, idempotent joins."""
+    import logging
+
+    log = logging.getLogger(__name__)
+    extensions = getattr(app, 'extensions', {})
+    marker = 'tofu_registered_background_services'
+    if not extensions.get(marker):
+        return 0
+
+    stopped = 0
+    all_stopped = True
+    try:
+        # Plugins are started last and may depend on core schedulers/catalogues,
+        # so their teardown runs first.
+        from .plugin_registry import run_shutdown_hooks
+        stopped += int(run_shutdown_hooks(app) or 0)
+    except Exception as exc:
+        all_stopped = False
+        log.warning('Plugin shutdown hooks failed: %s', exc)
+
+    owners = (
+        ('knowledge visual enrichment',
+         'lib.knowledge.enrichment', 'stop_visual_enrichment'),
+        ('provider model catalogue',
+         'lib.llm_dispatch.model_catalog_sync', 'stop_model_catalog_sync'),
+        ('Codex model catalogue',
+         'lib.oauth.codex_catalog', 'stop_codex_catalog_refresher'),
+        ('proactive scheduler',
+         'lib.scheduler', 'stop_scheduler_worker'),
+        ('daily report scheduler',
+         'lib.daily_report', 'stop_report_scheduler'),
+    )
+    import importlib
+    for label, module_name, stop_name in owners:
+        try:
+            module = importlib.import_module(module_name)
+            stop = getattr(module, stop_name)
+            if stop(timeout=timeout):
+                stopped += 1
+            else:
+                all_stopped = False
+                log.warning('%s did not stop within %.1fs', label, timeout)
+        except Exception as exc:
+            all_stopped = False
+            log.warning('%s shutdown failed: %s', label, exc)
+
+    # A timed-out owner remains live. Preserve the latch so a reused app cannot
+    # launch duplicate workers on top of it; a clean stop permits restart.
+    extensions[marker] = not all_stopped
+    return stopped
+
+
+def register_all(app, *, start_workers=True):
+    """Register all blueprints; optionally start route-owned workers.
+
+    ``start_workers=True`` preserves the historical embedder API.  Core's
+    ``server.py`` passes ``False`` at import time and starts the workers from
+    its real serving lifecycle after the database is ready.
+    """
     import logging
     _log = logging.getLogger(__name__)
 
@@ -76,7 +209,7 @@ def register_all(app):
     # Blueprints here. Discovery is fail-soft and returns [] when no plugin is
     # installed, so this is a no-op for a vanilla core install. The name guard
     # is defensive against a plugin shipping a duplicate blueprint name.
-    from .plugin_registry import discover_blueprint_plugins, run_startup_hooks
+    from .plugin_registry import discover_blueprint_plugins
     _already = {bp.name for bp in ALL_BLUEPRINTS}
     for bp in discover_blueprint_plugins():
         if bp.name in _already:
@@ -86,25 +219,5 @@ def register_all(app):
         app.register_blueprint(bp)
         _already.add(bp.name)
 
-    # ── Start daily report background scheduler ──
-    try:
-        from lib.daily_report import start_report_scheduler
-        start_report_scheduler()
-    except Exception as e:
-        _log.warning('Daily report scheduler start deferred (DB unavailable): %s', e)
-
-    # ── Start proactive agent / cron scheduler ──
-    try:
-        from lib.scheduler import start_scheduler_worker
-        start_scheduler_worker()
-    except Exception as e:
-        _log.warning('Scheduler worker start deferred (DB unavailable): %s', e)
-
-    # ── Plugin startup hooks (tofu.startup entry-point group) ──
-    # Background workers / schedulers / post-registration init that an optional
-    # feature needs (e.g. the trading intel + autopilot workers, brain
-    # cycle-count restore). No-op when no plugin is installed.
-    try:
-        run_startup_hooks(app)
-    except Exception as e:
-        _log.warning('Plugin startup hooks deferred: %s', e)
+    if start_workers:
+        start_registered_background_services(app)

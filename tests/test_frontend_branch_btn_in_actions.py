@@ -27,9 +27,11 @@ NEUTER
 from __future__ import annotations
 
 import os
+import json
 import re
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -37,12 +39,18 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
-ESCAPE_HTML = os.path.join(JS_DIR, 'core', 'escape_html.js')
-SAFE_HTML = os.path.join(JS_DIR, 'core', 'safe_html.js')
-CHAT_RENDER = os.path.join(JS_DIR, 'ui', 'chat_render.js')
-BRANCH_JS = os.path.join(JS_DIR, 'branch.js')
+sys.path.insert(0, HERE)
+from _runtime_sections import runtime_section_path  # noqa: E402
+
+ESCAPE_HTML = runtime_section_path('core/escape_html.js')
+SAFE_HTML = runtime_section_path('core/safe_html.js')
+CHAT_RENDER = runtime_section_path('ui/chat_render.js')
+BRANCH_JS = runtime_section_path('branch.js')
+TRANSLATION_MODEL = runtime_section_path('core/translation_model.js')
+TRANSLATION_INDICATOR = runtime_section_path('ui/translation_indicator.js')
 STYLES = os.path.join(ROOT, 'static', 'styles.css')
+ZH_I18N = os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales', 'zh.json')
+EN_I18N = os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales', 'en.json')
 
 
 def _node_deps_available() -> bool:
@@ -111,8 +119,8 @@ win._INITIAL_RENDER = global._INITIAL_RENDER = 20;
 
 (0, eval)(fs.readFileSync(process.argv[3], 'utf8'));  // escape_html.js
 (0, eval)(fs.readFileSync(process.argv[4], 'utf8'));  // safe_html.js
-(0, eval)(fs.readFileSync(process.argv[3].replace('escape_html.js', 'translation_model.js'), 'utf8'));
-(0, eval)(fs.readFileSync(process.argv[3].replace('core/escape_html.js', 'ui/translation_indicator.js'), 'utf8'));
+(0, eval)(fs.readFileSync(process.argv[8], 'utf8'));
+(0, eval)(fs.readFileSync(process.argv[9], 'utf8'));
 
 // ── branch.js (real / neutered) — defines renderBranchZone ──
 let branchSrc = fs.readFileSync(process.argv[5], 'utf8');
@@ -152,8 +160,8 @@ function parse(html) {
   const actions = el.querySelector('.message-actions');
   const br = actions && actions.querySelector('.msg-branch-btn');
   const isActionBtn = br && br.classList.contains('msg-action-btn');
-  const oc = br ? (br.getAttribute('onclick') || '') : '';
-  check('A_branch_btn_in_actions', !!br && !!isActionBtn && oc.indexOf('promptNewBranch(_msgElIndex(this))') >= 0);
+  const action = br ? (br.getAttribute('data-tofu-action') || '') : '';
+  check('A_branch_btn_in_actions', !!br && !!isActionBtn && action.indexOf('promptNewBranch(_msgElIndex(this))') >= 0);
 }
 
 // ══ B. user message → NO branch btn ══
@@ -190,7 +198,8 @@ def _run(nc: str = '') -> str:
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, CHAT_RENDER, ESCAPE_HTML, SAFE_HTML, BRANCH_JS, ROOT, nc],
+            ['node', harness, CHAT_RENDER, ESCAPE_HTML, SAFE_HTML, BRANCH_JS,
+             ROOT, nc, TRANSLATION_MODEL, TRANSLATION_INDICATOR],
             capture_output=True, text=True, timeout=60,
         )
     finally:
@@ -236,21 +245,17 @@ def test_nc_hardcode_copy_regression_is_caught():
 def test_msgaction_i18n_keys_have_zh_and_en():
     """Static guard: every msgAction.* key referenced by chat_render.js is
     defined in i18n.js with BOTH a zh and an en value."""
-    i18n_path = os.path.join(JS_DIR, 'i18n.js')
-    with open(i18n_path, encoding='utf-8') as f:
-        i18n_src = f.read()
+    with open(ZH_I18N, encoding='utf-8') as f:
+        zh = json.load(f)
+    with open(EN_I18N, encoding='utf-8') as f:
+        en = json.load(f)
     with open(CHAT_RENDER, encoding='utf-8') as f:
         chat_src = f.read()
     keys = set(re.findall(r"_mt\('(msgAction\.[a-zA-Z]+)'", chat_src))
     assert keys, 'no msgAction.* keys found in chat_render.js — did the wiring change?'
     for key in sorted(keys):
-        # Match a line like:  'msgAction.copy': { zh: '复制', en: 'Copy' },
-        m = re.search(
-            r"'" + re.escape(key) + r"'\s*:\s*\{([^}]*)\}", i18n_src)
-        assert m, f'i18n.js is missing a definition for {key!r}'
-        body = m.group(1)
-        assert 'zh:' in body, f'{key!r} has no zh translation'
-        assert 'en:' in body, f'{key!r} has no en translation'
+        assert key in zh, f'zh.json is missing a definition for {key!r}'
+        assert key in en, f'en.json is missing a definition for {key!r}'
 
 
 def test_styles_no_longer_defines_branch_add_btn():

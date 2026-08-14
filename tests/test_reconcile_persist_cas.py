@@ -50,6 +50,12 @@ class FakeDB:
     def commit(self):
         self.commits += 1
 
+    def begin(self):
+        return None
+
+    def rollback(self):
+        return None
+
 
 @pytest.fixture
 def persist(monkeypatch):
@@ -57,9 +63,10 @@ def persist(monkeypatch):
     monkeypatch.setattr(rc, 'notify_history_rewrite', lambda *a, **k: None,
                         raising=False)
     monkeypatch.setattr(rc, 'build_search_text', lambda m: '', raising=False)
-    import lib.database.messages_rows as mr
-    monkeypatch.setattr(mr, 'mirror_write_and_commit', lambda *a, **k: None,
-                        raising=False)
+    monkeypatch.setattr('lib.database.messages_rows.rows_write_enabled',
+                        lambda: False)
+    monkeypatch.setattr('lib.conversations.update_conversation_fts',
+                        lambda *a, **k: None)
     return rc._persist_reconcile
 
 
@@ -92,9 +99,10 @@ def test_legitimate_write_still_lands(persist):
 
 
 def test_neuter_removing_cas_predicate_is_caught():
-    """NEUTER: strip ``AND rev=?`` from the source → the guard above must fail."""
+    """NEUTER: omitting the repository CAS token would re-open data loss."""
     import inspect
     import routes.conversations as rc
     src = inspect.getsource(rc._persist_reconcile)
-    assert 'AND rev=?' in src, 'CAS predicate vanished from _persist_reconcile'
-    assert 'expected_rev' in src
+    assert 'replace_messages(' in src
+    assert 'expected_rev=expected_rev' in src, (
+        'the reconcile verdict is no longer pinned to the revision it read')

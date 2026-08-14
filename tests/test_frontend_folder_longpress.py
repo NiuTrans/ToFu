@@ -39,11 +39,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = runtime_sections_dir()
 _SRC = os.path.join(JS_DIR, 'main', 'main_folders_mobile.js')
 
 
@@ -315,23 +317,24 @@ _PANELS_SRC = os.path.join(JS_DIR, 'mobile_panels.js')
 
 
 def test_flow_picker_aria_roles_present():
-    """The mobile flow picker (openMobileFlowPicker) is a bottom-sheet <div>
-    list — screen-reader-invisible without roles. Assert the list container
-    carries role=listbox and each generated item carries role=option +
-    aria-selected. Source-contract (the fn is IIFE-bound + async-Api-driven,
-    so driving it fully would need heavy scaffolding — this guards the markup
-    the render emits)."""
+    """The mobile flow picker is an accessible bottom-sheet listbox."""
     with open(_PANELS_SRC, encoding='utf-8') as f:
         src = f.read()
     assert 'id="mobileFlowSheetList" role="listbox"' in src, \
         'flow-picker list must be role=listbox'
+    assert 'id="mobileFlowSheetStatus" role="status"' in src, \
+        'catalog availability must be announced outside the listbox'
+    assert src.index('id="mobileFlowSheetStatus"') < src.index('id="mobileFlowSheetList"'), \
+        'catalog status must not be nested among listbox options'
     assert 'aria-labelledby="mobileFlowSheetTitle"' in src, \
         'flow-picker listbox must reference its title'
     assert 'role="option"' in src, 'each flow item must be role=option'
+    assert '<button type="button" class="mobile-sheet-item' in src, \
+        'flow options must be natively focusable controls'
     assert 'aria-selected="' in src, 'each flow item must carry aria-selected'
     # aria-selected must be data-driven (true for the current flow), not a
     # hardcoded constant.
-    assert "it.flow === cur ? \"true\" : \"false\"" in src, \
+    assert "it.flow === current ? \"true\" : \"false\"" in src, \
         'aria-selected must reflect the active flow'
 
 

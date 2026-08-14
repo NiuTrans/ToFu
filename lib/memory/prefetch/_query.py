@@ -1,8 +1,8 @@
-"""lib/memory/prefetch/_query.py — Query construction.
+"""Plain-text query helpers shared by memory selection and profile learning.
 
-Strip tools, thinking, system-reminder blocks; keep last K user+assistant
-turns as a compact plain-text transcript that anchors both the BM25 coarse
-stage and the cheap-LLM rerank.
+Automatic memory selection uses only ``_extract_current_user_request``.
+``_build_recent_turns_text`` remains for profile consolidation, where bounded
+conversation history is intentionally part of the learning input.
 """
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ def _extract_current_user_request(messages: list,
                                   cap: int = _MAX_QUERY_CHARS // 2) -> str:
     """Return ONLY the last user message's plain text (no role prefix).
 
-    Used to anchor the cheap-LLM filter on "what the user just asked",
+    Used to anchor local selection on "what the user just asked",
     distinct from the prior conversational background.
     """
     for msg in reversed(messages):
@@ -72,7 +72,7 @@ def _build_recent_turns_text(messages: list, k: int = PREFETCH_RECENT_TURNS_K,
 
     Args:
         exclude_last_user: When True, the most recent user message is
-            skipped — used by the cheap-LLM rerank step where the last
+            skipped — used by profile consolidation where the last
             user request is shown in its own dedicated section so the
             model can anchor on it rather than blend it into history.
     """

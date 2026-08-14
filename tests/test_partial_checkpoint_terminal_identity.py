@@ -260,10 +260,12 @@ def test_reconcile_interrupt_branch_is_never_reached_on_a_live_turn():
     What makes it safe is that all THREE callers sit structurally off the live
     path, verified individually:
 
-      1. ``routes/conversations.py`` (GET / warm-open) — guarded by an explicit
-         ``if _conv_has_live_task(conv_id): return <unreconciled>`` at BOTH
-         entries, with the reason written down in-source: "a pending/running
-         task's empty placeholder is indistinguishable from a ghost tail".
+      1. ``routes/conversations.py`` (GET / warm-open) — the prefetch helper
+         returns before reconciliation when ``_conv_has_live_task`` is true;
+         the main GET snapshots that same predicate in ``_is_live`` and passes
+         ``allow_reconcile=not _is_live`` into the projected-row reader.  The
+         reason is written down in-source: "a pending/running task's empty
+         placeholder is indistinguishable from a ghost tail".
       2. ``lib/tasks_pkg/manager/_sync.py`` — called ONLY from
          ``_sync_result_to_conversation`` (the TERMINAL sync), inside its
          "nothing to persist" branch and behind a latest-task gate. At that
@@ -286,12 +288,19 @@ def test_reconcile_interrupt_branch_is_never_reached_on_a_live_turn():
     """
     conv_src = open(os.path.join(REPO, 'routes', 'conversations.py'),
                     encoding='utf-8').read()
-    # Gate 1: the GET path must refuse to reconcile a conv with a live task.
-    assert conv_src.count('if _conv_has_live_task(conv_id):') >= 2, (
-        'the GET-path live-task gate around reconcile is gone — a mid-stream '
-        "reconcile can now stamp finishReason=interrupted onto the LIVE turn's "
-        'own tail (no _taskId), which reads back as a prior turn and mints a '
-        'duplicate assistant bubble.')
+    # Gate 1: both GET entry points must refuse to reconcile a live conv.  The
+    # prefetch helper returns explicitly; the main GET threads one predicate
+    # snapshot into the projected-row reader so it neither races nor evaluates
+    # the task registry twice.
+    assert 'if _conv_has_live_task(conv_id):' in conv_src, (
+        'the prefetch live-task return around reconcile is gone.')
+    assert '_is_live = _conv_has_live_task(conv_id)' in conv_src, (
+        'the main GET no longer snapshots the live-task predicate.')
+    assert 'allow_reconcile=not _is_live' in conv_src, (
+        'the main GET projected-row reader can reconcile a live turn — a '
+        'mid-stream reconcile can stamp finishReason=interrupted onto the '
+        "LIVE turn's own tail (no _taskId), which reads back as a prior turn "
+        'and mints a duplicate assistant bubble.')
 
     sync_src = open(os.path.join(REPO, 'lib', 'tasks_pkg', 'manager', '_sync.py'),
                     encoding='utf-8').read()

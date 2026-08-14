@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 # concurrent.futures.TimeoutError only became an alias of builtin
 # TimeoutError in 3.11 — on 3.10 it is a DISTINCT class, so
@@ -47,6 +48,89 @@ from lib.tasks_pkg.tool_dispatch._heartbeat import (
 )
 
 logger = get_logger(__name__)
+
+
+# In-memory protocol tools whose calls are order-sensitive inside one model
+# response.  They are deliberately separate from ``_write_tools``: updating a
+# task-local checklist must be serial, but it is not an external mutation and
+# therefore must not trigger Manual-mode write approval or project-cache
+# invalidation.  Keep this list narrow; the serial lane preserves
+# ``parsed_tcs`` order exactly.
+_ORDERED_STATE_TOOLS = frozenset({'todo_write'})
+
+
+def _blocked_multi_agent_write(
+        tc: dict[str, Any], fn_name: str, write_tools: frozenset) -> str:
+    """Return the non-root agent name when its write must be refused."""
+    caller = tc.get('caller') if isinstance(tc, dict) else None
+    if not isinstance(caller, dict) or caller.get('type') != 'multi_agent':
+        return ''
+    agent_name = str(caller.get('agent_name') or '')
+    return (agent_name if agent_name and agent_name != '/root'
+            and fn_name in write_tools else '')
+
+
+def _call_id_signature(fn_name: str, fn_args: Any) -> str:
+    """Stable identity for replay protection; never trusts display metadata."""
+    try:
+        payload = json.dumps(
+            {'name': str(fn_name or ''),
+             'arguments': fn_args if isinstance(fn_args, dict) else {}},
+            ensure_ascii=False, sort_keys=True, separators=(',', ':'),
+            default=str)
+    except (TypeError, ValueError) as exc:
+        logger.debug('[ToolDispatch] call signature JSON fallback: %s', exc)
+        payload = f'{fn_name!s}\0{fn_args!r}'
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+
+def _finalize_call_id_replay(
+    task: dict[str, Any], fn_name: str, tc_id: str, rn: int,
+    round_entry: dict[str, Any] | None, content: Any, *, status: str = 'done',
+) -> None:
+    """Settle the display row for a call-ID replay without executing hooks."""
+    if isinstance(content, str):
+        text = content
+    else:
+        try:
+            text = json.dumps(content, ensure_ascii=False, default=str)
+        except (TypeError, ValueError) as exc:
+            logger.debug('[ToolDispatch] replay display serialization fallback: %s',
+                         exc)
+            text = str(content)
+    if round_entry is not None:
+        _finalize_tool_round(task, rn, round_entry, [{
+            'type': 'tool_call_replay', 'toolName': fn_name,
+            'content': text, 'badge': 'replayed',
+            'snippet': 'Duplicate call_id — previous result reused',
+        }], query_override=round_entry.get('query', fn_name))
+        round_entry['toolContent'] = text
+        round_entry['status'] = status if status in (
+            'error', 'rejected', 'aborted') else 'done'
+        round_entry['_idempotentReplay'] = True
+
+
+def _bounded_tool_env_int(name: str, default: int, minimum: int,
+                          maximum: int) -> int:
+    raw = os.environ.get(name, '')
+    try:
+        value = int(raw) if raw else default
+    except (TypeError, ValueError):
+        logger.warning('[ToolPipeline] invalid %s=%r; using %d',
+                       name, raw, default)
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _parallel_worker_limit(item_count: int, *, programmatic: bool = False
+                           ) -> int:
+    """Personal-server-safe pool size with a hard PTC concurrency ceiling."""
+    configured = _bounded_tool_env_int(
+        'TOOL_MAX_PARALLEL_WORKERS', 8, 1, 32)
+    if programmatic:
+        from lib.tools.programmatic import PROGRAMMATIC_MAX_CONCURRENT_CALLS
+        configured = min(configured, PROGRAMMATIC_MAX_CONCURRENT_CALLS)
+    return max(1, min(configured, max(1, int(item_count))))
 
 
 def _settle_tool_result(
@@ -121,6 +205,13 @@ def _settle_tool_result(
     # Layer 1 (micro_compact) will further compress these once
     # they fall outside the hot tail.
     _l0_pre_chars = len(tool_content) if isinstance(tool_content, str) else 0
+    if round_entry and isinstance(tool_content, str):
+        # Keep only the numeric pre-compaction observation; retaining another
+        # full copy would defeat the context/storage savings being measured.
+        _raw_tokens = _safe_count_tokens(
+            tool_content, model=task.get('model', '') if task else '')
+        if _raw_tokens > 0:
+            round_entry['rawToolTokens'] = _raw_tokens
     if isinstance(tool_content, str):
         _conv_id = task.get('convId', '') if task else ''
         tool_content = budget_tool_result(fn_name, tool_content,
@@ -254,6 +345,12 @@ def _settle_tool_result(
             tid, fn_name, round_num, e, exc_info=True)
 
     _settled[tc_id] = tool_content
+    task.setdefault('_tool_call_id_receipts', {})[tc_id] = {
+        'signature': _call_id_signature(fn_name, fn_args),
+        'name': fn_name,
+        'content': tool_content,
+        'status': terminal_status or (round_entry or {}).get('status') or 'done',
+    }
     return tool_content
 
 
@@ -282,6 +379,9 @@ def _screenshot_display_content(model: str, tool_content: dict) -> tuple[str, bo
         # strip it later and leave a misleading "analyze it visually" text).
         # Return a truthful result so the model knows the image is unreadable
         # and stops re-rendering / re-reading images.
+        custom_fallback = tool_content.get('_no_vision_fallback')
+        if custom_fallback:
+            return (str(custom_fallback), True)
         return (
             '[Image not shown — the current model (%s) has no vision '
             'support, so this image cannot be analyzed. Do not retry '
@@ -382,10 +482,82 @@ def execute_tool_pipeline(
     if '_tool_result_cache' not in task:
         task['_tool_result_cache'] = {}
     _cache = task['_tool_result_cache']
+    _call_id_receipts = task.setdefault('_tool_call_id_receipts', {})
+    # A recovered/continued task may have durable tool rounds but no transient
+    # receipt map. Rehydrate only completed rows and only by their real call ID.
+    for _row in task.get('toolRounds', []):
+        if not isinstance(_row, dict) or _row.get('toolContent') is None:
+            continue
+        _old_id = str(_row.get('toolCallId') or '')
+        _old_name = str(_row.get('toolName') or '')
+        if not _old_id or not _old_name or _old_id in _call_id_receipts:
+            continue
+        _old_args = _row.get('toolArgs')
+        if isinstance(_old_args, str):
+            try:
+                _old_args = json.loads(_old_args)
+            except (json.JSONDecodeError, TypeError) as exc:
+                logger.debug('[ToolDispatch] malformed recovered tool arguments: %s',
+                             exc)
+                _old_args = {}
+        _call_id_receipts[_old_id] = {
+            'signature': _call_id_signature(_old_name, _old_args),
+            'name': _old_name, 'content': _row.get('toolContent'),
+            'status': str(_row.get('status') or 'done'),
+        }
 
     parallel_items = []
+    _claimed_call_ids: dict[str, str] = {}
+    _duplicate_waiters: list[tuple] = []
     for item in parsed_tcs:
         tc, fn_name, tc_id, fn_args, rn, round_entry, _parse_err = item
+
+        _signature = _call_id_signature(fn_name, fn_args)
+        _receipt = _call_id_receipts.get(tc_id)
+        if isinstance(_receipt, dict):
+            if (_receipt.get('signature') == _signature
+                    and _receipt.get('name') == fn_name):
+                _replayed = _receipt.get('content', '')
+                _replay_status = str(_receipt.get('status') or 'done')
+                _finalize_call_id_replay(
+                    task, fn_name, tc_id, rn, round_entry, _replayed,
+                    status=_replay_status)
+                tool_results[tc_id] = (_replayed, False)
+                if _replay_status in ('error', 'rejected', 'aborted'):
+                    tool_verdicts[tc_id] = _replay_status
+                logger.info('[Task %s] call_id replay HIT: %s id=%s — '
+                            'previous result reused without execution',
+                            tid, fn_name, tc_id[:12])
+                continue
+            _conflict = (
+                'Tool call rejected: call_id was already used for a different '
+                'tool name or arguments. Mint a new call_id and retry.')
+            _finalize_call_id_replay(
+                task, fn_name, tc_id, rn, round_entry, _conflict,
+                status='rejected')
+            tool_results[tc_id] = (_conflict, False)
+            tool_verdicts[tc_id] = 'rejected'
+            logger.warning('[Task %s] call_id CONFLICT rejected: %s id=%s',
+                           tid, fn_name, tc_id[:12])
+            continue
+
+        # A malformed stream can repeat one call ID inside the same assistant
+        # message before the first copy has produced a receipt. Execute only
+        # the first; identical siblings wait for its result. A conflicting
+        # sibling is rejected immediately.
+        if tc_id in _claimed_call_ids:
+            if _claimed_call_ids[tc_id] == _signature:
+                _duplicate_waiters.append(item)
+            else:
+                _conflict = (
+                    'Tool call rejected: duplicate call_id has conflicting '
+                    'tool name or arguments. Mint a new call_id and retry.')
+                _finalize_call_id_replay(
+                    task, fn_name, tc_id, rn, round_entry, _conflict,
+                    status='rejected')
+                tool_verdicts[tc_id] = 'rejected'
+            continue
+        _claimed_call_ids[tc_id] = _signature
 
         # JSON parse failure / hallucinated-tool rejection → return error to
         # LLM, skip execution.
@@ -428,6 +600,34 @@ def execute_tool_pipeline(
                 idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
                 round_num=round_num,
                 terminal_status=(round_entry or {}).get('status') or 'rejected')
+            continue
+
+        # Native Multi-agent subagents are analysis-only in Tofu. OpenAI
+        # attributes every function call to an agent; the Responses translator
+        # preserves that attribution in ``caller``. Reject state-changing calls
+        # from any non-root agent at the execution boundary, so the read-only
+        # policy remains an authority rule even if prompt guidance is ignored.
+        _agent_name = _blocked_multi_agent_write(
+            tc, fn_name, _write_tools)
+        if _agent_name:
+            _blocked = (
+                'Tool call rejected: native Multi-agent subagents are '
+                'read-only. Return the finding to /root; only the root agent '
+                'may request a state-changing action.')
+            if round_entry:
+                round_entry['_rejected'] = {
+                    'kind': 'multi_agent_read_only',
+                    'agent': _agent_name,
+                    'tool': fn_name,
+                }
+            tool_results[tc_id] = (_blocked, False)
+            tool_verdicts[tc_id] = 'rejected'
+            _settle_tool_result(
+                task, fn_name, tc_id, fn_args, rn, round_entry, _blocked,
+                idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
+                round_num=round_num, terminal_status='rejected')
+            logger.warning('[Task %s] Rejected Multi-agent subagent write: '
+                           'agent=%s tool=%s', tid, _agent_name, fn_name)
             continue
 
         # ── Dedup check for idempotent tools ──
@@ -568,9 +768,30 @@ def execute_tool_pipeline(
             from lib.project_mod.tools import _is_destructive_command
             needs_approval = _is_destructive_command(fn_args.get('command', ''))
 
+        if needs_approval and fn_name.startswith('browser_'):
+            # Navigation/tab lifecycle are browser reads/lifecycle operations.
+            # Page mutation commands need one durable domain grant; an existing
+            # grant bypasses repeated per-step prompts.
+            if fn_name in ('browser_navigate', 'browser_close_tab'):
+                needs_approval = False
+            else:
+                try:
+                    from lib.browser.access import browser_tool_access
+                    browser_tool_access(
+                        fn_name, fn_args,
+                        user_id=str(task.get('_userId') or ''),
+                        client_id=str(cfg.get('browserClientId') or ''))
+                    needs_approval = False
+                except Exception as exc:
+                    logger.debug(
+                        '[ToolPipeline] browser access check requires approval '
+                        'for %s: %s', fn_name, exc)
+                    needs_approval = True
+
         if needs_approval:
             approved, reject_content = _handle_approval(
-                task, fn_name, fn_args, rn, round_entry, project_path, round_num, model)
+                task, fn_name, fn_args, rn, round_entry, project_path,
+                round_num, model, cfg=cfg)
             if not approved:
                 tool_results[tc_id] = (reject_content, False)
                 # ★ Settle NOW (pt_ac380e3d). The user ALREADY answered — the
@@ -721,17 +942,21 @@ def execute_tool_pipeline(
         parallel_items.append(item)
 
     # ══════════════════════════════════════════
-    #  Write-tool serial phase (concurrency safety)
+    #  Ordered-state / write-tool serial phase (concurrency safety)
     #  Inspired by Claude Code's isConcurrencySafe partitioning:
-    #  write tools run serially to prevent filesystem race conditions.
+    #  Write tools run serially to prevent filesystem race conditions.
+    #  Order-sensitive task-local protocols (currently todo_write) share the
+    #  ordered lane without inheriting write approval or cache invalidation.
     # ══════════════════════════════════════════
-    _serial_write_items = [
-        item for item in parallel_items if item[1] in _write_tools
+    _serial_items = [
+        item for item in parallel_items
+        if item[1] in _write_tools or item[1] in _ORDERED_STATE_TOOLS
     ]
     parallel_items = [
-        item for item in parallel_items if item[1] not in _write_tools
+        item for item in parallel_items
+        if item[1] not in _write_tools and item[1] not in _ORDERED_STATE_TOOLS
     ]
-    for item in _serial_write_items:
+    for item in _serial_items:
         tc, fn_name, tc_id, fn_args, rn, round_entry, _pe = item
         if task.get('aborted'):
             logger.info('[Task %s] Skipping serial write tool %s — task aborted', tid, fn_name)
@@ -743,7 +968,8 @@ def execute_tool_pipeline(
                 cache=_cache, tid=tid, round_num=round_num,
                 terminal_status='aborted')
             continue
-        logger.debug('[Task %s] Serial write dispatch: %s at round %d', tid, fn_name, round_num)
+        logger.debug('[Task %s] Ordered serial dispatch: %s at round %d',
+                     tid, fn_name, round_num)
         # ★ Heartbeat this lane (pt_9f5a51ba). ``run_command`` resolves
         #   timeout=None BY DESIGN (no ceiling, pinned by
         #   tests/test_no_backend_timeouts.py) and every non-readOnly MCP tool
@@ -761,7 +987,12 @@ def execute_tool_pipeline(
         #   (a producing command never goes stale). A command silent >30min
         #   IS reaped now — wedged by definition; the ratified human-wait
         #   exemption covers only ask_human / await_task(wait) / timer_create.
-        _hb_stop, _hb_thread = _start_tool_heartbeat(task, [item], tid)
+        # External writes may block and therefore need a transport heartbeat.
+        # Task-local todo transitions are bounded in-memory work; avoiding a
+        # heartbeat thread on every revision keeps the progress protocol cheap.
+        _hb_stop = None
+        if fn_name in _write_tools:
+            _hb_stop, _hb_thread = _start_tool_heartbeat(task, [item], tid)
         try:
             tc_id_ret, tool_content, is_search = _execute_tool_one(
                 task, tc, fn_name, tc_id, fn_args, rn, round_entry,
@@ -769,9 +1000,11 @@ def execute_tool_pipeline(
                 all_tools=tool_list,
             )
         finally:
-            _hb_stop.set()
+            if _hb_stop is not None:
+                _hb_stop.set()
         tool_results[tc_id_ret] = (tool_content, is_search)
-        _invalidate_project_cache(_cache, trigger=fn_name)
+        if fn_name in _write_tools:
+            _invalidate_project_cache(_cache, trigger=fn_name)
         # ★ Settle at THIS tool's own completion (pt_67ffc2b7) — a serial write
         #   runs before the parallel pool even starts, so deferring its
         #   settle to the post-phase made it wait for every read tool in the
@@ -805,8 +1038,13 @@ def execute_tool_pipeline(
             parallel_items = []  # skip the pool entirely
 
     if parallel_items:
-        max_parallel = int(os.environ.get('TOOL_MAX_PARALLEL_WORKERS', '16'))
-        max_workers = min(max_parallel, len(parallel_items))
+        _has_program_children = any(
+            isinstance(tc.get('caller'), dict)
+            and tc['caller'].get('type') == 'program'
+            for tc, _fn, _id, _args, _rn, _entry, _pe in parallel_items
+        )
+        max_workers = _parallel_worker_limit(
+            len(parallel_items), programmatic=_has_program_children)
         pool = ThreadPoolExecutor(max_workers=max_workers)
         _timed_out = False
         # ── Item 3: long-tool heartbeat ──────────────────────────────────
@@ -833,7 +1071,8 @@ def execute_tool_pipeline(
                 ): (tc_id, fn_name)
                 for tc, fn_name, tc_id, fn_args, rn, round_entry, _pe in parallel_items
             }
-            tool_timeout = int(os.environ.get('TOOL_PARALLEL_TIMEOUT', '300'))
+            tool_timeout = _bounded_tool_env_int(
+                'TOOL_PARALLEL_TIMEOUT', 300, 1, 3600)
             try:
                 for fut in as_completed(futures, timeout=tool_timeout):
                     # ── Abort check during parallel execution: cancel remaining futures ──
@@ -885,7 +1124,7 @@ def execute_tool_pipeline(
                                     _cache[_pi_cache_key] = (tool_content, is_search, 'dedup', _pi_display, _pi_eng_bkdn, _pi_vert)
                                     break
                         # ── Invalidate project cache after write/exec ops ──
-                        elif fut_fn_name in ('write_file', 'apply_diff', 'apply_diffs',
+                        elif fut_fn_name in ('write_file', 'edit_file', 'apply_diff', 'apply_diffs',
                                              'insert_content', 'insert_contents',
                                              'create_project',
                                              'code_exec', 'bash_exec', 'run_command'):
@@ -994,10 +1233,22 @@ def execute_tool_pipeline(
             # On normal completion wait=True is fine (all futures done).
             pool.shutdown(wait=not _timed_out, cancel_futures=_timed_out)
 
+    # Identical duplicate IDs from the same assistant batch share the first
+    # execution's result and settle their own UI rows now that it is known.
+    for _dup in _duplicate_waiters:
+        _tc, _name, _id, _args, _rn, _row, _pe = _dup
+        _dup_content, _dup_search = tool_results.get(
+            _id, ('Tool execution did not produce a result.', False))
+        _dup_status = tool_verdicts.get(_id, 'done')
+        _finalize_call_id_replay(
+            task, _name, _id, _rn, _row, _dup_content,
+            status=_dup_status)
+
     # ══════════════════════════════════════════
     #  Post-phase: Add tool messages in original order
     # ══════════════════════════════════════════
     _round_results_for_budget: list[tuple[str, str, str]] = []  # (tc_id, content, tool_name)
+    _program_messages_to_settle: list[tuple[dict, str, dict]] = []
     for tc, fn_name, tc_id, fn_args, rn, round_entry, _pe in parsed_tcs:
         if tc_id in tool_results:
             tool_content, is_search = tool_results[tc_id]
@@ -1036,14 +1287,19 @@ def execute_tool_pipeline(
             _shot_txt, _no_vision = _screenshot_display_content(
                 model, tool_content)
             if _no_vision:
-                messages.append({'role': 'tool', 'tool_call_id': tc_id,
-                                 'content': _shot_txt})
+                _tool_msg = {'role': 'tool', 'tool_call_id': tc_id,
+                             'content': _shot_txt}
+                if isinstance(tc.get('caller'), dict):
+                    _tool_msg['caller'] = dict(tc['caller'])
+                messages.append(_tool_msg)
                 logger.info(
                     '[Task %s] conv=%s text-only model %s — image tool result '
                     'for tc=%s replaced with no-vision placeholder',
                     tid, task.get('convId', '') if task else '', model, tc_id)
             else:
                 _append_screenshot_message(messages, tc_id, tool_content)
+                if isinstance(tc.get('caller'), dict):
+                    messages[-1]['caller'] = dict(tc['caller'])
             _settle_tool_result(
                 task, fn_name, tc_id, fn_args, rn, round_entry, _shot_txt,
                 idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
@@ -1063,16 +1319,41 @@ def execute_tool_pipeline(
             #   out-of-order tool_call/tool_result pairing is a hard API error
             #   on Anthropic — that ordering is the reason this phase exists,
             #   and it is NOT what was making the UI wait.
-            tool_content = _settle_tool_result(
-                task, fn_name, tc_id, fn_args, rn, round_entry, tool_content,
-                idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
-                round_num=round_num,
-                terminal_status=tool_verdicts.get(tc_id))
+            if not (round_entry or {}).get('_idempotentReplay'):
+                tool_content = _settle_tool_result(
+                    task, fn_name, tc_id, fn_args, rn, round_entry, tool_content,
+                    idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
+                    round_num=round_num,
+                    terminal_status=tool_verdicts.get(tc_id))
 
             # Collect for aggregate budget check
             _round_results_for_budget.append((tc_id, tool_content, fn_name))
 
-            messages.append({'role': 'tool', 'tool_call_id': tc_id, 'content': tool_content})
+            _tool_msg = {'role': 'tool', 'tool_call_id': tc_id,
+                         'content': tool_content}
+            if isinstance(tc.get('caller'), dict):
+                _tool_msg['caller'] = dict(tc['caller'])
+            messages.append(_tool_msg)
+
+        # Account the settled model-visible result once, after clamping and
+        # persistence substitutions. The next round-start gate enforces the
+        # configured aggregate hard ceiling before another provider call.
+        try:
+            from lib.task_budget import account_tool_output
+            account_tool_output(task, tool_content)
+        except Exception as _budget_err:
+            logger.debug('[Task %s] tool-output budget accounting skipped: %s',
+                         tid, _budget_err)
+
+        caller = tc.get('caller')
+        if isinstance(caller, dict) and caller.get('type') == 'program':
+            _program_messages_to_settle.append((
+                tc,
+                tool_verdicts.get(tc_id)
+                or (round_entry or {}).get('status')
+                or 'done',
+                messages[-1],
+            ))
 
     # ══════════════════════════════════════════
     #  Per-round aggregate budget check
@@ -1150,6 +1431,17 @@ def execute_tool_pipeline(
                                                 _re_fn or '?', _re_rn, _ev_err)
                                 break
 
+    # Measure the exact content that the next Responses request will replay.
+    # Aggregate L0 compaction above can replace large results, so measuring in
+    # the per-call loop would overstate bytes and report false truncations.
+    if _program_messages_to_settle:
+        from lib.tasks_pkg.orchestrator._programmatic import (
+            settle_programmatic_call,
+        )
+        for _ptc, _status, _tool_message in _program_messages_to_settle:
+            settle_programmatic_call(
+                task, _ptc, _status, content=_tool_message.get('content'))
+
     # Emit snapshot AFTER tool results appended — WIRE-FORM view (same single
     # source of truth as the orchestrator's pre-LLM and final snapshots), so
     # the panel reflects exactly what the model will receive next round. Runs
@@ -1168,6 +1460,7 @@ def execute_tool_pipeline(
             roundNum=round_num + 1,
             label=f'Round {round_num + 1} 工具结果后 · {len(snapshot)}条',
             messages=snapshot,
+            contextManifest=list(task.get('_contextManifest') or []),
         )
         if tool_list:
             snap_evt['tools'] = tool_list

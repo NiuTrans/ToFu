@@ -25,6 +25,96 @@ from lib.tasks_pkg.handlers._adapter import simple_call
 logger = get_logger(__name__)
 
 
+def _run_progressive_mcp(fn_name, fn_args):
+    """Executor callable for the stable progressive MCP meta tools."""
+    from lib.mcp import get_bridge
+    from lib.mcp.progressive import (
+        MCP_SEARCH_TOOL_NAME,
+        call_progressive_mcp,
+        search_mcp_catalog,
+    )
+
+    bridge = get_bridge()
+    try:
+        if fn_name == MCP_SEARCH_TOOL_NAME:
+            return search_mcp_catalog(
+                bridge,
+                fn_args.get('query', ''),
+                server=fn_args.get('server', ''),
+                limit=fn_args.get('limit', 5),
+            )
+        return call_progressive_mcp(
+            bridge, fn_name, fn_args.get('name', ''),
+            fn_args.get('arguments', {}),
+        )
+    except Exception as e:
+        logger.error('[MCP:Progressive] %s failed: %s', fn_name, e,
+                     exc_info=True)
+        return f'MCP tool error: {e}'
+
+
+@tool_registry.handler(
+    {'search_mcp_tools', 'call_mcp_read_tool', 'call_mcp_write_tool'},
+    category='mcp', description='Progressive MCP discovery and invocation')
+def handle_progressive_mcp_tool(
+    task: dict[str, Any],
+    tc: dict[str, Any],
+    fn_name: str,
+    tc_id: str,
+    fn_args: dict[str, Any],
+    rn: int,
+    round_entry: dict[str, Any],
+    cfg: dict[str, Any],
+    project_path: str | None,
+    project_enabled: bool,
+    all_tools: list[dict] | None = None,
+) -> tuple[str, str, bool]:
+    """Execute one progressive MCP search/read/write wrapper call."""
+    from lib.mcp.progressive import MCP_SEARCH_TOOL_NAME
+
+    underlying = str(fn_args.get('name') or '')
+
+    def _post_build(meta, _tool_content, _fn_args):
+        if fn_name == MCP_SEARCH_TOOL_NAME:
+            meta['badge'] = 'MCP catalog'
+            meta['title'] = f"Search MCP tools: {str(fn_args.get('query') or '')[:120]}"
+            return
+        try:
+            from lib.mcp import get_bridge
+            from lib.tasks_pkg.tool_display import compose_mcp_display
+            info = get_bridge().get_tool_info(underlying)
+            meta['badge'] = info['server_name'] if info else 'MCP'
+            display, _ = compose_mcp_display(
+                underlying, fn_args.get('arguments') or {})
+            meta['title'] = display or underlying or fn_name
+        except Exception as e:
+            logger.debug('[MCP:Progressive] display build failed for %s: %s',
+                         underlying, e)
+
+    result = simple_call(
+        task, fn_name, fn_args, rn, round_entry, tc_id,
+        executor=_run_progressive_mcp,
+        source='MCP', module_tag='MCP:Progressive',
+        extra={'mcpTool': underlying, 'progressive': True},
+        post_build=_post_build,
+    )
+    if fn_name == MCP_SEARCH_TOOL_NAME:
+        misses = 1
+        try:
+            import json
+            payload = json.loads(result[0]) if isinstance(result[0], str) else {}
+            misses = int(not bool(payload.get('matches')))
+        except Exception as e:
+            logger.debug('[MCP:Progressive] search result was not parseable '
+                         'for telemetry: %s', e)
+        try:
+            from lib.context_telemetry import record_mcp_search
+            record_mcp_search(task, misses=misses)
+        except Exception as e:
+            logger.debug('[MCP:Progressive] search telemetry failed: %s', e)
+    return result
+
+
 def _run_mcp(fn_name, fn_args):
     """Executor callable for simple_call — returns tool_content string."""
     from lib.mcp import get_bridge
@@ -103,6 +193,13 @@ def handle_mcp_tool(
             ('❌', 'MCP Error', 'MCP tool error', 'MCP server not connected'))
         meta['badge'] = server_name if not is_error else f'{server_name} (error)'
         meta['title'] = fresh_display
+
+    try:
+        from lib.mcp.tool_search import record_mcp_tool_used
+        record_mcp_tool_used(str(task.get('id') or ''), fn_name)
+    except Exception as e:
+        logger.debug('[MCP] sticky active-tool update failed for %s: %s',
+                     fn_name, e)
 
     return simple_call(
         task, fn_name, fn_args, rn, round_entry, tc_id,

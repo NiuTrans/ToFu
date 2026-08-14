@@ -92,6 +92,29 @@ def test_affinity_single_replica_owns_everything():
     assert owns_task('another') is True
 
 
+def test_rendezvous_add_replica_only_moves_keys_to_new_replica():
+    """A scale-up must not reshuffle keys between existing replicas."""
+    from lib.agent_core.affinity import owner_replica
+    old_ring = ['r1', 'r2', 'r3']
+    new_ring = old_ring + ['r4']
+    moved = 0
+    for i in range(1000):
+        task_id = 'task-%d' % i
+        before = owner_replica(task_id, old_ring)
+        after = owner_replica(task_id, new_ring)
+        if before != after:
+            moved += 1
+            assert after == 'r4'
+    assert 100 < moved < 400, 'distribution should move roughly 1/4 of keys'
+
+
+def test_programmatic_server_rejects_fake_multiworker_flag():
+    source = open(os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                               'server.py'), encoding='utf-8').read()
+    assert "if args.workers != 1:" in source
+    assert '--workers must be 1' in source
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  Supersede index externalized onto the shared store
 # ══════════════════════════════════════════════════════════════════════

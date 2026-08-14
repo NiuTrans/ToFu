@@ -21,7 +21,10 @@ from .storage import (
     _get_job,
     _clear_job,
     _report_path,
+    _is_report_date,
     _save_report,
+    _save_generated_report,
+    _update_report,
     _load_report,
 )
 
@@ -68,6 +71,7 @@ from .conversations import (
     _build_transcript_from_messages,
     _extract_convs_for_date,
     _count_convs_for_date,
+    _activity_counts_for_range,
     _analyse_conversations,
 )
 
@@ -84,6 +88,7 @@ from .scheduler import (
     _backfill_yesterday_if_missing,
     _scheduler_loop,
     start_report_scheduler,
+    stop_report_scheduler,
 )
 
 __all__ = [
@@ -91,7 +96,8 @@ __all__ = [
     'DEFAULT_USER_ID',
     '_REPORTS_DIR', '_active_jobs', '_jobs_lock',
     '_update_job', '_get_job', '_clear_job',
-    '_report_path', '_save_report', '_load_report',
+    '_report_path', '_is_report_date', '_save_report', '_save_generated_report',
+    '_update_report', '_load_report',
     # prompts
     '_ANALYSIS_SYSTEM', '_TODO_TOOL_DEFAULTS', '_TODO_TOOL_MAP', '_QUOTES',
     # cost
@@ -110,11 +116,12 @@ __all__ = [
     # conversations
     '_safe_int_ts', '_build_transcript_from_messages',
     '_extract_convs_for_date', '_count_convs_for_date',
+    '_activity_counts_for_range',
     '_analyse_conversations',
     # llm
     '_extract_json_result', '_run_llm_analysis', '_pick_persona',
     # async
     '_generate_in_background',
     '_backfill_yesterday_if_missing', '_scheduler_loop',
-    'start_report_scheduler',
+    'start_report_scheduler', 'stop_report_scheduler',
 ]

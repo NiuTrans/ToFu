@@ -63,6 +63,22 @@ _STREAM_TEXT = "Hello from the stubbed model. This is a deterministic reply."
 _SENTINEL = {'stream_calls': 0, 'search_calls': 0}
 
 
+@pytest.fixture(autouse=True)
+def _disable_open_mode_rate_limit(monkeypatch):
+    """Keep browser journeys isolated from the process-wide RPM bucket.
+
+    A real page boot performs several legitimate API requests.  Reusing the
+    session-scoped live server across the visual suite must not make later
+    journeys depend on how many earlier pages were opened.
+    """
+    from lib.rate_limit_store import reset_for_test
+
+    monkeypatch.setenv('TOFU_OPEN_MODE_RPM', '0')
+    reset_for_test()
+    yield
+    reset_for_test()
+
+
 def _stub_stream_llm_response_factory():
     """Build the stub bound to the manager's event helpers."""
     import lib.tasks_pkg.manager as mgr
@@ -215,49 +231,44 @@ def _install_llm_stubs():
 
 def _wait_app_ready(page, timeout=15000):
     page.wait_for_selector('#userInput', state='visible', timeout=timeout)
-    page.wait_for_function("typeof sendMessage === 'function'", timeout=timeout)
-    page.wait_for_function("typeof newChat === 'function'", timeout=timeout)
+    page.wait_for_function(
+        "window.TofuModules && window.TofuModules.version === 3",
+        timeout=timeout)
 
 
-def test_bundle_loaded_in_browser(page):
-    """The served bundle defines the tool-round renderer in-browser — proves
-    the js_bundler allowlist wired tool_rounds.js end-to-end (no unit test
-    checks the actually-served bundle)."""
+def test_bundle_loaded_in_browser(page, assert_no_js_errors):
+    """The served Vite entry reaches app-ready with the two allowed bridges."""
     _wait_app_ready(page)
-    assert page.evaluate("typeof renderToolRoundsHTML === 'function'"), (
-        'renderToolRoundsHTML missing in browser — bundler allowlist regression'
-    )
-    assert page.evaluate("typeof updateStreamingUI === 'function'")
-    assert page.evaluate("typeof _buildSwarmPanelHTML === 'function'")
+    public = page.evaluate("""() => ({
+        version: window.TofuModules?.version,
+        api: typeof window.Api?.request,
+        newChat: typeof window.TofuModules?.resolveAction('newChat'),
+        settings: window.TofuModules?.canInvokeFeature('openSettings'),
+        oldScripts: performance.getEntriesByType('resource')
+          .some(entry => entry.name.includes('/static/js/')),
+    })""")
+    assert public == {
+        'version': 3, 'api': 'function', 'newChat': 'function',
+        'settings': True, 'oldScripts': False,
+    }
 
 
-def test_send_message_streams_and_renders(page):
+def test_send_message_streams_and_renders(page, assert_no_js_errors):
     """Send a message against the stubbed LLM and assert a real assistant
     message renders in the live DOM. Fresh conversation (newChat) for
     isolation — without it the send collides with the open conv and the task
     manager auto-aborts it as superseded."""
     _wait_app_ready(page)
-    page.evaluate("newChat()")
+    page.locator('.new-chat-btn').click()
     time.sleep(0.4)
 
     calls_before = _SENTINEL['stream_calls']
     page.locator('#userInput').fill('Hello E2E')
     page.locator('#sendBtn').click()
 
-    # Source of truth: the in-memory conversations model accumulates the stub
-    # reply (survives DOM-finalize lag).
-    page.wait_for_function(
-        """() => {
-            if (typeof conversations === 'undefined') return false;
-            const c = conversations.find(c => c.id === activeConvId);
-            if (!c) return false;
-            return c.messages.some(m => m.role === 'assistant'
-                && (m.content || '').includes('stubbed model'));
-        }""",
-        timeout=30000)
     page.wait_for_function(
         "document.querySelector('#chatInner').innerText.includes('stubbed model')",
-        timeout=10000)
+        timeout=30000)
 
     body_text = page.inner_text('#chatInner')
     assert 'Hello E2E' in body_text, 'user message not rendered'
@@ -272,12 +283,12 @@ def test_send_message_streams_and_renders(page):
     )
 
 
-def test_tool_round_renders(page):
+def test_tool_round_renders(page, assert_no_js_errors):
     """A web_search tool round renders the ptool-panel in the live DOM —
     exercises the SSE tool_start/tool_result → tool_rounds.js render path.
     Fresh conversation for isolation (see above)."""
     _wait_app_ready(page)
-    page.evaluate("newChat()")
+    page.locator('.new-chat-btn').click()
     time.sleep(0.4)
 
     stream_before = _SENTINEL['stream_calls']
@@ -301,3 +312,22 @@ def test_tool_round_renders(page):
     assert _SENTINEL['search_calls'] > search_before, (
         'perform_web_search stub never ran — a real web search may have executed'
     )
+
+
+def test_admin_entry_loads_its_own_vite_graph(
+        page, live_server, assert_no_js_errors):
+    """The standalone admin page boots its ESM entry and visible auth gate."""
+    response = page.goto(f'{live_server}/admin', wait_until='domcontentloaded')
+    assert response and response.status == 200
+    page.wait_for_function(
+        "window.TofuModules && window.TofuModules.version === 3",
+        timeout=15000)
+    page.wait_for_selector('#adminGate', state='visible', timeout=15000)
+    evidence = page.evaluate(r"""() => ({
+      entry: performance.getEntriesByType('resource')
+        .some(item => /\/static\/vite\/assets\/admin-[^/]+\.js$/.test(item.name)),
+      classic: performance.getEntriesByType('resource')
+        .some(item => item.name.includes('/static/js/')),
+      api: typeof window.Api?.request,
+    })""")
+    assert evidence == {'entry': True, 'classic': False, 'api': 'function'}

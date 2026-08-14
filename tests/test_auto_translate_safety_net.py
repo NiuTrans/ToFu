@@ -20,10 +20,6 @@ import json
 import lib.tasks_pkg.auto_translate as at
 
 
-class _FakeRow(tuple):
-    """A 2-col row (messages, settings) indexable like the real sqlite row."""
-
-
 class _FakeDB:
     """Minimal stand-in for the thread-local chat DB connection.
 
@@ -32,15 +28,22 @@ class _FakeDB:
     """
 
     def __init__(self, messages, settings):
-        self._row = _FakeRow((json.dumps(messages), json.dumps(settings)))
+        self._messages = messages
+        self._settings = settings
 
     def execute(self, sql, params=()):
         self._last_sql = sql
         return self
 
     def fetchone(self):
-        # The safety net's first query selects (messages, settings).
-        return self._row
+        if 'SELECT messages,' not in self._last_sql:
+            return None
+        return {
+            'messages': json.dumps(self._messages),
+            'settings': json.dumps(self._settings),
+            'id': 'conv-net', 'user_id': 1, 'rev': 0,
+            'msg_count': len(self._messages),
+        }
 
 
 def _make_task(task_id='t-net', auto=True):

@@ -8,6 +8,10 @@ Endpoints (charter#0 envelope):
                                          (admin; provisions the managed
                                          provider on success, background)
   POST /api/v1/adapter/stop            — stop it and deprovision (admin)
+  POST /api/v1/adapter/oauth/start     — start Claude/ChatGPT login on agent
+  GET  /api/v1/adapter/oauth/status    — poll the agent-owned OAuth session
+  POST /api/v1/adapter/oauth/callback  — manual callback fallback
+  DELETE /api/v1/adapter/accounts      — remove one agent-local account
 
 The actual mechanics live in lib/desktop/adapter.py (policy store,
 loopback relay, provider provisioning); this is the thin REST surface.
@@ -15,9 +19,11 @@ loopback relay, provider provisioning); this is the thin REST surface.
 
 from __future__ import annotations
 
-from flask import Blueprint
+import re
 
-from lib.api_response import api_bad_request, api_internal_error, api_ok
+from quart import Blueprint, request
+
+from lib.api_response import api_bad_request, api_error, api_internal_error, api_ok
 from lib.log import get_logger
 from lib.openapi import api_meta
 from lib.request_parser import BadRequest, parse_body, require_str
@@ -33,6 +39,17 @@ def _caller_uid() -> str:
     from .auth import current_auth
     auth = current_auth()
     return (auth.user_id if auth and getattr(auth, 'user_id', '') else '')
+
+
+def _known_agent(agent_id: str, uid: str) -> dict:
+    from lib.desktop import list_agents
+    return next((a for a in list_agents(user_id=uid or None)
+                 if a.get('agent_id') == agent_id), None)
+
+
+def _valid_oauth_state(state: str) -> bool:
+    return bool(len(state) <= 128 and '..' not in state
+                and re.fullmatch(r'[A-Za-z0-9_.-]+', state))
 
 
 @api_v1_adapter_bp.route('/api/v1/adapter/status', methods=['GET'])
@@ -69,7 +86,8 @@ def adapter_status_route():
                 'name': a.get('name', ''),
                 'platform': a.get('platform', ''),
                 'online': a.get('online', False),
-                'adapter': adapter_status(aid, user_id=uid),
+                'adapter': adapter_status(
+                    aid, agent_name=a.get('name', ''), user_id=uid),
                 'policy': adapter_policy_public(aid),
             })
         return api_ok({'agents': agents, 'ensure_tasks': ensure_task_state()})
@@ -138,6 +156,153 @@ def adapter_stop_route():
     except Exception as e:
         logger.error('[Adapter.v1] stop failed: %s', e, exc_info=True)
         return api_internal_error(e, source='api_v1.adapter.stop')
+
+
+@api_v1_adapter_bp.route('/api/v1/adapter/oauth/start', methods=['POST'])
+@require_scope('admin')
+@api_meta(
+    summary='Start a subscription login inside an agent-local adapter',
+    description=(
+        'Body ``{agent_id, provider}``, where provider is ``claude`` or '
+        '``codex``. Returns the CLIProxyAPI authorization URL and opaque '
+        'state. Credentials remain in the selected desktop agent.'
+    ),
+    tags=['capabilities'], scope='admin',
+)
+def adapter_oauth_start_route():
+    body = parse_body()
+    try:
+        agent_id = require_str(body, 'agent_id')
+        provider = require_str(body, 'provider').lower()
+    except BadRequest as e:
+        return api_bad_request(str(e), field=getattr(e, 'field', '') or '')
+    if provider not in ('claude', 'codex'):
+        return api_bad_request('provider must be claude or codex', field='provider')
+    uid = _caller_uid()
+    if not _known_agent(agent_id, uid):
+        return api_bad_request('unknown agent_id', field='agent_id')
+    try:
+        from lib.desktop.adapter import start_adapter_oauth
+        return api_ok(start_adapter_oauth(agent_id, provider, user_id=uid))
+    except (RuntimeError, ValueError) as e:
+        logger.warning('[Adapter.v1] OAuth start failed: %s', e)
+        return api_error(str(e), status=502)
+    except Exception as e:
+        logger.error('[Adapter.v1] OAuth start failed: %s', e, exc_info=True)
+        return api_internal_error(e, source='api_v1.adapter.oauth_start')
+
+
+@api_v1_adapter_bp.route('/api/v1/adapter/oauth/status', methods=['GET'])
+@require_scope('admin')
+@api_meta(
+    summary='Poll an agent-local subscription OAuth session',
+    description=(
+        'Query ``agent_id`` + opaque ``state``. On success the backend '
+        'refreshes the managed adapter provider from /v1/models before '
+        'returning, so model pickers can be refreshed immediately.'
+    ),
+    tags=['capabilities'], scope='admin',
+)
+def adapter_oauth_status_route():
+    agent_id = str(request.args.get('agent_id') or '').strip()
+    state = str(request.args.get('state') or '').strip()
+    if not agent_id:
+        return api_bad_request('agent_id is required', field='agent_id')
+    if not _valid_oauth_state(state):
+        return api_bad_request('invalid OAuth state', field='state')
+    uid = _caller_uid()
+    agent = _known_agent(agent_id, uid)
+    if not agent:
+        return api_bad_request('unknown agent_id', field='agent_id')
+    try:
+        from lib.desktop.adapter import adapter_oauth_status
+        return api_ok(adapter_oauth_status(
+            agent_id, state, agent_name=agent.get('name', ''), user_id=uid))
+    except (RuntimeError, ValueError) as e:
+        logger.warning('[Adapter.v1] OAuth status failed: %s', e)
+        return api_error(str(e), status=502)
+    except Exception as e:
+        logger.error('[Adapter.v1] OAuth status failed: %s', e, exc_info=True)
+        return api_internal_error(e, source='api_v1.adapter.oauth_status')
+
+
+@api_v1_adapter_bp.route('/api/v1/adapter/oauth/callback', methods=['POST'])
+@require_scope('admin')
+@api_meta(
+    summary='Submit a manual callback to an agent-local OAuth session',
+    description=(
+        'Fallback for a browser that cannot reach the desktop callback '
+        'port. Body accepts ``redirect_url`` or ``code`` plus the state.'
+    ),
+    tags=['capabilities'], scope='admin',
+)
+def adapter_oauth_callback_route():
+    body = parse_body()
+    try:
+        agent_id = require_str(body, 'agent_id')
+        provider = require_str(body, 'provider').lower()
+        state = require_str(body, 'state')
+    except BadRequest as e:
+        return api_bad_request(str(e), field=getattr(e, 'field', '') or '')
+    if provider not in ('claude', 'codex'):
+        return api_bad_request('provider must be claude or codex', field='provider')
+    if not _valid_oauth_state(state):
+        return api_bad_request('invalid OAuth state', field='state')
+    code = str(body.get('code') or '').strip()
+    redirect_url = str(body.get('redirect_url') or '').strip()
+    error = str(body.get('error') or '').strip()
+    if not code and not redirect_url and not error:
+        return api_bad_request('code, redirect_url, or error is required')
+    if max(len(code), len(redirect_url), len(error)) > 8192:
+        return api_bad_request('OAuth callback payload is too long')
+    uid = _caller_uid()
+    if not _known_agent(agent_id, uid):
+        return api_bad_request('unknown agent_id', field='agent_id')
+    try:
+        from lib.desktop.adapter import submit_adapter_oauth_callback
+        return api_ok(submit_adapter_oauth_callback(
+            agent_id, provider, state, code=code, redirect_url=redirect_url,
+            error=error, user_id=uid))
+    except (RuntimeError, ValueError) as e:
+        logger.warning('[Adapter.v1] OAuth callback failed: %s', e)
+        return api_error(str(e), status=502)
+    except Exception as e:
+        logger.error('[Adapter.v1] OAuth callback failed: %s', e, exc_info=True)
+        return api_internal_error(e, source='api_v1.adapter.oauth_callback')
+
+
+@api_v1_adapter_bp.route('/api/v1/adapter/accounts', methods=['DELETE'])
+@require_scope('admin')
+@api_meta(
+    summary='Delete one account from an agent-local subscription adapter',
+    description='Body ``{agent_id, name, auth_index?}``.',
+    tags=['capabilities'], scope='admin',
+)
+def adapter_account_delete_route():
+    body = parse_body()
+    try:
+        agent_id = require_str(body, 'agent_id')
+        name = require_str(body, 'name')
+    except BadRequest as e:
+        return api_bad_request(str(e), field=getattr(e, 'field', '') or '')
+    uid = _caller_uid()
+    agent = _known_agent(agent_id, uid)
+    if not agent:
+        return api_bad_request('unknown agent_id', field='agent_id')
+    try:
+        from lib.desktop.adapter import delete_adapter_account
+        out = delete_adapter_account(
+            agent_id, name, auth_index=body.get('auth_index'),
+            agent_name=agent.get('name', ''), user_id=uid)
+        return api_ok(out)
+    except ValueError as e:
+        return api_bad_request(str(e))
+    except RuntimeError as e:
+        logger.warning('[Adapter.v1] account delete failed: %s', e)
+        return api_error(str(e), status=502)
+    except Exception as e:
+        logger.error('[Adapter.v1] account delete failed: %s', e, exc_info=True)
+        return api_internal_error(e, source='api_v1.adapter.account_delete')
 
 
 __all__ = ['api_v1_adapter_bp']

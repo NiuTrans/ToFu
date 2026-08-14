@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import re
+import json
 
 import pytest
 
@@ -35,7 +36,7 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 _STYLES = os.path.join(ROOT, 'static', 'styles.css')
-_I18N = os.path.join(ROOT, 'static', 'js', 'i18n.js')
+_I18N = os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales', 'zh.json')
 
 
 def _read(path):
@@ -121,7 +122,7 @@ def test_zh_chrome_labels_do_not_mix_english_epic():
     """The board's zh noun is 任务 (the tab is 任务板) — zh chrome strings must
     not fall back to the English word "epic". (The peerAdvancing {epic} token
     is a template VARIABLE name, not display text — excluded.)"""
-    src = _read(_I18N)
+    values = json.loads(_read(_I18N))
     keys = [
         'collab.epicsInProgress',
         'projectBrain.autoStartTitle',
@@ -131,11 +132,9 @@ def test_zh_chrome_labels_do_not_mix_english_epic():
         'projectBrain.boardUntitled',
     ]
     for key in keys:
-        m = re.search(re.escape("'" + key + "'") +
-                      r"\s*:\s*\{\s*zh:\s*'([^']*)'", src)
-        assert m, f'i18n key {key} not found'
-        assert 'epic' not in m.group(1).lower(), \
-            f'{key} zh value mixes the English word again: {m.group(1)}'
+        assert key in values, f'i18n key {key} not found'
+        assert 'epic' not in values[key].lower(), \
+            f'{key} zh value mixes the English word again: {values[key]}'
 
 
 if __name__ == '__main__':

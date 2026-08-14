@@ -334,14 +334,17 @@ def _execute_timer_create(fn_args):
                 # Mark timer as triggered in DB
                 from datetime import datetime
 
-                from lib.database import DOMAIN_SYSTEM, get_thread_db
+                from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, get_thread_db
                 sysdb = get_thread_db(DOMAIN_SYSTEM)
                 now_iso = datetime.now().isoformat()
-                sysdb.execute(
-                    "UPDATE timer_watchers SET status='triggered', triggered_at=?, updated_at=? WHERE id=?",
+                db_execute_with_retry(
+                    sysdb,
+                    "UPDATE timer_watchers SET status='triggered', triggered_at=?, "
+                    "updated_at=? WHERE id=? AND status='active'",
                     [now_iso, now_iso, timer_id]
                 )
-                sysdb.commit()
+                from lib.scheduler.timer._notify import notify_timer_changed
+                notify_timer_changed('triggered')
 
                 # Clean up command output cache + reconcile audit stash
                 from lib.scheduler.timer import _cmd_outputs_lock, _last_cmd_outputs

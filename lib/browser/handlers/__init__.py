@@ -37,6 +37,7 @@ from lib.browser.handlers._tabs import (  # noqa: E402,F401
     _handle_close_tab,
     _handle_navigate,
     _render_read_result,
+    _result_url_allowed,
 )
 from lib.browser.handlers._interact import (  # noqa: E402,F401
     _handle_get_interactive_elements,
@@ -71,4 +72,5 @@ __all__ = [
     '_handle_get_app_state', '_handle_preview_page',
     '_handle_read_page', '_handle_type', '_handle_press_key',
     '_extract_best_text', '_render_read_result',
+    '_result_url_allowed',
 ]

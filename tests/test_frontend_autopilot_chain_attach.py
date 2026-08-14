@@ -35,10 +35,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
+STREAM_LIFECYCLE = runtime_section_path('ui/stream_lifecycle.js')
 
 
 def _node_deps_available() -> bool:
@@ -51,7 +54,7 @@ _HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
 const ROOT = process.argv[2];
-const MODE = process.argv[3] || 'ABSENT';   // ABSENT | ATTACH | IDEMPOTENT
+const MODE = process.argv[4] || 'ABSENT';   // ABSENT | ATTACH | IDEMPOTENT
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM('<!DOCTYPE html><body><div id="chatInner"></div></body>', { url: 'http://localhost/' });
 const win = dom.window;
@@ -103,7 +106,7 @@ if (MODE === 'ABSENT') {
 // stream_lifecycle.js references many symbols from sibling modules at runtime;
 // stub the ones _runTerminalContinuation's body can reach so eval + call don't
 // throw. (We only exercise _runTerminalContinuation.)
-eval(fs.readFileSync(path.join(ROOT, 'static', 'js', 'ui', 'stream_lifecycle.js'), 'utf8'));
+eval(fs.readFileSync(process.argv[3], 'utf8'));
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -141,7 +144,7 @@ def _run(mode: str):
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     try:
-        proc = subprocess.run(['node', harness, ROOT, mode],
+        proc = subprocess.run(['node', harness, ROOT, STREAM_LIFECYCLE, mode],
                               capture_output=True, text=True, timeout=60)
     finally:
         try:

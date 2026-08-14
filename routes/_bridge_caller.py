@@ -15,7 +15,7 @@ identical form:
 
 import threading
 
-from flask import jsonify, request
+from quart import jsonify, request
 
 from lib.bridge_auth import resolve_bridge_credential
 from lib.env_compat import getenv_compat

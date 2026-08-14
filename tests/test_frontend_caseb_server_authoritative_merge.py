@@ -46,6 +46,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -53,7 +54,10 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+sys.path.insert(0, HERE)
+from _runtime_sections import runtime_section_path  # noqa: E402
+
+MAIN_INIT_TASKS = runtime_section_path('main/main_init_tasks.js')
 
 
 def _node_available() -> bool:
@@ -197,7 +201,7 @@ def _run_harness(js_source_path: str):
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_caseb_merge_is_server_status_authoritative():
-    src_js = os.path.join(JS_DIR, 'main', 'main_init_tasks.js')
+    src_js = MAIN_INIT_TASKS
     proc = _run_harness(src_js)
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
@@ -214,7 +218,7 @@ def test_caseb_merge_neuter(tmp_path):
     main_init_tasks.js and prove conv-done now WRONGLY keeps the stale-longer
     local buffer — i.e. the test genuinely discriminates the fix. Real file
     untouched."""
-    src_js = os.path.join(JS_DIR, 'main', 'main_init_tasks.js')
+    src_js = MAIN_INIT_TASKS
     with open(src_js, encoding='utf-8') as f:
         src = f.read()
 

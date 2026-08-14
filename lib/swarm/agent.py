@@ -24,6 +24,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from lib.agent_core.events import Phase
+from lib.agent_core.store import get_conversation_store
 from lib.llm import build_body as _default_build_body
 from lib.llm_dispatch import dispatch_stream as _default_dispatch_stream
 from lib.llm_dispatch.retry_i18n import retry_phase_fields
@@ -49,6 +50,33 @@ from lib.swarm.tools import ARTIFACT_TOOLS
 from lib.tool_input_repair import ingest_tool_call
 
 logger = get_logger(__name__)
+
+# Request-inspector rows bypass TaskRuntime (intentionally: they belong to a
+# sub-agent child stream, not the parent SSE stream), so they do not inherit
+# TaskRuntime's monotonic sequence allocator.  Serialise the small
+# read-tail+append critical section in-process; the durable tail plus the event
+# writer's pending shadow make the sequence survive both server restarts and
+# write-behind lag.
+_REQUEST_SNAPSHOT_SEQ_LOCK = threading.Lock()
+
+
+def _next_request_snapshot_event_id(inspector_id: str,
+                                    round_num: int) -> int:
+    """Return an unused inspector event id at/after this logical round.
+
+    ``round_num - 1`` preserves the historical 0-based id for a brand-new
+    agent.  Existing durable/pending rows win on resume, so a checkpoint whose
+    old code reset its round counter cannot collide and silently lose the new
+    snapshot.
+
+    The caller must hold ``_REQUEST_SNAPSHOT_SEQ_LOCK`` through the matching
+    ``append_persistent_event`` call; otherwise two freshly constructed agent
+    objects could both observe the same tail.
+    """
+    return get_conversation_store().next_task_event_id(
+        inspector_id, floor=max(0, int(round_num) - 1))
+
+
 def _emit_request_snapshot(agent, round_num: int) -> str:
     """Persist a Request Inspector snapshot for ONE sub-agent LLM round.
 
@@ -81,10 +109,7 @@ def _emit_request_snapshot(agent, round_num: int) -> str:
             provider_id=(agent.parent_task or {}).get('provider_id') or '')
         snap = _strip_base64_for_snapshot(_wire)
         role = getattr(agent.spec, 'role', '') or ''
-        append_persistent_event(
-            inspector_id,
-            round_num - 1,  # one row per round; PK (task_id, event_id)
-            build_event(
+        event = build_event(
                 EventType.MESSAGES_SNAPSHOT,
                 kind='request',
                 model=agent.model,
@@ -103,7 +128,15 @@ def _emit_request_snapshot(agent, round_num: int) -> str:
                 roundNum=round_num,
                 label=f'[{role}] Round {round_num} 请求前 · {len(snap)}条',
                 messages=snap,
-            ))
+            )
+        # This child stream has no TaskRuntime sequence owner.  Keep the tail
+        # lookup and enqueue together so a resumed/duplicated in-process
+        # worker cannot mint the same id.  The database tail makes this survive
+        # process restart; pending_event_rows covers the asynchronous writer.
+        with _REQUEST_SNAPSHOT_SEQ_LOCK:
+            event_id = _next_request_snapshot_event_id(
+                inspector_id, round_num)
+            append_persistent_event(inspector_id, event_id, event)
         return inspector_id
     except Exception as e:
         logger.debug('[Agent:%s] request-inspector snapshot failed '
@@ -162,6 +195,7 @@ MAX_PARALLEL_TOOLS = int(os.environ.get('TOOL_MAX_PARALLEL_WORKERS', '16'))
 # (run_command's edits aren't reliably attributable from args alone).
 _PRESENCE_EDIT_ACTIONS = {
     'write_file': 'written',
+    'edit_file': 'edited',
     'apply_diff': 'patched',
     'apply_diffs': 'patched',
     'insert_content': 'inserted',
@@ -234,8 +268,6 @@ class SubAgent:
         if self.artifact_store is not None:
             self._inject_artifact_tools()
 
-        self.max_rounds = spec.max_rounds  # 0 = unlimited
-
         # Result tracking
         self.result = SubAgentResult()
 
@@ -248,6 +280,25 @@ class SubAgent:
         # Presence: throttle anchor for the streaming heartbeat (one bump per
         # ~5s of token flow). 0.0 → the first chunk beats immediately.
         self._last_presence_beat = 0.0
+        # Set by ``_run_loop`` when the caller deliberately supplied an agent
+        # wall-clock ceiling.  Tool dispatch reads the same deadline so a
+        # process blocked inside run_command can observe the ceiling instead
+        # of waiting until the next (unreachable) before_round hook.
+        self._run_deadline_monotonic: float | None = None
+
+        # Number of rounds already completed by a durable checkpoint.  The
+        # loop chassis deliberately numbers each invocation from zero, so the
+        # master restores this offset when rehydrating an interrupted agent.
+        # Without it, progress, inspector snapshots, and the next checkpoint
+        # all time-travelled back to Round 1 after every server restart.
+        self._round_offset = 0
+        # Independent semantic breaker for capability-boundary violations.
+        # Alternating one legal call with one hallucinated privileged call is
+        # not caught by the identical-tool fingerprint, yet it is still a
+        # non-recovering loop. Two explicit rejections are enough evidence to
+        # stop and write an honest capability-limited result.
+        self._tool_authority_rejections = 0
+        self._tool_authority_lock = threading.Lock()
 
         # Durable-resume key. Set by the master orchestrator's _make_agent
         # factory (like ``output_file``). When present, the agent checkpoints
@@ -268,9 +319,9 @@ class SubAgent:
             if isinstance(t, dict):
                 tool_names.append(t.get('function', {}).get('name', '?'))
         logger.debug(
-            '[%s] Initialized: model=%s, max_rounds=%d, thinking=%s, '
+            '[%s] Initialized: model=%s, thinking=%s, '
             'tools=[%s%s] (%d total), depends_on=%s, objective="%s"',
-            self.agent_id, self.model, self.max_rounds, self.thinking_enabled,
+            self.agent_id, self.model, self.thinking_enabled,
             ', '.join(tool_names[:10]), '...' if len(tool_names) > 10 else '',
             len(tool_names), list(spec.depends_on or []), spec.objective[:100]
         )
@@ -280,11 +331,14 @@ class SubAgent:
     # ─────────────────────────────────────────────────
 
     def _resolve_model(self, spec: SubTaskSpec, default_model: str) -> str:
-        """Resolve the model for this agent based on spec override → role hint → default."""
+        """Resolve override → evidence-backed role tier → parent model."""
         if spec.model_override:
             return spec.model_override
         tier = get_role_model_hint(spec.role)
-        return resolve_model_for_tier(tier, default_model)
+        provider_id = ((self.parent_task or {}).get('config') or {}).get(
+            '_pinned_provider_id', '')
+        return resolve_model_for_tier(
+            tier, default_model, role=spec.role, provider_id=provider_id)
 
     # ─────────────────────────────────────────────────
     #  Artifact tool injection
@@ -321,6 +375,22 @@ class SubAgent:
             f'When your task is complete, provide a clear final answer. '
             f'Do NOT call tools after you have gathered sufficient information — '
             f'write your final answer directly.'
+        )
+
+        # The role prose is static, while security/capability gates can remove
+        # tools from one concrete request.  State the effective inventory in
+        # the agent's own prompt so a role description can never be mistaken
+        # for an authorization grant (the browser role previously promised
+        # browser_execute_js even when that schema was absent, after which the
+        # model tried to emulate it with an unbounded run_command).
+        available_tools = sorted(self._known_tool_names())
+        system_content += (
+            '\n\n## Tool authority for this run\n'
+            'You may call ONLY tools present in the tool schemas supplied to '
+            'this run. Never emulate a missing browser or privileged tool via '
+            'run_command. If a required tool is absent, report that limitation '
+            'plainly in your final answer.\n'
+            f'Available tools: {", ".join(available_tools) or "(none)"}.'
         )
 
         # Artifact store instructions
@@ -562,8 +632,8 @@ class SubAgent:
         self._presence_announce(phase='working')
 
         logger.info('[Agent:%s] ========== RUN START ==========', self.agent_id)
-        logger.info('[Agent:%s] role=%s model=%s max_rounds=%d tools=%s',
-                     self.agent_id, self.spec.role, self.model, self.max_rounds,
+        logger.info('[Agent:%s] role=%s model=%s tools=%s',
+                     self.agent_id, self.spec.role, self.model,
                      [t.get('function', {}).get('name', '?') for t in (self.tools or [])])
         logger.info('[Agent:%s] objective: %s', self.agent_id, self.spec.objective[:200])
         logger.debug('[Agent:%s] context: %s', self.agent_id, (self.spec.context or '')[:300])
@@ -663,30 +733,14 @@ class SubAgent:
             logger.debug('[Agent:%s] checkpoint failed (non-fatal): %s',
                          self.agent_id, e)
 
-    # Chassis ceiling for "unlimited" (swarm max_rounds=0): the loop is
-    # then bounded by the timeout/abort safety nets, exactly as before.
-    _UNLIMITED_ROUND_CEILING = 2 ** 30
-
     # Consecutive rounds re-issuing an IDENTICAL tool call before the
     # chassis declares the loop wedged. 10 leaves ample room for a genuine
     # retry (a flaky fetch re-tried a few times) while bounding the runaway
     # shape at a cost of ~10 rounds instead of 26.7 million.
     _MAX_CONSECUTIVE_NO_PROGRESS_ROUNDS = 10
 
-    def _round_budget_label(self) -> str:
-        """Render the EFFECTIVE round bounds for the per-round log line.
-
-        A bare ``\u221e`` (what the round line used to print whenever
-        ``max_rounds`` was 0) tells an operator the loop is unbounded, which
-        stopped being true when the no-progress breaker landed. With no
-        explicit ``max_rounds`` the real
-        bounds are the breaker and the wall clock, so name them:
-        ``\u221e(np=10,t=1800s)``. This string is the only live signal an
-        operator has while a loop is running — during the 2026-07-27 runaway
-        it was printed 26.7M times while saying nothing would stop it.
-        """
-        if self.max_rounds > 0:
-            return str(self.max_rounds)
+    def _round_safety_label(self) -> str:
+        """Render semantic safety breakers for the per-round log line."""
         bounds = [f'np={self._MAX_CONSECUTIVE_NO_PROGRESS_ROUNDS}']
         timeout_seconds = getattr(self.spec, 'timeout_seconds', 0) or 0
         if timeout_seconds > 0:
@@ -710,13 +764,10 @@ class SubAgent:
         )
 
         timeout_seconds = getattr(self.spec, 'timeout_seconds', None)
+        self._run_deadline_monotonic = (
+            time.monotonic() + float(timeout_seconds)
+            if timeout_seconds and float(timeout_seconds) > 0 else None)
         abort = AbortSignal.from_callback(self.abort_check)
-        # swarm rounds are 1-indexed (round 1..max_rounds); the chassis rnd
-        # is 0-indexed, so the cap is max_rounds - 1. 0 = unlimited → a
-        # ceiling the timeout/abort safety nets always hit first.
-        cap = (self.max_rounds - 1) if self.max_rounds > 0 \
-            else self._UNLIMITED_ROUND_CEILING
-
         class _LlmFailed(Exception):
             """Sentinel: the dispatch hook already ran the LLM-error path."""
 
@@ -733,11 +784,15 @@ class SubAgent:
             # Now: a round may always begin while the agent is producing; it is
             # halted only after genuine silence. Tool-level stalls are caught by
             # the beacon (tools heartbeat on subprocess output), not here.
+            with self._tool_authority_lock:
+                authority_rejections = self._tool_authority_rejections
+            if authority_rejections >= 2:
+                return 'tool_authority'
             self._touch_progress('round_start')
             if not self.progress_beacon.is_making_progress(self.spec.id):
                 return 'stalled'
-            # An explicit per-spec ceiling remains honoured when a caller sets
-            # one deliberately; it is no longer a silent default.
+            # An explicit wall-clock ceiling remains available independently
+            # of tool progress.
             if timeout_seconds and (time.time() - start_time) > timeout_seconds:
                 return 'timeout'
             return None
@@ -747,10 +802,8 @@ class SubAgent:
             request snapshot, streaming log, heartbeats, stream phases,
             dispatch, usage/trace bookkeeping, assistant-message append,
             final-answer branch). ``_tools`` is unused — the body reads
-            ``self.tools`` directly (max-rounds exit = partial answer from
-            history, NOT a forced tool-less final turn, hence
-            ``tools_terminal_round=False`` below)."""
-            round_num = rnd + 1
+            ``self.tools`` directly on every round."""
+            round_num = self._round_offset + rnd + 1
             self.result.rounds_used = round_num
             round_start = time.time()
 
@@ -762,7 +815,7 @@ class SubAgent:
             # "it began round N and is still waiting on the model".
             logger.info('[Agent:%s] \u2500\u2500 Round %d/%s START \u2500\u2500 messages=%d',
                         self.agent_id, round_num,
-                        self._round_budget_label(), len(self.messages))
+                        self._round_safety_label(), len(self.messages))
 
             # ── LLM call (uses DI-injected or default build_body / dispatch_stream) ──
             body = self._build_body(
@@ -1009,7 +1062,7 @@ class SubAgent:
             chassis' before-round check of the NEXT round (outcome.aborted →
             CANCELLED below).
             """
-            round_num = rnd + 1
+            round_num = self._round_offset + rnd + 1
             # ── Execute tool calls ──
             tool_names = []
             for tc in tool_calls:
@@ -1044,15 +1097,13 @@ class SubAgent:
         try:
             outcome = run_agent_loop(
                 abort=abort,
-                max_tool_rounds=cap,
                 round_tools=None,  # the dispatch hook reads self.tools itself
                 dispatch=_dispatch,
                 execute_tools=_execute_round_tools,
                 before_round=_before_round,
                 # Wedged-loop breaker. On 2026-07-27 one sub-agent re-issued
                 # an identical tool call for 26.7M rounds (3.5h, 9.1 GB of
-                # app.log) because max_rounds=0 collapses to the 2**30
-                # ceiling. The chassis halts on N consecutive rounds whose
+                # app.log). The chassis halts on N consecutive rounds whose
                 # tool-call fingerprint is unchanged; empty CONTENT is NOT
                 # the criterion (measured: 50.3% of legitimate rounds have
                 # content_len==0 — that is just a pure tool-calling turn).
@@ -1071,7 +1122,6 @@ class SubAgent:
                              and not (msg.get('content') or '').strip()))
                 ),
                 max_retry_bonus=2,
-                tools_terminal_round=False,
                 # Round-boundary checkpoint lives on the chassis'
                 # on_round_end seam (NOT inside the batch hook) so the
                 # orchestrator's throttled checkpoint converges on the
@@ -1082,15 +1132,18 @@ class SubAgent:
             logger.debug('run loop: _LlmFailed (%s)', _e)
             return  # the dispatch hook already ran the LLM-error path
 
+        completed_rounds = self._round_offset + outcome.rounds
+        next_round = completed_rounds + 1
+
         if outcome.completed:
             return  # the final-answer branch in _dispatch set everything
 
         if outcome.aborted:
             logger.info('[%s] Aborted (%s) at round %d',
-                        self.agent_id, outcome.exit_reason, outcome.rounds)
+                        self.agent_id, outcome.exit_reason, completed_rounds)
             self.result.status = SubAgentStatus.CANCELLED.value
             self._extract_partial_answer(
-                f'Agent cancelled at round {outcome.rounds}')
+                f'Agent cancelled at round {completed_rounds}')
             return
 
         if outcome.halted and outcome.exit_reason == 'stalled':
@@ -1099,51 +1152,50 @@ class SubAgent:
                 '[%s] Stalled: no progress signal for %.0fs (stall_at=%.0fs) '
                 'at round %d — halting a silent agent',
                 self.agent_id, _silent,
-                self.progress_beacon.stall_timeout, outcome.rounds + 1)
+                self.progress_beacon.stall_timeout, next_round)
             audit_log('agent_stalled',
                       agent_id=self.agent_id, role=self.spec.role,
-                      model=self.model, rounds=outcome.rounds,
+                      model=self.model, rounds=completed_rounds,
                       silent_seconds=round(_silent),
                       objective=(self.spec.objective or '')[:200])
             self.result.status = SubAgentStatus.COMPLETED.value
             self._finalize_with_wrapup(
                 f'no activity for {_silent:.0f}s (stopped at round '
-                f'{outcome.rounds})')
+                f'{completed_rounds})')
             self._emit_event(
                 'progress',
                 f'⏸️ [{self.spec.role}] Stopped: silent for {_silent:.0f}s',
                 status='running', phase='stalled',
-                round_num=outcome.rounds + 1,
+                round_num=next_round,
             )
             return
 
         if outcome.halted and outcome.exit_reason == 'timeout':
             logger.warning(
                 '[%s] Timeout after %ss at round %d',
-                self.agent_id, timeout_seconds, outcome.rounds + 1,
+                self.agent_id, timeout_seconds, next_round,
             )
             self.result.status = SubAgentStatus.COMPLETED.value
             self._finalize_with_wrapup(
                 f'timed out after the explicit {timeout_seconds}s ceiling '
-                f'(completed {outcome.rounds} rounds)')
+                f'(completed {completed_rounds} rounds)')
             self._emit_event(
                 'timeout',
                 f'⏰ [{self.spec.role}] Timed out after {timeout_seconds}s',
                 status='timeout', phase='timeout',
-                round_num=outcome.rounds + 1,
+                round_num=next_round,
             )
             return
 
         if outcome.halted and outcome.exit_reason == 'no_progress':
             # Wedged loop: the model re-issued an identical tool call for
             # _MAX_CONSECUTIVE_NO_PROGRESS_ROUNDS rounds. Without its own
-            # branch this fell through to 'max rounds exhausted' below and
-            # mislabelled the cause, hiding the very defect it detects.
+            # branch it would be mislabelled, hiding the very defect it detects.
             logger.warning(
                 '[%s] No-progress breaker: %d consecutive identical '
                 'tool-call rounds at round %d — halting a wedged loop',
                 self.agent_id, outcome.consecutive_no_progress_rounds,
-                outcome.rounds)
+                completed_rounds)
             # L3 feedback: a structured, greppable record so a wedged agent
             # is a first-class signal rather than something an operator has
             # to infer from log VOLUME after the fact.
@@ -1151,14 +1203,14 @@ class SubAgent:
                       agent_id=self.agent_id,
                       role=self.spec.role,
                       model=self.model,
-                      rounds=outcome.rounds,
+                      rounds=completed_rounds,
                       consecutive_identical=outcome.consecutive_no_progress_rounds,
                       objective=(self.spec.objective or '')[:200])
             self.result.status = SubAgentStatus.COMPLETED.value
             self._finalize_with_wrapup(
                 f'no progress for '
                 f'{outcome.consecutive_no_progress_rounds} consecutive rounds '
-                f'(stopped at round {outcome.rounds})',
+                f'(stopped at round {completed_rounds})',
                 guidance=('You were repeating the same tool call. Do not '
                           'retry it; report what you already learned.'))
             self._emit_event(
@@ -1166,13 +1218,44 @@ class SubAgent:
                 f'🛑 [{self.spec.role}] Stopped: no progress for '
                 f'{outcome.consecutive_no_progress_rounds} rounds',
                 status='running', phase='no_progress',
-                round_num=outcome.rounds,
+                round_num=completed_rounds,
             )
             return
 
-        # outcome.exit_reason == 'max_rounds_exhausted'
-        logger.info('[%s] Exhausted %d rounds', self.agent_id, self.max_rounds)
-        self._finalize_with_wrapup(f'max rounds ({self.max_rounds}) reached')
+        if outcome.halted and outcome.exit_reason == 'tool_authority':
+            with self._tool_authority_lock:
+                rejected = self._tool_authority_rejections
+            logger.warning(
+                '[%s] Tool-authority breaker: %d unavailable tool calls '
+                'rejected by round %d — forcing a tool-less wrap-up',
+                self.agent_id, rejected, completed_rounds)
+            audit_log('agent_tool_authority_breaker',
+                      agent_id=self.agent_id,
+                      role=self.spec.role,
+                      model=self.model,
+                      rounds=completed_rounds,
+                      rejected_calls=rejected,
+                      objective=(self.spec.objective or '')[:200])
+            self.result.status = SubAgentStatus.COMPLETED.value
+            self._finalize_with_wrapup(
+                f'{rejected} unavailable tool calls were rejected '
+                f'(stopped at round {completed_rounds})',
+                guidance=(
+                    'The required capability is not authorized in this run. '
+                    'Do not suggest or emulate a shell workaround; report the '
+                    'capability limitation plainly.'))
+            self._emit_event(
+                'progress',
+                f'🛑 [{self.spec.role}] Stopped: unavailable tool repeatedly requested',
+                status='running', phase=Phase.TOOL_AUTHORITY,
+                round_num=completed_rounds,
+            )
+            return
+
+        logger.warning('[%s] Agent loop halted unexpectedly: %s',
+                       self.agent_id, outcome.exit_reason)
+        self._finalize_with_wrapup(
+            f'agent loop halted: {outcome.exit_reason}')
         self.result.status = SubAgentStatus.COMPLETED.value
 
     # ─────────────────────────────────────────────────
@@ -1381,9 +1464,12 @@ class SubAgent:
         membership oracle for :func:`resolve_tool_name` so an alias never maps
         onto a tool the agent doesn't actually have, and a legitimate
         dynamically-injected tool is never mis-aliased. The three
-        locally-handled artifact tools are always included.
+        locally-handled artifact tools are included only when this agent has
+        the backing store and schemas for them.
         """
-        names: set[str] = {'store_artifact', 'read_artifact', 'list_artifacts'}
+        names: set[str] = set()
+        if self.artifact_store is not None:
+            names.update({'store_artifact', 'read_artifact', 'list_artifacts'})
         for t in (self.tools or []):
             if isinstance(t, dict):
                 n = (t.get('function') or {}).get('name')
@@ -1423,9 +1509,15 @@ class SubAgent:
         fn_name = _ingested.fn_name
         fn_info['name'] = fn_name  # persist canonical name onto the tool_call
         if _ingested.rejected:
+            with self._tool_authority_lock:
+                self._tool_authority_rejections += 1
+                rejection_count = self._tool_authority_rejections
             logger.warning('[Agent:%s] Rejected hallucinated tool %r (suggestions=%s)',
                            self.agent_id, _raw_name, _ingested.rejection.get('suggestions'))
-            return _ingested.parse_error
+            suffix = (f' This is unavailable-tool rejection '
+                      f'{rejection_count}/2; after the second rejection this '
+                      f'agent will stop and report the capability limitation.')
+            return (_ingested.parse_error or '') + suffix
         if _ingested.parse_error:
             logger.warning('[Agent:%s] Unparseable args for %s: %s',
                            self.agent_id, fn_name, _ingested.parse_error)
@@ -1629,7 +1721,47 @@ class SubAgent:
         """
         from lib.tasks_pkg.executor import _execute_tool_one
 
-        # Build a minimal task dict for tool execution.
+        # Work on a private args copy. The ingested args are persisted in the
+        # assistant message and tool log; adding a swarm-only safety timeout
+        # must not rewrite what the model actually sent.
+        fn_args = dict(fn_args or {})
+
+        # An explicit whole-agent deadline must also reach a process blocked
+        # inside run_command. Do not invent a default command timeout here:
+        # the swarm liveness contract deliberately permits productive, long
+        # commands to run while they emit progress. A genuinely stalled swarm
+        # is cancelled by the master's distinct internal stop signal, mirrored
+        # into task_proxy['aborted'] below.
+        if fn_name == 'run_command':
+            try:
+                requested_timeout = float(fn_args.get('timeout') or 0)
+            except (TypeError, ValueError) as exc:
+                logger.debug(
+                    '[Agent:%s] invalid run_command timeout %r: %s',
+                    self.agent_id, fn_args.get('timeout'), exc)
+                requested_timeout = 0.0
+            remaining = None
+            if self._run_deadline_monotonic is not None:
+                remaining = max(0.1, self._run_deadline_monotonic - time.monotonic())
+            if remaining is not None and (
+                    requested_timeout <= 0 or requested_timeout > remaining):
+                fn_args['timeout'] = remaining
+
+        def _tool_abort_requested() -> bool:
+            try:
+                if self.abort_check():
+                    return True
+            except Exception as e:
+                logger.debug('[Agent:%s] tool abort probe failed: %s',
+                             self.agent_id, e)
+            return (self._run_deadline_monotonic is not None
+                    and time.monotonic() >= self._run_deadline_monotonic)
+
+        # Build an ISOLATED minimal task dict for tool execution. Sharing the
+        # parent's events/toolRounds let sub-agent checkpoint callbacks write a
+        # half-built inner round onto the parent conversation. The sub-agent's
+        # durable transcript and UI timeline are owned by its own checkpoint /
+        # on_event paths, so the executor proxy must stay local.
         # ★ _suppressEvents: tool handlers call _finalize_tool_round →
         #   append_event, which would otherwise push tool_start/tool_result
         #   SSE events onto the PARENT's stream (task id is shared). Those
@@ -1643,11 +1775,21 @@ class SubAgent:
             'id': self.parent_task.get('id', 'unknown'),
             'convId': self.parent_task.get('convId', 'unknown'),
             'status': 'running',
-            'events': self.parent_task.get('events', []),
-            'events_lock': self.parent_task.get('events_lock', threading.Lock()),
-            'toolRounds': self.parent_task.get('toolRounds', []),
+            'aborted': _tool_abort_requested(),
+            'content': '',
+            'thinking': '',
+            'events': [],
+            'events_lock': threading.Lock(),
+            'content_lock': threading.RLock(),
+            'toolRounds': [],
             'phase': self.parent_task.get('phase'),
             '_suppressEvents': True,
+            '_suppressCheckpoint': True,
+            # There is no human input channel attached to a background swarm
+            # worker. The code-exec handler uses this to select its truly
+            # non-interactive subprocess path instead of waiting forever on a
+            # stdin request that no UI can answer.
+            '_unattended': True,
             # ★ Inherit per-request custom tools (handlers resolve task-locally
             #   in _execute_tool_one before the global registry). The schema
             #   side is already role-scoped via scope_tools_for_role.
@@ -1673,6 +1815,24 @@ class SubAgent:
             'browserClientId': self.parent_task.get('config', {}).get('browserClientId'),
         }
 
+        # run_command polls task['aborted'] every ~200 ms. Mirror the parent's
+        # live abort callback (and an explicit agent deadline) into the proxy
+        # while the executor is blocked so Stop reaches the subprocess tree.
+        monitor_stop = threading.Event()
+
+        def _mirror_abort():
+            while not monitor_stop.wait(0.1):
+                if _tool_abort_requested():
+                    task_proxy['aborted'] = True
+                    return
+
+        monitor = None
+        if fn_name == 'run_command':
+            monitor = threading.Thread(
+                target=_mirror_abort,
+                name=f'swarm-abort-{self.spec.id}', daemon=True)
+            monitor.start()
+
         try:
             _, tool_content, _ = _execute_tool_one(
                 task_proxy, tool_call, fn_name, tc_id, fn_args,
@@ -1686,6 +1846,10 @@ class SubAgent:
         except Exception as e:
             logger.error('[%s] Tool dispatch error for %s: %s', self.agent_id, fn_name, e, exc_info=True)
             return f'Error executing {fn_name}: {type(e).__name__}: {e}'
+        finally:
+            monitor_stop.set()
+            if monitor is not None:
+                monitor.join(timeout=0.3)
 
     # ─────────────────────────────────────────────────
     #  Result truncation

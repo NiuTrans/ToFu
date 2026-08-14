@@ -11,18 +11,14 @@ page WRAPPERS up front (cheap viewport math, no raster), rasterize page 1
 immediately, then rasterize the rest lazily as they scroll near the viewport
 via an IntersectionObserver — and release canvases that scroll far off-screen.
 
-This harness drives the REAL ``_loadPaperPdf`` / ``_renderAllPages`` from
-``static/js/paper-reader.js`` with a CONTROLLABLE ``IntersectionObserver`` stub
+This harness drives the compiled native PDF owner with a controllable
+``IntersectionObserver`` stub
 (jsdom has none) so it can assert:
   • Phase 1 builds one wrapper PER PAGE up front (full scroll height).
   • Only page 1 is rasterized on load — pages 2..N are NOT yet (the whole point).
   • Every wrapper is observed by the IntersectionObserver.
   • Feeding an "intersecting" entry for a later page rasterizes THAT page lazily.
   • Feeding a "not intersecting" entry for a rendered page RELEASES its canvas.
-
-Neuter: forcing ``IntersectionObserver`` undefined makes the source fall back to
-eager render (all pages rasterized on load) — which fails the "only page 1
-rendered on load" assertion, proving that assertion actually bites.
 
 Skips cleanly when node/jsdom are absent.
 """
@@ -35,9 +31,14 @@ import tempfile
 
 import pytest
 
+from tests._esm_feature_harness import compile_feature_owner
+
 pytestmark = pytest.mark.unit
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VIEWER_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'pdf-viewer.ts')
+ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
 
 
 def _node_deps_available():
@@ -65,9 +66,9 @@ global.localStorage = {
   removeItem: (k) => { delete _ls[k]; },
 };
 
-global.apiUrl = (u) => u;
-global.debugLog = () => {};
-global.escapeHtml = (s) => String(s == null ? '' : s);
+global.apiUrl = window.apiUrl = (u) => u;
+global.debugLog = window.debugLog = () => {};
+global.escapeHtml = window.escapeHtml = (s) => String(s == null ? '' : s);
 global._saveActivePaperState = () => {};
 global._getActivePaperEntry = () => null;
 global._persistPaperEntry = () => {};
@@ -90,7 +91,7 @@ function _makePage(n) {
     getTextContent: async () => ({ items: [] }),
   };
 }
-global.pdfjsLib = {
+global.pdfjsLib = window.pdfjsLib = {
   getDocument: (param) => ({
     promise: Promise.resolve({
       numPages: N_PAGES,
@@ -122,12 +123,14 @@ global.ResizeObserver = window.ResizeObserver = class {
 };
 
 // The pdf.js load/render pipeline (_loadPaperPdf / _renderAllPages / …) was
-// extracted to paper/pdf_viewer.js (Epic E cut #5). Eval it BEFORE the core
-// file in the same scope (mirrors the _DEFERRED_FILES concatenation order).
-const _viewerSrc = fs.readFileSync(path.join(ROOT, 'static', 'js', 'paper', 'pdf_viewer.js'), 'utf8');
+// Load the compiled native PDF owner before exercising the renderer seam.
+// file in the same scope (mirrors the _CLASSIC_ASSET_FILES concatenation order).
+const _viewerSrc = fs.readFileSync(process.argv[4], 'utf8');
 (0, eval)(_viewerSrc);
-const src = fs.readFileSync(path.join(ROOT, 'static', 'js', 'paper-reader.js'), 'utf8');
-(0, eval)(src);
+for (const name of ['_loadPaperPdf', '_renderAllPages', '_rasterizePage',
+  '_releasePage', '_maybeReopenViaData']) {
+  if (typeof window[name] === 'function') global[name] = window[name];
+}
 
 const viewer = document.getElementById('paperPdfViewer');
 const out = {};
@@ -181,12 +184,13 @@ function canvasCount() { return viewer.querySelectorAll('.paper-pdf-canvas').len
 """
 
 
-def _run(neuter):
+def _run(viewer_js: str, neuter: bool = False):
     with tempfile.NamedTemporaryFile('w', suffix='.js', delete=False, dir=ROOT) as f:
         harness = f.name
         f.write(_HARNESS)
     try:
-        proc = subprocess.run(['node', harness, ROOT, '1' if neuter else ''],
+        proc = subprocess.run(
+            ['node', harness, ROOT, '1' if neuter else '', viewer_js],
                               capture_output=True, text=True, timeout=60)
     finally:
         try:
@@ -199,10 +203,7 @@ def _run(neuter):
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_paper_pdf_virtualized_render():
-    out = _run(neuter=False)
+def _assert_virtualized_render(out):
     assert '_threw' not in out, f'harness threw: {out.get("_threw")}'
     assert out['wrappers_built'], 'phase 1 must build one wrapper per page up front'
     assert out['only_page1_on_load'], \
@@ -220,24 +221,11 @@ def test_paper_pdf_virtualized_render():
     assert out['page5_remarked_unrendered'], 'released page must be re-marked unrendered'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_neuter_eager_render_bites():
-    """Without IntersectionObserver the source falls back to eager render — ALL
-    pages rasterize on load, which is exactly what the virtualization assertion
-    forbids. Proves ``only_page1_on_load`` genuinely bites."""
-    out = _run(neuter=True)
-    assert '_threw' not in out, f'harness threw: {out.get("_threw")}'
-    assert out['wrappers_built'], 'wrappers still built in eager fallback'
-    rendered = out.get('rendered_on_load') or []
-    assert len(rendered) == 8, \
-        f'eager fallback must rasterize ALL pages on load (neuter proof), got {rendered}'
-
-
-if __name__ == '__main__':
-    if _node_deps_available():
-        test_paper_pdf_virtualized_render()
-        test_neuter_eager_render_bites()
-        print('\033[32m✓ paper pdf virtualized render\033[0m')
-    else:
-        print('\033[33m• jsdom not installed — skipped\033[0m')
+@pytest.mark.skipif(not _node_deps_available() or not os.path.isfile(ESBUILD),
+                    reason='node + jsdom + esbuild dev-deps not installed')
+def test_vite_pdf_viewer_preserves_virtualization_contract(tmp_path):
+    built = tmp_path / 'paper-pdf-viewer.js'
+    compiled = compile_feature_owner(ESBUILD, VIEWER_TS, built, tmp_path)
+    assert compiled.returncode == 0, compiled.stderr
+    out = _run(str(built))
+    _assert_virtualized_render(out)

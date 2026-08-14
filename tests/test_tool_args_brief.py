@@ -24,6 +24,8 @@ or via pytest.
 
 from __future__ import annotations
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {'lib/a.py'}
+
 import json
 import os
 import sys
@@ -128,7 +130,7 @@ def test_non_dict_args_pass_through_bounded():
 #  (reload recovery replays tool_log — two independent formatters could drift).
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _make_agent(on_event):
+def _make_agent(on_event, artifact_store=None):
     from lib.swarm.agent import SubAgent
     from lib.swarm.protocol import SubTaskSpec
     spec = SubTaskSpec(id='wb', role='general', objective='wiring probe')
@@ -137,7 +139,7 @@ def _make_agent(on_event):
         parent_task={'id': 't-wiring', 'convId': ''},
         all_tools=[], model='', thinking_enabled=False,
         on_event=on_event, abort_check=None,
-        project_path='', artifact_store=None,
+        project_path='', artifact_store=artifact_store,
     )
 
 
@@ -149,15 +151,16 @@ def test_swarm_agent_tool_log_and_sse_share_one_formatter(monkeypatch):
         lambda name, args, **kw: calls.append(name) or f'BRIEF::{name}')
 
     events = []
-    agent = _make_agent(events.append)
-    # read_artifact is handled locally and, with no store wired, returns a
-    # clean error string — the formatter + log + SSE all run BEFORE dispatch.
+    from lib.swarm.artifact_store import ArtifactStore
+    agent = _make_agent(events.append, artifact_store=ArtifactStore())
+    # A configured store makes read_artifact an authorized local tool, so this
+    # exercises the formatter + log + SSE path rather than the authority gate.
     result = agent._execute_single_tool(
         {'id': 'c1', 'function': {'name': 'read_artifact',
                                   'arguments': json.dumps({'key': 'missing'})}},
         round_num=1)
 
-    assert result == 'Error: artifact store not available'
+    assert result == 'Artifact "missing" not found. Available: (none)'
     assert calls == ['read_artifact'], (
         'formatter must be consulted exactly once per tool call')
     # Persisted log carries the formatted brief …

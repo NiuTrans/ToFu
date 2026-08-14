@@ -9,8 +9,6 @@
 
 from __future__ import annotations
 
-import json
-
 from lib.database import DOMAIN_CHAT, get_thread_db
 from lib.log import get_logger
 
@@ -235,17 +233,15 @@ def _prepend_note_to_last_user(built: list[dict], note: str) -> bool:
 
 
 def _load_messages_from_db(conv_id: str) -> list[dict] | None:
-    """Load raw messages from PostgreSQL for a conversation."""
+    """Load canonical messages through the conversation repository."""
     try:
         db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT messages FROM conversations WHERE id=? AND user_id=1',
-            (conv_id,)
-        ).fetchone()
-        if not row:
+        from lib.database.conversation_repository import load_conversation
+        snapshot = load_conversation(db, conv_id)
+        if snapshot is None:
             logger.warning('[MsgBuilder] conv=%s not found in DB', conv_id[:8])
             return None
-        messages = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+        messages = snapshot.messages
         if not isinstance(messages, list):
             logger.warning('[MsgBuilder] conv=%s messages is not a list: %s',
                            conv_id[:8], type(messages).__name__)

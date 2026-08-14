@@ -4,7 +4,6 @@ import json
 import subprocess
 import sys
 import threading
-import time
 import uuid
 from datetime import datetime
 
@@ -30,6 +29,7 @@ class ScheduledTaskManager:
         self.db_path = db_path  # kept for compat, not used with PG
         self._init_table()
         self._running = False
+        self._stop_event = threading.Event()
         self._thread = None
         self._execution_log = []  # Recent execution log (in-memory)
         self._log_lock = threading.Lock()  # protects _execution_log
@@ -39,29 +39,11 @@ class ScheduledTaskManager:
         return get_thread_db(DOMAIN_SYSTEM)
 
     def _init_table(self):
+        """Verify init_db installed the canonical, complete scheduler schema."""
         db = self._get_db()
-        db.execute('''
-            CREATE TABLE IF NOT EXISTS scheduled_tasks (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                schedule TEXT NOT NULL,
-                task_type TEXT NOT NULL DEFAULT 'command',
-                command TEXT NOT NULL,
-                description TEXT DEFAULT '',
-                enabled BOOLEAN NOT NULL DEFAULT TRUE,
-                notify_on_failure BOOLEAN NOT NULL DEFAULT TRUE,
-                notify_on_success BOOLEAN NOT NULL DEFAULT FALSE,
-                max_runtime INTEGER NOT NULL DEFAULT 300,
-                last_run TEXT,
-                last_result TEXT,
-                last_status TEXT DEFAULT 'never',
-                run_count INTEGER NOT NULL DEFAULT 0,
-                fail_count INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-        ''')
-        db.commit()
+        db.execute(
+            'SELECT id, name, schedule, task_type, command, enabled, '
+            'condition_kind FROM scheduled_tasks LIMIT 0')
 
     def create_task(self, name, schedule, command, task_type='command',
                     description='', notify_on_failure=True, notify_on_success=False,
@@ -126,15 +108,6 @@ class ScheduledTaskManager:
                     f"Cron expression '{schedule}' does not match any date in "
                     "the next year — check the day-of-month / month fields.")
 
-        # ── Capacity cap ──
-        db_count = self._get_db().execute(
-            'SELECT COUNT(*) AS n FROM scheduled_tasks').fetchone()
-        existing = db_count['n'] if isinstance(db_count, dict) else db_count[0]
-        if existing >= MAX_SCHEDULED_TASKS:
-            raise ValueError(
-                f'Too many scheduled tasks (max {MAX_SCHEDULED_TASKS}). '
-                'Delete an existing task first.')
-
         task_id = str(uuid.uuid4())[:12]
         now = datetime.now().isoformat()
         tools_json = json.dumps(tools_config or {}, ensure_ascii=False)
@@ -148,19 +121,31 @@ class ScheduledTaskManager:
                           if task_type == 'agent' else 'llm')
 
         db = self._get_db()
-        db.execute('''
-            INSERT INTO scheduled_tasks
-            (id, name, schedule, task_type, command, description,
-             notify_on_failure, notify_on_success, max_runtime, created_at, updated_at,
-             target_conv_id, source_conv_id, tools_config, max_executions, expires_at,
-             condition_kind, condition_command, condition_regex)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', [task_id, name, schedule, task_type, command, description,
-              bool(notify_on_failure), bool(notify_on_success), max_runtime, now, now,
-              target_conv_id or '', source_conv_id or '', tools_json,
-              max_executions, expires_at or '',
-              condition_kind, condition_command or '', condition_regex or ''])
-        db.commit()
+        from lib.database import lock_scoped_sequence, write_transaction
+        with write_transaction(db, label='scheduled-task-create'):
+            # Serialize the COUNT + INSERT admission decision across every
+            # process/host. A Python lock cannot enforce the global cap.
+            lock_scoped_sequence(db, 'scheduled_tasks_capacity', 'global')
+            db_count = db.execute(
+                'SELECT COUNT(*) AS n FROM scheduled_tasks').fetchone()
+            existing = (db_count['n'] if isinstance(db_count, dict)
+                        else db_count[0])
+            if existing >= MAX_SCHEDULED_TASKS:
+                raise ValueError(
+                    f'Too many scheduled tasks (max {MAX_SCHEDULED_TASKS}). '
+                    'Delete an existing task first.')
+            db.execute('''
+                INSERT INTO scheduled_tasks
+                (id, name, schedule, task_type, command, description,
+                 notify_on_failure, notify_on_success, max_runtime, created_at, updated_at,
+                 target_conv_id, source_conv_id, tools_config, max_executions, expires_at,
+                 condition_kind, condition_command, condition_regex)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', [task_id, name, schedule, task_type, command, description,
+                  bool(notify_on_failure), bool(notify_on_success), max_runtime, now, now,
+                  target_conv_id or '', source_conv_id or '', tools_json,
+                  max_executions, expires_at or '', condition_kind,
+                  condition_command or '', condition_regex or ''])
 
         task = dict(db.execute('SELECT * FROM scheduled_tasks WHERE id=?', [task_id]).fetchone())
 
@@ -217,32 +202,42 @@ class ScheduledTaskManager:
 
         db = self._get_db()
         set_clause = ', '.join(f'{k}=?' for k in updates)
-        db.execute(f'UPDATE scheduled_tasks SET {set_clause} WHERE id=?',
-                   list(updates.values()) + [task_id])
-        db.commit()
-        return True
+        from lib.database import db_execute_with_retry
+        cursor = db_execute_with_retry(
+            db, f'UPDATE scheduled_tasks SET {set_clause} WHERE id=?',
+            list(updates.values()) + [task_id], return_cursor=True)
+        return cursor.rowcount == 1
 
     def delete_task(self, task_id):
         """Delete a task."""
         db = self._get_db()
-        db.execute('DELETE FROM scheduled_tasks WHERE id=?', [task_id])
-        db.commit()
+        from lib.database import db_execute_with_retry
+        cursor = db_execute_with_retry(
+            db, 'DELETE FROM scheduled_tasks WHERE id=?', [task_id],
+            return_cursor=True)
         logger.info('🗑️ Deleted task %s', task_id)
-        return True
+        return cursor.rowcount == 1
 
     def toggle_task(self, task_id, enabled=None):
         """Enable or disable a task."""
         db = self._get_db()
+        from lib.database import write_transaction
         if enabled is None:
-            row = db.execute('SELECT enabled FROM scheduled_tasks WHERE id=?', [task_id]).fetchone()
-            if not row:
+            with write_transaction(db, label='scheduled-task-toggle'):
+                row = db.execute(
+                    'UPDATE scheduled_tasks SET enabled=NOT enabled, '
+                    'updated_at=? WHERE id=? RETURNING enabled',
+                    [datetime.now().isoformat(), task_id]).fetchone()
+            if row is None:
                 return None
-            enabled = not row['enabled']
+            return bool(row['enabled'])
 
-        db.execute('UPDATE scheduled_tasks SET enabled=?, updated_at=? WHERE id=?',
-                   [bool(enabled), datetime.now().isoformat(), task_id])
-        db.commit()
-        return enabled
+        from lib.database import db_execute_with_retry
+        cursor = db_execute_with_retry(
+            db, 'UPDATE scheduled_tasks SET enabled=?, updated_at=? WHERE id=?',
+            [bool(enabled), datetime.now().isoformat(), task_id],
+            return_cursor=True)
+        return bool(enabled) if cursor.rowcount == 1 else None
 
     def get_execution_log(self, limit=20):
         """Get recent execution log."""
@@ -326,23 +321,21 @@ class ScheduledTaskManager:
                 return False, 'Prompt execution error (see logs)'
 
         elif task_type == 'pg_backup':
-            # Scheduled PostgreSQL logical backup (pg_dumpall → data/pg_backups/).
-            # ``command`` is informational only. PG-only; no-op on SQLite.
+            # Legacy task type, now the backend-neutral scheduled backup slot:
+            # pg_dumpall on PG; verified VACUUM INTO snapshot on SQLite.
             try:
-                from lib.database import backup_pg_database
-                summary = backup_pg_database()
+                from lib.database import backup_database
+                summary = backup_database()
                 if summary.get('ok'):
                     return True, (f"backup ok: {summary.get('path')} "
                                   f"({summary.get('size_mb')} MB, "
                                   f"pruned {summary.get('pruned', 0)})")
                 reason = summary.get('reason', 'unknown')
-                # 'not_pg' / 'pg_unavailable' are expected on SQLite — success.
-                if reason in ('not_pg', 'pg_unavailable'):
-                    return True, f'skipped ({reason})'
                 return False, f'backup failed: {reason}'
             except Exception as e:
-                logger.error('[Scheduler] pg_backup task failed: %s', e, exc_info=True)
-                return False, 'PG backup error (see logs)'
+                logger.error('[Scheduler] database backup task failed: %s', e,
+                             exc_info=True)
+                return False, 'Database backup error (see logs)'
 
         elif task_type == 'pg_basebackup':
             # Tier B: self-contained pg_basebackup -X stream of the local
@@ -415,13 +408,14 @@ class ScheduledTaskManager:
 
         now = datetime.now().isoformat()
         db = self._get_db()
-        db.execute('''
+        from lib.database import db_execute_with_retry
+        db_execute_with_retry(db, '''
             UPDATE scheduled_tasks
             SET last_run=?, last_result=?, last_status=?, run_count=run_count+1,
                 fail_count=fail_count+? , updated_at=?
             WHERE id=?
-        ''', [now, result[:10000], 'ok' if success else 'failed', 0 if success else 1, now, task_id])
-        db.commit()
+        ''', [now, result[:10000], 'ok' if success else 'failed',
+             0 if success else 1, now, task_id])
 
         status = '✅' if success else '❌'
         logger.info('%s Task "%s" → %s', status, task['name'], result[:200])
@@ -532,13 +526,14 @@ class ScheduledTaskManager:
 
         now = datetime.now().isoformat()
         db = self._get_db()
-        db.execute('''
+        from lib.database import db_execute_with_retry
+        db_execute_with_retry(db, '''
             UPDATE scheduled_tasks
             SET last_run=?, last_result=?, last_status=?, run_count=run_count+1,
                 fail_count=fail_count+?, updated_at=?
             WHERE id=?
-        ''', [now, result[:10000], 'ok' if success else 'failed', 0 if success else 1, now, task_id])
-        db.commit()
+        ''', [now, result[:10000], 'ok' if success else 'failed',
+             0 if success else 1, now, task_id])
 
         status = '✅' if success else '❌'
         logger.info('%s "%s" → %s', status, task['name'], result[:200])
@@ -626,13 +621,13 @@ class ScheduledTaskManager:
 
         # Update task poll state in DB
         db = self._get_db()
-        db.execute('''
+        from lib.database import db_execute_with_retry
+        db_execute_with_retry(db, '''
             UPDATE scheduled_tasks
             SET poll_count=poll_count+1, last_poll_at=?, last_poll_decision=?,
                 last_poll_reason=?, last_run=?, updated_at=?
             WHERE id=?
         ''', [now, decision, reason[:500], now, now, task_id])
-        db.commit()
 
         logger.info('%s Poll decision: %s — reason: %s (tokens=%d, tier=%s)',
                     pfx, decision, reason[:100], tokens_used, tier)
@@ -647,14 +642,13 @@ class ScheduledTaskManager:
 
         if exec_task_id:
             # Update execution state
-            db.execute('''
+            db_execute_with_retry(db, '''
                 UPDATE scheduled_tasks
                 SET last_execution_at=?, last_execution_task_id=?,
                     last_execution_status='running', execution_count=execution_count+1,
                     updated_at=?
                 WHERE id=?
             ''', [now, exec_task_id, now, task_id])
-            db.commit()
 
             record_poll(task_id, 'act', reason, 'cheap', tokens_used,
                        status_snapshot, execution_task_id=exec_task_id,
@@ -722,42 +716,42 @@ class ScheduledTaskManager:
                          '(will retry after schema ready): %s', e)
 
     def _ensure_default_pg_backup_task(self):
-        """Idempotently register the daily PostgreSQL backup cron task.
+        """Idempotently register the daily active-database backup task.
 
-        Runs ``lib.database.backup_pg_database()`` nightly at 02:00 local
-        (pg_dumpall → data/pg_backups/, with retention pruning). This is the
+        Runs ``lib.database.backup_database()`` nightly at 02:00 local
+        (pg_dumpall on PG; VACUUM INTO on SQLite). This is the
         durability safety net: the 2026-06-04 WAL-corruption incident was
         only recoverable because a manual dump happened to exist — this makes
-        a recent dump always available. Matched by exact name so subsequent
-        boots never create duplicates. No-op on the SQLite backend (the
-        handler returns a benign 'skipped').
+        a recent verified snapshot always available. The historical task name
+        is accepted so upgrades never create a duplicate schedule.
         """
         try:
             db = self._get_db()
             row = db.execute(
-                "SELECT id FROM scheduled_tasks WHERE name=?",
-                ['PostgreSQL Backup']).fetchone()
+                "SELECT id FROM scheduled_tasks WHERE name IN (?, ?)",
+                ['Database Backup', 'PostgreSQL Backup']).fetchone()
             if row:
-                logger.debug('[Scheduler] PostgreSQL Backup task already present '
+                logger.debug('[Scheduler] Database Backup task already present '
                              '— skipping auto-registration')
                 return
             task = self.create_task(
-                name='PostgreSQL Backup',
+                name='Database Backup',
                 schedule='0 2 * * *',
-                command='lib.database.backup_pg_database()',  # informational
+                command='lib.database.backup_database()',  # informational
                 task_type='pg_backup',
-                description='Nightly pg_dumpall logical backup to data/pg_backups/ '
-                            'with retention pruning (TOFU_PG_BACKUP_RETENTION_DAYS, '
-                            'default 7). Durability safety net for crash recovery. '
+                description='Nightly active-database backup: pg_dumpall on PG; '
+                            'verified VACUUM INTO snapshot under data/db_snapshots/ '
+                            'on SQLite, with retention pruning. '
+                            'Durability safety net for crash recovery. '
                             'Auto-registered by lib.scheduler.manager.',
                 notify_on_failure=True,
                 notify_on_success=False,
                 max_runtime=1800,
             )
-            logger.info('[Scheduler] Auto-registered PostgreSQL Backup task id=%s',
+            logger.info('[Scheduler] Auto-registered Database Backup task id=%s',
                         task.get('id'))
         except Exception as e:
-            logger.debug('[Scheduler] Could not auto-register PostgreSQL Backup '
+            logger.debug('[Scheduler] Could not auto-register Database Backup '
                          '(will retry after schema ready): %s', e)
 
     def _ensure_default_pg_basebackup_task(self):
@@ -842,11 +836,12 @@ class ScheduledTaskManager:
             logger.debug('[Scheduler] Could not auto-register Billing Reserve '
                          'Reclaim (will retry after schema ready): %s', e)
 
-    def start(self):
+    def start(self) -> bool:
         """Start the background scheduler thread."""
-        if self._running:
-            return
+        if self._thread is not None and self._thread.is_alive():
+            return False
         self._running = True
+        self._stop_event.clear()
 
         # NOTE: Daily Optimizer auto-registration is deferred to the
         # readiness-gated thread in ``start_scheduler_worker`` — calling it
@@ -863,14 +858,10 @@ class ScheduledTaskManager:
                     # reset) are routinely recoverable on the next 30s tick —
                     # downgrade to WARNING without a traceback so they don't
                     # pollute error.log. Anything else is still a real bug.
+                    from lib.storage import StorageError
                     etype = type(e).__name__
-                    _msg_lower = str(e).lower()
                     is_transient_db = (
-                        etype in ('OperationalError', 'InterfaceError')
-                        or 'timeout expired' in _msg_lower
-                        or 'connection to server' in _msg_lower
-                        or 'database is locked' in _msg_lower
-                    )
+                        isinstance(e, StorageError) and e.retryable)
                     if is_transient_db:
                         logger.warning('[Scheduler] Transient DB error in check loop '
                                        '(will retry in 30s): %s: %s', etype, e)
@@ -888,15 +879,33 @@ class ScheduledTaskManager:
                         close_thread_db()
                     except Exception as _ce:
                         logger.debug('[Scheduler] close_thread_db failed: %s', _ce)
-                time.sleep(30)  # Check every 30 seconds
+                if self._stop_event.wait(30):
+                    break
 
         self._thread = threading.Thread(target=_loop, daemon=True)
         self._thread.start()
+        return True
 
-    def stop(self):
-        """Stop the background scheduler."""
+    def stop(self, timeout: float = 2.0) -> bool:
+        """Stop and bounded-join the background scheduler."""
         self._running = False
+        self._stop_event.set()
+        thread = self._thread
+        if thread is None:
+            return True
+        try:
+            wait_seconds = max(0.0, float(timeout))
+        except (TypeError, ValueError, OverflowError) as exc:
+            logger.debug('[Scheduler] invalid stop timeout; using 2.0: %s', exc)
+            wait_seconds = 2.0
+        if thread is not threading.current_thread():
+            thread.join(timeout=wait_seconds)
+        if thread.is_alive():
+            return False
+        if self._thread is thread:
+            self._thread = None
         logger.info('Stopped')
+        return True
 
 
 # ── Singleton ──
@@ -942,7 +951,8 @@ def start_scheduler_worker():
     def _deferred_resume():
         from lib.database import db_available
         for attempt in range(60):
-            time.sleep(2)
+            if mgr._stop_event.wait(2):
+                return
             if not db_available:
                 continue
             try:
@@ -958,9 +968,22 @@ def start_scheduler_worker():
                 logger.debug('[Scheduler] system schema not ready yet '
                              '(attempt %d/60)', attempt + 1)
                 continue
+            finally:
+                # Do not pin a connection during each two-second readiness
+                # wait. A successful probe is complete before later bootstrap
+                # helpers run and can safely be returned here as well.
+                try:
+                    from lib.database import close_thread_db
+                    close_thread_db()
+                except Exception as _ce:
+                    logger.debug('[Scheduler] readiness connection release '
+                                 'failed: %s', _ce)
         else:
             logger.warning('[Scheduler] system schema not available '
                            'after 120s, skipping optimizer register + timer resume')
+            return
+
+        if mgr._stop_event.is_set():
             return
 
         # Now that scheduled_tasks is fully migrated, register the Daily
@@ -997,9 +1020,30 @@ def start_scheduler_worker():
             logger.warning('[Scheduler] Failed to resume timers on startup: %s',
                            e)
 
+        # Default-task registration and timer discovery also use legacy
+        # get_thread_db helpers. The resume thread exits after this point, so
+        # return any final lease immediately rather than after the next reaper.
+        try:
+            from lib.database import close_thread_db
+            close_thread_db()
+        except Exception as _ce:
+            logger.debug('[Scheduler] resume connection release failed: %s', _ce)
+
     threading.Thread(target=_deferred_resume, name='timer-resume',
                      daemon=True).start()
     return mgr
 
 
-__all__ = ['ScheduledTaskManager', 'get_scheduler', 'start_scheduler_worker']
+def stop_scheduler_worker(timeout: float = 2.0) -> bool:
+    """Stop the process scheduler without constructing it during shutdown."""
+    with _manager_lock:
+        manager = _manager
+    if manager is None:
+        return True
+    return manager.stop(timeout=timeout)
+
+
+__all__ = [
+    'ScheduledTaskManager', 'get_scheduler', 'start_scheduler_worker',
+    'stop_scheduler_worker',
+]

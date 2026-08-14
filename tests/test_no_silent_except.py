@@ -54,14 +54,10 @@ ALLOWED: dict[str, int] = {
     # logs the full traceback (exc_info=True). Logging here too would
     # double-log; the trace exists one call downstream.
     'lib/api_response.py': 2,
-    # _run_with_deadline's _worker stores the exception in box['error'] and it
-    # is re-raised on the caller thread — surfaced, not swallowed. (Relocated
-    # from lib/memory/prefetch.py when that module was split into a package.)
-    'lib/memory/prefetch/_rerank.py': 1,
-    # _trace_fallback guards the logging call ITSELF; logging here could
-    # recurse into a failing logging backend. §2.2 logging-path exemption.
-    # (Relocated from lib/tasks_pkg/system_context.py when it became a package.)
-    'lib/tasks_pkg/system_context/_inject.py': 1,
+    # _emit_context_summary guards the logging backend itself. A second log
+    # attempt can recurse into the same failure, so this last-resort swallow is
+    # deliberately silent and prompt assembly remains authoritative.
+    'lib/tasks_pkg/context_composer/_render.py': 1,
     # terminal_state_log_summary BUILDS the diagnostic string that the
     # persist-failure branch then hands to logger.error. Its own fallback
     # returns a marker string instead of logging, for the same reason as

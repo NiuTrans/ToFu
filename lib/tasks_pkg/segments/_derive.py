@@ -111,6 +111,10 @@ def _rounds_view_from_segments(segments: list[dict[str, Any]]) -> list[dict[str,
         origin = s.get('_round') or {}
         if origin.get('extraContent'):
             r['extraContent'] = origin['extraContent']
+        if isinstance(origin.get('caller'), dict):
+            r['caller'] = dict(origin['caller'])
+        if origin.get('_anthropicContentBlocks'):
+            r['_anthropicContentBlocks'] = origin['_anthropicContentBlocks']
         rounds.append(r)
     return rounds
 

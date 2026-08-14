@@ -2,7 +2,7 @@
 """Regression guard for pt_3879f00e sub-part 3: every consumer of
 ``core/health_stream_timer.js``'s ``twStart`` / ``twUpdate`` / ``twStop``
 functions MUST typeof-gate the call, so the module can be moved into
-``_DEFERRED_FILES`` without tripping ``ReferenceError`` on the first SSE
+``_CLASSIC_ASSET_FILES`` without tripping ``ReferenceError`` on the first SSE
 frame after boot.
 
 The audit in ``docs/EPIC_E_DEFER_AUDIT.md`` enumerated ~40 unguarded call
@@ -30,6 +30,8 @@ import os
 import re
 import sys
 
+from tests._runtime_sections import runtime_section_path, runtime_sections_dir
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
@@ -43,7 +45,7 @@ def _unit(fn):
 
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_STATIC_JS = os.path.join(_ROOT, 'static', 'js')
+_STATIC_JS = runtime_sections_dir()
 
 
 # The forbidden pattern — a BARE statement invocation of a tw* function at
@@ -122,7 +124,7 @@ def test_no_bare_tw_call_sites_outside_health_stream_timer():
             continue
     assert not violations, (
         'Bare tw*() call sites found — these would ReferenceError if '
-        'core/health_stream_timer.js were moved to _DEFERRED_FILES '
+        'core/health_stream_timer.js were moved to _CLASSIC_ASSET_FILES '
         '(pt_3879f00e sub-part 3). Wrap each in '
         "``if (typeof twX === 'function') twX(...)`` so the deferrability "
         'sweep stays intact:\n\n' + '\n'.join('  ' + v for v in violations)
@@ -140,26 +142,26 @@ def test_typeof_guards_are_actually_present():
     ``typeof tw{Start,Update,Stop} === 'function'`` guard.
     """
     required_files = [
-        'static/js/project.js',
-        'static/js/ui/sse_handlers_lifecycle.js',
-        'static/js/ui/sse_handlers_io.js',
-        'static/js/ui/sse_handlers_swarm.js',
-        'static/js/ui/sse_handlers_tool.js',
-        'static/js/ui/sse_handlers_misc.js',
-        'static/js/ui/sse_poll_fallback.js',
-        'static/js/ui/sse_pipeline.js',
+        'project.js',
+        'ui/sse_handlers_lifecycle.js',
+        'ui/sse_handlers_io.js',
+        'ui/sse_handlers_swarm.js',
+        'ui/sse_handlers_tool.js',
+        'ui/sse_handlers_misc.js',
+        'ui/sse_poll_fallback.js',
+        'ui/sse_pipeline.js',
         # Files the audit missed but the guard test discovered on first
         # run — kept in the required-set so a future edit can't silently
         # remove the guard from these two either.
-        'static/js/ui/stream_lifecycle.js',
-        'static/js/ui/tool_rounds.js',
+        'ui/stream_lifecycle.js',
+        'ui/tool_rounds.js',
     ]
     guard_re = re.compile(
         r"typeof\s+tw(Start|Update|Stop)\s*===\s*'function'"
     )
     missing = []
     for rel in required_files:
-        full = os.path.join(_ROOT, rel)
+        full = runtime_section_path(rel)
         with open(full, encoding='utf-8') as f:
             src = f.read()
         if not guard_re.search(src):

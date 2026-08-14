@@ -558,12 +558,16 @@ def test_NC_blocked_by_write_is_load_bearing(flask_app):
         _BOARD_SRC,
         "            'block_reason=?, block_question=?, human_answer=?, blocked_by=?, '\n"
         "            'updated_at=? '\n"
-        "            'WHERE id=? AND project_path=?',\n"
+        "            'WHERE id=? AND project_path=? '\n"
+        "            'AND COALESCE(block_count,0)=?',\n"
         "            (blocked_until, new_count, reason, question_json, '', conv_id,\n"
-        "             now, task_id, project_path))",
+        "             now, task_id, project_path, new_count - 1),\n"
+        "            return_cursor=True)",
         "            'block_reason=?, block_question=?, human_answer=?, updated_at=? '\n"
-        "            'WHERE id=? AND project_path=?',\n"
+        "            'WHERE id=? AND project_path=? '\n"
+        "            'AND COALESCE(block_count,0)=?',\n"
         "            (blocked_until, new_count, reason, question_json, '', now,\n"
-        "             task_id, project_path))  # NC (blocked_by write stripped)",
+        "             task_id, project_path, new_count - 1),\n"
+        "            return_cursor=True)  # NC (blocked_by write stripped)",
         run,
     )

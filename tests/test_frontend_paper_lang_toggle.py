@@ -45,11 +45,15 @@ import subprocess
 
 import pytest
 
+from tests._paper_vite import compiled_typescript
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 JS_DIR = os.path.join(ROOT, 'static', 'js')
+REPORT_RUNTIME_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'report-runtime.ts')
 
 
 def _node_deps_available() -> bool:
@@ -110,6 +114,10 @@ localStorage.setItem('paper_library_migrated_v1', '1');
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper/report.js (report/review fns)
 if (process.argv[4]) eval(fs.readFileSync(process.argv[4], 'utf8'));  // paper-reader.js core
+eval(fs.readFileSync(process.argv[5], 'utf8'));
+Object.keys(win).forEach((name) => {
+  if (name.startsWith('_') && typeof win[name] === 'function') global[name] = win[name];
+});
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -230,12 +238,13 @@ def _run():
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     try:
-        proc = subprocess.run(
-            ['node', harness,
-             os.path.join(JS_DIR, 'paper', 'report.js'), ROOT,
-             os.path.join(JS_DIR, 'paper-reader.js')],
-            capture_output=True, text=True, timeout=60,
-        )
+        with compiled_typescript(REPORT_RUNTIME_TS) as runtime_js:
+            proc = subprocess.run(
+                ['node', harness,
+                 os.path.join(JS_DIR, 'paper', 'report.js'), ROOT,
+                 os.path.join(JS_DIR, 'paper-reader.js'), runtime_js],
+                capture_output=True, text=True, timeout=60,
+            )
     finally:
         try:
             os.remove(harness)

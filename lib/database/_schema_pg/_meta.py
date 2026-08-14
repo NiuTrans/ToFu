@@ -15,7 +15,7 @@ logger = get_logger(__name__)
 #  Schema Version Cache — Skip redundant DDL on subsequent startups
 # ═══════════════════════════════════════════════════════════════════════
 
-_SCHEMA_VERSION = 45  # Increment when tables/columns/indexes change
+_SCHEMA_VERSION = 55  # v55: authoritative turn / generation-attempt lifecycle
 
 
 def _column_exists(conn, table, column):

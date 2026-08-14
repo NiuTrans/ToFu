@@ -139,7 +139,9 @@ def test_warm_resume_first_frame_is_full_toolrounds_snapshot():
 
         # The client's last-received event id (mid-turn — e.g. it saw events
         # up to just before round 10's tool_start). We resume from there.
-        resume_cursor = len(task['events']) - 3  # a few missed events remain
+        # Last-Event-ID is the producer-owned absolute id of the last frame
+        # received, never a physical list offset.
+        resume_cursor = task['events'][-3]['seq']  # a few missed events remain
 
         # Mark the task terminal (append a done event + flip status) BEFORE
         # consuming the body, so the warm-resume replay hits the done frame and
@@ -180,6 +182,38 @@ def test_warm_resume_first_frame_is_full_toolrounds_snapshot():
         nums = [r.get('roundNum') for r in tr]
         assert nums == list(range(1, 11)), f'rounds out of order / missing: {nums}'
         assert first_payload.get('content') == 'partial answer so far'
+
+        # Exercise the REAL route's other migration branch too: a client whose
+        # next sequence was evicted must receive an authoritative id-less
+        # snapshot, not an empty replay that waits forever.
+        rolled = create_task(
+            'cv-warm-resume-rolled', [{'role': 'user', 'content': 'q'}], {})
+        rolled['content'] = 'authoritative after eviction'
+        with rolled['events_lock']:
+            rolled['events'] = [
+                {'type': 'delta', 'seq': 40, 'content': 'x'},
+                {'type': 'done', 'seq': 41, 'finishReason': 'stop'},
+            ]
+            rolled['_eventBaseSeq'] = 40
+            rolled['_eventNextSeq'] = 42
+        rolled['status'] = 'done'
+        rolled['finishReason'] = 'stop'
+
+        async with app.test_client() as client:
+            response = await client.get(
+                f'/api/chat/stream/{rolled["id"]}',
+                headers={'Last-Event-ID': '38'},  # next=39 was evicted
+            )
+            assert response.status_code == 200
+            rolled_raw = await response.get_data(as_text=True)
+
+        rolled_frames = _parse_sse_frames(rolled_raw)
+        assert [payload.get('type') for _eid, payload in rolled_frames] == [
+            'state', 'done',
+        ]
+        assert rolled_frames[0][0] is None
+        assert rolled_frames[0][1]['content'] == 'authoritative after eviction'
+        assert rolled_frames[1][0] is None
 
     try:
         asyncio.run(_t())

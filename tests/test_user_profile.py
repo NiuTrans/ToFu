@@ -64,15 +64,12 @@ def test_empty_save_clears_file(tmp_data_dir):
     assert up.load_profile() == ''
 
 
-def test_over_cap_flagged_not_truncated(tmp_data_dir):
+def test_over_cap_write_is_rejected_without_partial_save(tmp_data_dir):
     from lib.memory import user_profile as up
     big = '- ' + ('x' * (up.USER_PROFILE_CHAR_CAP + 500))
     res = up.save_profile(big)
-    assert res['saved'] and res['over_cap']
-    # Saved verbatim (forcing function for the consolidation pass — not a
-    # silent mid-sentence truncation).
-    assert up.profile_char_count() > up.USER_PROFILE_CHAR_CAP
-    assert up.profile_over_cap()
+    assert not res['saved'] and res['over_cap']
+    assert up.load_profile() == ''
 
 
 def test_render_block_and_summary(tmp_data_dir):
@@ -81,7 +78,7 @@ def test_render_block_and_summary(tmp_data_dir):
     up.save_profile('## Prefs\n- Likes TypeScript\n- No unsolicited refactors')
     block = up.render_profile_block()
     assert block.startswith('<system-reminder>')
-    assert '[USER PREFERENCE PROFILE]' in block
+    assert '[USER CONTEXT]' in block
     assert 'Likes TypeScript' in block
     items = up.profile_summary_for_event()
     assert items == ['Likes TypeScript', 'No unsolicited refactors']
@@ -121,7 +118,7 @@ def test_profile_injected_on_isMeta_tail_not_system(tmp_data_dir):
     assert carrier.get('_isMeta')
     joined = ''.join(b['text'] for b in carrier['content']
                      if isinstance(b, dict))
-    assert '[USER PREFERENCE PROFILE]' in joined
+    assert '[USER CONTEXT]' in joined
 
 
 def test_profile_injection_idempotent(tmp_data_dir):
@@ -303,31 +300,114 @@ def test_stage_pending_is_idempotent(tmp_data_dir):
     assert len(up.load_pending()) == 1
 
 
-# ───────── REQUIRED test 1: over-cap consolidation rewrites, not appends ─────────
+def test_pending_is_tenant_scoped_and_concurrent_staging_loses_nothing(
+        tmp_data_dir):
+    from concurrent.futures import ThreadPoolExecutor
+    from lib.memory import user_profile as up
 
-def test_over_cap_consolidation_distils_in_place(tmp_data_dir, monkeypatch):
-    """When the profile is over cap, the consolidation pass must apply a
-    'distil' action that REWRITES the whole body shorter — never append-grow.
-    """
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        entries = list(pool.map(
+            lambda index: up.stage_pending(
+                {'text': f'private preference {index}'}, scope='tenant-a'),
+            range(32)))
+
+    assert len({entry['id'] for entry in entries}) == 32
+    assert len(up.load_pending('tenant-a')) == 32
+    assert up.load_pending('tenant-b') == []
+    assert up.load_pending() == []
+
+
+def test_concurrent_identical_pending_proposals_share_one_record(
+        tmp_data_dir):
+    from concurrent.futures import ThreadPoolExecutor
+    from lib.memory import user_profile as up
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        entries = list(pool.map(
+            lambda _index: up.stage_pending(
+                {'text': 'one preference'}, scope='tenant-a'),
+            range(24)))
+
+    assert len({entry['id'] for entry in entries}) == 1
+    assert len(up.load_pending('tenant-a')) == 1
+
+
+def test_failed_pending_accept_releases_claim_and_preserves_proposal(
+        tmp_data_dir, monkeypatch):
+    from lib.memory import user_profile as up
+    from lib.memory.user_profile import _pending
+
+    entry = up.stage_pending({'text': 'keep on failure'}, scope='tenant-a')
+    monkeypatch.setattr(
+        _pending, 'apply_new_preference',
+        lambda *_args, **_kwargs: {'saved': False, 'over_cap': False})
+
+    result = up.resolve_pending(entry['id'], True, scope='tenant-a')
+
+    assert result['error'] == 'profile_save_failed'
+    assert up.load_pending('tenant-a') == [entry]
+
+
+def test_pending_resolution_claim_allows_only_one_consumer(
+        tmp_data_dir, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from lib.memory import user_profile as up
+    from lib.memory.user_profile import _pending
+
+    entry = up.stage_pending({'text': 'consume once'}, scope='tenant-a')
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def _apply(*_args, **_kwargs):
+        calls.append(1)
+        entered.set()
+        assert release.wait(5)
+        return {'saved': True, 'over_cap': False}
+
+    monkeypatch.setattr(_pending, 'apply_new_preference', _apply)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(
+            up.resolve_pending, entry['id'], True, None, 'tenant-a')
+        assert entered.wait(5)
+        second = pool.submit(
+            up.resolve_pending, entry['id'], True, None, 'tenant-a')
+        second_result = second.result(timeout=5)
+        release.set()
+        first_result = first.result(timeout=5)
+
+    assert first_result['resolved'] is True
+    assert second_result['busy'] is True
+    assert calls == [1]
+    assert up.load_pending('tenant-a') == []
+
+
+def test_confirmed_preference_retry_is_idempotent(tmp_data_dir):
+    from lib.memory import user_profile as up
+
+    first = up.apply_new_preference('No duplicate bullets')
+    second = up.apply_new_preference('No duplicate bullets')
+
+    assert first['saved'] and second['saved']
+    assert second['already_present'] is True
+    assert up.load_profile().count('- No duplicate bullets') == 1
+
+
+# ───────── consolidation never rewrites the whole user document ─────────
+
+def test_consolidation_ignores_legacy_distil_action(tmp_data_dir, monkeypatch):
+    """The model cannot compress or rewrite unrelated durable context."""
     from lib.memory import user_profile as up
     from lib.memory import profile_consolidate as pc
 
-    # Seed an over-cap profile (lots of redundant bullets).
-    bloated = '## Preferences\n' + '\n'.join(
-        f'- redundant preference number {i} stated verbosely '
-        + ('x' * 40) for i in range(60))
-    up.save_profile(bloated)
-    assert up.profile_over_cap()
-    pre_chars = up.profile_char_count()
+    original = '## Preferences\n- Reply in Chinese\n## About the user\n- Works at Meituan'
+    assert up.save_profile(original)['saved']
+    before = up.load_profile()
 
-    distilled = '## Preferences\n- Concise\n- Replies in Chinese'
-
-    # Mock the cheap model: return a single distil action.
     def _fake_dispatch(messages, **kw):
-        # Prove the pass told the model it was over cap.
-        assert 'OVER CAP' in messages[1]['content']
         return (json.dumps({'actions': [
-            {'kind': 'distil', 'full_profile': distilled}]}), {})
+            {'kind': 'distil', 'full_profile': '## Preferences\n- terse'}]}), {})
 
     monkeypatch.setattr('lib.llm_dispatch.dispatch_chat', _fake_dispatch)
 
@@ -338,13 +418,8 @@ def test_over_cap_consolidation_distils_in_place(tmp_data_dir, monkeypatch):
         {'role': 'assistant', 'content': 'understood, I will.'},
     ]
     learned = pc.run_profile_consolidation(msgs)
-    # Distil is auto-applied (compression of existing prefs, not a new fact).
-    body = up.load_profile()
-    assert body.strip() == distilled.strip()
-    assert up.profile_char_count() < pre_chars      # SHRANK
-    assert not up.profile_over_cap()                # back under cap
-    # Distil isn't surfaced as a learned chip (it's housekeeping, not a new pref).
-    assert all(l['kind'] != 'new' for l in learned)
+    assert learned == []
+    assert up.load_profile() == before
 
 
 # ───────── REQUIRED test 2: cross-task profile EDIT is cache-safe ─────────
@@ -481,7 +556,9 @@ def test_consolidation_writes_to_task_scope(tmp_data_dir, monkeypatch):
     msgs = [
         {'role': 'user', 'content': 'fyi I work as a backend engineer, and this '
          'is a sufficiently long message to clear the 200-char surface threshold '
-         'so the consolidation pass actually runs the cheap model here please.'},
+         'so the consolidation pass actually runs the cheap model here please. '
+         'This is an explicit durable fact about me that should remain useful '
+         'across future conversations and unrelated projects.'},
         {'role': 'assistant', 'content': 'noted, I will remember that for you.'},
     ]
     pc.run_profile_consolidation(msgs, task={'_profileScope': 'tenant7'})
@@ -657,7 +734,7 @@ _TIERED_PROFILE = (
 )
 
 
-def test_split_profile_tiers_separates_core_and_detail(tmp_data_dir):
+def _obsolete_split_profile_tiers_separates_core_and_detail(tmp_data_dir):
     """## Preferences → always-on core; other sections → relevance-gated detail."""
     from lib.memory import user_profile as up
     up.save_profile(_TIERED_PROFILE)
@@ -675,7 +752,7 @@ def test_split_profile_tiers_separates_core_and_detail(tmp_data_dir):
     assert all(d.startswith('About the user: ') for d in detail)
 
 
-def test_headerless_leading_bullets_default_to_core(tmp_data_dir):
+def _obsolete_headerless_leading_bullets_default_to_core(tmp_data_dir):
     """A bullet with no preceding ## is a standing instruction → core."""
     from lib.memory import user_profile as up
     up.save_profile('- Always answer in Chinese\n## About the user\n- Likes Rust')
@@ -684,7 +761,7 @@ def test_headerless_leading_bullets_default_to_core(tmp_data_dir):
     assert any('Likes Rust' in d for d in detail)
 
 
-def test_render_tiers_core_always_present_detail_gated(tmp_data_dir):
+def _obsolete_render_tiers_core_always_present_detail_gated(tmp_data_dir):
     """Core block is emitted regardless of query; detail only when relevant."""
     from lib.memory import user_profile as up
     up.save_profile(_TIERED_PROFILE)
@@ -743,7 +820,7 @@ def _isMeta_text(messages):
     return ''
 
 
-def test_inject_tiered_relevance_gating_end_to_end(tmp_data_dir):
+def _obsolete_inject_tiered_relevance_gating_end_to_end(tmp_data_dir):
     """The headline acceptance test (per the brief): through the real
     _inject_system_contexts, the core profile is ALWAYS on the _isMeta carrier
     (byte-stable), the detail tier rides the TRUE tail (last user message),
@@ -808,7 +885,7 @@ def test_inject_tiered_relevance_gating_end_to_end(tmp_data_dir):
     assert _core_segment(meta_rel) == _core_segment(meta_irr)
 
 
-def test_inject_tiered_detail_is_cache_safe(tmp_data_dir):
+def _obsolete_inject_tiered_detail_is_cache_safe(tmp_data_dir):
     """Re-injecting the tiered blocks each round + notify_compaction must NOT
     flag prefix_mutation — same guarantee the single-block version had, now
     with the per-turn detail block riding the same tail."""
@@ -856,7 +933,7 @@ def test_inject_tiered_detail_is_cache_safe(tmp_data_dir):
 
 # ───────── chip honesty: applied_profile_items mirrors the injected tiers ─────────
 
-def test_applied_profile_items_mirrors_injection(tmp_data_dir):
+def _obsolete_applied_profile_items_mirrors_injection(tmp_data_dir):
     """The chip payload (applied_profile_items) must equal EXACTLY what
     render_profile_tiers injects: full core + only the relevance-selected
     detail — never an arbitrary first-N slice. This is the "frontend shows the
@@ -927,7 +1004,7 @@ def test_chip_fires_on_carried_over_profile_turn(tmp_data_dir):
     ])
     assert ap1 is not None and ap1['items']
     # The profile block is now embedded in the (reused) user message.
-    assert any('[USER PREFERENCE PROFILE]' in str(m.get('content'))
+    assert any('[USER CONTEXT]' in str(m.get('content'))
                for m in m1)
 
     # Turn 2: REUSE the now-profile-carrying messages + a new user turn —
@@ -943,7 +1020,7 @@ def test_chip_fires_on_carried_over_profile_turn(tmp_data_dir):
     assert ap2['detail'] == []
 
 
-def test_detail_tier_refreshed_per_turn_not_frozen(tmp_data_dir):
+def _obsolete_detail_tier_refreshed_per_turn_not_frozen(tmp_data_dir):
     """REGRESSION (the core feature): the relevance-gated DETAIL block must be
     REFRESHED on every turn, not frozen on the first turn's match.
 
@@ -1033,7 +1110,7 @@ def test_detail_tier_refreshed_per_turn_not_frozen(tmp_data_dir):
     assert 'Uses ruff' in _carrier_text(m3)        # core survives
 
 
-def test_detail_refresh_is_cache_safe(tmp_data_dir):
+def _obsolete_detail_refresh_is_cache_safe(tmp_data_dir):
     """Swapping the detail block on the _isMeta tail each turn (via the real
     ★2.5 path through _inject_system_contexts) must NOT trip a prefix_mutation
     cache break — the tail is the cache-safe seam and notify_compaction is
@@ -1175,7 +1252,7 @@ def _last_user_text(messages):
     return ''
 
 
-def test_detail_block_rides_true_tail_not_isMeta_carrier(tmp_data_dir):
+def _obsolete_detail_block_rides_true_tail_not_isMeta_carrier(tmp_data_dir):
     """B4 (the headline cache bug): the relevance-gated DETAIL block must ride
     the TRUE tail (last user message), NEVER the index-1 _isMeta carrier that
     holds the large CLAUDE.md context.
@@ -1236,3 +1313,58 @@ def test_detail_block_rides_true_tail_not_isMeta_carrier(tmp_data_dir):
     assert car1 == car2, (
         'index-1 carrier bytes changed between turns → cross-turn prompt-cache '
         'prefix invalidation (the B4 cost)')
+
+
+# ───────── My Context: all three categories are always-on ─────────
+
+def test_split_profile_tiers_keeps_every_category_in_core(tmp_data_dir):
+    from lib.memory import user_profile as up
+
+    up.save_context_items([
+        {'type': 'identity', 'text': 'Works at Meituan'},
+        {'type': 'work_rule', 'condition': 'submitting cluster jobs',
+         'action': 'use hope MCP'},
+        {'type': 'response_preference', 'text': 'Reply in Chinese'},
+    ])
+    core, detail = up.split_profile_tiers()
+    assert detail == []
+    assert 'Works at Meituan' in core
+    assert 'submitting cluster jobs' in core and 'use hope MCP' in core
+    assert 'Reply in Chinese' in core
+
+
+def test_context_composer_injects_all_items_for_unrelated_turn(tmp_data_dir):
+    from lib.memory import user_profile as up
+    from lib.tasks_pkg.system_context import _inject_system_contexts
+
+    up.save_context_items([
+        {'type': 'identity', 'text': 'Works at Meituan'},
+        {'type': 'work_rule', 'condition': 'reading internal docs',
+         'action': 'use xuecheng MCP'},
+        {'type': 'response_preference', 'text': 'Lead with the conclusion'},
+    ])
+    messages = [
+        {'role': 'system', 'content': 'static'},
+        {'role': 'user', 'content': 'make this CSS border rounder'},
+    ]
+    task = {'config': {'preferencesEnabled': True}}
+    _inject_system_contexts(
+        messages, project_path='', project_enabled=False,
+        memory_enabled=False, search_enabled=False, swarm_enabled=False,
+        has_real_tools=False, conv_id='', task=task)
+    text = '\n'.join(str(message.get('content', '')) for message in messages)
+    assert '[USER CONTEXT]' in text
+    assert 'Works at Meituan' in text
+    assert 'reading internal docs' in text and 'use xuecheng MCP' in text
+    assert 'Lead with the conclusion' in text
+    assert task['_appliedPreferences']['detail'] == []
+    assert len(task['_appliedPreferences']['core']) == 3
+
+
+def test_interactive_context_is_independent_from_experience_memory():
+    from lib.agent_core.personal_scope import resolve_preferences_enabled
+
+    assert resolve_preferences_enabled({}, memory_enabled=False)
+    assert resolve_preferences_enabled(None, memory_enabled=False)
+    assert not resolve_preferences_enabled(
+        {'preferencesEnabled': False}, memory_enabled=True)

@@ -175,6 +175,23 @@ def test_index_cache_key_includes_panels_signature():
     )
 
 
+def test_index_cache_key_includes_settings_stylesheet_tag():
+    """A settings.css-only edit must update the hashed link immediately.
+
+    The settings stylesheet has its own content hash, independent from the
+    main stylesheet and JS bundle. If its tag is absent from the served-HTML
+    cache key, the browser receives new proxy markup with stale CSS until an
+    unrelated source change invalidates the page cache.
+    """
+    import inspect
+    from routes import common
+    src = inspect.getsource(common.index_page)
+    assert 'settings_tag = _get_settings_link_tag()' in src
+    assert "_bundled_index_cache['settings_tag'] == settings_tag" in src
+    assert '_SETTINGS_STYLES_RE.sub(settings_tag, html)' in src
+    assert "_bundled_index_cache['settings_tag'] = settings_tag" in src
+
+
 # ── ALL panels decoupled: the settings modal region is markers-only ────────
 
 def test_all_panels_decoupled_not_inline():
@@ -227,7 +244,7 @@ def test_translate_fragment_keeps_its_mt_markup():
 _SETTINGS_ONLY_CSS_PREFIXES = (
     r'\.mt-provider', r'\.mt-apply',        # translate (pilot)
     r'\.oauth-',                            # oauth      (batch A)
-    r'\.pref-', r'\.prefs\b',               # preferences(batch A)
+    r'\.pref-', r'\.prefs\b',               # preferences tab
     r'\.feishu-',                           # feishu     (batch A)
     r'\.mcp-',                              # mcp        (batch B)
     r'\.skills-',                           # skills     (batch B)
@@ -302,8 +319,11 @@ def test_settings_css_link_after_styles_in_index():
     """Cascade order: the settings.css <link> MUST come AFTER styles.css so
     equal-specificity overrides resolve the same as before the move."""
     html = _index_html()
-    i_styles = html.find('href="static/styles.css"')
-    i_settings = html.find('href="static/settings.css"')
+    # Cache-busting query strings are part of the production link, so anchor
+    # on the stylesheet path rather than requiring the quote immediately after
+    # ``.css``.
+    i_styles = html.find('href="static/styles.css')
+    i_settings = html.find('href="static/settings.css')
     assert i_styles != -1 and i_settings != -1, 'both stylesheet links must exist'
     assert i_styles < i_settings, (
         'settings.css <link> must come AFTER styles.css (cascade order) — '

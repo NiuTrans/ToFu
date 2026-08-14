@@ -28,7 +28,7 @@ pytestmark = pytest.mark.unit
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUNDLER_PY = ROOT / 'lib' / 'js_bundler.py'
 INDEX_HTML = ROOT / 'index.html'
-FEATURE_LOADER = ROOT / 'static' / 'js' / 'feature-loader.js'
+FEATURE_LOADER = ROOT / 'static' / 'js' / 'feature-bridge.js'
 CORE_PANEL = ROOT / 'static' / 'js' / 'settings' / 'core_panel.js'
 UPDATE_JS = ROOT / 'static' / 'js' / 'update.js'
 
@@ -46,7 +46,7 @@ def _manifest():
 def test_update_js_deferred_not_core():
     bundle, deferred, _ep, _crit = _manifest()
     assert 'update.js' in deferred, (
-        "update.js (48.7KB settings dialog) must be in _DEFERRED_FILES")
+        "update.js (48.7KB settings dialog) must be in _CLASSIC_ASSET_FILES")
     assert 'update.js' not in bundle, (
         "update.js must NOT remain in _BUNDLE_FILES — double-load would "
         "duplicate _updateState and re-arm the boot check")
@@ -59,14 +59,14 @@ def test_update_stubs_in_py_table():
     _bf, _df, entry_points, _crit = _manifest()
     missing = [s for s in UPDATE_STUBS if s not in entry_points]
     assert not missing, (
-        f'_DEFERRED_ENTRY_POINTS is missing update stubs: {missing}')
+        f'_FEATURE_ENTRY_POINTS is missing update stubs: {missing}')
 
 
 def test_update_stubs_in_loader_table():
     loader = FEATURE_LOADER.read_text()
     missing = [s for s in UPDATE_STUBS if f"'{s}'" not in loader]
     assert not missing, (
-        f'feature-loader.js is missing update stubs: {missing}')
+        f'feature-bridge.js is missing update stubs: {missing}')
 
 
 # ---------------------------------------------------------------------------

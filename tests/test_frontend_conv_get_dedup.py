@@ -31,6 +31,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -38,7 +39,11 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+sys.path.insert(0, HERE)
+from _runtime_sections import runtime_section_path  # noqa: E402
+
+API_JS = runtime_section_path('api.js')
+CROSS_TAB_SYNC = runtime_section_path('core/cross_tab_sync.js')
 
 
 def _node_available() -> bool:
@@ -136,7 +141,7 @@ def _run_harness(api_js_path: str) -> subprocess.CompletedProcess:
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_conv_get_inflight_dedup():
-    api_js = os.path.join(JS_DIR, 'api.js')
+    api_js = API_JS
     proc = _run_harness(api_js)
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
@@ -151,7 +156,7 @@ def test_conv_get_dedup_neuter(tmp_path):
     """NEUTER: drop the merge hit on a COPY of api.js → (A) fails with TWO
     fetches for the same conv, every other check stays green. Proves (A)
     discriminates the dedup itself. Shipped file left byte-identical."""
-    api_js = os.path.join(JS_DIR, 'api.js')
+    api_js = API_JS
     with open(api_js, encoding='utf-8') as f:
         src = f.read()
 
@@ -185,7 +190,7 @@ def test_recover_worker_fetches_tail_window_not_full_blob():
     GET must be the windowed tail read (?window=3 — O(3) rows from the
     normalized store), not the full blob that made one 176.8 MB conv get
     served 6× in 25s. NEUTER (revert the query on a copy) → predicate False."""
-    with open(os.path.join(JS_DIR, 'core', 'cross_tab_sync.js'), encoding='utf-8') as f:
+    with open(CROSS_TAB_SYNC, encoding='utf-8') as f:
         src = f.read()
     span = _recover_worker_span(src)
     assert "query: { window: '3' }" in span, (

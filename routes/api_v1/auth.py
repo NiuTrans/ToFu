@@ -74,13 +74,13 @@ import os
 import secrets
 from typing import Optional
 
-from flask import redirect, request
+from quart import redirect, request
 from quart import Response, g
 
 from lib.api_keys import (
     AuthContext, local_admin_context, touch_key, validate_token,
 )
-from lib.api_response import api_error, api_forbidden, api_unauthorized
+from lib.api_response import api_forbidden, api_typed_error, api_unauthorized
 from lib.auth_mode import requires_credential as _mode_requires_credential
 from lib.log import audit_log, get_logger
 from lib.rate_limit_api import RateDecision, apply_headers, check_request
@@ -162,6 +162,39 @@ _OPEN_MODE_ALLOW_REMOTE = (
     in ('1', 'true', 'yes', 'on'))
 
 
+def address_is_loopback(addr) -> bool:
+    """Return whether an HTTP/ASGI peer address is local loopback.
+
+    Accepts the string shape used by ``request.remote_addr`` and the
+    ``(host, port)`` tuple carried by an ASGI HTTP/WebSocket scope.  Keeping
+    this pure lets the WebSocket gate enforce the exact same trust boundary
+    as the HTTP middleware (Quart does not run ``before_request`` for WS).
+    """
+    import ipaddress
+    if isinstance(addr, (tuple, list)):
+        addr = addr[0] if addr else ''
+    addr = str(addr or '').strip()
+    if not addr:
+        return False
+    if addr == '<local>':
+        return True
+    addr = addr.split('%', 1)[0]
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError as e:
+        _auth_log.debug('Auth: unparseable peer address %r: %s', addr, e)
+        return False
+    if ip.is_loopback:
+        return True
+    mapped = getattr(ip, 'ipv4_mapped', None)
+    return bool(mapped and mapped.is_loopback)
+
+
+def open_mode_peer_allowed(addr) -> bool:
+    """Whether open mode may synthesize an admin for this socket peer."""
+    return _OPEN_MODE_ALLOW_REMOTE or address_is_loopback(addr)
+
+
 def _remote_is_loopback() -> bool:
     """True when the request peer is the local host (127.0.0.0/8, ::1).
 
@@ -176,27 +209,7 @@ def _remote_is_loopback() -> bool:
     consult this — see :func:`_is_bridge_path` and
     ``docs/UNIFIED_DEVICE_BRIDGE_DESIGN.md`` §3.2b / §3.4.
     """
-    import ipaddress
-    addr = (request.remote_addr or '').strip()
-    if not addr:
-        # No peer info (some ASGI test harnesses): fail closed.
-        return False
-    # Quart's in-process test client reports the literal '<local>' — an
-    # in-process call IS the local host. Hypercorn uses real socket addrs.
-    if addr == '<local>':
-        return True
-    # Strip IPv6 zone id if present (e.g. 'fe80::1%eth0').
-    addr = addr.split('%', 1)[0]
-    try:
-        ip = ipaddress.ip_address(addr)
-    except ValueError as e:
-        _auth_log.debug('Auth: unparseable remote_addr %r: %s', addr, e)
-        return False
-    if ip.is_loopback:
-        return True
-    # IPv4-mapped IPv6 loopback (::ffff:127.0.0.1).
-    mapped = getattr(ip, 'ipv4_mapped', None)
-    return bool(mapped and mapped.is_loopback)
+    return address_is_loopback(request.remote_addr)
 
 
 # ── Bridge endpoints: credential-only, never address-based ────────────
@@ -356,6 +369,18 @@ def _legacy_tunnel_token_passes() -> bool:
 # \u2500\u2500 Middleware \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 
+def _rate_limit_rejection(decision: RateDecision):
+    resp, status = api_typed_error(
+        'ratelimit', status=429,
+        detail=f'Rate limit exceeded ({decision.reason})',
+        source='api_v1.auth.rate_limit',
+        extensions={
+            'retry_after_s': round(decision.retry_after_s, 2),
+        })
+    apply_headers(resp, decision)
+    return resp, status
+
+
 async def auth_before_request():
     """Resolve ``g.auth_ctx`` for every request.
 
@@ -424,7 +449,7 @@ async def auth_before_request():
         # foot-gun. Operators who front the server with their own auth
         # can opt back in via TOFU_OPEN_MODE_ALLOW_REMOTE=1.
         if ctx_open is None:
-            if _OPEN_MODE_ALLOW_REMOTE or _remote_is_loopback():
+            if open_mode_peer_allowed(request.remote_addr):
                 ctx_open = local_admin_context()
             else:
                 # Remote, unauthenticated, open mode → behave like
@@ -435,6 +460,11 @@ async def auth_before_request():
                     request.remote_addr, path)
         if ctx_open is not None:
             g.auth_ctx = ctx_open
+            if ctx_open.via_open_mode and _is_api_path(path):
+                decision = check_request(ctx_open)
+                g.rate_decision = decision
+                if not decision.allowed:
+                    return _rate_limit_rejection(decision)
             return None
         # else: fall through to the credential-required gate below.
 
@@ -467,13 +497,12 @@ async def auth_before_request():
                               '(path=%s remote=%s)', token,
                               _token_source(token), path,
                               request.remote_addr)
-            return api_error({
-                'kind': 'unauthorized',
-                'detail': 'Invalid or expired API key. If you '
-                          'copied it from '
-                          'data/config/.first_run_token, that '
-                          'token may have been rotated — restart '
-                          'the server to mint a fresh one.'}, status=401)
+            return api_typed_error(
+                'permission', status=401,
+                detail='Invalid or expired API key. If you copied it from '
+                       'data/config/.first_run_token, that token may have '
+                       'been rotated — restart the server to mint a fresh one.',
+                source='api_v1.auth.token')
 
     # 2. Back-compat: legacy TUNNEL_TOKEN flow.
     if ctx is None and _legacy_tunnel_token_passes():
@@ -514,10 +543,11 @@ async def auth_before_request():
     # 5. Reject when no credential resolved on a private path.
     if ctx is None:
         if path.startswith(('/api/', '/v1/', '/metrics')):
-            return api_error({
-                'kind': 'unauthorized',
-                'detail': 'Authentication required. Send '
-                          'Authorization: Bearer tofu_live_…'}, status=401)
+            return api_typed_error(
+                'permission', status=401,
+                detail='Authentication required. Send Authorization: '
+                       'Bearer tofu_live_…',
+                source='api_v1.auth.required')
         return Response(
             '<!doctype html><meta charset="utf-8">'
             '<title>Sign in required \u2014 Tofu</title>'
@@ -540,12 +570,7 @@ async def auth_before_request():
     decision: RateDecision = check_request(ctx)
     g.rate_decision = decision
     if not decision.allowed:
-        resp, _st429 = api_error({
-            'kind': 'rate_limited',
-            'detail': f'Rate limit exceeded ({decision.reason})',
-            'retry_after_s': round(decision.retry_after_s, 2)}, status=429)
-        apply_headers(resp, decision)
-        return resp, _st429
+        return _rate_limit_rejection(decision)
 
     # 7. Per-key request counter (tokens recorded post-hoc by routes).
     if ctx.key_id:
@@ -751,4 +776,6 @@ __all__ = [
     'guard_model_relay_or_dispose',
     'current_auth',
     'SESSION_COOKIE',
+    'address_is_loopback',
+    'open_mode_peer_allowed',
 ]

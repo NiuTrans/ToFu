@@ -144,9 +144,14 @@ def test_human_nudge_still_refuses_self_and_rate_limits(_stub_io):
 class _HybridRow:
     _D = {'messages': '[]', 'updated_at': 0, 'settings': '{}'}
 
+    def keys(self):
+        return self._D.keys()
+
     def __getitem__(self, k):
         if isinstance(k, int):
-            return 0
+            if k == 0:
+                return self._D['messages']
+            raise IndexError(k)
         return self._D.get(k, None)
 
 
@@ -168,9 +173,10 @@ def _drive_dispatch(monkeypatch, payload):
         'queueId': 'q1', 'config': {}, 'payload': payload})
     monkeypatch.setattr(mq, 'get_thread_db', lambda *a, **k: _FakeDB())
     monkeypatch.setattr(mq, 'db_execute_with_retry', lambda *a, **k: None)
+    monkeypatch.setattr(
+        mq, '_append_user_msg_with_cas',
+        lambda _db, _conv_id, msg: captured.setdefault('msg', msg) is not None)
     monkeypatch.setattr('lib.database.json_dumps_pg', lambda x: '[]')
-    monkeypatch.setattr('lib.chat.append_user_msg_idempotent',
-                        lambda msgs, m: captured.setdefault('msg', m))
     monkeypatch.setattr(
         'lib.tasks_pkg.conv_message_builder.build_api_messages_from_db',
         lambda *a, **k: [])

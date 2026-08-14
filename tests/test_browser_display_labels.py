@@ -26,7 +26,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parent.parent
-TOOL_ROUNDS = ROOT / 'static' / 'js' / 'ui' / 'tool_rounds.js'
+TOOL_ROUNDS = ROOT / 'frontend' / 'src' / 'runtime' / 'app-runtime.js'
 
 
 @pytest.fixture(autouse=True)

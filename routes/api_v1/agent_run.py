@@ -82,7 +82,7 @@ import asyncio
 import json
 import time
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.agent_core.admission import (
     await_terminal, controller, on_terminal, register_waiter,
@@ -257,6 +257,14 @@ def _build_cfg(model_id: str, raw_config: dict | None,
                     cfg[key] = val
                 else:
                     logger.debug('[agent.run] unknown tool tag: %r', t)
+    elif isinstance(tools, dict):
+        # ``config.tools`` also hosts request-local context-efficiency
+        # switches (nativeExposure / programmaticCalling).  The headless
+        # alias predates those switches and used to pop then silently discard
+        # every mapping, so a request for routed exposure actually ran the
+        # full catalog.  Preserve mappings; the orchestrator normalizer owns
+        # validation and fails safe to the shipped defaults.
+        cfg['tools'] = dict(tools)
     elif tools is not None:
         logger.debug('[agent.run] ignoring unknown tools shape: %r', tools)
 
@@ -321,11 +329,12 @@ async def _stream_generator(task, model: str, completion_id: str,
             _billed = True
 
     task_id = task.get('id') or ''
+    from lib.task_replay import task_memory_replay_page
     try:
         while True:
-            with task['events_lock']:
-                new_events = list(task['events'][cursor:])
-                cursor = len(task['events'])
+            page = task_memory_replay_page(task, cursor)
+            new_events = page.events
+            cursor = page.next_cursor
             for ev in new_events:
                 etype = ev.get('type', '')
                 chunk = {

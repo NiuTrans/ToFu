@@ -1,14 +1,24 @@
         <div class="settings-tab-panel" id="settingsTab_oauth">
           <div class="settings-section-title" data-i18n="settings.oauthTitle">订阅登录</div>
-          <p class="settings-desc" data-i18n="settings.oauthPageDesc">使用 ChatGPT Plus / Claude Pro 订阅账号登录，无需 API Key，直接使用订阅额度。</p>
+          <p class="settings-desc" data-i18n="settings.oauthPageDesc">连接已有的 Claude 或 ChatGPT 订阅，无需填写 API Key。</p>
 
-          <!-- The whole flow in one glance — this is ALL most users need -->
+          <div class="oauth-responsibility" role="note">
+            <div class="oauth-responsibility-item is-user">
+              <span class="oauth-responsibility-label" data-i18n="settings.oauthYourPart">你需要做的</span>
+              <strong data-i18n="settings.oauthUserRole">只需在官方页面完成登录和授权</strong>
+            </div>
+            <div class="oauth-responsibility-item is-system">
+              <span class="oauth-responsibility-label" data-i18n="settings.oauthTofuPart">Tofu 负责</span>
+              <strong data-i18n="settings.oauthSystemRole">自动完成连接、模型接入、刷新与故障恢复</strong>
+            </div>
+          </div>
+
           <div class="oauth-steps">
             <div class="oauth-step">
               <span class="oauth-step-num">1</span>
               <div class="oauth-step-text">
-                <div class="oauth-step-title" data-i18n="settings.oauthStep1">点击登录</div>
-                <div class="oauth-step-sub" data-i18n="settings.oauthStep1Sub">弹窗打开官方授权页</div>
+                <div class="oauth-step-title" data-i18n="settings.oauthStep1">点击连接</div>
+                <div class="oauth-step-sub" data-i18n="settings.oauthStep1Sub">Tofu 打开官方授权页</div>
               </div>
             </div>
             <span class="oauth-step-arrow">→</span>
@@ -16,7 +26,7 @@
               <span class="oauth-step-num">2</span>
               <div class="oauth-step-text">
                 <div class="oauth-step-title" data-i18n="settings.oauthStep2">完成授权</div>
-                <div class="oauth-step-sub" data-i18n="settings.oauthStep2Sub">用订阅账号登录并授权</div>
+                <div class="oauth-step-sub" data-i18n="settings.oauthStep2Sub">在官方页面确认账号</div>
               </div>
             </div>
             <span class="oauth-step-arrow">→</span>
@@ -24,75 +34,71 @@
               <span class="oauth-step-num">3</span>
               <div class="oauth-step-text">
                 <div class="oauth-step-title" data-i18n="settings.oauthStep3">自动完成</div>
-                <div class="oauth-step-sub" data-i18n="settings.oauthStep3Sub">Token 过期自动刷新</div>
+                <div class="oauth-step-sub" data-i18n="settings.oauthStep3Sub">其余步骤由 Tofu 处理</div>
               </div>
             </div>
           </div>
 
-          <div class="oauth-china-note" data-i18n-html="settings.oauthChinaNote">⚠️ 中国用户：授权全程需要代理（Clash/VPN），建议在<strong>本地浏览器无痕窗口</strong>中完成。若服务器无法访问外网，卡片内会提示你安装受控端（装在自己电脑上即可）。</div>
-
-          <!-- Claude Pro -->
           <div class="oauth-provider-card" id="oauthClaudeCard">
             <div class="oauth-provider-header">
-              <img src="static/icons/claude.svg" width="20" height="20" style="vertical-align:-3px;filter:brightness(0) invert(1)" alt="Claude">
-              <span class="oauth-provider-name">Claude Pro / Max</span>
-              <span class="oauth-status-badge" id="oauthClaudeStatus" data-i18n="settings.notLoggedIn">未登录</span>
+              <img src="static/icons/claude.svg" width="20" height="20" style="vertical-align:-3px" alt="Claude">
+              <span class="oauth-provider-name" data-i18n="settings.oauthProviderClaude">Claude</span>
+              <span class="oauth-status-badge" id="oauthClaudeStatus" data-i18n="settings.notLoggedIn">未连接</span>
             </div>
-            <p class="oauth-provider-desc" data-i18n="settings.oauthClaudeDesc">登录 Claude 订阅，使用 Sonnet / Opus 等模型，无需 API Key。</p>
+            <p class="oauth-provider-desc" data-i18n="settings.oauthClaudeDesc">连接 Claude 订阅，使用 Sonnet / Opus 等模型。</p>
             <div class="oauth-provider-info" id="oauthClaudeInfo" style="display:none">
               <span class="oauth-email" id="oauthClaudeEmail"></span>
             </div>
             <div class="oauth-egress-line" id="oauthClaudeEgress" style="display:none"></div>
             <div class="oauth-provider-actions">
-              <button class="btn-small btn-primary" id="oauthClaudeLoginBtn" onclick="_oauthLogin('claude')" data-i18n="settings.loginClaude">登录 Claude</button>
-              <button class="btn-small btn-danger" id="oauthClaudeLogoutBtn" onclick="_oauthLogout('claude')" style="display:none" data-i18n="settings.logout">退出</button>
+              <button class="btn-small btn-primary" id="oauthClaudeLoginBtn" data-tofu-action="_oauthLogin('claude')" data-i18n="settings.loginClaude">连接 Claude</button>
+              <button class="btn-small btn-danger" id="oauthClaudeLogoutBtn" data-tofu-action="_oauthLogout('claude')" style="display:none" data-i18n="settings.oauthDisconnect">断开连接</button>
             </div>
             <div class="oauth-manual-fallback" id="oauthClaudeManual" style="display:none">
-              <p class="oauth-manual-hint" data-i18n-html="settings.oauthPopupBlocked">如弹窗无法打开，请复制链接到<strong>开了代理的浏览器无痕窗口</strong>中打开：</p>
+              <p class="oauth-manual-hint" data-i18n="settings.oauthManualAction">需要你继续操作：打开下面的官方授权页。</p>
               <div style="display:flex;gap:8px;margin-bottom:8px">
                 <input type="text" class="oauth-manual-input" id="oauthClaudeAuthUrl" readonly style="color:#888;font-size:12px">
-                <button class="btn-small" onclick="var u=document.getElementById('oauthClaudeAuthUrl');u.select();document.execCommand('copy');this.textContent=t('settings.oauthCopied');setTimeout(function(){this.textContent=t('settings.oauthCopyLink')}.bind(this),1500)" style="white-space:nowrap" data-i18n="settings.oauthCopyLink">复制链接</button>
+                <button class="btn-small" data-tofu-action="_oauthCopyAuthLink(this,'claude')" style="white-space:nowrap" data-i18n="settings.oauthCopyLink">复制链接</button>
               </div>
-              <p class="oauth-manual-hint" id="oauthClaudeCodeHint" data-i18n-html="settings.oauthClaudeCodeHint">授权成功后页面显示授权码，复制 <strong>code#state</strong> 粘贴到下方：</p>
+              <p class="oauth-manual-hint" id="oauthClaudeCodeHint" data-i18n-html="settings.oauthClaudeCodeHint">官方页面显示授权码后，将它粘贴到下方：</p>
               <div style="display:flex;gap:8px" id="oauthClaudePasteRow">
-                <input type="text" class="oauth-manual-input" id="oauthClaudeManualUrl" placeholder="粘贴 code#state（或完整回调 URL）" data-i18n-placeholder="settings.oauthClaudePh">
-                <button class="btn-small btn-primary" onclick="_oauthManualSubmit('claude')" data-i18n="settings.oauthSubmit">提交</button>
+                <input type="text" class="oauth-manual-input" id="oauthClaudeManualUrl" placeholder="粘贴授权结果" data-i18n-placeholder="settings.oauthClaudePh">
+                <button class="btn-small btn-primary" data-tofu-action="_oauthManualSubmit('claude')" data-i18n="settings.oauthSubmit">继续</button>
               </div>
-              <p class="oauth-manual-hint" id="oauthClaudeLoopbackNote" style="display:none" data-i18n="settings.oauthLoopbackNote">本机会自动接收授权码，无需复制粘贴。授权完成后本页会自动登录。</p>
+              <p class="oauth-manual-hint" id="oauthClaudeLoopbackNote" style="display:none" data-i18n="settings.oauthLoopbackNote">授权结果会自动返回 Tofu，无需复制粘贴。</p>
               <div id="oauthClaudeConsoleFallbackRow" style="display:none;margin-top:8px">
-                <button type="button" class="btn-small" id="oauthClaudeConsoleFallbackBtn" data-i18n="settings.oauthUseConsole">登录卡住了？改用手工粘贴</button>
+                <button type="button" class="btn-small" id="oauthClaudeConsoleFallbackBtn" data-i18n="settings.oauthUseConsole">授权页提示失败？换一种官方授权方式</button>
               </div>
             </div>
           </div>
 
-          <!-- ChatGPT Plus (Codex) -->
           <div class="oauth-provider-card" id="oauthCodexCard">
             <div class="oauth-provider-header">
-              <img src="static/icons/openai.svg" width="20" height="20" style="vertical-align:-3px;filter:brightness(0) invert(1)" alt="OpenAI">
-              <span class="oauth-provider-name">ChatGPT Plus / Pro</span>
-              <span class="oauth-status-badge" id="oauthCodexStatus" data-i18n="settings.notLoggedIn">未登录</span>
+              <img src="static/icons/openai.svg" width="20" height="20" style="vertical-align:-3px" alt="OpenAI">
+              <span class="oauth-provider-name" data-i18n="settings.oauthProviderCodex">ChatGPT</span>
+              <span class="oauth-status-badge" id="oauthCodexStatus" data-i18n="settings.notLoggedIn">未连接</span>
             </div>
-            <p class="oauth-provider-desc" data-i18n="settings.oauthCodexDesc">登录 ChatGPT 订阅，使用 Codex 模型，请求自动转换为 Responses API 格式。</p>
+            <p class="oauth-provider-desc" data-i18n="settings.oauthCodexDesc">连接 ChatGPT 订阅，使用 Codex 模型。</p>
             <div class="oauth-provider-info" id="oauthCodexInfo" style="display:none">
               <span class="oauth-email" id="oauthCodexEmail"></span>
             </div>
+            <div class="oauth-quota" id="oauthCodexQuota" style="display:none"></div>
             <div class="oauth-egress-line" id="oauthCodexEgress" style="display:none"></div>
             <div class="oauth-provider-actions">
-              <button class="btn-small btn-primary" id="oauthCodexLoginBtn" onclick="_oauthLogin('codex')" data-i18n="settings.loginChatGPT">登录 ChatGPT</button>
-              <button class="btn-small btn-danger" id="oauthCodexLogoutBtn" onclick="_oauthLogout('codex')" style="display:none" data-i18n="settings.logout">退出</button>
+              <button class="btn-small btn-primary" id="oauthCodexLoginBtn" data-tofu-action="_oauthLogin('codex')" data-i18n="settings.loginChatGPT">连接 ChatGPT</button>
+              <button class="btn-small btn-danger" id="oauthCodexLogoutBtn" data-tofu-action="_oauthLogout('codex')" style="display:none" data-i18n="settings.oauthDisconnect">断开连接</button>
             </div>
             <div class="oauth-manual-fallback" id="oauthCodexManual" style="display:none">
-              <p class="oauth-manual-hint" data-i18n-html="settings.oauthPopupBlocked">如弹窗无法打开，请复制链接到<strong>开了代理的浏览器无痕窗口</strong>中打开：</p>
+              <p class="oauth-manual-hint" data-i18n="settings.oauthManualAction">需要你继续操作：打开下面的官方授权页。</p>
               <div style="display:flex;gap:8px;margin-bottom:8px">
                 <input type="text" class="oauth-manual-input" id="oauthCodexAuthUrl" readonly style="color:#888;font-size:12px">
-                <button class="btn-small" onclick="var u=document.getElementById('oauthCodexAuthUrl');u.select();document.execCommand('copy');this.textContent=t('settings.oauthCopied');setTimeout(function(){this.textContent=t('settings.oauthCopyLink')}.bind(this),1500)" style="white-space:nowrap" data-i18n="settings.oauthCopyLink">复制链接</button>
+                <button class="btn-small" data-tofu-action="_oauthCopyAuthLink(this,'codex')" style="white-space:nowrap" data-i18n="settings.oauthCopyLink">复制链接</button>
               </div>
-              <p class="oauth-manual-hint" data-i18n="settings.oauthCodexCbHint">授权成功后，复制浏览器地址栏中的回调 URL 粘贴到下方：</p>
+              <p class="oauth-manual-hint" data-i18n="settings.oauthCodexCbHint">完成官方授权后，将浏览器显示的授权结果粘贴到下方：</p>
               <div style="display:flex;gap:8px">
-                <input type="text" class="oauth-manual-input" id="oauthCodexManualUrl" placeholder="粘贴回调 URL (http://localhost:1455/auth/callback?code=...)" data-i18n-placeholder="settings.oauthCodexPh">
-                <button class="btn-small btn-primary" onclick="_oauthManualSubmit('codex')" data-i18n="settings.oauthSubmit">提交</button>
+                <input type="text" class="oauth-manual-input" id="oauthCodexManualUrl" placeholder="粘贴授权结果" data-i18n-placeholder="settings.oauthCodexPh">
+                <button class="btn-small btn-primary" data-tofu-action="_oauthManualSubmit('codex')" data-i18n="settings.oauthSubmit">继续</button>
               </div>
             </div>
           </div>
-
         </div>

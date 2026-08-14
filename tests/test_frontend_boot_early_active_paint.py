@@ -49,11 +49,13 @@ import sys
 
 import pytest
 
+from tests._runtime_sections import runtime_section_names, runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+CONVERSATIONS = runtime_section_path('core/conversations.js')
 
 
 def _node_available() -> bool:
@@ -212,12 +214,12 @@ def _run(js_path: str) -> subprocess.CompletedProcess:
     # + pending_sync) via the drift-proof family closure — hand-picked pin
     # lists went stale at every slice (5 measured instances in one day:
     # _serverConvCount, _setCacheVerifying, _scheduleConvVerifyRetry, …).
-    sys.path.insert(0, HERE)
-    from _conv_bundle_sources import conv_family_sources
-    override = None
-    if os.path.basename(js_path) != 'conversations.js':
-        override = {'core/conversations.js': js_path}
-    extra_js = conv_family_sources(override=override)
+    family = [name for name in runtime_section_names()
+              if name == 'core/conversations.js'
+              or name.startswith('core/conv_')
+              or name == 'core/pending_sync.js']
+    extra_js = [js_path if name == 'core/conversations.js'
+                else runtime_section_path(name) for name in family]
     try:
         return subprocess.run(
             ['node', harness, *extra_js],
@@ -232,7 +234,7 @@ def _run(js_path: str) -> subprocess.CompletedProcess:
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_early_paint_and_server_reconcile():
-    conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
+    conv_js = CONVERSATIONS
     proc = _run(conv_js)
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
@@ -247,14 +249,14 @@ def test_NC_phase1_cache_render_is_load_bearing(tmp_path):
     """NEUTER: strip the Phase-1 cache render on a COPY → check (1) FAILS.
     Proves the instant cache paint (not the server fetch) is what gives the
     zero-wait first paint. Real file untouched."""
-    conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
+    conv_js = CONVERSATIONS
     with open(conv_js, encoding='utf-8') as f:
         src = f.read()
 
     # The Phase-1 active-conv render is `window.ConvView.replaceAll(...)` immediately
     # followed by the _restoreConvToolState + _setCacheVerifying lines. Neuter
     # ONLY that first (cache) render by disabling it in the cache branch.
-    needle = ('          window.ConvView.replaceAll(conv.id, { forceScroll: false });\n'
+    needle = ('          runtimeScope.ConvView.replaceAll(conv.id, { forceScroll: false });\n'
               '          if (typeof _restoreConvToolState === "function") _restoreConvToolState(conv);\n'
               '          _setCacheVerifying(convId, _cacheKnownStale);')
     assert src.count(needle) == 1, 'Phase-1 cache-render fragment drifted — update the neuter target'
@@ -285,7 +287,7 @@ def test_NC_phase2_overwrite_adopt_is_load_bearing(tmp_path):
     instead of adopting the server body → check (2) FAILS. Proves the server
     reconcile — not the cache — is authoritative after _needsLoad was cleared
     by Phase 1. Real file untouched."""
-    conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
+    conv_js = CONVERSATIONS
     with open(conv_js, encoding='utf-8') as f:
         src = f.read()
 

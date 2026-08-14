@@ -100,6 +100,8 @@ def _classify_outcome(msg: dict[str, Any], finish_reason: str | None) -> tuple[s
         return OUTCOME_COMPLETED, None
     if fr in ('length', 'max_tokens'):
         return OUTCOME_TRUNCATED, CAUSE_MAX_TOKENS
+    # Read-only compatibility for turns persisted before tool-round caps were
+    # removed. New executions never emit this finish reason.
     if fr == 'tool_rounds_exhausted':
         return OUTCOME_TRUNCATED, CAUSE_TOOL_CAP
     if fr == 'incomplete':

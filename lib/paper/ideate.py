@@ -76,8 +76,10 @@ IDEATE_NOVELTY_RETRIEVAL_K = 5
 # Generation divergence — mirror insight's 0.45 (divergent but JSON-safe).
 _IDEATE_TEMPERATURE = 0.45
 _IDEATE_MAX_TOKENS = 8000
-_MAX_IDEATE_TOOL_ROUNDS = 6
-
+# The open-ended generation/research loop gets a token envelope. Per-idea
+# rubric calls are finite and are accounted in the same usage snapshot, but do
+# not need a loop breaker.
+_IDEATE_AGENT_TOKEN_BUDGET = 160_000
 # Rubric judging is a judgement, not creative — deterministic.
 _RUBRIC_TEMPERATURE = 0.0
 _RUBRIC_MAX_TOKENS = 3000
@@ -87,8 +89,9 @@ _IDEATE_LANG_PREFIX = 'ideate'
 RUBRIC_AXES = ('novelty', 'falsifiability', 'mechanism_depth', 'value')
 
 # Required non-empty fields on every idea (gate ①).
-_REQUIRED_FIELDS = ('title', 'kind', 'linked_gap_id', 'core_mechanism',
-                    'novelty_claim', 'falsifiable_prediction', 'why_not_AB')
+_REQUIRED_FIELDS = ('title', 'kind', 'linked_gap_id', 'corpus_anchor_id',
+                    'corpus_delta', 'core_mechanism', 'novelty_claim',
+                    'falsifiable_prediction', 'why_not_AB')
 _VALID_KINDS = ('methodology', 'analysis')
 
 #: Synonyms a real model emits for the two frozen kinds. Production evidence
@@ -302,7 +305,8 @@ def ideate_lang_key(lang: str) -> str:
 
 def _norm_id(arxiv_id) -> str:
     """Strip a version suffix so ``2502.09992v3`` and ``2502.09992`` compare equal."""
-    return (arxiv_id or '').split('v')[0].strip()
+    from lib.paper.arxiv import normalize_arxiv_id
+    return normalize_arxiv_id(arxiv_id)
 
 
 # ── Facade seams (monkeypatchable) ─────────────────────────────────────────
@@ -376,10 +380,11 @@ def _structural_gate(idea: dict, valid_gap_ids: set) -> Optional[str]:
     if gid not in valid_gap_ids:
         return (f'linked_gap_id {gid!r} does not match any library-verified '
                 f'open_gap (invented problem — no evidence it solves a real gap)')
-    # novelty_claim must cite at least one concrete arxiv-shaped id (not "nobody did this")
-    import re
-    if not re.search(r'\d{4}\.\d{4,5}|[a-z-]+/\d{7}', idea.get('novelty_claim') or ''):
-        return 'novelty_claim cites no concrete arxiv id (unfalsifiable "nobody did this")'
+    # Substantive novelty is judged against the forced retrieved-neighbour set
+    # below. Requiring the generator to hand-copy an arXiv id here was a
+    # formatting gate: a potentially useful analysis idea died before evidence
+    # retrieval and the LLM judge ran. The claim remains required/non-empty;
+    # positive prior-art evidence decides whether it is actually novel.
     return None
 
 
@@ -551,6 +556,11 @@ def _judge_prompt(idea: dict, prior_set: dict, gap: dict, lang: str) -> str:
     neighbors = '\n'.join(neigh_lines) or '(retrieval returned nothing)'
     gap_txt = f"{gap.get('id')}: {gap.get('gap','')}" if gap else '(no linked gap)'
     idea_txt = (f"title: {idea.get('title')}\nkind: {idea.get('kind')}\n"
+                f"corpus_anchor_id: {idea.get('corpus_anchor_id')}\n"
+                f"corpus_delta: {idea.get('corpus_delta')}\n"
+                f"failure_cause: {idea.get('failure_cause')}\n"
+                f"new_invariant: {idea.get('new_invariant')}\n"
+                f"intervention_level: {idea.get('intervention_level')}\n"
                 f"core_mechanism: {idea.get('core_mechanism')}\n"
                 f"novelty_claim: {idea.get('novelty_claim')}\n"
                 f"falsifiable_prediction: {idea.get('falsifiable_prediction')}\n"
@@ -588,7 +598,7 @@ def _judge_prompt(idea: dict, prior_set: dict, gap: dict, lang: str) -> str:
 
 
 def _score_idea(idea: dict, prior_set: dict, gap: dict, lang: str, *,
-                model=None, abort=None) -> Optional[dict]:
+                model=None, abort=None, usage_meter=None) -> Optional[dict]:
     """Judge one idea: novelty-vs-retrieved + four-axis rubric, one dispatch.
 
     Returns::
@@ -623,6 +633,8 @@ def _score_idea(idea: dict, prior_set: dict, gap: dict, lang: str, *,
     except Exception as e:
         logger.error('[Paper:Ideate] judge dispatch failed: %s', e, exc_info=True)
         return None
+    if usage_meter:
+        usage_meter.record(_usage)
 
     content = buf['content'] or (msg.get('content') if isinstance(msg, dict) else '') or ''
     parsed = _parse_llm_json(content)
@@ -692,7 +704,8 @@ def _ground_idea_prior_art(idea: dict) -> tuple:
 # ── Generation (facade-resolved agentic loop, mirrors survey) ──────────────
 
 def _generate_raw_ideas(direction, open_gaps, reader_context, lang, *,
-                        n_ideas=6, model=None, abort=None, on_tool_event=None) -> list:
+                        n_ideas=6, model=None, abort=None, on_tool_event=None,
+                        usage_meter=None) -> list:
     """Generate raw (un-gated) ideas anchored to R2's open_gaps.
 
     Single seam tests monkeypatch (``ideate._generate_raw_ideas``) to drive the
@@ -721,14 +734,18 @@ def _generate_raw_ideas(direction, open_gaps, reader_context, lang, *,
 
         def _on_content(t):
             _round['content'] += t
+        effective_tools = usage_meter.allowed_tools(tools) if usage_meter else tools
         return _self.dispatch_stream(
             messages, on_content=_on_content, abort_check=abort_signal.is_set,
             prefer_model=model or None, strict_model=bool(model), capability='text',
-            tools=tools, max_tokens=_IDEATE_MAX_TOKENS, temperature=_IDEATE_TEMPERATURE,
+            tools=effective_tools, max_tokens=_IDEATE_MAX_TOKENS,
+            temperature=_IDEATE_TEMPERATURE,
             thinking_enabled=False, log_prefix='[Paper:Ideate]')
 
     def _on_round_result(rnd, msg, finish, usage):
         _last['msg'] = msg
+        if usage_meter:
+            usage_meter.observe_agent_round(usage, msg)
 
     def _begin_tool_round(rnd, msg):
         _round['content'] = ''
@@ -741,7 +758,7 @@ def _generate_raw_ideas(direction, open_gaps, reader_context, lang, *,
         log_prefix='[Paper:Ideate]')
 
     run_agent_loop(
-        abort=abort_signal, max_tool_rounds=_MAX_IDEATE_TOOL_ROUNDS,
+        abort=abort_signal,
         round_tools=_REPORT_TOOLS, dispatch=_dispatch, execute_tool=_execute_tool,
         on_round_result=_on_round_result, on_tool_round=_begin_tool_round)
 
@@ -765,7 +782,8 @@ def _compact_gaps(open_gaps: dict) -> str:
         if isinstance(g, dict) and g.get('id'):
             gaps.append({'id': g['id'], 'gap': g.get('gap', ''),
                          'why_open': g.get('why_open', ''),
-                         'kind_hint': g.get('kind_hint', '')})
+                         'kind_hint': g.get('kind_hint', ''),
+                         'evidence': list(g.get('evidence') or [])})
     return json.dumps({'open_gaps': gaps}, ensure_ascii=False)
 
 
@@ -792,9 +810,18 @@ def _ideate_system_prompt(lang: str, n_ideas: int) -> str:
             f'你是一位有品位的资深研究员,正在为一个方向提出 {n_ideas} 个**真正新颖**的研究 idea。\n'
             '铁律:每个 idea 必须 `linked_gap_id` 指向给定 open_gaps 里的一个真实 id —— '
             '**不许凭空发明问题**。core_mechanism 要讲清「为什么 work」的机理,不是操作步骤;'
-            'why_not_AB 要正面回答「为什么这不是两个已有件的拼接」;novelty_claim 要引用具体 arxiv_id。'
+            'why_not_AB 要正面回答「为什么这不是两个已有件的拼接」;novelty_claim 有证据时引用具体 arxiv_id。'
+            '先做一轮静默淘汰：凡是可概括成「已有指标/监测器/损失/模块 + 新场景」的候选都替换掉。'
+            '方法类 idea 必须从 gap 的 failure_cause 出发，提出一个能主动改变系统因果动力学的'
+            'new_invariant；优先改变 representation/objective/architecture/algorithm/protocol，'
+            '不能只在失败后检测、切换阈值或包一层防御。若含反应式组件，必须说明它如何改变状态转移，'
+            '而不是只报警。多个 idea 要来自不同的因果机制族，不是同一指标的改写。'
+            '每个 idea 还必须从 linked gap 的 evidence 中选一个 `corpus_anchor_id`，并用 '
+            '`corpus_delta` 说明对该论文真实机制改了哪一处；库外近邻只能辅助查新，不能替代语料锚点。'
             f'只返回 JSON:{{"ideas":[{{...}} × {n_ideas}]}},每个 idea 含 title/kind/linked_gap_id/'
-            'core_mechanism/novelty_claim/prior_art/falsifiable_prediction/why_not_AB。'
+            'corpus_anchor_id/corpus_delta/failure_cause/new_invariant/intervention_level/'
+            'core_mechanism/novelty_claim/'
+            'prior_art/falsifiable_prediction/why_not_AB。'
             f'**kind 只能是 {" 或 ".join(_VALID_KINDS)} 两个值之一**'
             '(提出新方法/新机制写 methodology；做度量/实证分析写 analysis)，'
             '可参考对应 open_gap 的 kind_hint。'
@@ -806,9 +833,23 @@ def _ideate_system_prompt(lang: str, n_ideas: int) -> str:
         'Iron rule: every idea MUST set linked_gap_id to a real id from the given open_gaps '
         '— do NOT invent your own problem. core_mechanism must explain WHY it works (a '
         'mechanism, not steps); why_not_AB must directly answer why this is not two existing '
-        'pieces glued; novelty_claim must cite a concrete arxiv_id. '
+        'pieces glued; novelty_claim should cite a concrete arxiv_id where evidence supports it. '
+        'First run a silent rejection pass: replace any candidate that can be summarized as '
+        '"an existing metric, monitor, loss, or module applied to a new setting". A methodology '
+        'idea must start from the gap\'s failure_cause and introduce a new_invariant that '
+        'proactively changes the system\'s causal dynamics. Prefer interventions at the '
+        'representation, objective, architecture, algorithm, or protocol level; a detector, '
+        'threshold switch, or defensive wrapper is insufficient unless you explain how it '
+        'changes the state transition rather than merely raising an alarm. Ideas must span '
+        'different causal mechanism families, not paraphrases of one diagnostic signal. '
+        'Every idea must also choose a `corpus_anchor_id` from its linked gap\'s evidence '
+        'and use `corpus_delta` to state exactly what changes in that paper\'s actual '
+        'mechanism. External neighbours help novelty checking but cannot replace this '
+        'in-corpus mechanism anchor. '
         f'Return ONLY JSON: {{"ideas":[{{...}} × {n_ideas}]}}, each idea with title/kind/'
-        'linked_gap_id/core_mechanism/novelty_claim/prior_art/falsifiable_prediction/why_not_AB. '
+        'linked_gap_id/corpus_anchor_id/corpus_delta/failure_cause/new_invariant/'
+        'intervention_level/core_mechanism/'
+        'novelty_claim/prior_art/falsifiable_prediction/why_not_AB. '
         f'**kind MUST be exactly one of: {" | ".join(_VALID_KINDS)}** '
         '(a new method/mechanism is "methodology"; a measurement or empirical study is '
         '"analysis") — follow the linked open_gap\'s kind_hint when unsure. '
@@ -850,29 +891,39 @@ def generate_ideas(direction: str, open_gaps: dict, *, lang: str = 'en',
     threshold can be calibrated from real data.
     """
     import lib.paper.ideate as _self
+    from lib.research.telemetry import ResearchUsageMeter, research_token_budget
+
     direction = (direction or '').strip()
     thr = IDEATE_GATE_THRESHOLD if threshold is None else float(threshold)
     valid_gaps = _valid_gap_ids(open_gaps)
+    usage_meter = ResearchUsageMeter(
+        'ideate', fallback_model=model or '',
+        token_budget=research_token_budget(
+            'TOFU_RESEARCH_IDEATE_TOKEN_BUDGET', _IDEATE_AGENT_TOKEN_BUDGET))
     if not direction:
         return {'ok': False, 'error': 'empty direction', 'direction': '', 'lang': lang,
-                'accepted': [], 'rejected': [], 'threshold': thr}
+                'accepted': [], 'rejected': [], 'threshold': thr,
+                'usage': usage_meter.snapshot()}
     if not valid_gaps:
         return {'ok': False, 'error': 'open_gaps has no verified gap ids (run survey first)',
                 'direction': direction, 'lang': lang, 'accepted': [], 'rejected': [],
-                'threshold': thr}
+                'threshold': thr, 'usage': usage_meter.snapshot()}
 
     try:
         raw = _self._generate_raw_ideas(direction, open_gaps, reader_context, lang,
                                         n_ideas=n_ideas, model=model, abort=abort,
-                                        on_tool_event=on_tool_event)
+                                        on_tool_event=on_tool_event,
+                                        usage_meter=usage_meter)
     except Exception as e:
         from lib.llm_errors import AbortedError
         if isinstance(e, AbortedError):
             return {'ok': False, 'error': 'aborted', 'direction': direction, 'lang': lang,
-                    'accepted': [], 'rejected': [], 'threshold': thr}
+                    'accepted': [], 'rejected': [], 'threshold': thr,
+                    'usage': usage_meter.snapshot()}
         logger.error('[Paper:Ideate] generation failed: %s', e, exc_info=True)
         return {'ok': False, 'error': f'generation failed: {e}', 'direction': direction,
-                'lang': lang, 'accepted': [], 'rejected': [], 'threshold': thr}
+                'lang': lang, 'accepted': [], 'rejected': [], 'threshold': thr,
+                'usage': usage_meter.snapshot()}
 
     accepted, rejected = [], []
     # Batch-wide term census for the fielded query: a term several ideas share is
@@ -911,13 +962,27 @@ def generate_ideas(direction: str, open_gaps: dict, *, lang: str = 'en',
             rejected.append({**idea, 'reject_stage': 'structural', 'reject_reason': reason})
             logger.info('[Paper:Ideate] REJECT(structural) %.50s — %s', idea.get('title'), reason)
             continue
+        gap = _gap_by_id(open_gaps, idea.get('linked_gap_id'))
+        evidence_ids = {_norm_id(raw) for raw in
+                        ((gap or {}).get('evidence') or [])}
+        evidence_ids.discard('')
+        anchor_id = _norm_id(idea.get('corpus_anchor_id'))
+        if evidence_ids and anchor_id not in evidence_ids:
+            reason = (f'corpus_anchor_id {anchor_id!r} is not evidence for linked gap '
+                      f'{idea.get("linked_gap_id")!r}')
+            rejected.append({**idea, 'reject_stage': 'structural',
+                             'reject_reason': reason})
+            logger.info('[Paper:Ideate] REJECT(structural) %.50s — %s',
+                        idea.get('title'), reason)
+            continue
+        idea['corpus_anchor_id'] = anchor_id
         # Grounding — strip hallucinated prior_art
         _grounded, dropped = _ground_idea_prior_art(idea)
         # Gate ② — forced-neighbor retrieval prior set
         prior_set = _novelty_prior_set(idea, batch_terms=_batch_terms)
         # Gate ③ — four-axis rubric judged against the RETRIEVED set
-        gap = _gap_by_id(open_gaps, idea.get('linked_gap_id'))
-        verdict = _score_idea(idea, prior_set, gap, lang, model=model, abort=abort)
+        verdict = _score_idea(idea, prior_set, gap, lang, model=model, abort=abort,
+                              usage_meter=usage_meter)
         if verdict is None:
             rejected.append({**idea, 'reject_stage': 'rubric',
                              'reject_reason': 'judge failed/unparseable',
@@ -980,7 +1045,8 @@ def generate_ideas(direction: str, open_gaps: dict, *, lang: str = 'en',
     logger.info('[Paper:Ideate] done — direction=%.60s generated=%d accepted=%d rejected=%d thr=%.2f',
                 direction, len(raw), len(accepted), len(rejected), thr)
     out = {'ok': True, 'direction': direction, 'lang': lang, 'accepted': accepted,
-           'rejected': rejected, 'threshold': thr, 'error': ''}
+           'rejected': rejected, 'threshold': thr,
+           'usage': usage_meter.snapshot(), 'error': ''}
 
     # Pipeline-pathology invariant: the zero-LLM structural gate wiping EVERY
     # generated idea is a DEFECT, not 宁缺毋滥 — it means the expensive gates

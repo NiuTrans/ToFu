@@ -85,6 +85,7 @@ from lib.tasks_pkg.tool_dispatch._approval import (  # noqa: E402,F401
     _APPROVAL_META_ENRICHERS,
     _approval_meta_apply_diff,
     _approval_meta_apply_diffs,
+    _approval_meta_edit_file,
     _approval_meta_create_project,
     _approval_meta_insert_content,
     _approval_meta_insert_contents,

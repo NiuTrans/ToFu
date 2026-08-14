@@ -4,11 +4,12 @@ Extracted from routes/common.py for better separation of concerns.
 Handles provider management, model discovery, Feishu config, proxy settings.
 """
 
+import copy
 import json
 import os
 import sys
 
-from flask import request
+from quart import request
 
 from lib.config_dir import config_path as _config_path
 from lib.log import get_logger
@@ -52,6 +53,145 @@ def _write_server_config(data):
         return False
 
 
+def _is_managed_subscription_provider(provider: dict) -> bool:
+    provider = provider if isinstance(provider, dict) else {}
+    return bool(
+        provider.get('oauth') in ('claude', 'codex')
+        or provider.get('managed_oauth') is True
+        or isinstance(provider.get('adapter'), dict)
+        or provider.get('id') in ('oauth_claude', 'oauth_codex')
+        or str(provider.get('id') or '').startswith('adapter_')
+    )
+
+
+def _merge_server_owned_providers(existing: list, incoming: list) -> list:
+    """Apply an editor snapshot while preserving server-owned projections.
+
+    Catalogue status/leases belong to the worker. Settings may remain open
+    across a refresh, so blindly writing its old snapshot can resurrect a
+    retired model, drop a newly discovered one, or restore an expired claim.
+    When the on-disk catalogue is newer, overlay matching user edits onto that
+    live list and retain only explicitly pinned new rows.
+    """
+    existing = existing if isinstance(existing, list) else []
+    incoming = incoming if isinstance(incoming, list) else []
+    managed = [p for p in existing if _is_managed_subscription_provider(p)]
+    reserved_ids = {p.get('id') for p in managed if p.get('id')}
+    reserved_ids.update(('oauth_claude', 'oauth_codex'))
+    current_by_id = {
+        p.get('id'): p for p in existing
+        if isinstance(p, dict) and p.get('id')
+    }
+    editable = []
+    for raw in incoming:
+        if (not isinstance(raw, dict)
+                or _is_managed_subscription_provider(raw)
+                or raw.get('id') in reserved_ids):
+            continue
+        provider = copy.deepcopy(raw)
+        current = current_by_id.get(provider.get('id')) or {}
+        current_state = current.get('model_catalog_sync')
+        incoming_state = provider.get('model_catalog_sync')
+        store_state = ('model_catalog_sync' in provider
+                       or 'model_catalog_sync' in current)
+
+        if isinstance(current_state, dict):
+            state = copy.deepcopy(current_state)
+        elif isinstance(incoming_state, dict):
+            state = copy.deepcopy(incoming_state)
+            state.pop('claim_token', None)
+            state.pop('lease_until', None)
+        else:
+            state = {}
+
+        def _connection_signature(value):
+            value = value if isinstance(value, dict) else {}
+            keys = value.get('api_keys') or []
+            first_key = next((k.strip() for k in keys
+                              if isinstance(k, str) and k.strip()), '')
+            return (
+                str(value.get('base_url') or '').strip().rstrip('/'),
+                str(value.get('models_path') or '').strip(),
+                first_key,
+            )
+
+        connection_changed = bool(
+            current and _connection_signature(current)
+            != _connection_signature(provider))
+        if connection_changed:
+            # Status and absence counters describe the old account/endpoint.
+            # Reset them so Save's forced wake can claim immediately and an
+            # old catalogue cannot retire rows from the new connection.
+            for key in (
+                    'claim_token', 'last_attempt_at', 'last_success_at',
+                    'last_finished_at', 'last_error', 'consecutive_failures',
+                    'pending_removals', 'last_added', 'last_removed',
+                    'catalog_size'):
+                state.pop(key, None)
+            state['lease_until'] = 0
+        if 'model_catalog_sync' in provider:
+            manual = (incoming_state is False or (
+                isinstance(incoming_state, dict)
+                and incoming_state.get('mode') == 'manual'))
+            state['mode'] = 'manual' if manual else 'auto'
+            if manual:
+                # Fence an in-flight network result: switching to manual must
+                # take effect at this save boundary, not after its lease ends.
+                state.pop('claim_token', None)
+                state['lease_until'] = 0
+        else:
+            if current_state is False:
+                state['mode'] = 'manual'
+            else:
+                state.setdefault('mode', 'auto')
+        if store_state:
+            provider['model_catalog_sync'] = state
+        else:
+            provider.pop('model_catalog_sync', None)
+
+        def _success_at(value):
+            if not isinstance(value, dict):
+                return 0.0
+            try:
+                return float(value.get('last_success_at') or 0)
+            except (TypeError, ValueError) as exc:
+                logger.debug('[Config] invalid model catalog success timestamp: %s',
+                             exc)
+                return 0.0
+
+        if (not connection_changed
+                and _success_at(current_state) > _success_at(incoming_state)
+                and isinstance(current.get('models'), list)):
+            current_models = {
+                m.get('model_id'): m for m in current['models']
+                if isinstance(m, dict) and m.get('model_id')
+            }
+            merged_models = []
+            seen = set()
+            for model in (provider.get('models') or []):
+                if not isinstance(model, dict) or not model.get('model_id'):
+                    continue
+                mid = model['model_id']
+                if mid in current_models:
+                    row = copy.deepcopy(current_models[mid])
+                    row.update(model)  # user-editable fields win
+                    merged_models.append(row)
+                    seen.add(mid)
+                elif model.get('catalog_pinned') is True:
+                    merged_models.append(model)
+                    seen.add(mid)
+                # Otherwise this is a stale managed row already retired.
+            for mid, model in current_models.items():
+                if mid not in seen:
+                    merged_models.append(copy.deepcopy(model))
+            provider['models'] = merged_models
+        from lib.llm_dispatch.openai_provider import (
+            normalize_official_openai_provider,
+        )
+        editable.append(normalize_official_openai_provider(provider))
+    return editable + managed
+
+
 # ══════════════════════════════════════════════════════
 #  Provider defaults + pricing-tier tags
 #  → moved to lib/provider_defaults.py (2026-06). Re-exported with the
@@ -63,6 +203,55 @@ from lib.provider_defaults import (  # noqa: E402
     reeval_cheap_tags as _reeval_cheap_tags,
 )
 from lib.provider_balance import normalize_balance as _normalize_balance  # noqa: E402
+
+
+def _canonical_model_registrations(providers: list, *,
+                                   reject_legacy_cost: bool = False,
+                                   activate: bool = True,
+                                   project_context: bool = True) -> list:
+    """Apply the one model contract and project context metadata for Settings.
+
+    ``project_context=False`` (the config SAVE path) must never persist
+    projected metadata: ``learned:*`` values are owned by
+    ``lib.context_limits`` (the shrink TTL and the expand floor-only rule
+    live there), so baking one into a registration row turns a transient
+    observation into permanent explicit metadata that wins over static
+    knowledge forever — the kimi-k3 383,727-vs-1M mask (2026-07-26). The
+    display path keeps projecting so the browser always sees a full triple.
+    """
+    from lib.model_registration import canonicalize_providers
+    from lib.model_info import resolved_context_profile
+
+    normalized = canonicalize_providers(
+        providers, reject_legacy_cost=reject_legacy_cost,
+        activate=activate)
+    for provider in normalized:
+        provider_id = str(provider.get('id') or provider.get('key')
+                          or provider.get('brand') or '')
+        for model in provider.get('models') or ():
+            explicit = model.get('context_window')
+            source = str(model.get('context_window_source') or '')
+            if explicit is not None and not source.startswith('learned:'):
+                profile = {
+                    'window': int(explicit),
+                    'source': source or 'model_registration',
+                    'exact': bool(model.get('context_window_exact', True)),
+                }
+            elif project_context:
+                profile = resolved_context_profile(
+                    str(model.get('model_id') or ''), provider_id)
+            else:
+                # Save path: learned-owned values belong to the learned store
+                # only. Strip the bake instead of persisting it; static
+                # knowledge re-composes at every read.
+                model['context_window'] = None
+                model['context_window_source'] = 'unknown'
+                model['context_window_exact'] = False
+                continue
+            model['context_window'] = profile.get('window')
+            model['context_window_source'] = profile.get('source') or 'unknown'
+            model['context_window_exact'] = bool(profile.get('exact'))
+    return normalized
 
 
 # ══════════════════════════════════════════════════════
@@ -115,7 +304,16 @@ def get_server_config():
     import lib as _lib
 
     logger.debug('[ServerConfig] GET /api/server-config requested')
+    try:
+        from lib.oauth.outbound import reconcile_oauth_providers
+        reconcile_oauth_providers()
+    except Exception as e:
+        logger.error('[ServerConfig] OAuth provider reconciliation failed: %s',
+                     e, exc_info=True)
     saved = _read_server_config()
+    from lib.cost_experiments import normalize_cost_experiment_config
+    cost_experiment = normalize_cost_experiment_config(
+        saved.get('cost_experiment'))
 
     if 'providers' in saved and any('models' in p for p in saved.get('providers', [])):
         providers = saved['providers']
@@ -140,9 +338,36 @@ def get_server_config():
     else:
         providers, presets = _build_default_providers()
 
+    # Project old official-OpenAI cards onto the current public contract even
+    # before the user next presses Save. The save path applies the same pure
+    # normalization and persists it; compatible third-party gateways are left
+    # untouched because they may intentionally expose another wire shape.
+    from lib.llm_dispatch.openai_provider import (
+        normalize_official_openai_providers,
+    )
+    providers = normalize_official_openai_providers(providers)
+
+    # One registration seam owns capabilities, RPM, context and billable
+    # pricing. It also removes the legacy blended `cost` routing hint before
+    # any provider/model data reaches Settings.
+    providers = _canonical_model_registrations(providers)
+
     # Re-evaluate cheap tags using real pricing data (fixes stale tags from
     # old discovery runs or name-heuristic fallback).
     _reeval_cheap_tags(providers)
+
+    # Project the same evidence-backed profile consumed by swarm routing onto
+    # Settings. Persisted supplier/operator evidence wins; known registry rows
+    # are derived at read time, while unknown models stay visibly unknown.
+    from lib.model_profiles import build_model_profile
+    for provider in providers:
+        provider_id = str(provider.get('id') or provider.get('brand') or '')
+        for model in provider.get('models') or ():
+            if not isinstance(model, dict) or not model.get('model_id'):
+                continue
+            model['capability_profile'] = build_model_profile(
+                str(model['model_id']), provider_id=provider_id,
+                model_entry=model)
 
     model_keys = [
         'LLM_MODEL', 'QWEN_MODEL',
@@ -159,6 +384,8 @@ def get_server_config():
             models[k] = v
 
     search_info = {
+        'profile': getattr(_lib, 'SEARCH_PROFILE', 'balanced'),
+        'overrides': dict(getattr(_lib, 'SEARCH_OVERRIDES', {}) or {}),
         'fetch_top_n': getattr(_lib, 'FETCH_TOP_N', 6),
         'fetch_timeout': getattr(_lib, 'FETCH_TIMEOUT', 15),
         'max_chars_search': getattr(_lib, 'FETCH_MAX_CHARS_SEARCH', 60000),
@@ -167,6 +394,7 @@ def get_server_config():
         'max_bytes': getattr(_lib, 'FETCH_MAX_BYTES', 20 * 1024 * 1024),
         'skip_domains': sorted(getattr(_lib, 'SKIP_DOMAINS', set())),
         'llm_content_filter': getattr(_lib, 'LLM_CONTENT_FILTER_ENABLED', True),
+        'deepen_enabled': getattr(_lib, 'SEARCH_DEEPEN_ENABLED', False),
     }
     if 'search' in saved:
         search_info.update(saved['search'])
@@ -209,6 +437,11 @@ def get_server_config():
         prov_name = prov.get('name', prov_id)
         for m in prov.get('models', []):
             mid = m.get('model_id', '')
+            # Codex's authenticated catalogue also contains hidden internal
+            # routing/review models. Keep them dispatchable, as Codex does,
+            # but mirror `/model` by omitting them from ordinary pickers.
+            if m.get('catalog_visibility') not in (None, '', 'list'):
+                continue
             # Per-model enable toggle: skip when explicitly disabled by the user
             # in Settings. Matches the dispatcher's slot-pool filter.
             if m.get('enabled') is False:
@@ -216,7 +449,10 @@ def get_server_config():
             if mid:
                 dropdown_models.append({
                     'model_id': mid,
-                    'brand': m.get('brand', ''),
+                    # Provider-level oauth/adapter brands describe credential
+                    # plumbing. The shared frontend grouping rule deliberately
+                    # falls through those markers to the model vendor.
+                    'brand': m.get('brand') or prov.get('brand', ''),
                     'thinking_default': m.get('thinking_default', False),
                     'capabilities': m.get('capabilities', ['text']),
                     'provider_id': prov_id,
@@ -266,10 +502,9 @@ def get_server_config():
     #      provider_id.
     # Templates that omit 'pricing' transparently fall back to the global
     # MODEL_PRICING table — this stays compatible with all existing templates.
-    from lib.pricing import (
-        clear_provider_pricing as _clear_pp,
-        set_provider_pricing as _set_pp,
-    )
+    from lib.pricing import clear_provider_pricing as _clear_pp
+    from lib.model_registration import register_model as _register_model
+    from lib.llm_dispatch.model_entry import resolve_request_ids
     provider_pricing = {}
     for prov in providers:
         pid = prov.get('id') or prov.get('key')
@@ -284,16 +519,15 @@ def get_server_config():
                 continue
             if pinfo.get('input') is None or pinfo.get('output') is None:
                 continue
-            entry = {
-                'input': pinfo['input'],
-                'output': pinfo['output'],
-                'name': pinfo.get('name', mid),
-            }
-            for k in ('cacheWriteMul', 'cacheReadMul', 'context_tiers'):
-                if k in pinfo:
-                    entry[k] = pinfo[k]
-            _set_pp(pid, mid, entry)
-            per_model[mid] = entry
+            normalized = _register_model(m, provider_id=pid)
+            entry = dict(normalized['pricing'])
+            entry.setdefault('name', mid)
+            # Costing keys on the wire id while Settings keys on the logical
+            # id. Publishing both identities here prevents split pools from
+            # silently booking at the global/default price.
+            for identity in dict.fromkeys(
+                    [mid, *resolve_request_ids(normalized)]):
+                per_model[identity] = dict(entry)
         if per_model:
             provider_pricing[pid] = per_model
 
@@ -316,6 +550,12 @@ def get_server_config():
         'proxy_bypass_domains': saved.get('proxy_bypass_domains', []),
         'env_proxy_bypass': os.environ.get('PROXY_BYPASS_DOMAINS', ''),
     }
+    try:
+        from lib.proxy import get_proxy_pool
+        network_info['proxy_pool'] = get_proxy_pool()
+    except Exception as _e:
+        logger.debug('get server config: proxy pool view failed (%s)', _e)
+        network_info['proxy_pool'] = []
     try:
         from lib.netpath import status_summary as _np_status
         network_info['netpath'] = _np_status()
@@ -351,16 +591,16 @@ def get_server_config():
     # override) for every model in the dropdown, so the gauge never re-derives.
     try:
         from lib.tasks_pkg.compaction import (
-            build_context_policy, resolve_model_context_limit,
+            build_context_policy, resolve_model_context_profile,
         )
         context_policy = build_context_policy()
         per_model = {}
         for dm in dropdown_models:
             mid = dm.get('model_id', '')
-            if not mid or mid in per_model:
+            pid = dm.get('provider_id', '') or ''
+            if not mid:
                 continue
-            per_model[mid] = resolve_model_context_limit(
-                mid, dm.get('provider_id', '') or '')
+            per_model['%s::%s' % (pid, mid)] = resolve_model_context_profile(mid, pid)
         context_policy['per_model'] = per_model
     except Exception as e:
         logger.warning('[ServerConfig] context policy unavailable: %s', e)
@@ -429,7 +669,73 @@ def get_server_config():
         'translation': translation_policy,
         'langDetect': lang_detect_policy,
         'capability_taxonomy': capability_taxonomy,
+        'cost_experiment': cost_experiment,
     })
+
+
+@config_bp.route('/api/v1/cost-experiments/report')
+@safe_route
+async def cost_experiment_report():
+    """Aggregate persisted, provider-priced outcomes for the visible A/B UI.
+
+    Conversation is the sampling unit. The bounded row cap protects the
+    settings request on unusually large installations and is disclosed in the
+    response instead of silently presenting a partial report as complete.
+    """
+    import asyncio
+    import time
+
+    from lib.cost_experiments import (
+        aggregate_cost_experiment_rows,
+        normalize_cost_experiment_config,
+    )
+    from lib.database import run_pooled
+    from routes.common import _request_user_id
+
+    try:
+        days = int(request.args.get('days', 14))
+    except (TypeError, ValueError):
+        return api_bad_request('days must be an integer between 1 and 90')
+    if days < 1 or days > 90:
+        return api_bad_request('days must be between 1 and 90')
+
+    exp = normalize_cost_experiment_config(
+        _read_server_config().get('cost_experiment'))
+    now_ms = int(time.time() * 1000)
+    cutoff_ms = now_ms - days * 86_400_000
+    row_cap = 5_000
+    owner_id = _request_user_id()
+    def _load_rows(db):
+        from lib.database.conversation_repository import load_conversation
+        ids = db.execute(
+            'SELECT id, updated_at FROM conversations '
+            'WHERE user_id=? AND updated_at>=? '
+            'ORDER BY updated_at DESC LIMIT ?',
+            (owner_id, cutoff_ms, row_cap + 1)).fetchall()
+        result = []
+        for item in ids:
+            snapshot = load_conversation(db, item['id'], user_id=owner_id)
+            if snapshot is not None:
+                result.append({
+                    'id': item['id'], 'messages': snapshot.messages,
+                    'updated_at': item['updated_at'],
+                })
+        return result
+
+    rows = await run_pooled(_load_rows)
+    truncated = len(rows) > row_cap
+    report = await asyncio.to_thread(
+        aggregate_cost_experiment_rows,
+        list(rows[:row_cap]),
+        experiment_id=exp['experiment_id'],
+        days=days,
+        now_ms=now_ms,
+        min_sample_size=exp['min_sample_size'],
+    )
+    report['enabled'] = exp['enabled']
+    report['truncated'] = truncated
+    report['rowCap'] = row_cap
+    return api_ok(report)
 
 
 @config_bp.route('/api/v1/feishu/status')
@@ -783,7 +1089,7 @@ def resolve_provider_faces():
             resolutions.append({
                 'model_id': mid, 'skipped': skip, 'ok': True,
                 'face': DEFAULT_FACE, 'protocol': '', 'base_url': '',
-                'forced': False, 'error': '',
+                'responses_profile': '', 'forced': False, 'error': '',
             })
             continue
 
@@ -794,6 +1100,7 @@ def resolve_provider_faces():
             'face': r.face_name,
             'protocol': r.protocol or '',
             'base_url': r.base_url,
+            'responses_profile': r.responses_profile,
             'forced': r.forced,
             'error': r.error or '',
         })
@@ -958,6 +1265,7 @@ from lib.provider_probe import (  # noqa: E402,F401
     probe_cell_key as _probe_cell_key,
     persist_probe_task as _persist_probe_task,
     public_probe_snapshot as _public_probe_snapshot,
+    normalize_probe_snapshot as _normalize_probe_snapshot,
     CELL_PROBE_TASKS as _CELL_PROBE_TASKS,
     CELL_PROBE_LOCK as _CELL_PROBE_LOCK,
 )
@@ -1040,6 +1348,7 @@ def probe_provider_cells_start():
     if not force and not scoped:
         cached = read_json(_probe_cache_path(provider_id), default=None)
         if isinstance(cached, dict) and cached.get('cells'):
+            cached = _normalize_probe_snapshot(cached)
             logger.info('[CellProbe] %s resumed from disk (%d cells, status=%s)',
                         provider_id, len(cached['cells']), cached.get('status'))
             return api_ok(cached)
@@ -1078,6 +1387,7 @@ def probe_provider_cells_start():
         valid_keys = {_probe_cell_key(w[0], w[3]) for w in full_work}
         cached = read_json(_probe_cache_path(provider_id), default=None)
         if isinstance(cached, dict) and isinstance(cached.get('cells'), dict):
+            cached = _normalize_probe_snapshot(cached)
             for k, v in cached['cells'].items():
                 if k in valid_keys and k not in probed_keys and isinstance(v, dict):
                     seed_cells[k] = v
@@ -1130,7 +1440,7 @@ def probe_provider_cells_status():
 
     cached = read_json(_probe_cache_path(provider_id), default=None)
     if isinstance(cached, dict) and cached.get('cells') is not None:
-        return api_ok(cached)
+        return api_ok(_normalize_probe_snapshot(cached))
     return api_ok({'status': 'none'})
 
 
@@ -1169,6 +1479,11 @@ def get_provider_templates():
             # bundled in the file (every deployment hosts different models).
             if not tpl.get('models') and tpl.get('category') != 'local':
                 continue
+            # Templates and manually saved providers share the exact same
+            # registration contract. The browser therefore never sees the
+            # obsolete routing-cost field, and gets a context profile even
+            # when a legacy template omitted one.
+            tpl = _canonical_model_registrations([tpl])[0]
             # Normalize pricing-tier tags using live pricing data.
             try:
                 reevaluate_pricing_tags(
@@ -1212,6 +1527,43 @@ def _hot_reload_feishu(feishu_data: dict):
         logger.warning('[Feishu] Hot-reload failed: %s', e, exc_info=True)
 
 
+@config_bp.route('/api/v1/network/proxy-test', methods=['POST'])
+def test_network_proxy():
+    """POST — live-probe ONE proxy entry against the subscription canaries.
+
+    Body: ``{url, scope, credential_vault?, id?, name?}``. The complete URL
+    may include userinfo; legacy structured auth fields remain accepted but
+    are not part of the Settings product model.
+    Works on UNSAVED rows (the Settings test button fires before saving):
+    an inline ``credential`` (or URL userinfo) is used for this probe only
+    and never persisted; a bare ``credential_vault`` reference resolves
+    through the vault. Returns ``{ok, results: [{target, label, status,
+    latency_ms, verdict}]}`` — 403 from the canary = geo/policy block, any
+    other HTTP answer = the app layer was reached.
+    """
+    data = parse_body()
+    from lib.proxy import sanitize_proxy_pool, test_proxy_entry
+    entries, creds, err = sanitize_proxy_pool([{
+        'id': data.get('id') or 'probe',
+        'name': data.get('name') or 'probe',
+        'url': data.get('url') or '',
+        'credential': data.get('credential') or '',
+        'username': data.get('username') or '',
+        'password': data.get('password') or '',
+        'credential_vault': data.get('credential_vault') or '',
+        'clear_credential': bool(data.get('clear_credential', False)),
+        'scope': data.get('scope') or 'subscription',
+        'enabled': True,
+    }])
+    if err or not entries:
+        return api_bad_request('proxy-test: %s' % (err or 'empty entry'))
+    result = test_proxy_entry(entries[0], credential=creds.get(entries[0]['id']))
+    # 'ok' belongs to the envelope — the diagnostic verdict rides 'any_ok'.
+    return api_ok({'any_ok': bool(result.get('ok')),
+                   'results': result.get('results') or [],
+                   'error': result.get('error') or ''})
+
+
 @config_bp.route('/api/v1/server-config', methods=['POST'])
 def save_server_config():
     """POST — save server configuration changes.
@@ -1227,6 +1579,78 @@ def save_server_config():
     data = parse_body()
     changes = []
     dispatch_reset_needed = False
+
+    provider_prep = None
+    if 'providers' in data:
+        if not isinstance(data['providers'], list):
+            return api_bad_request('providers must be an array')
+        try:
+            # Compatibility migration: old Settings snapshots may still carry
+            # `cost`; normalization accepts and drops it. New public/BYO API
+            # registrations reject that field at their own boundary.
+            provider_prep = _canonical_model_registrations(
+                data['providers'], activate=False, project_context=False)
+        except ValueError as e:
+            return api_bad_request('providers: %s' % e)
+
+    cost_experiment_prep = None
+    from lib.cost_experiments import CostExperimentTransitionError
+    if 'cost_experiment' in data:
+        try:
+            from lib.cost_experiments import normalize_cost_experiment_config
+            cost_experiment_prep = normalize_cost_experiment_config(
+                data['cost_experiment'], strict=True)
+        except ValueError as e:
+            return api_bad_request('cost_experiment: %s' % e)
+
+    try:
+        from lib.oauth.outbound import reconcile_oauth_providers
+        reconcile_oauth_providers()
+    except Exception as e:
+        logger.error('[ServerConfig] pre-save OAuth reconciliation failed: %s',
+                     e, exc_info=True)
+
+    # ── Bypass-list pre-processing ──
+    # Validate every side-effect-free network input first. Otherwise a request
+    # containing a valid new proxy secret plus an invalid bypass rule could
+    # write the vault secret and then return 400.
+    bypass_prep = None
+    if 'proxy_bypass_domains' in data:
+        from lib.proxy import sanitize_bypass_domains
+        bypass_prep, bypass_err = sanitize_bypass_domains(
+            data['proxy_bypass_domains'])
+        if bypass_err:
+            return api_bad_request('proxy_bypass_domains: %s' % bypass_err)
+
+    # ── Proxy pool pre-processing (OUTSIDE the atomic mutator) ──
+    # Sanitize + split URL userinfo into the credentials vault BEFORE the
+    # config-lock write: vault CRUD is a side effect that must not run
+    # inside the mutator. ``pool_prep`` is the sanitized persisted shape.
+    pool_prep = None
+    pool_old_credential_ids = set()
+    if 'proxy_pool' in data:
+        from lib.proxy import sanitize_proxy_pool
+        entries, creds, err = sanitize_proxy_pool(data['proxy_pool'])
+        if err:
+            return api_bad_request('proxy_pool: %s' % err)
+        try:
+            from lib.credentials_vault import set_entry as _vault_set
+            for _pid, _secret in creds.items():
+                _vault_set('proxy_%s_auth' % _pid, _secret,
+                           note='proxy pool credential')
+        except ValueError as e:
+            return api_bad_request('proxy_pool credential: %s' % e)
+        pool_prep = entries
+        try:
+            _prior = _read_server_config()
+            for _entry in (_prior.get('proxy_pool') or []):
+                if not isinstance(_entry, dict) or not _entry.get('id'):
+                    continue
+                _pid = _entry['id']
+                if _entry.get('credential_vault') == 'proxy_%s_auth' % _pid:
+                    pool_old_credential_ids.add(_pid)
+        except Exception as e:
+            logger.debug('[ServerConfig] prior proxy_pool read failed: %s', e)
 
     # The whole read-modify-write runs inside ONE ``update_json_atomic``
     # mutator so it is serialised (per-path thread lock + cross-process
@@ -1244,10 +1668,27 @@ def save_server_config():
         if not isinstance(existing, dict):
             existing = {}
 
-        if 'providers' in data and isinstance(data['providers'], list):
-            existing['providers'] = data['providers']
-            total_models = sum(len(p.get('models', [])) for p in data['providers'])
-            changes.append('providers (%d with %d models)' % (len(data['providers']), total_models))
+        # Validate before any other config mutation or hot-reload side effect.
+        # One experiment ID must describe one stable routing shape; otherwise
+        # an admin slider change could move an existing conversation to the
+        # other arm and contaminate both samples.
+        if cost_experiment_prep is not None:
+            from lib.cost_experiments import validate_cost_experiment_transition
+            validate_cost_experiment_transition(
+                existing.get('cost_experiment'), cost_experiment_prep)
+
+        if provider_prep is not None:
+            current = existing.get('providers') or []
+            existing['providers'] = _merge_server_owned_providers(
+                current, provider_prep)
+            editable_count = sum(
+                not _is_managed_subscription_provider(p)
+                for p in existing['providers'])
+            managed_count = len(existing['providers']) - editable_count
+            total_models = sum(len(p.get('models', []))
+                               for p in existing['providers'])
+            changes.append('providers (%d editable + %d managed with %d models)' % (
+                editable_count, managed_count, total_models))
             dispatch_reset_needed = True
             existing.pop('models_registry', None)
 
@@ -1292,10 +1733,10 @@ def save_server_config():
             changes.append('model_defaults')
             dispatch_reset_needed = True
 
-        if 'proxy_bypass_domains' in data and isinstance(data['proxy_bypass_domains'], list):
-            existing['proxy_bypass_domains'] = data['proxy_bypass_domains']
+        if bypass_prep is not None:
+            existing['proxy_bypass_domains'] = bypass_prep
             from lib.proxy import set_bypass_domains
-            set_bypass_domains(data['proxy_bypass_domains'])
+            set_bypass_domains(bypass_prep)
             changes.append('proxy_bypass_domains')
 
         if 'proxy_config' in data and isinstance(data['proxy_config'], dict):
@@ -1311,6 +1752,22 @@ def save_server_config():
                 https_proxy=existing['proxy_config']['https_proxy'],
             )
             changes.append('proxy_config')
+
+        if pool_prep is not None:
+            existing['proxy_pool'] = pool_prep
+            # The pool editor owns proxying once used — retire the legacy
+            # single-proxy slot so both never apply at once (the pool's
+            # 'global' rows replace it; env vars remain the last fallback).
+            if existing.get('proxy_config') and any(
+                    existing['proxy_config'].get(k)
+                    for k in ('http_proxy', 'https_proxy')):
+                existing['proxy_config'] = {'http_proxy': '', 'https_proxy': ''}
+                from lib.proxy import set_proxy_config
+                set_proxy_config()
+                changes.append('proxy_config retired (migrated to pool)')
+            from lib.proxy import set_proxy_pool
+            set_proxy_pool(pool_prep)
+            changes.append('proxy_pool (%d entries)' % len(pool_prep))
 
         if 'feishu' in data and isinstance(data['feishu'], dict):
             existing['feishu'] = data['feishu']
@@ -1332,16 +1789,46 @@ def save_server_config():
                         existing['mt_provider']['provider'],
                         existing['mt_provider']['enabled'])
 
+        if cost_experiment_prep is not None:
+            from lib.cost_experiments import normalize_cost_experiment_config
+            prior_cost_experiment = normalize_cost_experiment_config(
+                existing.get('cost_experiment'))
+            if cost_experiment_prep != prior_cost_experiment:
+                existing['cost_experiment'] = cost_experiment_prep
+                changes.append(
+                    'cost_experiment (enabled=%s traffic=%d%% optimized=%d%%)'
+                    % (cost_experiment_prep['enabled'],
+                       cost_experiment_prep['traffic_percent'],
+                       cost_experiment_prep['treatment_percent']))
+
         return existing
 
     # ── Persist to disk (locked read-modify-write) ──
     try:
         update_json_atomic(_SERVER_CONFIG_PATH, _mutate, default={})
         logger.info('[ServerConfig] Saved server_config.json')
+    except CostExperimentTransitionError as e:
+        logger.warning('[ServerConfig] rejected cost experiment transition: %s',
+                       e)
+        return api_bad_request('cost_experiment: %s' % e)
     except Exception as e:
         logger.error('[ServerConfig] Failed to write config file to %s: %s',
                      _SERVER_CONFIG_PATH, e, exc_info=True)
         return api_internal_error('Failed to write config file')
+
+    # Vault hygiene: credentials die when their row is removed OR when the
+    # user explicitly removes authentication from an existing row.
+    if pool_prep is not None:
+        try:
+            from lib.credentials_vault import delete_entry as _vault_del
+            new_credential_ids = {
+                e['id'] for e in pool_prep
+                if e.get('credential_vault') == 'proxy_%s_auth' % e['id']
+            }
+            for _rid in sorted(pool_old_credential_ids - new_credential_ids):
+                _vault_del('proxy_%s_auth' % _rid)
+        except Exception as e:
+            logger.warning('[ServerConfig] stale proxy credential sweep failed: %s', e)
 
     # ── Hot-reload: update all module-level variables from disk ──
     try:
@@ -1362,4 +1849,17 @@ def save_server_config():
         audit_log('server_config_change', changes=changes)
         logger.info('[ServerConfig] Config changes applied (hot-reload): %s', changes)
 
-    return api_ok({'needs_restart': False, 'changes': changes})
+    catalog_sync_started = False
+    if 'providers' in data and isinstance(data['providers'], list):
+        try:
+            from lib.llm_dispatch.model_catalog_sync import trigger_model_catalog_sync
+            provider_ids = [p.get('id') for p in data['providers']
+                            if isinstance(p, dict) and p.get('id')]
+            catalog_sync_started = trigger_model_catalog_sync(provider_ids)
+        except Exception as e:
+            # Saving config succeeded; a background refresh failure must never
+            # turn that durable success into an HTTP error.
+            logger.warning('[ServerConfig] model catalogue wake failed: %s', e)
+
+    return api_ok({'needs_restart': False, 'changes': changes,
+                   'model_catalog_sync_started': catalog_sync_started})

@@ -299,8 +299,26 @@ def test_connect_snapshot_carrier_is_vu_start_replay_snapshot():
     assert snap.get('content') == 'partial reply'
     assert snap.get('thinking') == 'some reasoning'
     assert snap.get('toolRounds') == [{'roundNum': 1, 'status': 'done'}]
-    assert cursor == len(carrier['events']), (
-        'cursor must sit at the live tail — replayed history would double-append')
+    assert cursor == 2, (
+        'cursor must sit at the absolute live tail — replayed history would '
+        'double-append')
+
+
+def test_connect_snapshot_carrier_cursor_survives_rolling_buffer():
+    from lib.chat_dispatch import build_connect_snapshot
+
+    carrier = _fake_task('vu-t8-roll', _vu_subtask=True,
+                         _vu_msg_id='vu-msg-8-roll')
+    carrier['_eventBaseSeq'] = 50
+    carrier['_eventNextSeq'] = 52
+    carrier['events'] = [
+        {'type': 'autopilot_vu_event', 'seq': 50},
+        {'type': 'autopilot_vu_event', 'seq': 51},
+    ]
+
+    state, _meta, cursor = build_connect_snapshot(carrier)
+    assert state['type'] == 'autopilot_vu_start'
+    assert cursor == 52
 
 
 def test_connect_snapshot_normal_task_unchanged():
@@ -343,6 +361,29 @@ def test_warm_resume_carrier_replays_frames_without_agent_state():
         'carrier warm resume must replay exactly the missed VU frames')
 
 
+def test_warm_resume_carrier_uses_absolute_rolling_sequences():
+    from lib.chat_dispatch import plan_warm_resume
+
+    carrier = _fake_task('vu-t10-roll', _vu_subtask=True,
+                         _vu_msg_id='vu-msg-10-roll', content='ab')
+    carrier['_eventBaseSeq'] = 100
+    carrier['_eventNextSeq'] = 103
+    carrier['events'] = [
+        {'type': 'autopilot_vu_event', 'seq': 100},
+        {'type': 'autopilot_vu_event', 'seq': 101},
+        {'type': 'autopilot_vu_event', 'seq': 102},
+    ]
+
+    plan = plan_warm_resume(carrier, '100', 'vu-roll')
+    assert plan is not None
+    assert plan.resume_state is None
+    assert plan.replay_frames == [
+        (101, carrier['events'][1]),
+        (102, carrier['events'][2]),
+    ]
+    assert plan_warm_resume(carrier, '98', 'vu-roll') is None
+
+
 def test_warm_resume_normal_task_unchanged():
     """Regression parity: a normal task's warm resume still leads with the
     agent state frame."""
@@ -363,9 +404,11 @@ def test_warm_resume_normal_task_unchanged():
 
 def _tick(task):
     from lib.chat_dispatch import next_live_tick
+    from lib.task_replay import task_event_base_cursor
     now = time.time()
+    cursor = task_event_base_cursor(task, task['events']) + len(task['events'])
     return next_live_tick(
-        task=task, cursor=len(task['events']), sse_gen=1,
+        task=task, cursor=cursor, sse_gen=1,
         stream_start=now - 1, sse_max_duration=7200,
         last_t=now, now=now, task_id_short=task['id'][:8])
 

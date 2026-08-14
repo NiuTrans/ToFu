@@ -12,6 +12,7 @@ importing this module never hard-fails when a backend package is missing.
 from lib.log import get_logger
 
 from lib.doc_parser._plain import _binary_text_extract
+from lib.doc_parser._tables import render_markdown_table
 from lib.doc_parser._truncation import truncation_warning
 
 logger = get_logger(__name__)
@@ -163,7 +164,7 @@ def _extract_xls_legacy(file_bytes: bytes, limit: int) -> dict:
                     cells.append('TRUE' if cell.value else 'FALSE')
                 else:
                     cells.append(str(cell.value) if cell.value else '')
-            rows_data.append('| ' + ' | '.join(c.replace('|', '\\|') for c in cells) + ' |')
+            rows_data.append(cells)
 
         if ws.nrows > 1001:
             warnings.append(truncation_warning(
@@ -171,13 +172,9 @@ def _extract_xls_legacy(file_bytes: bytes, limit: int) -> dict:
                 scope=f'Sheet "{ws.name}"', detail='row cap 1,000'))
 
         if rows_data:
-            header = rows_data[0]
-            ncols = ws.ncols
-            separator = '| ' + ' | '.join(['---'] * ncols) + ' |'
-            table_md = header + '\n' + separator
-            if len(rows_data) > 1:
-                table_md += '\n' + '\n'.join(rows_data[1:])
-            sheet_parts.append(table_md)
+            table_md = render_markdown_table(rows_data)
+            if table_md:
+                sheet_parts.append(table_md)
 
         sheet_text = '\n'.join(sheet_parts)
         total_chars += len(sheet_text)

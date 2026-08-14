@@ -198,6 +198,190 @@ def test_auto_fold_noop_on_small_turn(stub_summary):
     assert msgs == original
 
 
+@pytest.mark.unit
+def test_auto_low_yield_second_compaction_declines_before_summary(monkeypatch):
+    """A threshold crossing is not sufficient when almost all tokens are in
+    the protected hot region.  Automatic L2 must decline before paying for a
+    summary or rewriting the cache prefix when the best-case fold is <5%."""
+    import lib.tasks_pkg.compaction._layer2 as layer2
+    from lib.tasks_pkg.compaction import (
+        _estimate_total_tokens, force_compact_if_needed)
+    from lib.tasks_pkg.compaction._constants import _summary_cooldowns
+
+    # Shape of the reported second trigger: a previous compact summary is an
+    # older turn, while the current turn's hot tool results own nearly all of
+    # the prompt.  Folding the older turn can save only ~3%.
+    msgs = [
+        _sys(),
+        _user('original objective'),
+        {'role': 'assistant', 'content': 'prior compact summary ' + 's' * 12_000},
+        _user('continue the same task'),
+    ]
+    for i in range(8):  # protected hot tail: not eligible for intra-turn fold
+        msgs += _round(i, chars=48_000, dense=True)
+
+    before = _estimate_total_tokens(msgs)
+    summary_calls = []
+    archive_calls = []
+    monkeypatch.setattr(
+        layer2, '_generate_query_aware_summary',
+        lambda *a, **k: summary_calls.append((a, k)) or 'SHOULD NOT RUN')
+    monkeypatch.setattr(
+        layer2, '_archive_transcript',
+        lambda *a, **k: archive_calls.append((a, k)) or 1)
+
+    conv_id = 'low-yield-second'
+    _summary_cooldowns.pop(conv_id, None)
+    original = list(msgs)
+    task = {
+        'convId': conv_id,
+        'id': 't',
+        'config': {'model': 'kimi-k3'},
+    }
+    import lib.tasks_pkg.compaction._layer2._compact as compact_mod
+    monkeypatch.setattr(compact_mod, '_should_force_compact', lambda *a, **k: True)
+    result = force_compact_if_needed(msgs, task=task)
+
+    assert before > 128_000  # economic trigger can genuinely be crossed
+    assert result is False
+    assert msgs == original
+    assert summary_calls == [], 'declined rewrite must not spend summary tokens'
+    assert archive_calls == [], 'declined rewrite must not emit a fake snapshot'
+    assert conv_id not in _summary_cooldowns
+    assert task['_autoCompactRetryAfterTokens'] > before
+
+
+@pytest.mark.unit
+def test_auto_economic_decline_hysteresis_waits_for_prompt_growth(monkeypatch):
+    """After a decline, the same hot tail should not be reconsidered on every
+    round. The retry floor is economic only and never masks window safety."""
+    import lib.tasks_pkg.compaction._tokens as tokens
+
+    messages = [_sys(), _user('x' * 40_000)]
+    msg_tokens = tokens._estimate_total_tokens(messages)
+    task = {
+        'convId': 'hysteresis',
+        'config': {'model': 'kimi-k3'},
+        '_autoCompactRetryAfterTokens': msg_tokens + 8_192,
+    }
+    monkeypatch.setattr(
+        tokens, '_count_tokens_authoritative',
+        lambda *args, **kwargs: (130_000, 'test'))
+
+    assert tokens._should_force_compact(messages, task) is False
+    assert task['_autoCompactRetryAfterTokens'] == msg_tokens + 8_192
+
+    # Meaningful growth reaches the retry floor and clears the defer marker.
+    messages.append(_user('y' * 40_000))
+    monkeypatch.setattr(
+        tokens, '_count_tokens_authoritative',
+        lambda *args, **kwargs: (140_000, 'test'))
+    assert tokens._should_force_compact(messages, task) is True
+    assert '_autoCompactRetryAfterTokens' not in task
+
+
+@pytest.mark.unit
+def test_auto_realized_low_yield_candidate_is_not_committed(monkeypatch):
+    """Best-case eligibility is only a prefilter.  If the generated summary
+    plus its synthetic pair leaves <5% realized savings, proactive L2 must
+    preserve the live prefix and report no completed compaction side effects."""
+    import lib.context_telemetry as telemetry
+    import lib.tasks_pkg.cache_tracking as cache_tracking
+    import lib.tasks_pkg.compaction._layer2 as layer2
+    import lib.tasks_pkg.compaction._layer2._compact as compact_mod
+    import lib.token_counter as token_counter
+    from lib.tasks_pkg.compaction import force_compact_if_needed
+    from lib.tasks_pkg.compaction._constants import _summary_cooldowns
+
+    msgs = [
+        _sys(),
+        _user('objective'),
+        {'role': 'assistant', 'content': 'old answer ' + 'a' * 160_000},
+        _user('continue'),
+        {'role': 'assistant', 'content': 'protected recent answer ' + 'b' * 60_000},
+    ]
+    original = [dict(m) for m in msgs]
+    conv_id = 'realized-low-yield'
+    _summary_cooldowns.pop(conv_id, None)
+    task = {
+        'convId': conv_id,
+        'id': 't',
+        'config': {'model': 'kimi-k3'},
+        '_contextEvidenceLedger': {'entries': [{'id': 'temporary'}]},
+    }
+
+    summary_calls = []
+    archive_calls = []
+    roi_calls = []
+    telemetry_calls = []
+    invalidations = []
+    monkeypatch.setattr(compact_mod, '_should_force_compact', lambda *a, **k: True)
+    monkeypatch.setattr(
+        layer2, '_generate_query_aware_summary',
+        lambda *a, **k: summary_calls.append((a, k)) or ('summary ' + 'z' * 155_000))
+    monkeypatch.setattr(
+        layer2, '_archive_transcript',
+        lambda *a, **k: archive_calls.append((a, k)) or 17)
+    monkeypatch.setattr(
+        cache_tracking, 'record_l2_compaction',
+        lambda *a, **k: roi_calls.append((a, k)))
+    monkeypatch.setattr(
+        telemetry, 'record_compaction_event',
+        lambda *a, **k: telemetry_calls.append((a, k)))
+    monkeypatch.setattr(
+        token_counter, 'invalidate', lambda conv: invalidations.append(conv))
+
+    result = force_compact_if_needed(msgs, task=task)
+
+    assert result is False
+    assert msgs == original
+    assert len(summary_calls) == 1, 'best-case gate should permit candidate generation'
+    assert archive_calls == []
+    assert roi_calls == []
+    assert telemetry_calls == []
+    assert invalidations == []
+    assert conv_id not in _summary_cooldowns
+    assert '_contextEvidenceLedger' not in task
+    assert not any(e.get('type') in ('compaction', 'compaction_done')
+                   for e in task.get('events', []))
+
+
+@pytest.mark.unit
+def test_forced_compaction_bypasses_realized_yield_gate(monkeypatch):
+    """Manual/reactive force=True is correctness-first: even a summary that
+    realizes <5% savings still commits and injects the synthetic pair."""
+    import lib.tasks_pkg.compaction._layer2 as layer2
+    from lib.tasks_pkg.compaction import force_compact_if_needed
+
+    msgs = [
+        _sys(),
+        _user('objective'),
+        {'role': 'assistant', 'content': 'old answer ' + 'a' * 40_000},
+        _user('continue'),
+        {'role': 'assistant', 'content': 'protected recent answer ' + 'b' * 60_000},
+    ]
+    original = [dict(m) for m in msgs]
+    monkeypatch.setattr(
+        layer2, '_generate_query_aware_summary',
+        lambda *a, **k: 'summary ' + 'z' * 38_000)
+    monkeypatch.setattr(layer2, '_archive_transcript', lambda *a, **k: None)
+
+    task = {
+        'convId': 'forced-low-yield',
+        'id': 't',
+        'config': {'model': 'kimi-k3'},
+        '_contextEvidenceLedger': {'entries': [{'id': 'temporary'}]},
+    }
+    result = force_compact_if_needed(msgs, task=task, force=True,
+                                     keep_recent_pairs=1)
+
+    assert result is True
+    assert msgs != original
+    assert '_contextEvidenceLedger' not in task
+    assert any(m.get('role') == 'tool' and m.get('name') == 'context_compact'
+               for m in msgs)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  #1b — SUCCESS-PATH CONVERGENCE: fold+summary succeeds but the preserved
 #        hot-tail rounds are themselves oversized → execute_compact_tool must

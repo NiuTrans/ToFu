@@ -11,8 +11,6 @@ import json
 import re
 import time
 
-from lib.database import db_execute_with_retry, json_dumps_pg
-from lib.database._core_schema import CONVERSATIONS, upsert
 from lib.log import audit_log, get_logger
 
 logger = get_logger(__name__)
@@ -44,7 +42,7 @@ def extract_task_meta(task):
     Asymmetry between these four paths historically caused "my apiRounds
     disappeared after I came back" / "modifiedFiles missing on reload".
     """
-    meta = {}
+    meta = {'contentEpoch': int(task.get('_contentEpoch') or 0)}
     if task.get('finishReason'):
         meta['finishReason'] = task['finishReason']
     if task.get('usage'):
@@ -65,6 +63,15 @@ def extract_task_meta(task):
         meta['modifiedFiles'] = task['modifiedFiles']
     if task.get('modifiedFileList'):
         meta['modifiedFileList'] = task['modifiedFileList']
+    if task.get('_todoState'):
+        from lib.tools.todo import public_todo_state
+        meta['todoState'] = public_todo_state(task['_todoState'])
+    if task.get('_todo_blocked'):
+        meta['todoBlocked'] = task['_todo_blocked']
+    if task.get('costExperiment'):
+        meta['costExperiment'] = task['costExperiment']
+    elif task.get('_costExperiment'):
+        meta['costExperiment'] = task['_costExperiment']
     if task.get('_fallback_model'):
         meta['fallbackModel'] = task['_fallback_model']
     if task.get('_fallback_from'):
@@ -82,18 +89,12 @@ def load_or_create_conv(db, conv_id, config, payload):
     Returns:
         (messages_list, is_new, title) or raises.
     """
-    row = db.execute(
-        'SELECT messages, title, settings FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID)
-    ).fetchone()
-
-    if row:
-        try:
-            messages = json.loads(row['messages'] or '[]')
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.warning('[Send] Failed to parse messages for conv=%s: %s', conv_id[:8], e)
-            messages = []
-        return messages, False, row['title']
+    from lib.database.conversation_repository import load_conversation
+    snapshot = load_conversation(
+        db, conv_id, user_id=DEFAULT_USER_ID,
+        metadata_columns=('title', 'settings'))
+    if snapshot is not None:
+        return snapshot.messages, False, snapshot['title']
 
     # New conversation — create it
     title = (payload.get('text') or 'New Chat')[:60]
@@ -106,11 +107,11 @@ def load_or_create_conv(db, conv_id, config, payload):
     if payload.get('folderId'):
         settings['folderId'] = payload['folderId']
 
-    db_execute_with_retry(db, '''
-        INSERT INTO conversations (id, user_id, title, messages, created_at, updated_at, settings, msg_count, search_text)
-        VALUES (?, ?, ?, '[]', ?, ?, ?, 0, '')
-    ''', (conv_id, DEFAULT_USER_ID, title, now_ms, now_ms,
-          json.dumps(settings, ensure_ascii=False)))
+    from lib.database.conversation_repository import upsert_conversation
+    upsert_conversation(
+        db, conv_id, [], user_id=DEFAULT_USER_ID, title=title,
+        created_at=now_ms, updated_at=now_ms,
+        settings=json.dumps(settings, ensure_ascii=False), full=True)
 
     return [], True, title
 
@@ -184,8 +185,6 @@ def persist_conv_messages(db, conv_id, messages, title, settings_patch=None):
     from lib.tasks_pkg.manager import _assign_message_ids
     _assign_message_ids(messages)
     now_ms = int(time.time() * 1000)
-    messages_json = json_dumps_pg(messages)
-
     from lib.conversations import build_search_text
     search_text = build_search_text(messages)
 
@@ -202,91 +201,79 @@ def persist_conv_messages(db, conv_id, messages, title, settings_patch=None):
     if messages:
         settings_update.update(settled_turn_facts(messages[-1]))
 
-    # Merge with existing settings AND preserve original created_at
-    existing = db.execute(
-        'SELECT settings, created_at FROM conversations WHERE id=? AND user_id=?',
-        (conv_id, DEFAULT_USER_ID)
-    ).fetchone()
-    if existing:
-        try:
-            settings = json.loads(existing['settings'] or '{}')
-        except (json.JSONDecodeError, TypeError) as _e_audit:
-            logger.debug('[chat] persist_conv_messages caught %s: %s', type(_e_audit).__name__, _e_audit)
-            settings = {}
-        settings.update(settings_update)
-        # ★ Preserve original created_at — INSERT OR REPLACE would overwrite
-        #   it with now_ms, causing all conversations to lose their real
-        #   creation timestamp on every message send/regenerate/edit.
-        created_at = existing['created_at'] or now_ms
-    else:
-        settings = settings_update
-        created_at = now_ms
+    # One repository-owned write transaction now covers the settings
+    # read/merge, transitional blob write, canonical message rows, revision
+    # marker, and FTS refresh.  The old sequence committed the blob first and
+    # mirrored rows best-effort afterwards, creating an unavoidable split-
+    # brain window on any exception or process death.
+    from lib.database import write_transaction
+    from lib.database.messages_rows import changed_message_seqs, rows_write_enabled
+    from lib.database.conversation_repository import (
+        load_conversation,
+        replace_messages,
+        upsert_conversation,
+    )
 
-    settings_json = json.dumps(settings, ensure_ascii=False)
+    _rows_on = rows_write_enabled()
+    with write_transaction(db, label='persist conversation messages'):
+        # Read after BEGIN IMMEDIATE on SQLite: settings merge and dirty-set
+        # derivation share the same snapshot as the following mutations.
+        existing = load_conversation(
+            db, conv_id, user_id=DEFAULT_USER_ID,
+            metadata_columns=('settings', 'created_at'))
+        if existing is not None:
+            try:
+                settings = json.loads(existing.get('settings') or '{}')
+            except (json.JSONDecodeError, TypeError) as _e_audit:
+                logger.debug('[chat] persist_conv_messages caught %s: %s',
+                             type(_e_audit).__name__, _e_audit)
+                settings = {}
+            settings.update(settings_update)
+            # Preserve the original creation time across every append/edit.
+            created_at = existing['created_at'] or now_ms
+        else:
+            settings = dict(settings_update)
+            created_at = now_ms
 
-    upsert(db, CONVERSATIONS, {
-        'id': conv_id, 'user_id': DEFAULT_USER_ID, 'title': title,
-        'messages': messages_json, 'created_at': created_at, 'updated_at': now_ms,
-        'settings': settings_json, 'msg_count': len(messages), 'search_text': search_text,
-    }, insert_cols=['id', 'user_id', 'title', 'messages', 'created_at',
-                    'updated_at', 'settings', 'msg_count', 'search_text'], retry=True)
-    from lib.conversations import update_conversation_fts
-    update_conversation_fts(db, conv_id, search_text)
-    # Phase 5 dual-write (flag-gated, best-effort): mirror the JSONB array into
-    # conversation_messages rows. No-op unless TOFU_MESSAGES_ROWS; never raises.
-    #
-    # P1 durability (pt_7e4afe73, 2026-07-24): commit the mirror rows RIGHT
-    # HERE, not deep inside dual_write_conv, and NOT at the caller. Reasoning:
-    #   * The authoritative JSONB write above went through upsert(retry=True)
-    #     which routes to db_execute_with_retry(commit=True) — so the JSONB
-    #     row is already committed and the current transaction on ``db`` is
-    #     empty when dual_write_conv runs.
-    #   * update_conversation_fts (line above) also commits internally on
-    #     SQLite (no-op on PG).
-    #   * Therefore the ONLY writes sitting in the current implicit
-    #     transaction at this point are the mirror rows dual_write_conv just
-    #     inserted. Committing here can NOT prematurely flush any other
-    #     pending caller-side writes (there aren't any — see JOURNAL 续15's
-    #     transaction-boundary caveat: it applies to arbitrary mid-flow
-    #     commits, NOT to a commit that immediately follows our own writes
-    #     with a clean prior state).
-    #   * Best-effort per dual_write_conv's contract — swallow exceptions so
-    #     a mirror-side failure cannot break the JSONB write path. The
-    #     mirror's parity gate (verify_conv_parity) is the load-bearing
-    #     check for whether reads can safely flip to rows.
-    from lib.database.messages_rows import dual_write_conv, rows_write_enabled
-    dual_write_conv(db, conv_id, messages, now_ms=now_ms)
-    if rows_write_enabled():
-        # Only commit when dual_write actually ran; keep the flag-off path
-        # byte-identical to the pre-fix behaviour.
-        try:
-            db.commit()
-        except Exception as _p1_commit_e:
-            logger.warning('[chat] persist_conv_messages: mirror-row commit '
-                           'failed conv=%s (non-fatal, JSONB truth is already '
-                           'committed): %s',
-                           conv_id[:8] if conv_id else '?', _p1_commit_e)
+        _mirror_changed_seqs = None
+        if _rows_on and existing:
+            try:
+                _mirror_changed_seqs = changed_message_seqs(
+                    existing.messages, messages)
+            except Exception as _mirror_diff_err:
+                # Strong mode must prefer extra writes over a possibly stale
+                # equal-count row set.  Full dirty coverage is deterministic.
+                logger.warning(
+                    '[chat] mirror dirty-set derivation failed conv=%s: %s '
+                    '(rewriting all message rows)',
+                    (conv_id or '?')[:8], _mirror_diff_err)
+                _mirror_changed_seqs = list(range(len(messages)))
+        elif _rows_on:
+            _mirror_changed_seqs = list(range(len(messages)))
 
-    # Read back the post-write rev — the ``conversations_rev_bump_trg`` trigger
-    # advanced it in the SAME statement as this upsert (on a genuine messages
-    # change). This is the SINGLE source of truth for the new version: callers
-    # that emit a cross-device notify pass THIS rev so a sibling device's
-    # rev-gate refetches the body, instead of a rev=None frame that only nudges
-    # the sidebar. A RETURNING clause is NOT portable here — the SQLite mirror
-    # bumps rev in an AFTER-UPDATE nested statement, so RETURNING would surface
-    # the pre-bump value; a follow-up SELECT reads the committed post-bump rev
-    # on both backends. Best-effort: a read failure returns None (caller falls
-    # back to the old rev=None sidebar-only behaviour — no regression).
-    try:
-        rev_row = db.execute(
-            'SELECT rev FROM conversations WHERE id=? AND user_id=?',
-            (conv_id, DEFAULT_USER_ID)).fetchone()
-        if rev_row is not None:
-            return rev_row[0] if not isinstance(rev_row, dict) else rev_row.get('rev')
-    except Exception as e:
-        logger.debug('[chat] persist_conv_messages rev read-back failed conv=%s: %s',
-                     conv_id[:8] if conv_id else '?', e)
-    return None
+        settings_json = json.dumps(settings, ensure_ascii=False)
+        if existing is None:
+            result = upsert_conversation(
+                db, conv_id, messages, user_id=DEFAULT_USER_ID, title=title,
+                created_at=created_at, updated_at=now_ms,
+                settings=settings_json, search_text=search_text,
+                changed_seqs=_mirror_changed_seqs, full=False)
+        else:
+            result = replace_messages(
+                db, conv_id, messages, user_id=DEFAULT_USER_ID,
+                expected_rev=existing['rev'],
+                metadata={
+                    'title': title,
+                    'created_at': created_at,
+                    'updated_at': now_ms,
+                    'settings': settings_json,
+                },
+                changed_seqs=_mirror_changed_seqs, full=False)
+            if not result.applied:
+                raise RuntimeError(
+                    f'conversation {conv_id} advanced during persist; '
+                    'refusing to overwrite the concurrent writer')
+        return result.rev
 
 
 def append_pending_user_msg(db, conv_id, user_msg, valid_assistant_ids=None):
@@ -331,20 +318,17 @@ def append_pending_user_msg(db, conv_id, user_msg, valid_assistant_ids=None):
                      'assistant id to protect; queue-only fallback', conv_id[:8])
         return False, None
     _MAX_CAS = 4
+    from lib.database.conversation_repository import (
+        load_conversation,
+        replace_messages,
+    )
     for attempt in range(_MAX_CAS):
-        row = db.execute(
-            'SELECT messages, updated_at, rev FROM conversations WHERE id=? AND user_id=?',
-            (conv_id, DEFAULT_USER_ID)).fetchone()
-        if not row:
+        snapshot = load_conversation(db, conv_id, user_id=DEFAULT_USER_ID)
+        if snapshot is None:
             logger.warning('[Send] pending-user append: conv=%s not found', conv_id[:8])
             return False, None
-        try:
-            messages = json.loads(row['messages'] or '[]')
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.warning('[Send] pending-user append: bad messages JSON conv=%s: %s',
-                           conv_id[:8], e)
-            return False, None
-        cur_rev = row['rev']  # Phase 4 W2: CAS token is rev (trigger-bumped); the
+        messages = snapshot.messages
+        cur_rev = snapshot['rev']  # Phase 4 W2: CAS token is rev (trigger-bumped); the
         # loop re-reads the row at the top of every attempt, so cur_rev is
         # refreshed each retry. updated_at is still stamped in SET, not the token.
 
@@ -377,26 +361,12 @@ def append_pending_user_msg(db, conv_id, user_msg, valid_assistant_ids=None):
         _assign_message_ids(messages)
 
         now_ms = int(time.time() * 1000)
-        cur = db.execute(
-            'UPDATE conversations SET messages=?, updated_at=?, msg_count=? '
-            'WHERE id=? AND user_id=? AND rev=?',
-            (json_dumps_pg(messages), now_ms, len(messages), conv_id,
-             DEFAULT_USER_ID, cur_rev))
-        db.commit()
-        if getattr(cur, 'rowcount', None) != 0:
-            # Phase 5 dual-write (flag-gated, inert when off): tail append.
-            from lib.database.messages_rows import mirror_write_and_commit
-            mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms)
-            try:
-                rev_row = db.execute(
-                    'SELECT rev FROM conversations WHERE id=? AND user_id=?',
-                    (conv_id, DEFAULT_USER_ID)).fetchone()
-                rev = (rev_row[0] if not isinstance(rev_row, dict)
-                       else rev_row.get('rev')) if rev_row is not None else None
-            except Exception as e:
-                logger.debug('[Send] pending-user append rev read-back failed: %s', e)
-                rev = None
-            return True, rev
+        result = replace_messages(
+            db, conv_id, messages, user_id=DEFAULT_USER_ID,
+            expected_rev=cur_rev,
+            metadata={'updated_at': now_ms, 'msg_count': len(messages)})
+        if result.applied:
+            return True, result.rev
         # CAS miss — a concurrent writer bumped updated_at; re-read + retry.
         logger.debug('[Send] pending-user append CAS miss conv=%s attempt %d/%d',
                      conv_id[:8], attempt + 1, _MAX_CAS)
@@ -439,19 +409,16 @@ def remove_pending_user_msgs(db, conv_id, timestamps=None):
         if not timestamps:
             return 0, None
     _MAX_CAS = 4
+    from lib.database.conversation_repository import (
+        load_conversation,
+        replace_messages,
+    )
     for attempt in range(_MAX_CAS):
-        row = db.execute(
-            'SELECT messages, rev FROM conversations WHERE id=? AND user_id=?',
-            (conv_id, DEFAULT_USER_ID)).fetchone()
-        if not row:
+        snapshot = load_conversation(db, conv_id, user_id=DEFAULT_USER_ID)
+        if snapshot is None:
             return 0, None
-        try:
-            messages = json.loads(row['messages'] or '[]')
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.warning('[Queue] pending-mirror sweep: bad messages JSON conv=%s: %s',
-                           conv_id[:8], e)
-            return 0, None
-        cur_rev = row['rev']
+        messages = snapshot.messages
+        cur_rev = snapshot['rev']
         kept = []
         removed = 0
         for m in messages:
@@ -464,24 +431,14 @@ def remove_pending_user_msgs(db, conv_id, timestamps=None):
         if not removed:
             return 0, None
         now_ms = int(time.time() * 1000)
-        cur = db.execute(
-            'UPDATE conversations SET messages=?, updated_at=?, msg_count=? '
-            'WHERE id=? AND user_id=? AND rev=?',
-            (json_dumps_pg(kept), now_ms, len(kept), conv_id,
-             DEFAULT_USER_ID, cur_rev))
-        db.commit()
-        if getattr(cur, 'rowcount', None) != 0:
-            from lib.database.messages_rows import mirror_write_and_commit
-            mirror_write_and_commit(db, conv_id, kept, now_ms=now_ms)
-            try:
-                rev_row = db.execute(
-                    'SELECT rev FROM conversations WHERE id=? AND user_id=?',
-                    (conv_id, DEFAULT_USER_ID)).fetchone()
-                rev = (rev_row[0] if not isinstance(rev_row, dict)
-                       else rev_row.get('rev')) if rev_row is not None else None
-            except Exception as e:
-                logger.debug('[Queue] pending-mirror sweep rev read-back failed: %s', e)
-                rev = None
+        result = replace_messages(
+            db, conv_id, kept, user_id=DEFAULT_USER_ID,
+            expected_rev=cur_rev,
+            metadata={'updated_at': now_ms, 'msg_count': len(kept)},
+            # Removing rows can shift every later sequence.
+            full=True)
+        if result.applied:
+            rev = result.rev
             logger.info('[Queue] swept %d pending mirror row(s) conv=%s (rev=%s)',
                         removed, conv_id[:8], rev)
             return removed, rev

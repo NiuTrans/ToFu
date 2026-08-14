@@ -17,6 +17,44 @@ import unittest
 from lib.agent_core import admission
 
 
+def test_personal_server_default_is_bounded(monkeypatch):
+    monkeypatch.delenv('TOFU_MAX_INFLIGHT_TASKS', raising=False)
+    assert admission._default_max_inflight() == 16
+
+
+def test_invalid_inflight_config_falls_back_safely(monkeypatch):
+    monkeypatch.setenv('TOFU_MAX_INFLIGHT_TASKS', 'not-an-int')
+    assert admission._default_max_inflight() == 16
+
+
+def test_memory_pressure_gate_fails_closed_and_is_disableable(monkeypatch):
+    import lib.cgroup_guard as cg
+
+    monkeypatch.setenv('TOFU_ADMISSION_CGROUP_PCT', '96')
+    monkeypatch.setattr(cg, 'pressure', lambda: {
+        'pct': 97.5, 'usage': 975, 'limit': 1000, 'swap': 0})
+    assert admission._memory_pressure_allows_admission() is False
+
+    monkeypatch.setattr(cg, 'pressure', lambda: {
+        'pct': 95.9, 'usage': 959, 'limit': 1000, 'swap': 0})
+    assert admission._memory_pressure_allows_admission() is True
+
+    monkeypatch.setenv('TOFU_ADMISSION_CGROUP_PCT', '0')
+    assert admission._memory_pressure_allows_admission() is True
+
+
+def test_controller_refuses_before_allocating_slot_under_pressure(monkeypatch):
+    import lib.runtime_state_store as rss
+
+    rss.reset_for_test()
+    monkeypatch.setattr(admission, '_memory_pressure_allows_admission',
+                        lambda: False)
+    ctrl = admission.AdmissionController(max_inflight=4)
+    assert ctrl.try_acquire() is False
+    assert ctrl.in_flight == 0
+    assert ctrl.stats()['last_refusal_reason'] == 'memory_pressure'
+
+
 class AdmissionControllerTest(unittest.TestCase):
 
     def setUp(self):
@@ -68,6 +106,21 @@ class AdmissionControllerTest(unittest.TestCase):
             self.assertEqual(ctrl.in_flight, 0)
             self.assertTrue(ctrl.try_acquire())
         asyncio.new_event_loop().run_until_complete(go())
+
+    def test_living_long_task_refreshes_its_admission_lease(self):
+        """Crossing a lease TTL must not make a live LLM task disappear."""
+        ctrl = admission.AdmissionController(max_inflight=1)
+        ctrl._ttl = 0.12
+        try:
+            self.assertTrue(ctrl.try_acquire())
+            time.sleep(0.08)
+            ctrl.refresh_held_slots()
+            time.sleep(0.08)
+            self.assertEqual(ctrl.in_flight, 1)
+            self.assertFalse(ctrl.try_acquire())
+        finally:
+            ctrl.release()
+            ctrl.shutdown()
 
 
 class WaiterTest(unittest.TestCase):

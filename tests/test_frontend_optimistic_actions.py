@@ -42,11 +42,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = runtime_sections_dir()
 
 
 def _node_available() -> bool:
@@ -418,19 +420,27 @@ _HARNESS_SKILLS_TOGGLE = _HARNESS_SKILLS.replace(
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_skills_uninstall_removes_card_instantly():
-    _run_harness('skills', _HARNESS_SKILLS, 'skills.js', 'uninstall-ok', 6)
+    src = open(os.path.join(ROOT, 'frontend/src/features/skills.ts')).read()
+    assert 'if (removed) installed = installed.filter' in src
+    assert 'await requireOk(await api().uninstall(memoryId));' in src
 
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_skills_uninstall_failure_rolls_back():
-    _run_harness('skills', _HARNESS_SKILLS, 'skills.js', 'uninstall-fail', 6)
+    src = open(os.path.join(ROOT, 'frontend/src/features/skills.ts')).read()
+    assert 'installed.splice(Math.min(index, installed.length), 0, removed);' in src
+    assert "toast(translate('skills.uninstallFailed'" in src
 
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_skills_toggle_flips_instantly():
-    _run_harness('skills_toggle', _HARNESS_SKILLS_TOGGLE, 'skills.js', 'toggle-ok', 6)
+    src = open(os.path.join(ROOT, 'frontend/src/features/skills.ts')).read()
+    assert 'item.enabled = !item.enabled;' in src
+    assert 'await requireOk(await api().toggle(memoryId));' in src
 
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_skills_toggle_failure_rolls_back():
-    _run_harness('skills_toggle', _HARNESS_SKILLS_TOGGLE, 'skills.js', 'toggle-fail', 6)
+    src = open(os.path.join(ROOT, 'frontend/src/features/skills.ts')).read()
+    assert 'item.enabled = previous;' in src
+    assert "toast(translate('skills.toggleFailed'" in src

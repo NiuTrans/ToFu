@@ -25,7 +25,7 @@ If ``TOFU_AUTH_MODE`` is set the env var locks the mode; PUT returns
 
 from __future__ import annotations
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.api_response import api_bad_request, api_ok, api_forbidden
 from lib.auth_mode import (

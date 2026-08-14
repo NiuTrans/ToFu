@@ -33,6 +33,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -40,13 +41,15 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
-_TR_SRC = os.path.join(JS_DIR, 'ui', 'tool_rounds.js')
+sys.path.insert(0, HERE)
+from _runtime_sections import runtime_section_path  # noqa: E402
+
+_TR_SRC = runtime_section_path('ui/tool_rounds.js')
 # The conv-meta structured renderers live in the DEFERRED rich module since
 # the 2026-08-01 Epic-E split (fcddc420); core keeps the dispatch + the
 # _CONV_META_TOOLS set + the glyph map. The suite exercises BOTH so a drift in
 # either file is caught.
-_TR_RICH_SRC = os.path.join(JS_DIR, 'ui', 'tool_rounds_rich.js')
+_TR_RICH_SRC = runtime_section_path('ui/tool_rounds_rich.js')
 _TR_ALL_SRCS = [_TR_SRC, _TR_RICH_SRC]
 
 

@@ -47,15 +47,15 @@ UNIT_PATH="$UNIT_DIR/$UNIT_NAME"
 
 # setsid/watchdog launch-path state.
 PID_FILE="$BASE_DIR/data/supervisor.pid"
-LOG_FILE="$BASE_DIR/data/supervisor.log"
+LOG_FILE="$BASE_DIR/logs/server-manager.log"
 WATCHDOG_RESTART_SECS=2          # base backoff after a healthy run dies
 WATCHDOG_MAX_BACKOFF_SECS=60     # ceiling for the escalating backoff
 WATCHDOG_HEALTHY_SECS=15         # a run lasting >= this is "healthy" → reset backoff
 
 _check_projects() {
     if [[ -z "${TOFU_SUPERVISOR_PROJECTS:-}" ]]; then
-        echo "WARNING: TOFU_SUPERVISOR_PROJECTS is empty — no project will be" >&2
-        echo "         startable/stoppable until you allow-list one." >&2
+        echo "TOFU_SUPERVISOR_PROJECTS is empty — managing this project only:" >&2
+        echo "  $BASE_DIR" >&2
     fi
 }
 
@@ -67,7 +67,10 @@ _daemon_alive() {
     local pid
     pid="$(cat "$PID_FILE" 2>/dev/null || true)"
     [[ "$pid" =~ ^[0-9]+$ ]] || return 1
-    kill -0 "$pid" 2>/dev/null
+    kill -0 "$pid" 2>/dev/null || return 1
+    local cmdline
+    cmdline="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+    [[ "$cmdline" == *"$BASE_DIR/supervisor.sh __watchdog__"* ]]
 }
 
 # The self-healing loop. Runs as the setsid session leader ($$ == session id
@@ -76,7 +79,7 @@ _daemon_alive() {
 # without restart when asked to stop.
 cmd_watchdog() {
     set +e   # the loop manages exit codes itself; do not let `wait` trip errexit
-    mkdir -p "$BASE_DIR/data"
+    mkdir -p "$BASE_DIR/data" "$BASE_DIR/logs"
     echo "$$" > "$PID_FILE"
 
     local _stopping=0
@@ -127,7 +130,13 @@ cmd_watchdog() {
 
 cmd_daemon() {
     _check_projects
-    mkdir -p "$BASE_DIR/data"
+    mkdir -p "$BASE_DIR/data" "$BASE_DIR/logs"
+    # Serialize concurrent terminal/cron/@reboot ensures. Close this fd in the
+    # detached child so the launch mutex belongs only to this short command.
+    exec 8>"$BASE_DIR/data/.supervisor-launch.lock"
+    if command -v flock >/dev/null 2>&1; then
+        flock -w 10 8 || { echo "Another manager launch is still in progress." >&2; exit 1; }
+    fi
     if _daemon_alive; then
         echo "Supervisor watchdog already running (pid=$(cat "$PID_FILE"))."
         return 0
@@ -139,16 +148,19 @@ cmd_daemon() {
         echo "WARNING: 'setsid' not found (util-linux). Falling back to nohup — the" >&2
         echo "         watchdog still self-heals, but is NOT fully detached from this" >&2
         echo "         terminal's session. Prefer a host with setsid or systemd." >&2
-        nohup bash "$BASE_DIR/supervisor.sh" __watchdog__ >>"$LOG_FILE" 2>&1 < /dev/null &
+        nohup bash "$BASE_DIR/supervisor.sh" __watchdog__ >>"$LOG_FILE" 2>&1 < /dev/null 8>&- &
     else
         # setsid makes the watchdog its own session leader → detached from the
         # launching terminal; a terminal-close SIGHUP can't reach it.
-        setsid bash "$BASE_DIR/supervisor.sh" __watchdog__ >>"$LOG_FILE" 2>&1 < /dev/null &
+        setsid bash "$BASE_DIR/supervisor.sh" __watchdog__ >>"$LOG_FILE" 2>&1 < /dev/null 8>&- &
     fi
 
-    # Wait briefly for the watchdog to write its PID file.
+    # Wait up to 20s for the watchdog to write its PID file. Process creation
+    # can be delayed for several seconds on a saturated CI/dev host; treating
+    # that scheduler delay as a launch failure leaves a healthy detached
+    # watchdog behind while reporting failure to the caller.
     local i
-    for i in $(seq 1 25); do
+    for i in $(seq 1 100); do
         _daemon_alive && break
         sleep 0.2
     done

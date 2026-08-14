@@ -33,6 +33,7 @@ from lib.desktop_agent._gui import (
 )
 from lib.desktop_agent._project import (
     cmd_project_apply_diff,
+    cmd_project_edit_file,
     cmd_project_find_files,
     cmd_project_grep_search,
     cmd_project_list_dir,
@@ -82,6 +83,7 @@ COMMANDS = {
     'project_read_files':    cmd_project_read_files,
     'project_write_file':    cmd_project_write_file,
     'project_apply_diff':    cmd_project_apply_diff,
+    'project_edit_file':     cmd_project_edit_file,
     'project_grep_search':   cmd_project_grep_search,
     'project_find_files':    cmd_project_find_files,
     'project_run_command':   cmd_project_run_command,
@@ -89,7 +91,8 @@ COMMANDS = {
 
 # Permission levels
 WRITE_COMMANDS = {'desktop_write_file', 'desktop_move_file',
-                  'project_write_file', 'project_apply_diff'}
+                  'project_write_file', 'project_apply_diff',
+                  'project_edit_file'}
 EXEC_COMMANDS = {'desktop_run_command', 'desktop_open_file', 'desktop_open_app',
                  'project_run_command'}
 GUI_COMMANDS = {'desktop_gui_action', 'desktop_screenshot'}

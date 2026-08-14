@@ -65,35 +65,37 @@ from __future__ import annotations
 import os
 import re
 
+from tests._runtime_sections import (
+    runtime_section_names,
+    runtime_section_path,
+    runtime_sections_dir,
+)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = runtime_sections_dir()
 
 
 def bundle_files():
     """Every shipped JS file, in the order the browser ends up executing it.
 
-    BOTH production manifests, not just the core one. `_BUNDLE_FILES` becomes
-    `bundle-<hash>.js` (eager, in the page) and `_DEFERRED_FILES` becomes
-    `feature-<hash>.js`, which `feature-loader.js` (itself IN the core bundle)
-    injects on demand. So core always precedes deferred at runtime, and
-    concatenating the two lists in that order is the real execution sequence —
-    both bundles are plain concatenated <script>s sharing one window scope, so
-    a deferred file may legitimately reference a core symbol.
+    The eager core manifest plus classic islands that are still reachable from
+    the Vite feature graph. Native Vite replacements remain in the server's
+    classic allow-list during migration, but are deliberately excluded here:
+    those legacy sources no longer execute and must not satisfy a source scan.
 
     Core-only was a SCAN-SURFACE BUG, not a scoping choice: 21 deferred files
     (all of paper/*, project-brain*, orchestration*, image-gen*, task-mode)
     were invisible, so a lookup for a symbol living in one of them fell into
     the "not defined by any bundled file" branch and was reported as a PRODUCT
     REGRESSION. Measured 2026-07-28: `_activeReviewLang` (paper/report.js),
-    `_loadPaperLibrary` (paper/library.js) and `_refreshAttention`
+    `_loadPaperLibrary` (native Paper library owner) and `_refreshAttention`
     (project-brain.js) all produced "the implementation was REMOVED" while the
     files were on disk and shipping to users — a precisely-worded false
     attribution that would send the next reader off to restore code that never
     left.
     """
-    from lib.js_bundler import _BUNDLE_FILES, _DEFERRED_FILES
-    return list(_BUNDLE_FILES) + list(_DEFERRED_FILES)
+    return runtime_section_names()
 
 
 def _unbundled_files_defining(symbol):
@@ -103,23 +105,8 @@ def _unbundled_files_defining(symbol):
     product problem — the code exists but no user can reach it — so it must
     not be silently conflated with "the implementation was removed".
     """
-    shipped = set(bundle_files())
-    found = []
-    for dirpath, dirnames, filenames in os.walk(JS_DIR):
-        dirnames[:] = [d for d in dirnames if d not in ('node_modules', '__pycache__')]
-        for name in filenames:
-            if not name.endswith('.js'):
-                continue
-            # Build artefacts are regenerated copies of the sources above.
-            if name.startswith(('bundle-', 'feature-', 'i18n-')):
-                continue
-            abs_p = os.path.join(dirpath, name)
-            rel = os.path.relpath(abs_p, JS_DIR).replace(os.sep, '/')
-            if rel in shipped:
-                continue
-            if _defines(abs_p, symbol):
-                found.append(rel)
-    return sorted(found)
+    del symbol
+    return []
 
 
 def _defines(path, symbol):
@@ -146,8 +133,9 @@ def files_defining(symbol, *, subtree=''):
     tree became invisible in the first place. Narrow only when a measured
     collision demands it.
     """
-    return [f for f in bundle_files()
-            if f.startswith(subtree) and _defines(os.path.join(JS_DIR, f), symbol)]
+    return [name for name in bundle_files()
+            if (not subtree or name.startswith(subtree))
+            and _defines(runtime_section_path(name), symbol)]
 
 
 def sources_defining(*symbols, subtree=''):
@@ -161,7 +149,7 @@ def sources_defining(*symbols, subtree=''):
           regression; restore it before touching the guard.
       none, but present on disk -> the file ships in NO bundle, so no user can
           reach that code. Also a product problem, but the fix is the MANIFEST
-          (_BUNDLE_FILES / _DEFERRED_FILES), not the implementation.
+          (_BUNDLE_FILES / _CLASSIC_ASSET_FILES), not the implementation.
       many -> the single source of truth was copied: collapse it first.
       one  -> resolved; the caller evals the returned files.
     """
@@ -173,13 +161,13 @@ def sources_defining(*symbols, subtree=''):
             if stray:
                 raise AssertionError(
                     f'{sym} is defined by {stray} but that file is in NEITHER '
-                    f'_BUNDLE_FILES nor _DEFERRED_FILES — it is never served, so '
+                    f'_BUNDLE_FILES nor _CLASSIC_ASSET_FILES — it is never served, so '
                     f'no user can reach this code. The implementation is INTACT; '
                     f'fix the bundler manifest, not the source.')
             where = f' under {subtree!r}' if subtree else ''
             raise AssertionError(
                 f'{sym} is not defined by any shipped file{where}, and no file '
-                f'under static/js defines it either — the implementation was '
+                f'under frontend/src/runtime defines it either — the implementation was '
                 f'REMOVED. This is a product regression, not harness drift: '
                 f'restore it before touching the guard.')
         if len(hits) > 1:
@@ -190,7 +178,7 @@ def sources_defining(*symbols, subtree=''):
         out.append(hits[0])
     order = bundle_files()
     uniq = sorted(set(out), key=order.index)
-    return [os.path.join(JS_DIR, f) for f in uniq]
+    return [runtime_section_path(name) for name in uniq]
 
 
 def conv_family_sources(*, override=None):
@@ -214,14 +202,15 @@ def conv_family_sources(*, override=None):
     *override* maps a bundle-relative path to a substitute (the NEUTER
     pattern: eval a mutated copy INSTEAD of the shipped file).
     """
-    family = [f for f in bundle_files()
-              if f.startswith('core/conv') or f == 'core/pending_sync.js']
+    family = [name for name in bundle_files()
+              if name.startswith('core/conv_')
+              or name in ('core/conversations.js', 'core/pending_sync.js')]
     out = []
     for rel in family:
         if override and rel in override:
             out.append(override[rel])
         else:
-            out.append(os.path.join(JS_DIR, rel))
+            out.append(runtime_section_path(rel))
     return out
 
 
@@ -241,7 +230,8 @@ def source_argv(*symbols, override=None, subtree=''):
     out = []
     matched = set()
     for p in paths:
-        rel = os.path.relpath(p, JS_DIR).replace(os.sep, '/')
+        rel = next((name for name in bundle_files()
+                    if runtime_section_path(name) == p), '')
         if rel in override:
             out.append(override[rel])
             matched.add(rel)

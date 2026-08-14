@@ -46,6 +46,9 @@ TITLE_MAX_CHARS = 60
 _THINKING_MODELS_TO_EXCLUDE = frozenset({
     # OpenAI o-series (cheap + thinking)
     'o4-mini',
+    # GPT-5.6 balanced/high-volume tiers are cheap + thinking.
+    'gpt-5.6-terra',
+    'gpt-5.6-luna',
     # DeepSeek (cheap + thinking pair)
     'deepseek-v4-pro',
     'deepseek-v4-flash',

@@ -47,8 +47,7 @@ object the internal functions mutate.
 
 Submodules:
   * ``._state``   — CacheState, _cache_states, _cache_lock, _state_key,
-                    cleanup_cache_state, cleanup_stale_cache_states,
-                    _release_multiroot_sticky  (the SINGLETON state)
+                    cleanup_cache_state, cleanup_stale_cache_states
   * ``._hashing`` — _md5, _hash_system_prompt, _hash_tools, ... , _diff_* (pure)
   * ``._detect``  — EDITABLE_TAIL_COUNT, _classify_break, _resolve_break_cause,
                     detect_cache_break
@@ -82,10 +81,10 @@ from lib.tasks_pkg.cache_tracking._state import (  # noqa: E402,F401
     _cache_states,
     _cache_lock,
     _state_key,
-    _release_multiroot_sticky,
     cleanup_cache_state,
     cleanup_stale_cache_states,
     get_prev_turn_cache_read,
+    get_warm_cache_read,
 )
 
 
@@ -163,8 +162,9 @@ __all__ = [
     'audit_log',
     # state singleton
     'CacheState', '_cache_states', '_cache_lock', '_state_key',
-    '_release_multiroot_sticky', 'cleanup_cache_state',
+    'cleanup_cache_state',
     'cleanup_stale_cache_states', 'get_prev_turn_cache_read',
+    'get_warm_cache_read',
     # hashing
     '_md5', '_hash_system_prompt', '_hash_tools', '_hash_tools_per_tool',
     '_diff_tool_hashes', '_hash_prefix_content', '_hash_prefix_fields',

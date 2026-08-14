@@ -17,38 +17,6 @@ import tempfile
 import unittest
 
 
-def _install_shim():
-    import quart
-    sys.modules['flask'] = quart
-    for attr in ('json', 'globals', 'helpers', 'wrappers', 'ctx'):
-        qs = f'quart.{attr}'
-        if qs in sys.modules:
-            sys.modules[f'flask.{attr}'] = sys.modules[qs]
-    # Newer Flask sansio (3.1+) reads config['PROVIDE_AUTOMATIC_OPTIONS']
-    # in add_url_rule, but the installed Quart dropped it from
-    # default_config → bare Quart(__name__) raises KeyError on
-    # construction. server.py patches this at import time; replicate it
-    # here so this module builds its own app standalone.
-    from quart import Quart
-    if 'PROVIDE_AUTOMATIC_OPTIONS' not in Quart.default_config:
-        Quart.default_config = {**Quart.default_config,
-                                'PROVIDE_AUTOMATIC_OPTIONS': True}
-    from quart.wrappers import Request as _QR
-    import inspect
-    if inspect.iscoroutinefunction(_QR.get_json):
-        _orig = _QR.get_json
-
-        def _sync_get_json(self, *a, **kw):
-            import asyncio as _a
-            coro = _orig(self, *a, **kw)
-            return _a.run(coro)
-        # Mirror server.py: stash the genuine async original so async
-        # handlers (which call async_parse_body) recover + await it instead
-        # of hitting this sync asyncio.run() shim from inside a running loop.
-        _sync_get_json._genuine_async_get_json = _orig
-        _QR.get_json = _sync_get_json
-
-
 def _new_loop_run(coro):
     loop = asyncio.new_event_loop()
     try:
@@ -61,7 +29,6 @@ class AgentRunRouteTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        _install_shim()
         cls._tmp = tempfile.TemporaryDirectory()
 
         # Isolate api_keys store
@@ -84,7 +51,8 @@ class AgentRunRouteTest(unittest.TestCase):
         os.environ['TOFU_EPHEMERAL_PREFLIGHT'] = '0'
 
         from quart import Quart
-        cls.app = Quart(__name__)
+        cls.app = Quart(__name__, static_folder=None)
+        cls.app.config.setdefault('PROVIDE_AUTOMATIC_OPTIONS', True)
         cls.app.config['TESTING'] = True
 
         from routes.api_v1.auth import (

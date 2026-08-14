@@ -47,6 +47,10 @@ def _make_db():
         ' project_path TEXT NOT NULL DEFAULT \'\', response TEXT NOT NULL DEFAULT \'\','
         ' pillar_state TEXT NOT NULL DEFAULT \'{}\', trigger TEXT NOT NULL DEFAULT \'manual\','
         ' ts INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (item_id, seq))')
+    conn.execute(
+        'CREATE TABLE scoped_sequences ('
+        ' namespace TEXT NOT NULL, scope_key TEXT NOT NULL, value INTEGER NOT NULL,'
+        ' PRIMARY KEY (namespace, scope_key))')
     conn.commit()
     return conn
 
@@ -453,29 +457,29 @@ def test_goal_cap_is_independent_of_the_charter_content_cap(db):
 #  (b) HUMAN-FACING ONLY — not on the system-context injection path
 # ════════════════════════════════════════════════════════════════════
 
-def _system_context_package_sources():
-    """Return {relpath: source} for EVERY .py under the system_context package.
+def _injection_sources():
+    """Return source for both the facade and canonical Context Composer.
 
-    system_context was split from a single module into a package (commit
-    86567af); the injection logic now spans several files. This guard scans the
-    whole package dir so it keeps holding if the injection logic moves between
-    package members. Fails loudly if the dir is absent (never a silent no-op)."""
+    ``system_context`` is now a compatibility facade; provider ownership lives
+    in ``context_composer``.  Scan both so a future move cannot make this guard
+    silently inspect only a forwarding shell.
+    """
     import os
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    pkg = os.path.join(root, 'lib', 'tasks_pkg', 'system_context')
-    assert os.path.isdir(pkg), (
-        f'system_context package dir not found at {pkg!r} — the source guard '
-        f'cannot verify the injection path; update this test to the new layout')
     sources = {}
-    for dirpath, _dirs, files in os.walk(pkg):
-        if '__pycache__' in dirpath:
-            continue
-        for fn in files:
-            if fn.endswith('.py'):
-                p = os.path.join(dirpath, fn)
-                with open(p, encoding='utf-8') as f:
-                    sources[os.path.relpath(p, root)] = f.read()
-    assert sources, f'no .py sources found under {pkg!r}'
+    for package in ('system_context', 'context_composer'):
+        pkg = os.path.join(root, 'lib', 'tasks_pkg', package)
+        assert os.path.isdir(pkg), (
+            f'injection package dir not found at {pkg!r}; update the guard')
+        for dirpath, _dirs, files in os.walk(pkg):
+            if '__pycache__' in dirpath:
+                continue
+            for fn in files:
+                if fn.endswith('.py'):
+                    p = os.path.join(dirpath, fn)
+                    with open(p, encoding='utf-8') as f:
+                        sources[os.path.relpath(p, root)] = f.read()
+    assert sources, 'no prompt-injection sources found'
     return sources
 
 
@@ -494,7 +498,7 @@ def test_only_the_goals_renderer_is_on_the_injection_path():
     concern/question readers must stay off it: those are things the human is
     TRACKING, and injecting an unresolved worry as if it were direction would
     steer the project on an open question."""
-    sources = _system_context_package_sources()
+    sources = _injection_sources()
     for banned in ('address_watch_item', 'list_watch_items', 'add_watch_item',
                    'generate_item_response', 'promote_watch_item',
                    'promotion_state'):
@@ -516,7 +520,8 @@ def test_the_goals_block_is_actually_wired_into_the_injection_path():
     import ast
     import os
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    inject = os.path.join(root, 'lib', 'tasks_pkg', 'system_context', '_inject.py')
+    inject = os.path.join(
+        root, 'lib', 'tasks_pkg', 'context_composer', '_providers.py')
     with open(inject, encoding='utf-8') as f:
         tree = ast.parse(f.read())
     called, imported = set(), set()
@@ -531,10 +536,10 @@ def test_the_goals_block_is_actually_wired_into_the_injection_path():
             for alias in node.names:
                 imported.add(alias.name)
     assert 'render_goals_injection_block' in imported, (
-        '_inject.py does not import the goals renderer — a goal would reach no '
+        'Context Composer does not import the goals renderer — a goal would reach no '
         'prompt, the original defect this epic exists to fix')
     assert 'render_goals_injection_block' in called, (
-        '_inject.py imports the goals renderer but never calls it')
+        'Context Composer imports the goals renderer but never calls it')
 
 
 def test_goal_text_reaches_the_real_prompt_with_an_empty_charter(db, monkeypatch):

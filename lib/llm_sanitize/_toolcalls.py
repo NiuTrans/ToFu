@@ -10,6 +10,204 @@ from lib.llm_sanitize._fields import _strip_tool_calls
 
 logger = get_logger(__name__)
 
+import hashlib
+import json
+import re
+
+
+# ══════════════════════════════════════════════════════════
+#  Wire-shape protocol healer (any-model)
+# ══════════════════════════════════════════════════════════
+
+#: Placeholder stamped on tool_calls whose function name is empty/missing.
+#: Kimi hard-400s the WHOLE request on it ("Invalid request: tokenization
+#: failed" — live-verified 2026-08-07: task 9a8196f3 R4 was rejected on both
+#: gateway keys; probe matrix B/L). Matches Anthropic's ^[a-zA-Z0-9_-]{1,64}$
+#: as well, and the paired tool receipt still tells the model the call never
+#: ran, so no information is lost.
+_UNNAMED_TOOL_NAME = 'unnamed_tool_call'
+
+#: Strictest vendor name contract (Anthropic): ^[a-zA-Z0-9_-]{1,64}$.
+_TOOL_NAME_VALID_RE = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
+_TOOL_NAME_INVALID_RE = re.compile(r'[^a-zA-Z0-9_-]')
+_TOOL_NAME_MAX = 64
+
+
+def _mint_tool_call_id(msg_idx: int, call_idx: int, tc: dict) -> str:
+    """Deterministic id for an id-less tool_call: ``call_<sha1[:12]>`` over
+    (message index, call index, id-less canonical JSON of the call).
+
+    ``_strip_non_api_fields`` DEEP-copies, so this heal never reaches the
+    source messages — a random mint would give the same persisted call a
+    DIFFERENT wire id on every round, breaking the prompt-cache prefix and
+    tripping cache_tracking ``body_identical=false`` for exactly the
+    non-parse producers (endpoint mode, compat shims, legacy history) this
+    healer exists to protect (owner review 2026-08-07: two build_body runs
+    over one id-less call minted call_d35b67054ae1 vs call_426a3d3ea09a).
+    Deriving from (position, content) makes the mint idempotent across
+    rounds; identical id-less twins in one message still get distinct ids
+    via the call index.
+    """
+    payload = json.dumps({k: v for k, v in tc.items() if k != 'id'},
+                         sort_keys=True, ensure_ascii=False, default=str)
+    digest = hashlib.sha1(
+        f'{msg_idx}:{call_idx}:{payload}'.encode('utf-8')).hexdigest()
+    return f'call_{digest[:12]}'
+
+
+def _fix_tool_call_wire_shape(messages: list) -> list:
+    """Heal OpenAI-style tool_call protocol violations on the wire.
+
+    Single chokepoint — runs in ``build_body`` for EVERY model and EVERY
+    producer (fresh stream rounds, persisted history, endpoint mode, swarm,
+    compat shims). Every rule below is backed by a live probe against
+    kimi-k3 (2026-08-07 matrix, ``max_tokens=1``):
+
+    Healed (proven HTTP 400 on the strict vendor):
+      * ``function.name`` empty/missing → ``_UNNAMED_TOOL_NAME``
+        (probes B/L — "tokenization failed" / "name can't be blank")
+      * ``type`` missing or ≠ ``'function'`` → ``'function'`` (probe H —
+        "tokenization failed")
+      * ``function.arguments`` dict/list → JSON string; None/non-str scalar
+        → ``'{}'`` (probe K — "expected type string")
+      * tool message with empty/missing ``tool_call_id`` → positionally
+        paired with the preceding assistant message's next unclaimed id;
+        unpairable → dropped (probe M — "tool_call_id is not found")
+
+    Normalised for cross-vendor safety (tolerated by kimi, rejected by
+    Anthropic's name pattern):
+      * name invalid chars → ``'_'``, clamped to 64 chars (probe I showed
+        kimi accepts ``antml:thinking``; Anthropic does not)
+      * tool_call ``id`` empty/missing → minted ``call_<sha1[:12]>``
+        DETERMINISTICALLY from (message idx, call idx, content) — kimi
+        tolerates ``''`` (probe J), but the orphan/adjacency fixer pairs
+        BY id; and a random mint would break the cache prefix every round
+        because the deep-copy seam never writes the heal back
+
+    Deliberately NOT touched (live-probed accepted — healing them would
+    change behaviour on a guess and destroy evidence):
+      * ``arguments=''`` (probe E), invalid-JSON argument strings (probe G —
+        the round-level ``sanitize_malformed_tool_call_args`` already heals
+        fresh rounds and keeps the raw-args evidence), scalar JSON (probe F),
+        lone surrogates in content (probe C).
+
+    Mutates nested dicts in place (same self-healing-history semantics as
+    ``sanitize_malformed_tool_call_args``); returns a NEW list because
+    unpairable tool messages may be dropped. Runs BEFORE
+    ``_fix_orphaned_tool_calls`` so pairing there sees the healed ids.
+    """
+    if not messages:
+        return messages
+
+    fixed_name = fixed_type = fixed_args = fixed_id = 0
+    paired_tid = dropped_entry = dropped_tool = 0
+    name_locations = []
+
+    out = []
+    unclaimed = []  # ids of the current assistant → tool* run, not yet matched
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            out.append(msg)
+            unclaimed = []
+            continue
+        role = msg.get('role')
+
+        if role == 'assistant' and 'tool_calls' in msg:
+            tcs = msg.get('tool_calls')
+            if not isinstance(tcs, list) or not tcs:
+                # Non-list / empty tool_calls is never protocol-valid; the
+                # message stands on its content alone.
+                msg.pop('tool_calls', None)
+                unclaimed = []
+                out.append(msg)
+                continue
+            kept = []
+            for tc_i, tc in enumerate(tcs):
+                if not isinstance(tc, dict):
+                    dropped_entry += 1
+                    continue
+                tcid = tc.get('id')
+                if tcid is not None and not isinstance(tcid, str):
+                    tc['id'] = str(tcid)
+                    fixed_id += 1
+                elif not tcid:
+                    tc['id'] = _mint_tool_call_id(idx, tc_i, tc)
+                    fixed_id += 1
+                if tc.get('type') != 'function':
+                    tc['type'] = 'function'
+                    fixed_type += 1
+                fn = tc.get('function')
+                if not isinstance(fn, dict):
+                    fn = {}
+                    tc['function'] = fn
+                name = fn.get('name')
+                if not isinstance(name, str) or not name.strip():
+                    fn['name'] = _UNNAMED_TOOL_NAME
+                    fixed_name += 1
+                    if len(name_locations) < 6:
+                        name_locations.append(f'#{idx}')
+                elif not _TOOL_NAME_VALID_RE.match(name):
+                    fn['name'] = _TOOL_NAME_INVALID_RE.sub(
+                        '_', name)[:_TOOL_NAME_MAX]
+                    fixed_name += 1
+                    if len(name_locations) < 6:
+                        name_locations.append(f'#{idx}')
+                args = fn.get('arguments')
+                if isinstance(args, (dict, list)):
+                    fn['arguments'] = json.dumps(args, ensure_ascii=False)
+                    fixed_args += 1
+                elif args is None or not isinstance(args, str):
+                    fn['arguments'] = '{}'
+                    fixed_args += 1
+                kept.append(tc)
+            if kept:
+                msg['tool_calls'] = kept
+                unclaimed = [tc.get('id') for tc in kept if tc.get('id')]
+            else:
+                msg.pop('tool_calls', None)
+                unclaimed = []
+            out.append(msg)
+            continue
+
+        if role == 'tool':
+            tcid = msg.get('tool_call_id')
+            if tcid is not None and not isinstance(tcid, str):
+                tcid = str(tcid)
+                msg['tool_call_id'] = tcid
+                fixed_id += 1
+            if not tcid:
+                if unclaimed:
+                    msg['tool_call_id'] = unclaimed.pop(0)
+                    paired_tid += 1
+                else:
+                    # Protocol-dead: no vendor accepts a tool message with an
+                    # unresolvable id (probe M), and the orphan fixer only
+                    # drops truthy ids — so the drop must happen here.
+                    dropped_tool += 1
+                    continue
+            elif tcid in unclaimed:
+                unclaimed.remove(tcid)
+            out.append(msg)
+            continue
+
+        # Any other message breaks an assistant → tool adjacency run.
+        unclaimed = []
+        out.append(msg)
+
+    total = (fixed_name + fixed_type + fixed_args + fixed_id
+             + paired_tid + dropped_entry + dropped_tool)
+    if total:
+        logger.warning(
+            '[build_body] Healed tool_call wire shape: name=%d type=%d '
+            'args=%d id=%d paired_tool_id=%d dropped_entries=%d '
+            'dropped_tool_msgs=%d%s — strict vendors hard-400 the whole '
+            'request on these (Kimi "tokenization failed", 2026-08-07)',
+            fixed_name, fixed_type, fixed_args, fixed_id, paired_tid,
+            dropped_entry, dropped_tool,
+            (f' (name fixes at msg {", ".join(name_locations)})'
+             if name_locations else ''))
+    return out
+
 
 # ══════════════════════════════════════════════════════════
 #  Tool-call/result repair (Anthropic-strict)

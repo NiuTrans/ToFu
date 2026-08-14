@@ -12,6 +12,7 @@ read MODEL_PRICING from here by import.
 """
 
 from lib.log import get_logger
+from lib.model_info._openai_gpt56 import gpt56_pricing_rows
 
 logger = get_logger(__name__)
 
@@ -26,7 +27,7 @@ DEFAULT_USD_CNY_RATE = 7.24
 # ── Model pricing (USD per 1M tokens) — hardcoded fallback ──
 # cacheWriteMul / cacheReadMul are multipliers of the base input price:
 #   Anthropic Claude: write=1.25x, read=0.10x (5-min TTL)
-#   OpenAI GPT:       write=1.00x, read=0.50x
+#   OpenAI GPT-5.6:   write=1.25x, read=0.10x
 #   DeepSeek:         write=1.00x, read=0.10x (disk cache)
 MODEL_PRICING = {
     # ── Anthropic Fable 5 (creative flagship, May 2026) — Opus-tier pricing ──
@@ -146,14 +147,10 @@ MODEL_PRICING = {
     'gpt-image-1':                   {'input': 0.0,  'output': 0.0,  'cacheWriteMul': 0, 'cacheReadMul': 0, 'name': 'GPT Image 1'},
     'gpt-image-1-mini':              {'input': 0.0,  'output': 0.0,  'cacheWriteMul': 0, 'cacheReadMul': 0, 'name': 'GPT Image 1 Mini'},
     'dall-e-3':                      {'input': 0.0,  'output': 0.0,  'cacheWriteMul': 0, 'cacheReadMul': 0, 'name': 'DALL-E 3'},
-    # ── OpenAI (GPT-5.6 family — May 2026) ──
-    # Two-tier lineup: flagship + pro. No mini/nano this generation.
-    'gpt-5.6':                   {'input': 2.50, 'output': 15.00, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GPT-5.6'},
-    'gpt-5.6-pro':               {'input': 30.0, 'output': 180.0, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GPT-5.6 Pro'},
-    # GPT-5.6 sub-SKUs on the Meituan gateway (Jul 2026 marketplace) — converted from CNY at 7.24.
-    'gpt-5.6-sol':               {'input': 4.97, 'output': 29.83, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GPT-5.6 Sol'},    # ¥36/¥216 per 1M
-    'gpt-5.6-terra':             {'input': 2.49, 'output': 14.92, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GPT-5.6 Terra'},  # ¥18/¥108 per 1M
-    'gpt-5.6-luna':              {'input': 0.99, 'output': 5.97,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GPT-5.6 Luna'},   # ¥7.2/¥43.2 per 1M
+    # ── OpenAI GPT-5.6 public family ──
+    # Includes the official >272K full-request pricing tier. Gateway-specific
+    # prices (for example Meituan) remain provider overrides and win at runtime.
+    **gpt56_pricing_rows(),
     # ── OpenAI (GPT-5.4 family — March 2026; kept as the cost tier) ──
     'gpt-5.4':                   {'input': 2.50, 'output': 15.00, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GPT-5.4'},
     'gpt-5.4-pro':               {'input': 30.0, 'output': 180.0, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GPT-5.4 Pro'},
@@ -192,6 +189,7 @@ MODEL_PRICING = {
     'MiniMax-M2.7-highspeed':    {'input': 0.30, 'output': 1.20, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'MiniMax M2.7 HS'},
     'M2-her':                    {'input': 0.30, 'output': 1.20, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'MiniMax M2-her'},
     # ── GLM (Zhipu AI) — converted from CNY at 7.24 ──
+    'glm-5.3':                   {'input': 3.45, 'output': 13.81, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GLM-5.3'},  # 1M context; registered billable rates, not a routing hint
     'glm-5.2':                   {'input': 3.45, 'output': 13.81, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GLM-5.2'},  # 1M context, 128K output, text-only thinking flagship (2026-06-13)
     'glm-5.1':                   {'input': 3.45, 'output': 13.81, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GLM-5.1'},
     'glm-5.1-huawei':            {'input': 3.45, 'output': 13.81, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GLM-5.1 (Huawei)'},
@@ -247,10 +245,10 @@ QWEN_PRICING_CNY = {
     'deepseek-v3.2-baidu':   {'input': [(32_000, 2.0), (1_000_000, 4.0)], 'output': [(32_000, 4.0), (1_000_000, 6.0)]},
     'deepseek-v3.2-huawei':  {'input': [(32_000, 2.0), (1_000_000, 4.0)], 'output': [(32_000, 4.0), (1_000_000, 6.0)]},
     'deepseek-v3.2-doubao':  {'input': [(32_000, 2.0), (1_000_000, 4.0)], 'output': [(32_000, 4.0), (1_000_000, 6.0)]},
-    # DeepSeek V4 on Meituan: flat ¥1/¥2 (flash) and ¥12/¥24 (pro) per 1M tokens.
-    'deepseek-v4-flash':        {'input': [(1_000_000, 1.0)],  'output': [(1_000_000, 2.0)]},
+    # DeepSeek V4 gateway mirrors use provider-qualified model ids.  The plain
+    # official ids live in MODEL_PRICING above; repeating them here would make
+    # the legacy CNY compatibility layer overwrite the official USD rows.
     'deepseek-v4-flash-huawei': {'input': [(1_000_000, 1.0)],  'output': [(1_000_000, 2.0)]},
-    'deepseek-v4-pro':          {'input': [(1_000_000, 12.0)], 'output': [(1_000_000, 24.0)]},
     # Tencent Hunyuan HY3 — tiered pricing on 16K / 32K / 256K context boundaries
     'hy3-preview':              {'input': [(16_000, 1.2), (32_000, 1.6), (256_000, 2.0)],
                                  'output': [(16_000, 4.0), (32_000, 6.4), (256_000, 8.0)]},

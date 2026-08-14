@@ -73,16 +73,20 @@ _TOOL_CALLS_NO_PAYLOAD_RETRY_MAX = 2
 # When the model tries to end its turn (finish_reason=stop, no tool calls) but
 # its structured checklist (task['_todos'], written via the todo_write tool)
 # still has pending / in_progress items, inject a reminder and RE-DRIVE the
-# loop instead of breaking — catching a premature stop CHEAPLY (mid-loop) vs.
+# loop instead of breaking; an explicitly blocked-only list settles incomplete
+# immediately rather than wasting retries — catching a premature stop CHEAPLY
+# (mid-loop) vs.
 # a full Critic round. Bounded by a hard nudge cap so a model that refuses to
 # either finish or update the checklist can't loop forever (runaway guard,
-# same discipline as the retry caps above). Env-overridable, fail-open:
-# unset→default 3, 0/<=0→DISABLED (never enforce), garbage→default.
+# same discipline as the retry caps above). Env-overridable: unset→default 3,
+# 0/<=0→no automatic nudge, garbage→default. Reaching/setting zero disables
+# re-driving only; an unfinished checklist still yields finish_reason=
+# ``incomplete`` rather than being reported as a successful completion.
 _TODO_CONTINUATION_MAX_DEFAULT = 3
 
 
 def _todo_continuation_max() -> int:
-    """Max todo-continuation nudges per phase (runaway guard). Fail-open."""
+    """Max automatic todo-continuation nudges per phase (runaway guard)."""
     import os
     raw = (os.environ.get('TOFU_TODO_CONTINUATION_MAX') or '').strip()
     if not raw:

@@ -19,6 +19,8 @@ import threading
 
 import pytest
 
+pytest_plugins = ('tests._artifact_sidecar',)
+
 
 @pytest.fixture()
 def tmp_project_root(tmp_path):

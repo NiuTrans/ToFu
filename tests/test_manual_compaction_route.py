@@ -24,12 +24,6 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Install the Flask→Quart shim before importing the route module (mirrors
-# tests/test_api_response.py + server.py's default_config patch).
-import quart as _quart          # noqa: E402
-sys.modules['flask'] = _quart
-
-
 def _make_app():
     from quart import Quart
     if 'PROVIDE_AUTOMATIC_OPTIONS' not in Quart.default_config:

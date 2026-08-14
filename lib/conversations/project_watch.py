@@ -49,7 +49,13 @@ import json
 import threading
 import time
 
-from lib.database import DOMAIN_CHAT, get_thread_db
+from lib.database import (
+    DOMAIN_CHAT,
+    allocate_scoped_sequence,
+    db_execute_with_retry,
+    get_thread_db,
+    write_transaction,
+)
 from lib.ids import short_id
 from lib.log import audit_log, get_logger
 from lib.timeutil import now_ms
@@ -80,9 +86,6 @@ VALID_STATUSES = ('open', 'resolved')
 # persisted. A GOAL never has one of these — it is injected, or it is resolved.
 PROMOTION_NONE = 'none'      # no promotion on record → offer "add to charter"
 PROMOTION_ACTIVE = 'active'  # item text IS a live committed decision
-
-# Serializes the read-max-then-insert of the per-item monotonic seq.
-_response_lock = threading.Lock()
 
 _SYSTEM_PROMPTS = {
     'question': (
@@ -131,14 +134,14 @@ def add_watch_item(project_path: str, kind: str, text: str, *,
     ts = _now_ms()
     try:
         db = get_thread_db(DOMAIN_CHAT)
-        db.execute(
+        db_execute_with_retry(
+            db,
             'INSERT INTO project_watch_items '
             '(item_id, project_path, kind, text, status, promoted, '
             ' response_fingerprint, created_by_conv, created_at, updated_at) '
             'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             (item_id, project_path, kind, text, 'open', 0, '',
              created_by_conv or '', ts, ts))
-        db.commit()
     except Exception as e:
         logger.error('[Watch] add failed proj=%.40r: %s', project_path, e,
                      exc_info=True)
@@ -178,13 +181,19 @@ def edit_watch_item(item_id: str, *, text: str | None = None,
         if new_kind not in VALID_KINDS:
             return {'ok': False, 'error': 'invalid kind'}
         text_changed = new_text != row['text']
-        db.execute(
+        updated_at = max(_now_ms(), int(row['updated_at'] or 0) + 1)
+        cursor = db_execute_with_retry(
+            db,
             'UPDATE project_watch_items SET text=?, kind=?, updated_at=?'
             + (', response_fingerprint=?' if text_changed else '')
-            + ' WHERE item_id=?',
-            ((new_text, new_kind, _now_ms(), '', item_id) if text_changed
-             else (new_text, new_kind, _now_ms(), item_id)))
-        db.commit()
+            + ' WHERE item_id=? AND text=? AND kind=? AND updated_at=?',
+            ((new_text, new_kind, updated_at, '', item_id,
+              row['text'], row['kind'], row['updated_at']) if text_changed
+             else (new_text, new_kind, updated_at, item_id,
+                   row['text'], row['kind'], row['updated_at'])),
+            return_cursor=True)
+        if cursor.rowcount != 1:
+            return {'ok': False, 'error': 'edit_conflict'}
     except Exception as e:
         logger.error('[Watch] edit failed item=%s: %s', item_id, e, exc_info=True)
         return {'ok': False, 'error': str(e)}
@@ -210,12 +219,13 @@ def set_watch_status(item_id: str, status: str) -> dict:
         return {'ok': False, 'error': 'invalid status'}
     try:
         db = get_thread_db(DOMAIN_CHAT)
-        row = _get_item_row(db, item_id)
-        if not row:
+        cursor = db_execute_with_retry(
+            db,
+            'UPDATE project_watch_items SET status=?, updated_at=? '
+            'WHERE item_id=?', (status, _now_ms(), item_id),
+            return_cursor=True)
+        if cursor.rowcount != 1:
             return {'ok': False, 'error': 'not found'}
-        db.execute('UPDATE project_watch_items SET status=?, updated_at=? '
-                   'WHERE item_id=?', (status, _now_ms(), item_id))
-        db.commit()
     except Exception as e:
         logger.error('[Watch] status failed item=%s: %s', item_id, e, exc_info=True)
         return {'ok': False, 'error': str(e)}
@@ -234,9 +244,11 @@ def delete_watch_item(item_id: str) -> dict:
         return {'ok': False, 'error': 'no item'}
     try:
         db = get_thread_db(DOMAIN_CHAT)
-        db.execute('DELETE FROM project_watch_responses WHERE item_id=?', (item_id,))
-        db.execute('DELETE FROM project_watch_items WHERE item_id=?', (item_id,))
-        db.commit()
+        with write_transaction(db, label='project-watch-delete'):
+            db.execute('DELETE FROM project_watch_responses WHERE item_id=?',
+                       (item_id,))
+            db.execute('DELETE FROM project_watch_items WHERE item_id=?',
+                       (item_id,))
     except Exception as e:
         logger.error('[Watch] delete failed item=%s: %s', item_id, e, exc_info=True)
         return {'ok': False, 'error': str(e)}
@@ -496,7 +508,9 @@ def generate_item_response(kind: str, item_text: str, pillar_state: dict) -> str
 
 
 def _persist_response(db, item_id: str, project_path: str, response: str,
-                      pillar_state: dict, trigger: str) -> dict | None:
+                      pillar_state: dict, trigger: str, *,
+                      fingerprint_guard: tuple[str, int, str] | None = None
+                      ) -> dict | None:
     try:
         pillar_json = json.dumps(pillar_state, ensure_ascii=False)
     except (TypeError, ValueError) as e:
@@ -504,11 +518,21 @@ def _persist_response(db, item_id: str, project_path: str, response: str,
         pillar_json = '{}'
     ts = _now_ms()
     try:
-        with _response_lock:
-            row = db.execute(
-                'SELECT COALESCE(MAX(seq), 0) AS m FROM project_watch_responses '
-                'WHERE item_id=?', (item_id,)).fetchone()
-            seq = (row['m'] if row and row['m'] is not None else 0) + 1
+        with write_transaction(db, label='project-watch-response-append'):
+            if fingerprint_guard is not None:
+                expected_fp, expected_updated_at, new_fp = fingerprint_guard
+                updated_at = max(ts, int(expected_updated_at or 0) + 1)
+                cursor = db.execute(
+                    'UPDATE project_watch_items '
+                    'SET response_fingerprint=?, updated_at=? '
+                    'WHERE item_id=? AND response_fingerprint=? '
+                    'AND updated_at=?',
+                    (new_fp, updated_at, item_id, expected_fp,
+                     expected_updated_at))
+                if cursor.rowcount != 1:
+                    return {'conflict': True}
+            seq = allocate_scoped_sequence(
+                db, 'project_watch_responses', item_id)
             db.execute(
                 'INSERT INTO project_watch_responses '
                 '(item_id, seq, project_path, response, pillar_state, trigger, ts) '
@@ -519,7 +543,6 @@ def _persist_response(db, item_id: str, project_path: str, response: str,
                 db.execute('DELETE FROM project_watch_responses '
                            'WHERE item_id=? AND seq <= ?',
                            (item_id, seq - _RESPONSES_KEEP))
-            db.commit()
     except Exception as e:
         logger.warning('[Watch] persist response failed item=%s: %s', item_id, e)
         return None
@@ -566,14 +589,15 @@ def address_watch_item(item_id: str, *, trigger: str = 'manual',
         trail = _response_trail(db, item_id, limit=1)
         return trail[0] if trail else None
 
-    snap = _persist_response(db, item_id, project_path, response, pillar_state, trigger)
-    if snap:
-        try:
-            db.execute('UPDATE project_watch_items SET response_fingerprint=?, '
-                       'updated_at=? WHERE item_id=?', (fp, _now_ms(), item_id))
-            db.commit()
-        except Exception as e:
-            logger.debug('[Watch] fingerprint update skipped item=%s: %s', item_id, e)
+    snap = _persist_response(
+        db, item_id, project_path, response, pillar_state, trigger,
+        fingerprint_guard=(row['response_fingerprint'] or '',
+                           int(row['updated_at'] or 0), fp))
+    if snap and snap.get('conflict'):
+        # Another worker edited/addressed the item while synthesis ran. Never
+        # append stale evidence; return the concurrent winner if one exists.
+        trail = _response_trail(db, item_id, limit=1)
+        return trail[0] if trail else None
     return snap
 
 
@@ -784,9 +808,10 @@ def promote_watch_item(item_id: str, *, updated_by_conv: str = '',
     if not res.get('ok'):
         return res
     try:
-        db.execute('UPDATE project_watch_items SET promoted=1, updated_at=? '
-                   'WHERE item_id=?', (_now_ms(), item_id))
-        db.commit()
+        db_execute_with_retry(
+            db,
+            'UPDATE project_watch_items SET promoted=1, updated_at=? '
+            'WHERE item_id=?', (_now_ms(), item_id))
     except Exception as e:
         logger.debug('[Watch] promoted-flag update skipped item=%s: %s', item_id, e)
     audit_log('watch_item_promoted', project_path=project_path, item_id=item_id,

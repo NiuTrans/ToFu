@@ -51,10 +51,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
+STREAMING_RENDER = runtime_section_path('ui/streaming_render.js')
 
 
 def _node_deps_available() -> bool:
@@ -67,7 +70,7 @@ _HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
 const ROOT = process.argv[2];
-const NC = process.argv[3] === 'NC';   // negative-control: strip parentMessage
+const NC = process.argv[4] === 'NC';   // negative-control: strip parentMessage
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM('<!DOCTYPE html><body><div id="chatInner"></div></body>', { url: 'http://localhost/' });
 const win = dom.window;
@@ -141,7 +144,7 @@ win.ConvView = global.ConvView = {
   removeMessage: function () { return true; },
 };
 
-eval(fs.readFileSync(path.join(ROOT, 'static', 'js', 'ui', 'streaming_render.js'), 'utf8'));
+eval(fs.readFileSync(process.argv[3], 'utf8'));
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -236,7 +239,7 @@ def _run(nc: bool):
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     try:
-        argv = ['node', harness, ROOT]
+        argv = ['node', harness, ROOT, STREAMING_RENDER]
         if nc:
             argv.append('NC')
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=60)

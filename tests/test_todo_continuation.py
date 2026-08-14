@@ -23,7 +23,9 @@ stop at 3/10 todos. This enforcer covers exactly that gap, cheaply (mid-loop
 reminder vs. a full Critic round).
 """
 
+import json
 import threading
+import time
 
 import pytest
 
@@ -83,6 +85,248 @@ def test_incomplete_todos_filter():
     inc = todo.incomplete_todos(items)
     assert {t['id'] for t in inc} == {'2', '3'}
     assert todo.incomplete_todos([{'id': '1', 'content': 'a', 'status': 'completed'}]) == []
+
+
+def test_sync_revises_one_checklist_and_duplicate_is_noop():
+    first = todo.apply_todo_operation(None, {'todos': [
+        {'id': 'a', 'content': 'A', 'status': 'in_progress'},
+        {'id': 'b', 'content': 'B', 'status': 'pending'},
+    ]})
+    frame = first['state']['stack'][0]
+    checklist_id = frame['checklist_id']
+    revision = frame['revision']
+
+    duplicate = todo.apply_todo_operation(first['state'], {'todos': first['todos']})
+    assert duplicate['no_op'] is True
+    assert duplicate['state']['stack'][0]['checklist_id'] == checklist_id
+    assert duplicate['state']['stack'][0]['revision'] == revision
+
+    advanced = todo.apply_todo_operation(duplicate['state'], {'todos': [
+        {'id': 'a', 'content': 'A', 'status': 'completed'},
+        {'id': 'b', 'content': 'B', 'status': 'in_progress'},
+    ]})
+    assert advanced['state']['stack'][0]['checklist_id'] == checklist_id
+    assert advanced['state']['stack'][0]['revision'] == revision + 1
+
+    completed = todo.apply_todo_operation(advanced['state'], {'todos': [
+        {'id': 'a', 'content': 'A', 'status': 'completed'},
+        {'id': 'b', 'content': 'B', 'status': 'completed'},
+    ]})
+    final_duplicate = todo.apply_todo_operation(
+        completed['state'], {'todos': completed['todos']})
+    assert final_duplicate['state']['root_completed'] is True
+    assert final_duplicate['no_op'] is True
+    assert final_duplicate['rejected'] is False
+
+
+def test_sync_cannot_drop_unfinished_but_replan_can_with_reason():
+    initial = todo.apply_todo_operation(None, {'todos': [
+        {'id': 'keep', 'content': 'Keep', 'status': 'in_progress'},
+        {'id': 'drop', 'content': 'Drop', 'status': 'pending'},
+    ]})
+    rejected = todo.apply_todo_operation(initial['state'], {
+        'operation': 'sync',
+        'todos': [{'id': 'keep', 'content': 'Keep', 'status': 'in_progress'}],
+    })
+    assert rejected['rejected'] is True
+    assert {x['id'] for x in rejected['todos']} == {'keep', 'drop'}
+
+    no_reason = todo.apply_todo_operation(initial['state'], {
+        'operation': 'replan', 'todos': [],
+    })
+    assert no_reason['rejected'] is True
+
+    replanned = todo.apply_todo_operation(initial['state'], {
+        'operation': 'replan', 'reason': 'Requirement changed',
+        'todos': [{'id': 'new', 'content': 'New path', 'status': 'in_progress'}],
+    })
+    assert replanned['rejected'] is False
+    audit = replanned['state']['history'][-1]
+    assert audit['kind'] == 'replan'
+    assert audit['reason'] == 'Requirement changed'
+    assert {x['id'] for x in audit['superseded']} == {'keep', 'drop'}
+
+
+def test_child_completion_auto_pops_and_completes_parent_item():
+    root = todo.apply_todo_operation(None, {'todos': [
+        {'id': 'parent', 'content': 'Build feature', 'status': 'in_progress'},
+        {'id': 'verify', 'content': 'Verify', 'status': 'pending'},
+    ]})
+    child = todo.apply_todo_operation(root['state'], {
+        'operation': 'push', 'parent_todo_id': 'parent',
+        'todos': [
+            {'id': 'c1', 'content': 'Implement', 'status': 'in_progress'},
+            {'id': 'c2', 'content': 'Test', 'status': 'pending'},
+        ],
+    })
+    assert len(child['state']['stack']) == 2
+    child_id = child['state']['stack'][-1]['checklist_id']
+
+    restored = todo.apply_todo_operation(child['state'], {'todos': [
+        {'id': 'c1', 'content': 'Implement', 'status': 'completed'},
+        {'id': 'c2', 'content': 'Test', 'status': 'completed'},
+    ]})
+    assert restored['auto_popped'] == [child_id]
+    assert len(restored['state']['stack']) == 1
+    parent = {x['id']: x for x in restored['todos']}
+    assert parent['parent']['status'] == 'completed'
+    assert parent['verify']['status'] == 'pending'
+
+
+def test_same_round_todo_calls_execute_in_model_order(monkeypatch):
+    """A child push emitted after its root sync cannot overtake that sync.
+
+    The ordered-state lane is intentionally distinct from the external-write
+    lane, so this also runs in attended Manual mode without asking approval.
+    """
+    from lib.tasks_pkg.executor import tool_registry
+    from lib.tasks_pkg.handlers.misc._human import _handle_todo_write
+    from lib.tasks_pkg.tool_dispatch import execute_tool_pipeline, parse_tool_calls
+
+    original = tool_registry.lookup('todo_write')
+    starts = []
+
+    def delayed_first(task, tc, fn_name, tc_id, fn_args, rn, round_entry,
+                      cfg, project_path, project_enabled, all_tools=None):
+        starts.append(tc_id)
+        if tc_id == 'todo-root':
+            time.sleep(0.05)
+        return original(
+            task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg,
+            project_path, project_enabled, all_tools=all_tools)
+
+    monkeypatch.setitem(tool_registry._exact, 'todo_write', delayed_first)
+    task = _task(
+        convId='todo-order', status='running', model='test-model',
+        toolRounds=[], _attended=True,
+        _tool_schema=[todo.TODO_WRITE_TOOL],
+    )
+    root_args = {'todos': [
+        {'id': 'feature', 'content': 'Build feature', 'status': 'in_progress'},
+    ]}
+    child_args = {
+        'operation': 'push', 'parent_todo_id': 'feature',
+        'todos': [
+            {'id': 'impl', 'content': 'Implement', 'status': 'in_progress'},
+        ],
+    }
+    assistant = {'content': '', 'tool_calls': [
+        {'id': 'todo-root', 'type': 'function', 'function': {
+            'name': 'todo_write', 'arguments': json.dumps(root_args)}},
+        {'id': 'todo-child', 'type': 'function', 'function': {
+            'name': 'todo_write', 'arguments': json.dumps(child_args)}},
+    ]}
+    parsed, _ = parse_tool_calls(
+        assistant, task, round_num=0, tool_round_num=0,
+        project_enabled=False)
+
+    messages = []
+    execute_tool_pipeline(
+        task, parsed, cfg={'autoApply': False}, project_path=None,
+        project_enabled=False, tool_list=[todo.TODO_WRITE_TOOL],
+        messages=messages, all_search_results_text=[], round_num=0,
+        model='test-model')
+
+    assert starts == ['todo-root', 'todo-child']
+    assert len(task['_todoState']['stack']) == 2
+    assert task['_todoState']['stack'][-1]['parent_todo_id'] == 'feature'
+    assert all('rejected' not in str(msg.get('content', '')).lower()
+               for msg in messages)
+
+
+def test_replay_compacts_todo_revisions_but_keeps_audit_input_unchanged():
+    rounds = []
+    for n in range(3):
+        rounds.append({
+            'toolName': 'todo_write', 'toolCallId': f't{n}',
+            'results': [{'todoNoop': False, 'todoRejected': False}],
+        })
+    rounds.insert(1, {'toolName': 'read_files', 'toolCallId': 'read'})
+    projected = todo.compact_todo_rounds_for_replay(rounds)
+    assert [r['toolCallId'] for r in projected] == ['read', 't2']
+    assert len(rounds) == 4
+
+
+def test_wire_replay_contains_only_latest_effective_todo_revision():
+    from lib.tasks_pkg.conv_message_builder import _reconstruct_tool_call_messages
+
+    rounds = []
+    for n in range(3):
+        rounds.append({
+            'roundNum': n + 1, 'llmRound': n,
+            'toolName': 'todo_write', 'toolCallId': f'todo-{n}',
+            'toolArgs': '{"todos": []}',
+            'toolContent': f'Checklist updated revision {n}',
+            'status': 'done',
+            'results': [{'todoNoop': False, 'todoRejected': False}],
+        })
+    wire = _reconstruct_tool_call_messages(rounds)
+    calls = [tc for msg in wire if msg.get('role') == 'assistant'
+             for tc in msg.get('tool_calls') or []]
+    results = [msg for msg in wire if msg.get('role') == 'tool']
+    assert [tc['id'] for tc in calls] == ['todo-2']
+    assert [msg['tool_call_id'] for msg in results] == ['todo-2']
+
+
+def test_continue_resume_restores_authoritative_checklist_stack():
+    from lib.tasks_pkg.orchestrator._resume_state import apply_resume_state
+
+    root = todo.apply_todo_operation(None, {'todos': [
+        {'id': 'parent', 'content': 'Parent', 'status': 'in_progress'},
+    ]})
+    child = todo.apply_todo_operation(root['state'], {
+        'operation': 'push', 'parent_todo_id': 'parent',
+        'todos': [{'id': 'child', 'content': 'Child', 'status': 'in_progress'}],
+    })
+    task = {'convId': 'c', 'content': '', 'content_lock': threading.Lock()}
+    apply_resume_state(
+        task=task,
+        cfg={'checkpointTodoState': child['state']},
+        messages=[], model='test-model', tid='testtask',
+    )
+    assert len(task['_todoState']['stack']) == 2
+    assert task['_todos'][0]['id'] == 'child'
+
+
+def test_live_task_metadata_exposes_todo_state_and_blocked_verdict():
+    from lib.chat.persistence import extract_task_meta
+
+    state = todo.apply_todo_operation(None, {'todos': [
+        {'id': 'blocked', 'content': 'Need credential', 'status': 'blocked'},
+    ]})['state']
+    blocked = {'reason': 'todo_items_blocked', 'incomplete': 1}
+    meta = extract_task_meta({'_todoState': state, '_todo_blocked': blocked})
+    assert meta['todoState']['stack'][0]['todos'][0]['status'] == 'blocked'
+    assert meta['todoBlocked'] == blocked
+
+
+def test_compaction_attachment_carries_child_stack_breadcrumb_and_deduplicates():
+    from lib.tasks_pkg.attachments import (compute_turn_attachments,
+                                           inject_attachments)
+
+    root = todo.apply_todo_operation(None, {'todos': [
+        {'id': 'parent', 'content': 'Build feature', 'status': 'in_progress'},
+    ]})
+    child = todo.apply_todo_operation(root['state'], {
+        'operation': 'push', 'parent_todo_id': 'parent',
+        'todos': [{'id': 'child', 'content': 'Implement detail', 'status': 'in_progress'}],
+    })
+    task = {'_todoState': child['state'], '_todos': child['todos']}
+    messages = [{'role': 'user', 'content': 'continue'}]
+    attachments = compute_turn_attachments(
+        messages, task=task, round_num=4, conv_id='nested-todo')
+    assert len(attachments) == 1
+    assert 'Checklist path: Root task > Build feature' in attachments[0]
+    inject_attachments(messages, attachments)
+    assert compute_turn_attachments(
+        messages, task=task, round_num=5, conv_id='nested-todo') == []
+
+
+def test_headless_result_is_not_ok_when_todos_forced_incomplete_finish():
+    from lib.tasks_pkg.entry import ChatResult
+
+    result = ChatResult(status='done', finish_reason='incomplete')
+    assert result.ok is False
 
 
 # ══════════════════════════════════════════════════════════
@@ -152,24 +396,43 @@ def test_enforcer_noop_without_todos(monkeypatch):
 
 
 def test_enforcer_bounded_by_cap(monkeypatch):
-    """★ Runaway guard: after the cap, the stop is ALLOWED even with incomplete
-    todos (a model that won't finish or update the list can't loop forever)."""
+    """★ Runaway guard: after the cap, stop re-driving and return incomplete
+    (a model that won't finish or update the list can't loop forever)."""
     monkeypatch.setenv('TOFU_TODO_CONTINUATION_MAX', '3')
     task = _task(_todo_continuation_count=3,  # cap already reached
                  _todos=[{'id': '2', 'content': 'still pending', 'status': 'pending'}])
     messages = [{'role': 'user', 'content': 'x'}]
     decision = _run(task, messages)
     assert decision['action'] == 'break'
+    assert decision['last_finish_reason'] == 'incomplete'
+    assert task['_todo_blocked']['incomplete'] == 1
     assert len(messages) == 1  # no further injection
 
 
+def test_enforcer_does_not_waste_nudges_on_explicit_blocker(monkeypatch):
+    """A fully blocked checklist settles incomplete immediately."""
+    monkeypatch.setenv('TOFU_TODO_CONTINUATION_MAX', '3')
+    task = _task(_todos=[
+        {'id': 'wait', 'content': 'Await unavailable credential',
+         'status': 'blocked'},
+    ])
+    messages = [{'role': 'user', 'content': 'x'}]
+    decision = _run(task, messages)
+    assert decision['action'] == 'break'
+    assert decision['last_finish_reason'] == 'incomplete'
+    assert task['_todo_blocked']['reason'] == 'todo_items_blocked'
+    assert '_todo_continuation_count' not in task
+    assert len(messages) == 1
+
+
 def test_enforcer_disabled_by_env(monkeypatch):
-    """TOFU_TODO_CONTINUATION_MAX=0 → enforcer disabled (fail-open)."""
+    """TOFU_TODO_CONTINUATION_MAX=0 disables nudges, not completion honesty."""
     monkeypatch.setenv('TOFU_TODO_CONTINUATION_MAX', '0')
     task = _task(_todos=[{'id': '2', 'content': 'pending', 'status': 'pending'}])
     messages = [{'role': 'user', 'content': 'x'}]
     decision = _run(task, messages)
     assert decision['action'] == 'break'
+    assert decision['last_finish_reason'] == 'incomplete'
 
 
 def test_enforcer_only_on_real_content(monkeypatch):

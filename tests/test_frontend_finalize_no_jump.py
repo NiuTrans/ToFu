@@ -55,11 +55,13 @@ import tempfile
 
 import pytest
 
+from tests._runtime_sections import runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = runtime_sections_dir()
 CONV_VIEW = os.path.join(JS_DIR, 'conv_view.js')
 _SHARED_HARNESS = os.path.join(HERE, '_jsdom_harness.js')
 
@@ -110,7 +112,7 @@ global.requestAnimationFrame = win.requestAnimationFrame = (fn) => { fn(); retur
 global.setTimeout = win.setTimeout = (fn) => 0;
 
 // ── Extract + (optionally neuter) the REAL _withInstantScroll from core.js ──
-const coreSrc = fs.readFileSync(path.join(ROOT, 'static', 'js', 'core.js'), 'utf8');
+const coreSrc = fs.readFileSync(path.join(process.argv[5], 'core.js'), 'utf8');
 const _wisMatch = coreSrc.match(/function _withInstantScroll\(el, fn\)\s*\{[\s\S]*?\n\}/);
 if (!_wisMatch) { console.log('FAIL withinstantscroll_extracted'); process.exit(0); }
 check('withinstantscroll_extracted', true);
@@ -208,7 +210,7 @@ def _run_node(neuter: str = 'none') -> str:
         fh.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', hp, CONV_VIEW, ROOT, neuter],
+            ['node', hp, CONV_VIEW, ROOT, neuter, JS_DIR],
             capture_output=True, text=True, timeout=60,
             env={**os.environ, 'JSDOM_HARNESS': _SHARED_HARNESS},
         )

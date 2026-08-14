@@ -50,12 +50,13 @@ def _drain_progress(task: dict, cursor: int, progress_fn) -> int:
     (logged at debug) — progress reporting must never break the task.
     """
     try:
-        with task['events_lock']:
-            new = list(task['events'][cursor:])
+        from lib.task_replay import task_memory_replay_page
+        page = task_memory_replay_page(task, cursor)
+        new = page.events
     except Exception as e:
         logger.debug('[run_task_sync] progress drain failed (ignored): %s', e)
         return cursor
-    advanced = cursor + len(new)
+    advanced = page.next_cursor
     for ev in new:
         line = _format_progress_event(ev)
         if not line:

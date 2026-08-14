@@ -83,6 +83,73 @@ def test_summary_no_on_delta_uses_nonstreaming(monkeypatch):
     assert called['chat'] == 1 and called['stream'] == 0, called
 
 
+def test_codex_subscription_auto_summary_streams_and_pins(monkeypatch):
+    """Automatic L2 compaction must not escape a stream-only Codex slot.
+
+    The old non-streaming path excluded every managed Codex model, then paid a
+    different provider tagged ``cheap``.  A task already served by
+    ``oauth_codex`` must instead use streaming dispatch under a provider pin.
+    """
+    import lib.llm_dispatch as ld
+    import lib.tasks_pkg.compaction._layer2._summary as summ
+    from lib.llm_dispatch.provider_pin import (
+        clear_pinned_provider, get_pinned_provider)
+
+    seen = {'chat': 0, 'stream': 0, 'pin': None, 'on_content': 'unset'}
+
+    def fake_chat(*args, **kwargs):
+        seen['chat'] += 1
+        raise AssertionError('Codex subscription summary used non-stream chat')
+
+    def fake_stream(messages, *, on_content=None, **kwargs):
+        seen['stream'] += 1
+        seen['pin'] = get_pinned_provider()
+        seen['on_content'] = on_content
+        return ({'role': 'assistant', 'content': 'CODEX SUMMARY'}, 'stop',
+                {'prompt_tokens': 11, 'completion_tokens': 2})
+
+    monkeypatch.setattr(ld, 'dispatch_chat', fake_chat)
+    monkeypatch.setattr(ld, 'dispatch_stream', fake_stream)
+    clear_pinned_provider()
+    try:
+        result = summ._generate_query_aware_summary(
+            [{'role': 'user', 'content': 'q'}], 'q', conv_id='codex-conv',
+            task={'convId': 'codex-conv', 'provider_id': 'oauth_codex',
+                  'config': {'model': 'gpt-5.6-luna'}})
+    finally:
+        clear_pinned_provider()
+
+    assert result == 'CODEX SUMMARY'
+    assert seen == {
+        'chat': 0, 'stream': 1, 'pin': 'oauth_codex', 'on_content': None,
+    }
+
+
+def test_non_codex_provider_pin_is_never_overridden(monkeypatch):
+    import lib.llm_dispatch as ld
+    import lib.tasks_pkg.compaction._layer2._summary as summ
+    from lib.llm_dispatch.provider_pin import (
+        clear_pinned_provider, get_pinned_provider, set_pinned_provider)
+
+    seen = {'pin': None}
+
+    def fake_chat(messages, **kwargs):
+        seen['pin'] = get_pinned_provider()
+        return 'LOCAL SUMMARY', {'prompt_tokens': 3, 'completion_tokens': 1}
+
+    monkeypatch.setattr(ld, 'dispatch_chat', fake_chat)
+    set_pinned_provider('ephemeral:user-owned')
+    try:
+        result = summ._generate_query_aware_summary(
+            [{'role': 'user', 'content': 'q'}], 'q', conv_id='c',
+            task={'provider_id': 'oauth_codex', 'config': {'model': 'gpt-5.6-luna'}})
+    finally:
+        clear_pinned_provider()
+
+    assert result == 'LOCAL SUMMARY'
+    assert seen['pin'] == 'ephemeral:user-owned'
+
+
 # ── (3) compact_conversation_now pushes start/delta/done on 'compaction' ──
 
 class _Store:

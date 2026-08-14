@@ -36,11 +36,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_names, runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+JS_DIR = runtime_sections_dir()
 
 
 def _node_available() -> bool:
@@ -50,13 +52,12 @@ def _node_available() -> bool:
 # ── Contract 1: bundler registration + ordering (pure Python, always runs) ──
 
 def test_diag_collect_in_bundle_before_main():
-    from lib.js_bundler import _BUNDLE_FILES
-
-    assert 'diag_collect.js' in _BUNDLE_FILES, (
-        "diag_collect.js dropped from _BUNDLE_FILES — the diagnostics collector "
+    runtime_files = runtime_section_names()
+    assert 'diag_collect.js' in runtime_files, (
+        "diag_collect.js dropped from the Vite runtime — the diagnostics collector "
         "would silently vanish from the production bundle (§3.2.1). Re-add it.")
-    assert 'main.js' in _BUNDLE_FILES, 'main.js missing from _BUNDLE_FILES (bundle broken)'
-    assert _BUNDLE_FILES.index('diag_collect.js') < _BUNDLE_FILES.index('main.js'), (
+    assert 'main.js' in runtime_files, 'main.js missing from the Vite runtime'
+    assert runtime_files.index('diag_collect.js') < runtime_files.index('main.js'), (
         "diag_collect.js must load BEFORE main.js so window.__tofuCollectDiagnostics "
         "is defined by the time the app boots.")
 
@@ -66,7 +67,7 @@ def test_diag_collect_in_bundle_before_main():
 _HARNESS = r"""
 const fs = require('fs');
 const collectorPath = process.argv[2];
-const mode = process.argv[3];  // 'healthy' | 'wedged'
+const mode = process.argv[3];  // 'healthy' | 'wedged' | 'modern' | 'modern-reject'
 
 // Minimal browser-ish globals the collector reads (all guarded in the source,
 // but we supply realistic values so the blob is meaningful).
@@ -88,6 +89,15 @@ global.convWindowParam = () => '60';
 global.BASE_PATH = '';
 global.window.TOFU_CONV_WINDOW = undefined;
 global.window.__tofuDiagRing = ['t [warn] SSE failed: network error', 't [warn] Falling back to polling'];
+if (mode === 'modern') {
+  global.window.TofuModules = {
+    collectDiagnostics: () => Promise.resolve(JSON.stringify({ source: 'vite' })),
+  };
+} else if (mode === 'modern-reject') {
+  global.window.TofuModules = {
+    collectDiagnostics: () => Promise.reject(new Error('stale diagnostics chunk')),
+  };
+}
 
 // Real AbortController wired so abort() flips a flag our stub fetch observes.
 global.AbortController = class {
@@ -147,6 +157,7 @@ Promise.resolve(window.__tofuCollectDiagnostics()).then((s) => {
     probe: parsed.liveGetProbe,
     ua: parsed.userAgent,
     recentLogLen: (parsed.recentLog || []).length,
+    source: parsed.source || null,
   }));
 }, (e) => {
   console.log('RESULT ' + JSON.stringify({ error: 'promise rejected: ' + (e && e.message) }));
@@ -201,6 +212,18 @@ def test_NEUTER_tunnel_wedge_probe_reports_aborted():
         "wedged-tunnel probe must report aborted=true (the core issue-#1 tunnel "
         f"signal) — got: {probe}")
     assert probe.get('failed') is True, f'wedged probe should be marked failed: {probe}'
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_collector_delegates_to_vite_chunk_and_rolls_back_on_rejection():
+    modern = _run('modern')
+    assert modern.get('ok') is True
+    assert modern.get('source') == 'vite'
+
+    rollback = _run('modern-reject')
+    assert rollback.get('ok') is True
+    assert rollback.get('source') is None
+    assert rollback['probe'].get('httpStatus') == 200
 
 
 if __name__ == '__main__':

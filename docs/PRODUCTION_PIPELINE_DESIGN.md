@@ -12,6 +12,8 @@
 > | P6 `deliverable` / 进度双投影 / artifacts binary | ⏸ **刻意不抽** | §9.3:第三个样本没用上 → 是视频/播客共性而非全局共性 |
 > | P6 `_registries()` 发现制 | ✅ 已落地 | `0c768268` — motion / podcast 对通用任务 API 从此可见;套件 5/5（failing-first） |
 > | P7 第三配方验证 | ✅ 已落地 | `lib/longform/` — 512 行（目标 ≤600）;套件 9/9 含 NEUTER;实测结论见 §9 |
+> | P8 PPT/视频内容内核统一 | ✅ 已落地 | `lib/production/research.py` + `contracts.py`;三车道证据、当前事实闸、叙事/素材/finding 契约共用，媒介渲染分离 |
+> | P9 视频镜头 IR / 配方目录 | ✅ 已落地 | `lib/motion_video/_shot_recipes.py`;13 个 renderer-neutral 配方、语义选型/运动族与能量审计、配方化四锚点 QA、资产 ready 闸、API/UI 可观测 |
 >
 > 触发诉求(owner 原话):「我希望有一天,我只要在输入框里说我想要一个关于某新闻话题的
 > 科普知识视频,视频就被创作出来了,用户甚至不需要感知」+「我不确定现在这个技能形态是否合适」。
@@ -50,7 +52,7 @@
 | 文案 → 时间轴 | ⚠️ 硬估 | `lib/paper/video_abstract.py:88-99` 用 4.2 字/秒估算,**不复用 TTS 真实时长** |
 | 分镜 → 画面 | ⚠️ 两极 | §1.2 |
 | 配图 / 素材 | ❌ 无 | `lib/tools/image_gen.py` 与 motion_video 零连接;契约本身禁止渲染期联网取素材 |
-| 渲染 / 拼接 / 配音 / 烧字幕 / 单镜重渲 | ✅ 完整 | `lib/motion_video/_render.py` `_concat.py` `_audio.py` |
+| 渲染 / 真实转场 / 配音与整片混音 / 烧字幕 / 单镜重渲 | ✅ 完整 | `lib/motion_video/_render.py` `_timeline.py` `_concat.py` `_audio.py` `_audio_cues.py` |
 
 **入口把门关死了**:`routes/api_v1/motion.py:100-103` 要求 `srt` / `srt_path` /
 `scenes_path` 三者至少一个,否则 400;`lib/motion_video/engine.py:83-98`
@@ -147,7 +149,7 @@ auto-motion 当年就是每镜起一次 Claude Code;我们有 `lib/agent_loop.ru
 ┌─────────────────────────────────────────────────────────────┐
 │ ③ 知识包(技能商店,Markdown)  「怎么做得好看」                 │
 │    hyperframes-motion / -design / 分镜策略 / 品牌规范          │
-│    ── 零代码。模型按需 activate_skill 渐进披露。               │
+│    ── 零代码。模型按需 load_skill 渐进披露。                   │
 ├─────────────────────────────────────────────────────────────┤
 │ ② 配方(每能力 300–600 行纯业务)  「这件产品由哪些阶段组成」    │
 │    video   = research → script → timeline → storyboard        │
@@ -156,8 +158,8 @@ auto-motion 当年就是每镜起一次 Claude Code;我们有 `lib/agent_loop.ru
 │    ppt     = research → outline → slides → export             │
 ├─────────────────────────────────────────────────────────────┤
 │ ① 产出底盘(横向复用,一次性)  「长任务怎么跑、产物怎么存、       │
-│    进度怎么让人看见」                                          │
-│    job 生命周期 + 阶段图契约 + 二进制产物 + 进度双投影          │
+│    事实怎么保持新、内容单元如何互认、进度怎么让人看见」          │
+│    job 生命周期 + 阶段图 + 证据/内容契约                         │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -165,12 +167,15 @@ auto-motion 当年就是每镜起一次 Claude Code;我们有 `lib/agent_loop.ru
 
 | 组件 | 职责 | 消灭的重复 |
 |---|---|---|
-| `job.py`(`ProductionRuntime`) | `TaskRuntime` 之上的薄层:dedup key 声明式、阶段事件、stale 清理 | runtime 五件套 ~118 行/能力 |
-| `stages.py` | **阶段图契约**:每阶段 = `(name, run, gate, retry, resumable)`;上游产物落盘即 checkpoint;单阶段可重跑 | 每个 engine 手写的 try/except + 阶段 emit |
-| `progress.py` | **双投影**:同一份阶段事件同时 → 气泡 `tool_progress`(抄 `code_exec.py:81` 合批模式)+ 面板 `push_event` | 「一行递增秒数」 |
-| `deliverable.py` | 二进制产物登记 + 统一 Range 下发(路径引用而非 content) | 每能力一份 `serve_*_file` |
-| `entry.py` | start 路由骨架:enum 白名单校验 → dedup join → 返回 job | `motion.py` / podcast start 的重复骨架 |
-| 注册 | 挂 `tofu.task_runtimes`,并把 `routes/api_v1/tasks.py:40` `_registries()` 从硬编码改为发现制 | 每能力手写 poll |
+| `runtime.py`(`ProductionRuntime`) | `TaskRuntime` 之上的薄层:dedup key、任务字段形状、stale 清理 | runtime 五件套 ~118 行/能力 |
+| `stages.py` | **阶段图契约**:每阶段 = `(name, run, gate, retry, resume_ttl_s, checkpoint_version)`；失效上游会原子失效整个下游后缀 | 每个 engine 手写 try/except、重试、断点一致性 |
+| `jobs.py` | job manifest 读写 + 崩溃后扫描重投 | 每能力各写一份 job.json 与 resume scanner |
+| `research.py` | 多车道时效研究、URL 证据卡、当前状态/价格信号、跨媒介事实硬闸；月/周 freshness 是 profile | PPT/video 两套搜索与“有 URL 就算新”的漂移 |
+| `contracts.py` | 叙事职责/存在理由、`S#`、素材 brief、质量 finding 的最小共用形状 | 每种媒介各自清洗同一字段且语义漂移 |
+| 注册 | 挂 `tofu.task_runtimes`，通用任务 API 通过发现制拿到 runtime | 每能力手写 poll |
+
+`progress.py`、`deliverable.py`、`entry.py` 仍未抽取；§9.3/§10.3 的第三样本证据没有
+支持把它们升级为全局底盘。这里不因为内容内核统一而顺手扩大范围。
 
 **不抽象的东西(刻意)**:
 - **前端面板不统一**——podcast 的转录/睡眠定时 与 motion 的逐镜网格/单镜重渲是**真实领域差异**,
@@ -204,6 +209,9 @@ auto-motion 当年就是每镜起一次 Claude Code;我们有 `lib/agent_loop.ru
 - 失败分类已有(`_render.py` 的 env_missing/lint/chrome/timeout/aborted),
   带反馈自修最多 2 轮,再失败降级到 `_template.py`(**不整片翻车**);
 - 阶段内并行用有界线程池(已有,`engine.py` 默认 2 上限 4)。
+- 动画运行时是受管依赖，不是渲染期 CDN：固定版本 GSAP 先做 SHA-256 校验并
+  缓存，再复制到每镜 `assets/`；作者、模板和旧断点 HTML 在闸门前统一改写为
+  scene-relative 引用。浏览器代理/CDN 失效时不会再出现“首帧正常、时间轴静止”。
 
 这一步同时解决三件事:**质量**(不再是幻灯片)、**可无人值守**(不依赖主对话)、
 **主 agent 只需调一个工具**(不烧 context)。
@@ -211,7 +219,7 @@ auto-motion 当年就是每镜起一次 Claude Code;我们有 `lib/agent_loop.ru
 ### 2.3 ③ 知识包 —— 退为编导手册
 
 技能商店里已有的 6 个 hyperframes 包**位置正确,只是角色要说清**:它们是
-「怎么做得好看」的手册,由**阶段 5 的子 agent** 按需 `activate_skill`,
+「怎么做得好看」的手册,由**阶段 5 的子 agent** 按需 `load_skill`,
 而不是由主对话激活后手工照做。再加一个 tofu 自己的 `video-director` 包承载
 风格偏好/品牌规范/何时该用哪种品类。
 
@@ -403,3 +411,85 @@ motion-video / paper-podcast / longform-report 三家的 `_X_runtime` / `_X_task
 - `docs/PAPER_PODCAST_DESIGN.md`:播客链是第二个「配方」样本;P6 迁移时对齐。
 - `docs/ARCHITECTURE.md` / `CLAUDE.md`:P6 slice 1 落地时已在 `CLAUDE.md` 目录树新增
   `motion_video/` 与 `production/` 条目(含「哪些还没搬」的诚实边界)。
+
+---
+
+## 11. P8 PPT / 视频共用内容内核（2026-08-10）
+
+澎程 deck 的时效与素材关联复盘暴露了一个跨媒介架构问题：PPT 已经有多车道研究、
+来源 ID 和当前事实闸，视频仍只有“本周搜索 + 至少一个 URL”。同一个主题换成视频，
+就可能重新丢掉已经修好的价格状态与证据关联。P8 把这类能力下沉到
+`lib/production/`，不是把 PPT 代码复制给视频。
+
+```
+用户主题
+  → production.research：清理创作指令 → current / official / background
+  → evidence bundle：S# + URL + 日期 + lane + as_of + current signals
+  → production.contracts：narrative role/why + source_ids + asset briefs
+  ├─ slides adapter：outline → PPTD 静态布局 → PPTX
+  └─ motion adapter：spoken beats → 真音频时间轴 → HyperFrames / MP4
+  → shared finding shape：check / element / issue / severity / fix
+```
+
+### 11.1 真正共用的部分
+
+- **研究与证据：** 同一个 `research_topic()`；PPT 使用近一月 profile，新闻视频使用
+  近一周 profile，并在常青主题不足三卡时回退不限时。两边都保留官方候选深挖、
+  背景材料、检索错误与研究截止时间。
+- **事实闸与定向重试：** `current_fact_errors()` 同时审 deck outline 和视频脚本。
+  有当前状态必须引用对应 `S#`；已有预售价却说未公布、已有发布证据却说等待发布，
+  都会拒绝，并把原因回灌下一轮模型。
+- **内容单元：** 页和镜头都携带 `narrative_role` + `narrative_why`；视频逐镜保留
+  `source_ids` 直到 scenes.json，片尾来源卡不再替代逐镜证据关联。
+- **素材与 QA：** 两种媒介的 `role/prompt/semantic_target` 素材 brief 与结构化 VLM
+  finding 经过同一 normalizer；`semantic_target` 必须说明素材具体支撑哪个可见对象、
+  部位或关系，unknown role 不得悄悄创造新的强制素材等级。
+- **断点策略：** 研究 checkpoint 共用 6 小时 TTL 和 evidence schema 版本，版本再按
+  week/month profile 分叉；任何失效都会带着下游后缀一起重跑。
+
+### 11.2 明确不共用的部分
+
+PPTD 的边界、字形行框、OOXML 导出属于**静态空间语义**；HyperFrames、GSAP、TTS、
+镜头 duration 与拼接属于**时间语义**。两者是 production content kernel 的两个媒介
+adapter，不共享授权语言或 renderer。统一的判断标准是：同一缺陷若换一种媒介仍成立，
+才进入底盘；只在页面或时间轴上成立，就留在能力内。
+
+---
+
+## 12. P9 renderer-neutral 视频镜头合同（2026-08-10）
+
+`video-shotcraft` 和 Remotion 的共同启发不是替换技术栈，而是在脚本语义与具体 renderer
+之间建立结构化 shot IR。P9 将 managed HyperFrames corpus 的 13 个蓝图升级为
+`motion-shot-v1` 配方目录；每镜在进入作者与渲染器前都具备运动族、能量、建议时长、
+多相位数量、QA 锚点、落定停留和验收约束。自动规划会在语义允许时改变相邻运动族，
+显式选择则保留并产生可见 finding，避免“为了去重擅改创意”。
+
+这层只属于 motion adapter，不下沉到 `production/contracts.py`：页面没有帧、hold、phase
+或 transition-overlap 语义。共用底盘仍只拥有跨媒介成立的证据、叙事、素材和 finding
+合同。目录经 `GET /api/v1/motion/shot-recipes` 暴露，因此 HyperFrames、未来 canvas 或
+其他帧引擎可以消费相同 recipe，而无需把 renderer 依赖塞进内容层。
+
+QA 同步从固定 15/50/90 三帧变成每配方四个语义锚点，并增加字体与图片的 render-ready
+闸。
+
+---
+
+## 13. P10 program timeline 与 film-level audio IR（2026-08-10）
+
+P10 吸收 Remotion `TransitionSeries` 的时长代数和 video-shotcraft 的集中 sound table，
+但保留 HyperFrames renderer。`motion-timeline-v1` 将每镜拆成 content duration 与可选的
+outgoing visual handle：进入下一镜的 overlap 等量加到前镜渲染尾部，随后由真实 FFmpeg
+`xfade` 消耗。这样 program duration、TTS、SRT 和 SFX cue 仍使用同一连续时钟，转场不会
+偷偷缩短成片。
+
+`motion-audio-v1` 是 motion adapter 独有的整片音频合同：本地 BGM/SFX 经过授权校验、
+SHA-256 staging 与漂移复核；cue 可以按绝对秒、镜头进度、镜头 offset 或 verified beat
+定位，并把音效内部 peak 对齐到可见 action。混音链包含 narration/BGM gain、旁白触发的
+sidechain ducking、淡入淡出、SFX delay、limiter 与目标 LUFS，最终同时交付机器可复现的
+plan 和人可读归因文件。verified beat grid 必须携带逐拍观测，由系统重算残差、匹配率、
+平均误差、漂移与首拍五项门槛；required 模式将超过三帧的转场节拍误差视为合同失败。
+
+这两层不进入跨媒介 production kernel：PPT 没有帧、beat 或 overlap handle。PPT 与视频
+继续共用事实、叙事、素材语义和 VLM finding，之后才各自由静态空间 adapter 与时间 adapter
+解释。当前系统不自动检测音乐节拍，也不捆绑第三方音效库；它验证并消费明确提供的节拍与
+有来源素材。

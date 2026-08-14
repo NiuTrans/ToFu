@@ -5,6 +5,7 @@ Holds ``AnthropicSSETranslator``. Depends on the inbound module for the
 shared ``_STOP_REASON_MAP`` table and the ``_convert_usage`` helper.
 """
 
+import copy
 import json
 
 from lib.log import get_logger
@@ -35,6 +36,14 @@ class AnthropicSSETranslator:
         self.tool_name_reverse: dict = {}
         # content-block index → 'text' | 'tool_use' | 'thinking'
         self._block_types: dict = {}
+        # Anthropic hosted tools (notably Tool Search) add protocol blocks that
+        # have no OpenAI Chat-Completions equivalent: ``server_tool_use`` and
+        # ``tool_search_tool_result``.  Anthropic requires the complete
+        # assistant content array to be replayed unchanged on the next request.
+        # Keep a request-private copy while still projecting ordinary text /
+        # thinking / client tool_use into the existing OpenAI-shaped stream.
+        self._anthropic_blocks: dict[int, dict] = {}
+        self._anthropic_input_json: dict[int, str] = {}
         # Running RAW Anthropic usage, merged across message_start (carries
         # input_tokens + cache_creation_input_tokens + cache_read_input_tokens)
         # and message_delta (carries the growing output_tokens). Anthropic
@@ -48,6 +57,46 @@ class AnthropicSSETranslator:
         # wallet debit, AND detect_cache_break (which then blames 'server-side').
         # Merging here lets each emitted usage be the COMPLETE picture.
         self._usage_raw: dict = {}
+
+    @property
+    def anthropic_content_blocks(self) -> list[dict]:
+        """Complete Anthropic assistant blocks, in original wire order.
+
+        Returned values are detached from translator state so downstream
+        cache-control decoration cannot mutate a later retry/reconciliation.
+        """
+        if not any(block.get('type') in (
+                'server_tool_use', 'tool_search_tool_result')
+                   for block in self._anthropic_blocks.values()
+                   if isinstance(block, dict)):
+            return []
+        return [copy.deepcopy(self._anthropic_blocks[index])
+                for index in sorted(self._anthropic_blocks)]
+
+    def _capture_delta(self, idx: int, delta: dict) -> None:
+        block = self._anthropic_blocks.get(idx)
+        if not isinstance(block, dict):
+            return
+        dtype = delta.get('type')
+        if dtype == 'text_delta':
+            block['text'] = str(block.get('text') or '') + str(
+                delta.get('text') or '')
+        elif dtype == 'thinking_delta':
+            block['thinking'] = str(block.get('thinking') or '') + str(
+                delta.get('thinking') or '')
+        elif dtype == 'signature_delta':
+            block['signature'] = str(block.get('signature') or '') + str(
+                delta.get('signature') or '')
+        elif dtype == 'input_json_delta':
+            raw = self._anthropic_input_json.get(idx, '') + str(
+                delta.get('partial_json') or '')
+            self._anthropic_input_json[idx] = raw
+            try:
+                block['input'] = json.loads(raw) if raw else {}
+            except (json.JSONDecodeError, TypeError):
+                # Partial JSON is expected until content_block_stop.  Keep the
+                # last complete ``input`` (normally {}) until it closes.
+                pass
 
     def translate(self, data_str: str) -> list:
         try:
@@ -69,6 +118,16 @@ class AnthropicSSETranslator:
             block = ev.get('content_block') or {}
             btype = block.get('type')
             self._block_types[idx] = btype
+            if isinstance(block, dict):
+                self._anthropic_blocks[idx] = copy.deepcopy(block)
+                if btype in ('tool_use', 'server_tool_use'):
+                    _initial_input = block.get('input')
+                    if _initial_input not in (None, {}):
+                        try:
+                            self._anthropic_input_json[idx] = json.dumps(
+                                _initial_input, ensure_ascii=False)
+                        except (TypeError, ValueError):
+                            self._anthropic_input_json[idx] = ''
             if btype == 'tool_use':
                 _name = block.get('name', '')
                 if self.tool_name_reverse:
@@ -85,6 +144,7 @@ class AnthropicSSETranslator:
             idx = ev.get('index', 0)
             delta = ev.get('delta') or {}
             dtype = delta.get('type')
+            self._capture_delta(idx, delta)
             if dtype == 'text_delta':
                 return [{'choices': [{'delta': {'content': delta.get('text', '')}}]}]
             if dtype == 'thinking_delta':
@@ -96,6 +156,11 @@ class AnthropicSSETranslator:
                 # synthetic OpenAI delta field the accumulator collects.
                 return [{'choices': [{'delta': {'thinking_signature': delta.get('signature', '')}}]}]
             if dtype == 'input_json_delta':
+                # ``server_tool_use`` is Anthropic's own hosted search call,
+                # not an application tool request.  Project only real client
+                # ``tool_use`` blocks into our standard execution pipeline.
+                if self._block_types.get(idx) != 'tool_use':
+                    return []
                 return [{'choices': [{'delta': {'tool_calls': [{
                     'index': idx,
                     'function': {'arguments': delta.get('partial_json', '')},

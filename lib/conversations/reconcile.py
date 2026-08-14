@@ -60,6 +60,16 @@ def has_real_round(msg: dict[str, Any]) -> bool:
     remains as a private alias for existing in-tree importers.
     """
     rounds = msg.get('toolRounds')
+    # A windowed SQL projection intentionally removes raw tool rounds before
+    # they cross the DB/Python boundary.  The positive count is sufficient to
+    # prove the message is NOT an empty ghost.  It is never used to infer a
+    # completed result when the full field is present, and cannot cause data
+    # deletion (a forged count only makes cleanup more conservative).
+    if (not isinstance(rounds, list)
+            and msg.get('_trimmed') is True
+            and isinstance(msg.get('_trimmedToolRoundCount'), int)
+            and msg.get('_trimmedToolRoundCount') > 0):
+        return True
     if not isinstance(rounds, list):
         return False
     for r in rounds:
@@ -499,6 +509,11 @@ def _twin_keeper_index(
     twin = messages[idx]
     if not isinstance(twin, dict) or twin.get('role') != 'assistant':
         return None
+    # A transport-light message has deliberately lost toolRounds/segments.
+    # It can still be ghost-classified using its positive summary, but it must
+    # never participate in a losslessness proof for duplicate folding.
+    if twin.get('_trimmed') is True:
+        return None
     if _is_special_turn(twin):
         return None
     task_id = twin.get('_taskId')
@@ -519,6 +534,8 @@ def _twin_keeper_index(
             continue
         if prev.get('_taskId') != task_id:
             continue
+        if prev.get('_trimmed') is True:
+            return None
         if _is_special_turn(prev) or j < guard:
             return None
         found = j
@@ -621,6 +638,8 @@ def is_duplicate_task_twin(
     twin = messages[idx]
     if not isinstance(twin, dict) or twin.get('role') != 'assistant':
         return False
+    if twin.get('_trimmed') is True:
+        return False
     if _is_special_turn(twin):
         return False
     task_id = twin.get('_taskId')
@@ -643,6 +662,8 @@ def is_duplicate_task_twin(
             continue
         if prev.get('_taskId') != task_id:
             continue
+        if prev.get('_trimmed') is True:
+            return False
         if _is_special_turn(prev):
             return False
         if j < guard:

@@ -175,6 +175,7 @@ class EventType:
     ERROR = 'error'
     RETRY_RESET = 'retry_reset'
     MODEL_FALLBACK = 'model_fallback' 
+    BUDGET_WARNING = 'budget_warning'
     # ── content ──
     DELTA = 'delta'
     DELTA_RESET = 'delta_reset'
@@ -184,6 +185,9 @@ class EventType:
     TOOL_RESULT = 'tool_result'
     TOOL_COMPLETE = 'tool_complete'
     TOOL_COMPACTED = 'tool_compacted'
+    TOOL_CALL_REPLAY = 'tool_call_replay'
+    PROGRAM_START = 'program_start'
+    PROGRAM_OUTPUT = 'program_output'
     # ── context ──
     ROUND_USAGE = 'round_usage'
     ROUND_COMMITTED = 'round_committed'
@@ -258,6 +262,7 @@ class Phase:
     TODO_CONTINUATION = 'todo_continuation'
     INTENT_STALL_NUDGE = 'intent_stall_nudge'
     TOOL_HISTORY_RESTORED = 'tool_history_restored'
+    TOOL_AUTHORITY = 'tool_authority'
     # ── motion_video channel ──
     RESEARCH = 'research'
     SCRIPT_DONE = 'script_done'
@@ -317,7 +322,11 @@ _SPECS: tuple[EventSpec, ...] = (
                       'toolRounds': 'authoritative tool-round list (status per round)',
                       'error': '(optional) error envelope',
                       'finishReason': '(optional) terminal finish reason',
-                      'usage': '(optional) token usage', 'model': '(optional) model id'}),
+                      'usage': '(optional) token usage', 'model': '(optional) model id',
+                      'phase': '(optional, running tasks only) authoritative '
+                               'current phase snapshot — same shape as the poll '
+                               'fallback task.phase, so reconnects resume the real '
+                               'working label instead of a bare waiting placeholder'}),
     EventSpec(EventType.PHASE, _C.LIFECYCLE,
               'Progress / status hint for the current turn.',
               fields={'phase': 'phase key — the declared vocabulary lives in '
@@ -391,7 +400,8 @@ _SPECS: tuple[EventSpec, ...] = (
               'frame carrying the attempt/backoff detail accompanies it.',
               fields={'attempt': 'whole-turn retry number (1-based)',
                       'max': 'retry budget',
-                      'kind': 'error kind that triggered the re-run'}),
+                      'kind': 'error kind that triggered the re-run',
+                      'contentEpoch': 'monotonic text generation after this reset'}),
     EventSpec(EventType.MODEL_FALLBACK, _C.LIFECYCLE,
               'The primary model failed and the turn is being re-streamed on '
               'the configured fallback model. Emitted EARLY, at the decision '
@@ -405,6 +415,14 @@ _SPECS: tuple[EventSpec, ...] = (
                       'fallbackKind': 'error kind that triggered the fallback',
                       'fallbackReason': 'human-readable reason (kind: detail, '
                                         'capped at 300 chars)'}),
+    EventSpec(EventType.BUDGET_WARNING, _C.LIFECYCLE,
+              'A task crossed a configured soft resource budget. Work may '
+              'continue until the corresponding hard limit is reached.',
+              fields={'limit': 'promptTokens|apiRounds|toolOutputBytes|elapsedSeconds',
+                      'used': 'current measured consumption',
+                      'remaining': 'amount remaining before hard termination',
+                      'hardLimit': 'configured hard ceiling',
+                      'unit': 'tokens|rounds|bytes|seconds'}),
     # ───────────────────────── content ─────────────────────────
     EventSpec(EventType.DELTA, _C.CONTENT,
               'Incremental assistant output — append to the live bubble.',
@@ -425,13 +443,16 @@ _SPECS: tuple[EventSpec, ...] = (
               'to stamp the prose onto: the client clears UNCONDITIONALLY '
               '(still keeping tool rounds).',
               fields={'roundNum': 'the tool-call round number whose prose is dropped',
-                      'discard': 'optional; true = unconditional clear, no prose-capture'}),
+                      'discard': 'optional; true = unconditional clear, no prose-capture',
+                      'contentEpoch': 'monotonic text generation after this reset'}),
     # ───────────────────────── tool ─────────────────────────
     EventSpec(EventType.TOOL_START, _C.TOOL,
               'A tool call began executing.',
               fields={'roundNum': 'round index', 'toolName': 'tool name',
                       'toolCallId': 'tool-call id', 'query': 'display string',
                       'toolArgs': 'serialized args',
+                      'caller': '(optional) Responses nested-call owner',
+                      'programCallId': '(optional) parent program call id',
                       'status': "(optional) 'rejected' when the tool was a "
                                 'hallucination and never ran',
                       '_rejected': '(optional) {attempted, suggestions} for a '
@@ -470,6 +491,18 @@ _SPECS: tuple[EventSpec, ...] = (
                                    '— pt_8524e0ec). The reaper ignores it for '
                                    'liveness; the frontend stalled-card reads '
                                    'it to tell self-ticks from real output',
+                      'query': '(optional) REPAIRED display string — present '
+                               'only on the display-patch frame the dispatcher '
+                               'sends when a late args repair rebuilt the '
+                               'round display (the early announce was built '
+                               'from truncated/unrepaired args). The client '
+                               'patches the live row WITHOUT settling the '
+                               'round (2026-08-06 mid-arguments cut rendered '
+                               '"$ ?" for the whole command duration)',
+                      '_repaired': '(optional) {label, detail, patterns} — '
+                                   'rides with query on the display-patch '
+                                   'frame so the row gains the auto-fixed '
+                                   'badge together with the new text',
                       **_TOOL_CLOCK_FIELDS}),
     EventSpec(EventType.TOOL_RESULT, _C.TOOL,
               'A tool produced a (possibly partial) result payload.',
@@ -495,6 +528,32 @@ _SPECS: tuple[EventSpec, ...] = (
     EventSpec(EventType.TOOL_COMPACTED, _C.TOOL,
               'A prior tool result was compacted out of context to save tokens.',
               fields={'toolCallId': 'tool-call id', 'roundNum': 'round index'}),
+    EventSpec(EventType.TOOL_CALL_REPLAY, _C.TOOL,
+              'A previously settled idempotent tool call was reused without '
+              'executing the tool again.',
+              fields={'toolName': 'canonical tool name',
+                      'content': 'replayed settled result',
+                      'badge': 'replayed'}),
+    EventSpec(EventType.PROGRAM_START, _C.TOOL,
+              'A hosted JavaScript orchestration program started. Its nested '
+              'function calls remain ordinary tool lifecycle events.',
+              fields={'roundNum': 'display-only parent round index',
+                      'llmRound': 'model round that authored the program',
+                      'programCallId': 'program call id used by child callers',
+                      'code': 'JavaScript authored by the model',
+                      'childCallIds': 'nested function-call ids',
+                      'childToolNames': 'nested function names',
+                      'limits': 'enforced calls/output/continuation ceilings',
+                      'status': 'running', 'tStart': 'program start epoch ms'}),
+    EventSpec(EventType.PROGRAM_OUTPUT, _C.TOOL,
+              'A hosted orchestration program produced its aggregate output.',
+              fields={'roundNum': 'display-only parent round index',
+                      'llmRound': 'originating model round',
+                      'programCallId': 'program call id',
+                      'result': 'program aggregate result',
+                      'status': 'completed or incomplete',
+                      'tStart': 'program start epoch ms',
+                      'tEnd': 'program completion epoch ms'}),
     # ───────────────────────── context ─────────────────────────
     EventSpec(EventType.ROUND_USAGE, _C.CONTEXT,
               'Token-usage accounting for a completed round.',
@@ -517,22 +576,22 @@ _SPECS: tuple[EventSpec, ...] = (
               'Memory-prefetch pipeline stage update.',
               fields={'stage': 'pipeline stage', 'results': 'retrieved notes'}),
     EventSpec(EventType.PREFERENCES_APPLIED, _C.CONTEXT,
-              'The bounded personal-preference profile was injected into this '
-              'turn (always-on, cache-safe _isMeta tail). Drives the quiet '
-              '"preferences applied" chip so the user can see the assistant '
-              'is honouring their stored preferences.',
+              'The bounded structured user context was injected into this '
+              'turn (all categories always-on and cache-safe).',
               fields={'chars': 'profile size in chars',
                       'items': 'flat list of injected bullets (core + relevant detail) for the chip',
                       'core': 'always-on core-tier bullets injected this turn',
                       'detail': 'relevance-selected detail-tier bullets (empty on an irrelevant turn)'}),
     EventSpec(EventType.PREFERENCE_LEARNED, _C.CONTEXT,
-              'A preference was learned/reinforced by the post-turn '
-              'consolidation pass. Surfaces a "Noted: you prefer X" moment; '
-              'when pending=true it awaits user confirm (undo/edit affordance).',
+              'A durable user-context item was learned or updated by the '
+              'post-turn consolidation pass and can be undone.',
               fields={'kind': 'reinforced|pending',
                       'summary': 'one-line description of what was learned',
                       'pending': 'true when awaiting user confirm (new pref)',
-                      'id': 'pending proposal id (empty for auto-reinforced)'}),
+                      'id': 'legacy alias for change_id',
+                      'change_id': 'bounded undo-log change identifier',
+                      'item_id': 'stable context item identifier',
+                      'context_type': 'identity|work_rule|response_preference'}),
     EventSpec(EventType.RELATED_CONVERSATIONS, _C.CONTEXT,
               'The bounded cross-conversation project digest (sibling '
               'conversations of the same project) was injected into this turn '
@@ -544,8 +603,13 @@ _SPECS: tuple[EventSpec, ...] = (
                       'toolsAvailable': 'whether get_conversation/'
                                         'list_conversations were registered this turn'}),
     EventSpec(EventType.PROJECT_EXTERNAL_EDIT, _C.CONTEXT,
-              'A project file changed on disk outside the agent (drift notice).',
-              fields={'path': 'file path', 'action': 'create|modify|delete'}),
+              'Off-agent (IDE) drift to a tracked file was snapshotted into '
+              'file-history. Pure audit/provenance record — the frontend '
+              'deliberately does NOT render it (the drift toast advertised an '
+              "undo the UI had no path for; the snapshot's real consumer is "
+              'the file-history timeline itself).',
+              fields={'files': 'list of drifted project-relative paths',
+                      'sha': 'file-history snapshot id'}),
     EventSpec(EventType.WORKSPACE_ROOT_ADDED, _C.CONTEXT,
               'An absolute-path write auto-registered a NEW extra workspace '
               'root (the silent workspace expansion that was previously '
@@ -808,10 +872,10 @@ _PHASE_SPECS: tuple[PhaseSpec, ...] = (
                       'detailKey': 'i18n key', 'detailArgs': 'model label',
                       'model': 'raw model id'}),
     PhaseSpec(Phase.WORKING, (_CHAT,),
-              'Generic working status: VU sub-task startup steps, endpoint/'
-              'flow producer step_phase forwards, external CLI backends.',
-              fields={'detail': 'status text (rendered verbatim by the '
-                                'fallback branch)',
+              'Generic working status: ordinary-turn and VU startup stages, '
+              'endpoint/flow producer step_phase forwards, external CLI '
+              'backends.',
+              fields={'detail': 'English fallback status text',
                       'detailKey': '(optional) i18n key',
                       'detailArgs': '(optional) interpolation args',
                       'attempt': '(optional) retry counter (forwarded '
@@ -839,6 +903,11 @@ _PHASE_SPECS: tuple[PhaseSpec, ...] = (
               'reload/compaction (diagnostic).',
               fields={'detail': 'summary text', 'stats': 'rebuild stats',
                       'overhead': 'estimated token overhead of the rebuild'}),
+    PhaseSpec(Phase.TOOL_AUTHORITY, (_CHAT,),
+              'A sub-agent repeatedly requested unavailable tools and is '
+              'being stopped with an explicit capability-limit result.',
+              fields={'detail': 'human-readable stop reason',
+                      'roundNum': 'round at which the breaker opened'}),
     # ───────────────────── motion_video channel ─────────────────────
     PhaseSpec(Phase.RESEARCH, ('motion_video',),
               'Topic → recipe research is running.',
@@ -940,6 +1009,9 @@ def build_event(type_: str, **fields: Any) -> dict[str, Any]:
     cannot drift between emitters. That is what makes the transport segment
     (``receivedAt - emittedAt``) comparable across tools. An explicit
     ``emittedAt=`` kwarg wins, so a replay path can preserve the original.
+    PHASE events intentionally remain unstamped: ``task['phase']`` is an
+    immediate current-state snapshot, not a transport-duration sample, and
+    keeps the byte shape older clients expect.
 
     Unregistered types are allowed (the wire stays forward-compatible) but log
     a debug line — the drift test is what enforces registration at CI time.

@@ -311,11 +311,10 @@ STRINGS = {
         'zh': '将这台电脑连接到远程 Tofu',
     },
     'desktop.connect.instructions': {
-        'en': 'In Tofu, open Local Control → This computer and press '
-              '"Pair this computer" — the 6-digit code needs no address. '
-              'This line is the advanced fallback: paste it whole.',
-        'zh': '在 Tofu 中打开「本机控制 → 这台电脑」，优先点「配对这台电脑」'
-              '用 6 位码配对（无需地址）。连接行是高级兜底：将整行粘贴到这里。',
+        'en': 'Current controlled-end installers configure the server '
+              'automatically. This legacy repair screen is kept only for '
+              'older integrations.',
+        'zh': '新版受控端安装包会自动配置服务器；此修复入口仅供旧版集成使用。',
     },
     'desktop.connect.current': {
         'en': 'Currently attached to: {url}',
@@ -335,12 +334,12 @@ STRINGS = {
     },
     'desktop.connect.verifyFailed': {
         'en': 'Cannot reach Tofu there: {reason}. A proxy/SSO address is '
-              'unusable for the agent — the attach-bundle installer is '
-              'the reliable path (it carries working routes itself). '
-              'Press Connect again to save anyway.',
-        'zh': '连不上服务器：{reason}。代理/SSO 地址受控端用不了——建议重新'
-              '下载受控端安装包（安装包自己带可用通路）；再点一次「连接」'
-              '强制保存。',
+              'reachable through the browser-assisted channel: keep your '
+              'signed-in Tofu tab open and choose "Connect through browser" '
+              'in the control panel. Press Connect again to save anyway.',
+        'zh': '连不上服务器：{reason}。代理/SSO 地址可改用浏览器安全通道：'
+              '保持已登录的 Tofu 标签页打开，并在控制面板点「通过浏览器连接」。'
+              '再点一次「连接」可先强制保存。',
     },
     'desktop.comp.postgresql.name': {
         'en': 'PostgreSQL Database',
@@ -400,14 +399,6 @@ STRINGS = {
         'en': 'Allow relaying subscription API traffic',
         'zh': '允许转发订阅 API 流量',
     },
-    'desktop.tray.connectRemote': {
-        'en': 'Connect to remote Tofu…',
-        'zh': '连接到远程 Tofu…',
-    },
-    'desktop.tray.connectDifferent': {
-        'en': 'Connect to a different Tofu…',
-        'zh': '连接到另一个 Tofu…',
-    },
     'desktop.tray.copyDiag': {
         'en': 'Copy diagnostics',
         'zh': '复制诊断信息',
@@ -456,15 +447,23 @@ STRINGS = {
         'en': 'connected',
         'zh': '已连上',
     },
+    'desktop.tray.stOkBrowser': {
+        'en': 'connected through the signed-in browser',
+        'zh': '已通过登录中的浏览器安全连接',
+    },
     'desktop.tray.stAuth': {
-        'en': 'auth failed — the credential is dead; re-pair via '
-              '"Connect to a different Tofu…"',
-        'zh': '鉴权失败——密钥已失效；用托盘「连接到另一个 Tofu…」重新配对即可',
+        'en': 'access expired — download and run a fresh controlled-end '
+              'installer; it reconnects automatically',
+        'zh': '连接授权已失效——重新下载并运行受控端安装包即可自动恢复',
     },
     'desktop.tray.stProxy': {
-        'en': 'blocked by a proxy/SSO gateway — re-discovering the route '
-              '(auto-tunnel included)',
-        'zh': '地址被代理/SSO 拦截——正在自动重找通路（含自动隧道）',
+        'en': 'blocked by a proxy/SSO gateway — keep the Tofu page open and '
+              'choose "Connect through browser"',
+        'zh': '被代理/SSO 网关拦截——保持 Tofu 网页打开并点「通过浏览器连接」',
+    },
+    'desktop.tray.browserRelay': {
+        'en': 'Connect through browser',
+        'zh': '通过浏览器连接',
     },
     'desktop.tray.stUnreachable': {
         'en': 'server unreachable — retrying and re-discovering the route '
@@ -480,10 +479,9 @@ STRINGS = {
         'zh': '连接中…',
     },
     'desktop.tray.stUnattached': {
-        'en': 'not configured — reinstall the attach-bundle installer '
-              '(zero input), or use "Connect to a different Tofu…"',
-        'zh': '未配置服务器——重新下载受控端安装包（零输入自动配对），'
-              '或在托盘选「连接到另一个 Tofu…」',
+        'en': 'not configured — download and run a fresh controlled-end '
+              'installer; it connects automatically',
+        'zh': '尚未配置——重新下载并运行受控端安装包即可自动连接',
     },
     # ── Startup role window (desktop/role_window.py) ──
     # Both launchers show this window at startup so the machine's ROLE is
@@ -856,6 +854,8 @@ def apply_theme(root, palette=None) -> dict:
                     foreground=p['text'], font=_f(10, 'bold'))
     style.configure('CardSub.TLabel', background=p['bg2'],
                     foreground=p['text2'], font=_f(9))
+    style.configure('TileSub.TLabel', background=p['bg3'],
+                    foreground=p['text2'], font=_f(9))
     # Section eyebrow inside a card (the「SERVER / 服务器」label row).
     style.configure('CardHead.TLabel', background=p['bg2'],
                     foreground=p['text3'], font=_f(8, 'bold'))
@@ -873,6 +873,11 @@ def apply_theme(root, palette=None) -> dict:
                     foreground=p['text'], font=base_font, padding=(2, 2))
     style.map('Tier.TCheckbutton',
               background=[('active', p['bg2'])],
+              foreground=[('disabled', p['text3'])])
+    style.configure('Tile.TCheckbutton', background=p['bg3'],
+                    foreground=p['text'], font=base_font, padding=(2, 2))
+    style.map('Tile.TCheckbutton',
+              background=[('active', p['bg3'])],
               foreground=[('disabled', p['text3'])])
     # A checkbutton sitting directly on the window background (the bottom
     # bar) — the card-flavoured one would paint a bg2 patch behind itself.

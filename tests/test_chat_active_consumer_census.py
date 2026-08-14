@@ -72,16 +72,10 @@ _BACKEND_CONSUMERS = {
 
 # ── Frontend: every caller of Api.chat.active(), with its carrier stance. ───
 _FRONTEND_CONSUMERS = {
-    'static/js/core/cross_tab_sync.js': (
-        'Orphan-recovery + the stale-pin sweep. CARRIER-AWARE since '
-        'pt_d97f9098776c48e9: pairs this endpoint with the conv-state '
-        'projection so a live carrier pin is never judged stale.'
-    ),
-    'static/js/main/main_send_pipeline.js': (
-        'The follow-up/queue funnel. CARRIER-AWARE since pt_f7a292dc13de47f0: '
-        'computeFollowupRoute routes the pin (live carrier → VU connector, '
-        'terminal/unknown → probe, plain worker → skip) instead of treating a '
-        "pin's presence as proof that someone else is driving."
+    'frontend/src/runtime/app-runtime.js': (
+        'The retained runtime owns both orphan recovery/stale-pin sweep and '
+        'the follow-up funnel. Both pair the filtered active endpoint with '
+        'conv-state carrier truth before deciding that work is stale.'
     ),
 }
 
@@ -151,20 +145,16 @@ def _py_call_sites(pattern):
     return hits
 
 
-# Built bundle artifacts duplicate the scanned sources, so they can never
-# be "consumers" of their own — skip them by the SAME hash-anchored shape
-# js_bundler's stale-cleaner uses (bundle-<8hex>.js / feature-<8hex>.js),
-# which deliberately does NOT match a source file like feature-loader.js.
-_BUILT_BUNDLE_RE = re.compile(r'^(bundle|feature)-[0-9a-f]{8}\.js$')
+_VITE_ASSET_RE = re.compile(r'^assets/.+-[A-Za-z0-9_-]{8,}\.js$')
 
 
 def _js_call_sites(pattern):
-    """Files under static/js/ that call ``pattern`` (comments stripped)."""
+    """Vite source files that call ``pattern`` (comments stripped)."""
     hits = set()
-    js_dir = os.path.join(ROOT, 'static', 'js')
+    js_dir = os.path.join(ROOT, 'frontend', 'src')
     for dirpath, _dirs, files in os.walk(js_dir):
         for fn in files:
-            if not fn.endswith('.js') or fn.startswith('bundle-') or _BUILT_BUNDLE_RE.match(fn):
+            if not fn.endswith(('.js', '.ts')):
                 continue
             path = os.path.join(dirpath, fn)
             rel = os.path.relpath(path, ROOT)
@@ -209,14 +199,10 @@ def test_frontend_active_endpoint_consumers_are_enumerated():
     )
 
 
-def test_built_bundle_skip_is_hash_anchored():
-    """The artifact skip must match the bundler's content-hashed outputs and
-    NOTHING else — a bare-prefix skip would stop scanning feature-loader.js,
-    a real source file, silently shrinking the census."""
-    assert _BUILT_BUNDLE_RE.match('feature-4a9d4def.js')
-    assert _BUILT_BUNDLE_RE.match('bundle-1f319574.js')
-    assert not _BUILT_BUNDLE_RE.match('feature-loader.js')
-    assert not _BUILT_BUNDLE_RE.match('feature-4a9d4def.js.bak')
+def test_vite_artifact_shape_cannot_match_a_source_path():
+    assert _VITE_ASSET_RE.match('assets/main-1f319574.js')
+    assert not _VITE_ASSET_RE.match('frontend/src/main.ts')
+    assert not _VITE_ASSET_RE.match('frontend/src/runtime/app-runtime.js')
 
 
 def test_restart_guard_shares_the_predicate_with_the_reconnect_view():

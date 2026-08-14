@@ -9,6 +9,7 @@ blocks waiting for the user's decision — it NEVER executes the tool.
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 
@@ -172,6 +173,41 @@ def _approval_meta_insert_contents(approval_meta, fn_args):
             'replaceLines': content_text.count('\n') + 1,
         })
     approval_meta['editSummaries'] = edit_summaries
+
+
+def _approval_meta_edit_file(approval_meta, fn_args):
+    """Show mixed edit operations without hiding insert direction."""
+    edits = fn_args.get('edits') or []
+    paths = list(dict.fromkeys(
+        e.get('path', '?') for e in edits if isinstance(e, dict)
+    ))
+    approval_meta['path'] = (
+        ', '.join(paths[:5])
+        + (f' +{len(paths)-5} more' if len(paths) > 5 else '')
+    )
+    approval_meta['editCount'] = len(edits)
+    approval_meta['batchMode'] = True
+    approval_meta['description'] = (
+        fn_args.get('description')
+        or f'{len(edits)} edits across {len(paths)} file(s)'
+    )
+    summaries = []
+    for edit in edits[:20]:
+        if not isinstance(edit, dict):
+            continue
+        anchor = edit.get('anchor', '')
+        content = edit.get('content', '')
+        operation = edit.get('operation', '?')
+        summaries.append({
+            'path': edit.get('path', '?'),
+            'operation': operation,
+            'description': edit.get('description') or operation.replace('_', ' '),
+            'search': anchor[:500] + ('…' if len(anchor) > 500 else ''),
+            'replace': content[:500] + ('…' if len(content) > 500 else ''),
+            'searchLines': anchor.count('\n') + 1,
+            'replaceLines': content.count('\n') + 1,
+        })
+    approval_meta['editSummaries'] = summaries
 
 
 def _approval_meta_create_project(approval_meta, fn_args):
@@ -709,12 +745,43 @@ def _approval_meta_update_search_settings(approval_meta, fn_args):
     )
 
 
+def _approval_meta_call_mcp_write_tool(approval_meta, fn_args):
+    """Show the exact remote MCP mutator and its arguments before approval.
+
+    The progressive wrapper deliberately hides a potentially huge MCP catalog
+    behind one stable tool name.  Without this enricher that indirection also
+    hid the *actual* remote operation from the approval dialog: every write
+    looked like the same opaque ``call_mcp_write_tool`` action.
+    """
+    name = str(fn_args.get('name') or '')
+    arguments = fn_args.get('arguments')
+    try:
+        arguments_text = json.dumps(
+            arguments if isinstance(arguments, dict) else {},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(',', ': '),
+        )
+    except (TypeError, ValueError) as exc:
+        logger.debug('[Approval] MCP arguments are not JSON serializable: %s',
+                     exc)
+        arguments_text = str(arguments)
+    approval_meta['path'] = name
+    _risk(
+        approval_meta,
+        ('Remote MCP write tool', name),
+        ('Arguments', arguments_text),
+        note='Invoke a state-changing tool on an external MCP server',
+    )
+
+
 # Module-level dispatch table — maps tool name → approval meta enricher.
 # Only tools that need special approval metadata are listed; tools not in
 # this dict get the base metadata only (path + description).
 _APPROVAL_META_ENRICHERS = {
     'run_command':      _approval_meta_run_command,
     'write_file':       _approval_meta_write_file,
+    'edit_file':        _approval_meta_edit_file,
     'apply_diff':       _approval_meta_apply_diff,
     'apply_diffs':      _approval_meta_apply_diffs,
     'insert_content':   _approval_meta_insert_content,
@@ -759,6 +826,8 @@ _APPROVAL_META_ENRICHERS = {
     'motion_video_narrate':     _approval_meta_motion_video_narrate,
     # ── search settings: server-wide config mutation ──
     'update_search_settings':   _approval_meta_update_search_settings,
+    # ── progressive MCP: remote target + payload are otherwise hidden ──
+    'call_mcp_write_tool':       _approval_meta_call_mcp_write_tool,
 }
 
 
@@ -771,6 +840,7 @@ def _handle_approval(
     project_path: str | None,
     round_num: int,
     model: str,
+    cfg: dict[str, Any] | None = None,
 ) -> tuple[bool, str | None]:
     """Gate a write operation on manual user approval (no execution).
 
@@ -837,4 +907,19 @@ def _handle_approval(
     # execution finalizes it.
     logger.info('[Task %s] Write approved: tool=%s — dispatching via normal path',
                 tid, fn_name)
+    # Browser approval is a durable exact-domain grant. Subsequent page writes
+    # for the same user + client/profile run directly; another domain or a
+    # revoked grant asks again. The generic execution layer independently
+    # enforces the grant, so unattended tasks cannot bypass this by skipping
+    # the UI gate.
+    if fn_name.startswith('browser_'):
+        try:
+            from lib.browser.access import browser_tool_access
+            browser_tool_access(
+                fn_name, fn_args, user_id=str(task.get('_userId') or ''),
+                client_id=str((cfg or {}).get('browserClientId') or ''),
+                grant_on_success=True)
+        except Exception as exc:
+            logger.warning('[Task %s] browser domain grant could not be saved: %s',
+                           tid, exc)
     return True, None

@@ -31,6 +31,8 @@ import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PAPER_JS = os.path.join(ROOT, 'static', 'js', 'paper-reader.js')
+SESSION_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'session.ts')
 CSS = os.path.join(ROOT, 'static', 'styles.css')
 
 
@@ -150,12 +152,11 @@ def test_draft_state_and_wiring_present():
 
 def test_paper_mode_toggles_body_class():
     """enterPaperMode adds paper-mode-active; exitPaperMode removes it."""
-    src = _paper_src()
-    enter = src[src.index('function enterPaperMode'):src.index('function exitPaperMode')]
-    after_exit = src[src.index('function exitPaperMode'):]
-    assert "classList.add('paper-mode-active')" in enter, \
+    with open(SESSION_TS, encoding='utf-8') as handle:
+        src = handle.read()
+    assert "classList.add('paper-mode-active')" in src, \
         'enterPaperMode does not add the paper-mode-active body class'
-    assert "classList.remove('paper-mode-active')" in after_exit, \
+    assert "classList.remove('paper-mode-active')" in src, \
         'exitPaperMode does not remove the paper-mode-active body class'
 
 

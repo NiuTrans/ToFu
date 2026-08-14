@@ -44,6 +44,8 @@ import subprocess
 
 import pytest
 
+from tests._paper_vite import compiled_typescript
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -51,6 +53,10 @@ ROOT = os.path.normpath(os.path.join(HERE, '..'))
 JS_DIR = os.path.join(ROOT, 'static', 'js')
 REPORT_JS = os.path.join(JS_DIR, 'paper', 'report.js')   # holds _persistGeneratedReviewVenue
 CORE_JS = os.path.join(JS_DIR, 'paper-reader.js')
+REPORT_RUNTIME_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'report-runtime.ts')
+SESSION_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'session.ts')
 
 
 def _node_deps_available() -> bool:
@@ -137,19 +143,24 @@ localStorage.setItem('paper_library_migrated_v1', '1');
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper/report.js
 if (process.argv[4]) eval(fs.readFileSync(process.argv[4], 'utf8'));  // paper-reader.js core
+eval(fs.readFileSync(process.argv[5], 'utf8'));
+eval(fs.readFileSync(process.argv[6], 'utf8'));
+Object.keys(win).forEach((name) => {
+  if (name.startsWith('_') && typeof win[name] === 'function') global[name] = win[name];
+});
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
 // Stubs for unrelated subsystems.
 _getActivePaperEntry = () => ({ id: 'paper-1', title: 'P' });
-_saveActivePaperState = () => {};
-_renderReportSkeleton = (c) => { if (c) c.innerHTML = '<div class="skeleton"></div>'; };
-_syncReportToolbar = () => {};
-_renderPaperQA = () => {};
-_populatePaperReportModelDropdown = () => {};
+win._saveActivePaperState = _saveActivePaperState = () => {};
+win._renderReportSkeleton = _renderReportSkeleton = (c) => { if (c) c.innerHTML = '<div class="skeleton"></div>'; };
+win._syncReportToolbar = _syncReportToolbar = () => {};
+win._renderPaperQA = _renderPaperQA = () => {};
+win._populatePaperReportModelDropdown = _populatePaperReportModelDropdown = () => {};
 let finalRenders = 0;
-_renderFinalReport = (c, txt) => { finalRenders++; if (c) c.innerHTML = '<pre>' + escapeHtml(txt || '') + '</pre>'; };
+win._renderFinalReport = _renderFinalReport = (c, txt) => { finalRenders++; if (c) c.innerHTML = '<pre>' + escapeHtml(txt || '') + '</pre>'; };
 // Track whether the manual Generate prompt was ever shown (the reported bug).
 let startPromptShown = 0;
 _renderReportStartPrompt = (view) => {
@@ -171,6 +182,10 @@ if (typeof toggleSidebar === 'undefined') { global.toggleSidebar = win.toggleSid
   _paperHash = 'phash-1';
   _paperReviewModel = 'some-model';
   _i18nLang = 'en';
+  Object.assign(win, {
+    _activePaperId, _paperParsedText, _paperHash, _paperReviewModel,
+    _paperReviewVenue, _paperReviewVenues, _i18nLang,
+  });
   localStorage.removeItem('paper_review_venue_by_id');
   await _ensureReviewVenues();
   // Silent selection (no persist) — models the auto-resolved / carried venue.
@@ -199,6 +214,10 @@ if (typeof toggleSidebar === 'undefined') { global.toggleSidebar = win.toggleSid
   _paperReviewVenues = [];
   _paperReviewStream = null;
   _paperReviewCache = '';
+  Object.assign(win, {
+    _paperReviewVenue, _paperReviewVenues, _paperReviewStream,
+    _paperReviewCache,
+  });
   _switchPaperTab('qa');
   _switchPaperTab('review');
   for (let i = 0; i < 60; i++) { await new Promise(r => setTimeout(r, 0)); }
@@ -227,10 +246,13 @@ def _write_harness() -> str:
 def _run_harness(report_js_path: str, core_js: str = CORE_JS):
     harness = _write_harness()
     try:
-        proc = subprocess.run(
-            ['node', harness, report_js_path, ROOT, core_js],
-            capture_output=True, text=True, timeout=60,
-        )
+        with compiled_typescript(REPORT_RUNTIME_TS) as runtime_js:
+            with compiled_typescript(SESSION_TS) as session_js:
+                proc = subprocess.run(
+                    ['node', harness, report_js_path, ROOT, core_js,
+                     runtime_js, session_js],
+                    capture_output=True, text=True, timeout=60,
+                )
     finally:
         try:
             os.remove(harness)

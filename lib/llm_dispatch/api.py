@@ -335,10 +335,6 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
     _audit_severity_downgrade()
     dispatcher = get_dispatcher()
     exclude = set(exclude_models) if exclude_models else set()
-    # Caller-provided model exclusions are permanent for this dispatch call —
-    # remember them so the periodic exclusion-reset during 429 cycling doesn't
-    # silently re-introduce a model the caller explicitly banned.
-    _initial_exclude_models = set(exclude)
     exclude_keys = set()      # keys to exclude entirely (transient classes)
     exclude_pairs = set()     # (key_name, model) pairs to exclude (transient classes)
     # Durable counterparts (permission/quota) — survive the 60s reset;
@@ -360,6 +356,11 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
             exclude.add(slot.model)
             logger.debug('%s Excluding stream-only model %s from non-streaming dispatch',
                         log_prefix, slot.model)
+
+    # Caller exclusions AND protocol-required stream-only exclusions are
+    # permanent for this dispatch call. Snapshot only after both sources have
+    # landed so attempt one and 429 cycling can never re-introduce them.
+    _initial_exclude_models = set(exclude)
 
     # ★ NO total time budget. A non-streaming call is waited out for as long
     #   as the upstream needs — truncating a translate/summarize call at a
@@ -417,7 +418,7 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
 
         # Caller-provided exclude_models must apply on attempt 1 too
         # (failure-driven exclusions only kick in after total_attempts>0).
-        _eff_exclude = exclude if (total_attempts > 0 or _initial_exclude_models) else None
+        _eff_exclude = exclude if exclude else None
         slot = dispatcher.pick_and_reserve(
             capability=capability,
             prefer_model=prefer_model,
@@ -485,6 +486,8 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                 thinking_format=slot.thinking_format or '',
                 provider_id=slot.provider_id or '',
                 api_protocol=slot.protocol or 'openai',
+                responses_feature_profile=(
+                    getattr(slot, 'responses_profile', '') or 'compatible'),
                 oauth=slot.oauth or '',
                 adapter=slot.adapter or None,
             )
@@ -505,6 +508,9 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                     'key': slot.key_name, 'model': slot.model,
                     'key_tail': (slot.api_key or '')[-4:],
                     'provider_id': slot.provider_id,
+                    'protocol': slot.protocol or 'openai',
+                    'responses_profile': getattr(
+                        slot, 'responses_profile', '') or '',
                     'latency_ms': round(latency),
                     'attempt': hard_attempts + 1,
                     '429_retries': _429_count,
@@ -754,7 +760,10 @@ def _readjust_thinking_params(body: dict, new_model: str, thinking_format: str):
     Different model families use incompatible thinking parameter formats:
       - Claude:   thinking.type = 'adaptive'
       - Doubao:   thinking.type = 'enabled' / 'disabled'
-      - GLM:      thinking.type = 'enabled' / 'disabled'
+      - GLM:      thinking.type = 'enabled' / 'disabled'; 5.2+ adds
+                  reasoning_effort (+ clear_thinking when history carries
+                  reasoning_content); 5.3 is forced-thinking — 'disabled'
+                  degrades to reasoning_effort='low'
       - MiniMax:  reasoning_split = True
       - Qwen/LongCat: enable_thinking = True/False
       - Gemini 3.x: reasoning_effort = 'minimal'/'low'/'medium'/'high'
@@ -796,9 +805,14 @@ def _readjust_thinking_params(body: dict, new_model: str, thinking_format: str):
     elif reasoning_effort is not None:
         # Gemini dialect: 'minimal' is the closest thing to "thinking off".
         is_enabled = reasoning_effort != 'minimal'
-        # Carry the effort across the swap if no explicit effort was set.
-        if not effort:
-            effort = reasoning_effort
+
+    # Carry the effort across the swap if no explicit effort was set — also
+    # when thinking_dict/enable_thinking declared the state: GLM bodies carry
+    # the rung in top-level reasoning_effort, and without this a GLM→GLM
+    # slot swap (e.g. 5.2 slot 503 → 5.3 slot) would silently reset it to
+    # the model default.
+    if not effort and reasoning_effort is not None:
+        effort = reasoning_effort
 
     # Clean ALL thinking-related keys before re-setting
     body.pop('thinking', None)
@@ -814,6 +828,15 @@ def _readjust_thinking_params(body: dict, new_model: str, thinking_format: str):
     if _tf:
         from lib.llm_dispatch.provider_registry import get_dialect
         _plugin_dialect = get_dialect(_tf)
+    if _plugin_dialect is None and _tf == 'enable_thinking':
+        # Lockstep with build_body(): GLM-5.2+ has a native thinking
+        # contract; a provider-level legacy enable_thinking format must not
+        # claim it (dead field on GLM-native gateways — see the build_body
+        # branch for the live evidence and the engine-vs-family rationale).
+        from lib.model_info import glm_line_version
+        _gv = glm_line_version(new_model)
+        if _gv is not None and _gv >= (5, 2):
+            _tf = ''
     if _plugin_dialect is not None:
         _readjust = _plugin_dialect.apply_readjust
         try:
@@ -862,10 +885,24 @@ def _readjust_thinking_params(body: dict, new_model: str, thinking_format: str):
             body['thinking'] = {'type': 'enabled' if is_enabled else 'disabled'}
             body['temperature'] = 1.0 if is_enabled else 0.6
     elif not _tf and is_glm(new_model):
-        body['thinking'] = {'type': 'enabled' if is_enabled else 'disabled'}
-        if is_enabled:
+        # Kept in lockstep with the GLM branch in build_body() — GLM-5.3 is
+        # forced-thinking (see that branch for the contract).
+        from lib.llm import glm_reasoning_effort
+        from lib.model_info import glm_line_version
+        _glm_v = glm_line_version(new_model)
+        _glm_forced = _glm_v is not None and _glm_v >= (5, 3)
+        if is_enabled or _glm_forced:
+            body['thinking'] = {'type': 'enabled'}
             body['temperature'] = 1.0
+            if _glm_v is not None and _glm_v >= (5, 2):
+                body['reasoning_effort'] = glm_reasoning_effort(
+                    effort, is_enabled, new_model)
+                if any(m.get('reasoning_content')
+                       for m in (body.get('messages') or [])
+                       if isinstance(m, dict) and m.get('role') == 'assistant'):
+                    body['thinking']['clear_thinking'] = False
         else:
+            body['thinking'] = {'type': 'disabled'}
             body['temperature'] = max(body.get('temperature', 0.7), 0.01)
     elif not _tf and is_minimax(new_model):
         if is_enabled:
@@ -895,7 +932,7 @@ def _readjust_thinking_params(body: dict, new_model: str, thinking_format: str):
                 if effort == 'xhigh' and not is_claude_opus_47(new_model):
                     effort = 'high'
                 elif effort == 'ultra':
-                    # 'ultra' is a GPT-5.6 tier; map to Claude's top rung.
+                    # Tofu's legacy 'ultra' label maps to Claude's top rung.
                     effort = 'max'
                 body['effort'] = effort
         elif is_claude_opus_47(new_model):
@@ -997,8 +1034,11 @@ def _adapt_stream_body_for_slot(slot, body_or_messages, is_body, *,
         from lib.model_info import is_gemini as _is_gemini
         if _is_gemini(slot.model) and body.get('messages'):
             _inject_gemini_thought_signatures(body['messages'], slot.model)
+        if (slot.protocol or '') == 'responses':
+            body['_responses_feature_profile'] = (
+                getattr(slot, 'responses_profile', '') or 'compatible')
         return body
-    return build_body(
+    body = build_body(
         slot.model, body_or_messages,
         max_tokens=max_tokens, temperature=temperature,
         thinking_enabled=thinking_enabled, preset=effort or preset,
@@ -1006,6 +1046,10 @@ def _adapt_stream_body_for_slot(slot, body_or_messages, is_body, *,
         thinking_format=slot.thinking_format or '',
         provider_id=slot.provider_id or '',
     )
+    if (slot.protocol or '') == 'responses':
+        body['_responses_feature_profile'] = (
+            getattr(slot, 'responses_profile', '') or 'compatible')
+    return body
 
 
 def _finalize_stream_success(slot, usage, *, latency, ttft, state,
@@ -1041,6 +1085,9 @@ def _finalize_stream_success(slot, usage, *, latency, ttft, state,
             'key': slot.key_name, 'model': slot.model,
             'key_tail': (slot.api_key or '')[-4:],
             'provider_id': slot.provider_id,
+            'protocol': slot.protocol or 'openai',
+            'responses_profile': getattr(
+                slot, 'responses_profile', '') or '',
             'latency_ms': round(latency),
             'attempt': state.hard_attempts + 1,
             '429_retries': state._429_count,
@@ -1049,8 +1096,20 @@ def _finalize_stream_success(slot, usage, *, latency, ttft, state,
     if cache_conv_id:
         try:
             from lib.llm_dispatch.cache_settle import (
-                is_cold_write, record_stream_end)
-            record_stream_end(cache_conv_id, cold_write=is_cold_write(usage))
+                codex_cache_write_pending, is_cold_write,
+                observe_codex_cache, record_stream_end,
+            )
+            _cache_profile = slot.oauth or ''
+            if _cache_profile == 'codex':
+                observe_codex_cache(cache_conv_id, usage)
+            record_stream_end(
+                cache_conv_id,
+                cold_write=is_cold_write(usage),
+                cache_profile=_cache_profile,
+                pending_write=(
+                    codex_cache_write_pending(usage)
+                    if _cache_profile == 'codex' else False),
+            )
         except ImportError as _cs_err:
             logger.debug('%s cache-settle record unavailable: %s', tag, _cs_err)
 
@@ -1709,7 +1768,8 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
         try:
             from lib.llm_dispatch.cache_settle import settle_before_send
             settle_before_send(_cache_conv_id, _est_tok,
-                               abort_check=abort_check, log_prefix=tag)
+                               abort_check=abort_check, log_prefix=tag,
+                               cache_profile=slot.oauth or '')
         except ImportError as _cs_err:
             logger.debug('%s cache-settle gate unavailable: %s', tag, _cs_err)
 
@@ -2141,7 +2201,8 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
             _cache_conv_id = get_conv_affinity() or ''
             await async_settle_before_send(
                 _cache_conv_id, estimate_prefix_tokens(body),
-                abort_check=abort_check, log_prefix=tag)
+                abort_check=abort_check, log_prefix=tag,
+                cache_profile=slot.oauth or '')
         except ImportError as _cs_err:
             logger.debug('%s cache-settle (async) unavailable: %s', tag, _cs_err)
 
@@ -2400,6 +2461,8 @@ def dispatch_fastest(messages, *, max_tokens=4096, temperature=0,
                 thinking_format=slot.thinking_format or '',
                 provider_id=slot.provider_id or '',
                 api_protocol=slot.protocol or 'openai',
+                responses_feature_profile=(
+                    getattr(slot, 'responses_profile', '') or 'compatible'),
                 oauth=slot.oauth or '',
                 adapter=slot.adapter or None,
             )
@@ -2446,6 +2509,9 @@ def dispatch_fastest(messages, *, max_tokens=4096, temperature=0,
                                 'model': winner.model,
                                 'key_tail': (winner.api_key or '')[-4:],
                                 'provider_id': winner.provider_id,
+                                'protocol': winner.protocol or 'openai',
+                                'responses_profile': (
+                                    winner.responses_profile or ''),
                                 'latency_ms': round(winner.latency_ema),
                                 'mode': 'race',
                             }

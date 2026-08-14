@@ -30,7 +30,6 @@ Run:  pytest tests/test_research_persistence.py -m unit
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
 
@@ -44,13 +43,22 @@ pytestmark = pytest.mark.unit
 # ── Fixtures ───────────────────────────────────────────────────────────────
 
 @pytest.fixture()
-def fresh_db(tmp_path):
-    """Real SQLite with the real schema — no mocked DB layer."""
+def fresh_db(tmp_path, monkeypatch):
+    """Real Sidecar SQLite plus the legacy DB needed by neighboring recipe code."""
     from lib.database import reset_sqlite_for_tests, restore_db_state
+    from lib.research import persistence
+    from lib.storage import StorageSupervisor
+
     snapshot = reset_sqlite_for_tests(str(tmp_path / 'research.db'))
+    supervisor = StorageSupervisor(
+        project_root=tmp_path / 'sidecar', backend='sqlite', startup_timeout=20)
+    supervisor.start()
+    monkeypatch.setattr(
+        persistence, '_storage', lambda **_kwargs: supervisor.client)
     try:
-        yield
+        yield supervisor
     finally:
+        supervisor.stop()
         restore_db_state(snapshot)
 
 
@@ -95,6 +103,12 @@ _IDEATE_ARTIFACT = {
     ],
     'threshold': 4.0,
     'gate_reached': 'accepted',
+    'evaluation': {
+        'ok': True, 'overall_score': 4.1, 'worth_following_up': True,
+        'judge_count': 2,
+        'scores': {'survey_coverage': 4.0},
+        'usage': {'calls': 2, 'prompt_tokens': 120, 'cost_cny': 0.12},
+    },
 }
 
 
@@ -185,6 +199,9 @@ class TestArtifactsOutliveTheProcess:
         assert rej[0]['reject_reason'], 'the rejection reason was dropped'
         assert got['threshold'] == 4.0
         assert got['gate_reached'] == 'accepted'
+        assert got['evaluation']['overall_score'] == 4.1
+        assert got['evaluation']['judge_count'] == 2
+        assert got['usage']['stages']['evaluate']['calls'] == 2
 
     def test_absent_direction_reads_back_empty_not_error(self, fresh_db):
         """A direction never researched is an honest empty, not an exception —
@@ -205,14 +222,16 @@ class TestArtifactsOutliveTheProcess:
 
 class TestCompositeKeyDiscipline:
     def test_survey_and_ideate_are_separate_rows(self, fresh_db):
-        from lib.research.persistence import persist_ideate, persist_survey
-        from lib.database import get_thread_db
+        from lib.research.persistence import (
+            persist_ideate, persist_survey, research_direction_hash,
+        )
         persist_survey(_DIRECTION, 'en', '# S', _OPEN_GAPS, model='')
         persist_ideate(_DIRECTION, 'en', _IDEATE_ARTIFACT, model='')
-        db = get_thread_db()
-        rows = db.execute(
-            'SELECT lang FROM paper_reports ORDER BY lang').fetchall()
-        langs = sorted(r['lang'] for r in rows)
+        rows = fresh_db.client.query('research.artifacts.get', {
+            'paper_hash': research_direction_hash(_DIRECTION),
+            'lang': 'en',
+        })
+        langs = sorted(row['lang_key'] for row in rows)
         assert langs == ['ideate:en', 'survey:en'], (
             f'expected two distinct composite-key rows, got {langs}')
 
@@ -227,28 +246,26 @@ class TestCompositeKeyDiscipline:
     def test_rerun_upserts_rather_than_duplicating(self, fresh_db):
         from lib.research.persistence import (load_research_artifacts,
                                               persist_survey)
-        from lib.database import get_thread_db
         persist_survey(_DIRECTION, 'en', '# First', _OPEN_GAPS, model='')
         persist_survey(_DIRECTION, 'en', '# Second', _OPEN_GAPS, model='')
-        db = get_thread_db()
-        n = db.execute("SELECT count(*) AS n FROM paper_reports "
-                       "WHERE lang = 'survey:en'").fetchone()['n']
+        got = load_research_artifacts(_DIRECTION, 'en')
+        n = 1 if got['survey_md'] else 0
         assert n == 1, f'a re-run duplicated the row instead of upserting ({n})'
         assert load_research_artifacts(_DIRECTION, 'en')['survey_md'] == '# Second'
 
     def test_research_rows_never_land_on_a_real_papers_report(self, fresh_db):
         """A paper's plain ``(phash,'en')`` report must be untouched by a
         research run — the composite key is what keeps them apart."""
-        from lib.database import get_thread_db
         from lib.research.persistence import persist_survey
-        db = get_thread_db()
-        db.execute("INSERT INTO paper_reports (paper_hash, lang, report,"
-                   " model, meta, created_at) VALUES (?,?,?,'','',1)",
-                   ('deadbeef' * 4, 'en', 'THE PAPER REPORT'))
-        db.commit()
+        fresh_db.client.command('paper.report.upsert', {
+            'paper_hash': 'deadbeef' * 4, 'lang': 'en',
+            'report': 'THE PAPER REPORT', 'model': '', 'meta': {},
+            'created_at': 1,
+        }, 'research-test-paper-decoy')
         persist_survey(_DIRECTION, 'en', '# S', _OPEN_GAPS, model='')
-        row = db.execute("SELECT report FROM paper_reports WHERE paper_hash=?"
-                         " AND lang='en'", ('deadbeef' * 4,)).fetchone()
+        row = fresh_db.client.query('paper.report.get', {
+            'paper_hash': 'deadbeef' * 4, 'lang': 'en',
+        })
         assert row['report'] == 'THE PAPER REPORT', \
             'a research run overwrote a real paper report'
 
@@ -271,11 +288,10 @@ class TestPersistenceFailurePosture:
                                  model='') is False
 
     def test_empty_direction_is_refused_not_written(self, fresh_db):
-        from lib.database import get_thread_db
         from lib.research.persistence import persist_survey
         assert persist_survey('', 'en', '# S', _OPEN_GAPS, model='') is False
-        db = get_thread_db()
-        n = db.execute('SELECT count(*) AS n FROM paper_reports').fetchone()['n']
+        n = len(fresh_db.client.query(
+            'research.directions.list', {'limit': 50}))
         assert n == 0, 'an empty direction wrote a row under a blank identity'
 
 

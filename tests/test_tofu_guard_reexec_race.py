@@ -338,17 +338,18 @@ class TestReexecRace(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_static_anchors(self):
-        """The marker write (update.py), clear (server.py) and both guard
+        """The marker write (update.py), clear (server_boot_report.py) and both guard
         layers are present in the shipped sources."""
         with open(os.path.join(ROOT, 'routes', 'api_v1', 'update.py'),
                   encoding='utf-8') as f:
             upd = f.read()
-        with open(os.path.join(ROOT, 'server.py'), encoding='utf-8') as f:
-            srv = f.read()
+        with open(os.path.join(ROOT, 'lib', 'server_boot_report.py'),
+                  encoding='utf-8') as f:
+            boot_report = f.read()
         with open(GUARD_SRC, encoding='utf-8') as f:
             grd = f.read()
         self.assertIn("'.reexec_in_progress'", upd)
-        self.assertIn("'.reexec_in_progress'", srv)
+        self.assertIn("'.reexec_in_progress'", boot_report)
         self.assertIn('# (b1) re-exec marker', grd)
         self.assertIn('# (b2) boot-in-progress via the instance lock', grd)
 

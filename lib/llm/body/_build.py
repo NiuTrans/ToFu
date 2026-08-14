@@ -6,11 +6,14 @@ Orchestrates the cohesive helpers: image validation/downscaling
 context-window clamp (``_clamp``).
 """
 
+import copy
+
 import lib as _lib
 from lib.llm_sanitize import (
     _drop_empty_assistant_messages,
     _fix_empty_user_messages,
     _fix_orphaned_tool_calls,
+    _fix_tool_call_wire_shape,
     _merge_consecutive_same_role,
     _sanitize_messages,
     _strip_empty_text_blocks,
@@ -20,6 +23,8 @@ from lib.log import get_logger
 from lib.model_info import (
     _clamp_max_tokens,
     gemini_reasoning_effort,
+    glm_line_version,
+    glm_reasoning_effort,
     gpt_reasoning_effort,
     is_claude,
     is_claude_opus_47,
@@ -63,7 +68,11 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
       - Claude:   thinking.type='adaptive', effort param, cache breakpoints
       - Kimi K3:  top-level reasoning_effort (low/high/max), no temperature
       - Kimi K2:  thinking.type='enabled'/'disabled', fixed temp
-      - GLM:      thinking.type='enabled', temperature clamped to (0, 1)
+      - GLM:      thinking.type='enabled'/'disabled', temperature clamped
+                  to (0, 1); GLM-5.2+ adds reasoning_effort + preserved
+                  thinking (clear_thinking=false when history carries
+                  reasoning_content); GLM-5.3 is forced-thinking — 'disabled'
+                  degrades to reasoning_effort='low' (an API error otherwise)
       - Doubao:   thinking.type='enabled'/'disabled'
       - LongCat:  enable_thinking flag, temperature adjustment
       - Qwen:     enable_thinking flag, temperature adjustment
@@ -99,6 +108,18 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
         model, messages, max_tokens, provider_id=provider_id)
 
     clean_messages = _strip_non_api_fields(messages)
+    # Protocol-private assistant state is not an OpenAI API field, but native
+    # protocol converters need it after the generic body builder has run.
+    # Restore it onto the canonical in-process body here; the final OpenAI
+    # serialization branch strips it, while Responses/Anthropic consume their
+    # respective sidecar during conversion.  This also closes the historical
+    # restart/rebuild hole for Responses output items.
+    for _source_msg, _clean_msg in zip(messages, clean_messages):
+        if not isinstance(_source_msg, dict):
+            continue
+        for _sidecar in ('_responses_items', '_anthropic_content_blocks'):
+            if _source_msg.get(_sidecar):
+                _clean_msg[_sidecar] = copy.deepcopy(_source_msg[_sidecar])
 
     _pid = provider_id.lower() if provider_id else ''
     # Keyed on the GATEWAY, not one provider id's exact spelling: every
@@ -114,6 +135,12 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
     # list left empty by the strip is claimed by them (Kimi 400 "text content
     # is empty" — see _strip_empty_text_blocks).
     _strip_empty_text_blocks(clean_messages)
+    # Heal tool_call wire shape for ANY model BEFORE the orphan/adjacency
+    # fixer (which pairs BY id): empty/missing function.name → placeholder,
+    # missing type/id, non-string arguments, unpairable tool_call_id.
+    # Kimi hard-400s the whole request on these with the misleading
+    # "tokenization failed" (live-probed 2026-08-07, task 9a8196f3).
+    clean_messages = _fix_tool_call_wire_shape(clean_messages)
     clean_messages = _fix_orphaned_tool_calls(clean_messages)
     clean_messages = _drop_empty_assistant_messages(clean_messages)
     clean_messages = _merge_consecutive_same_role(clean_messages)
@@ -182,6 +209,19 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
     if _tf:
         from lib.llm_dispatch.provider_registry import get_dialect
         _plugin_dialect = get_dialect(_tf)
+    if _plugin_dialect is None and _tf == 'enable_thinking':
+        # GLM-5.2+ carries its own native thinking contract (effort rungs +
+        # preserved thinking). A provider-level legacy ``enable_thinking`` —
+        # e.g. the YourProvider template's Qwen-oriented default — is a dead field
+        # on GLM-native gateways (live-verified 2026-08-14 on
+        # your-llm-gateway.example.com: glm-5.3 ignores it, so a user-disabled model
+        # still thinks and bills) and it would silently kill the effort knob
+        # and clear_thinking. Deliberate engine declarations (plugin / none /
+        # chat_template_kwargs) still win — they describe the engine, not a
+        # model-family default.
+        _gv = glm_line_version(model)
+        if _gv is not None and _gv >= (5, 2):
+            _tf = ''
     if _plugin_dialect is not None:
         try:
             _plugin_dialect.apply_build(
@@ -229,9 +269,30 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
             body['thinking'] = {'type': 'disabled'}
         body['temperature'] = temperature or 0.7
     elif not _tf and is_glm(model):
-        if thinking_enabled:
+        # GLM-5.3 (2026-08-14) is a FORCED-thinking model: thinking.type
+        # 'disabled' is an API ERROR on its native endpoint, so a depth of
+        # 'off' degrades to the lightest legal rung (reasoning_effort='low')
+        # instead of a 400 — same policy as Kimi K3, the other
+        # always-thinks family.
+        _glm_v = glm_line_version(model)
+        _glm_forced = _glm_v is not None and _glm_v >= (5, 3)
+        if thinking_enabled or _glm_forced:
             body['thinking'] = {'type': 'enabled'}
             body['temperature'] = 1.0
+            if _glm_v is not None and _glm_v >= (5, 2):
+                # Effort knob + preserved thinking ship with GLM-5.2+; older
+                # GLM endpoints reject both fields.
+                body['reasoning_effort'] = glm_reasoning_effort(
+                    _effort, thinking_enabled, model)
+                # Preserved thinking: GLM clears replayed reasoning_content
+                # server-side by default (clear_thinking=true); opting out
+                # keeps the trace in context — officially recommended for
+                # tool/agent loops (better quality AND cache hits). Only
+                # meaningful when the history actually carries some.
+                if any(m.get('reasoning_content')
+                       for m in clean_messages
+                       if isinstance(m, dict) and m.get('role') == 'assistant'):
+                    body['thinking']['clear_thinking'] = False
         else:
             body['thinking'] = {'type': 'disabled'}
             body['temperature'] = max(temperature, 0.01) if temperature else 0.7
@@ -261,9 +322,9 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
         body['reasoning_split'] = True
     elif not _tf and is_gpt5(model):
         # OpenAI GPT-5 family is a reasoning model driven by the native
-        # ``reasoning_effort`` string (minimal/low/medium/high, plus the
-        # GPT-5.6 ``ultra`` tier). gpt_reasoning_effort maps Tofu's depth
-        # ladder and downgrades ``ultra`` to ``high`` on pre-5.6 models.
+        # ``reasoning_effort`` string. Current Codex models use ``none`` when
+        # disabled, add ``xhigh`` on 5.3+, and add ``max`` on 5.6+.
+        # gpt_reasoning_effort owns that generation-aware mapping.
         # Temperature is omitted — GPT-5 reasoning ignores sampling params.
         body['reasoning_effort'] = gpt_reasoning_effort(
             _effort, thinking_enabled, model)
@@ -293,7 +354,8 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
                             'downgrading to high', model)
                 _effort = 'high'
             elif _effort == 'ultra':
-                # ``ultra`` is a GPT-5.6 tier with no Claude equivalent —
+                # ``ultra`` is Tofu's legacy GPT-5.6 compatibility label;
+                # the public GPT value is ``max`` and Claude also tops at max.
                 # map to Claude's top rung (max) so the effort is honoured.
                 logger.info('[build_body] effort=ultra has no Claude tier on '
                             '%s — mapping to max', model)

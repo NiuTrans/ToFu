@@ -454,9 +454,8 @@ def resolve_turn_swarm_tools(tool_list, *, swarm_enabled: bool,
     Returns ``(tool_list, forced_names)``:
       * ``swarm_enabled`` true (assembly already added them) → unchanged, ``[]``.
       * ``swarm_enabled`` false AND ``has_pending_or_live`` → force the three
-        master tools in (bypassing the per-conversation tool-schema latch,
-        which ran during assembly BEFORE this augmentation — correctness of
-        the pending-swarm turn wins over prompt-cache stability).
+        master tools in because pending work remains actionable even when the
+        composer toggle is currently off.
       * otherwise → unchanged, ``[]``.
     """
     if swarm_enabled or not has_pending_or_live:

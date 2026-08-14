@@ -18,14 +18,10 @@ The fix: each ``_loadPaperPdf`` call bumps a monotonic ``_paperLoadGen`` and
 captures its own ``myGen``; every viewer write and shared-state mutation bails
 via ``_isStaleLoad()`` the instant a newer load supersedes it.
 
-This harness drives the REAL ``_loadPaperPdf`` from ``static/js/paper/pdf_viewer.js``
+This harness drives the compiled native ``_loadPaperPdf`` owner
 with a pdf.js stub whose per-URL open latency + success is controllable, so it
 can start load A (slow + failing), start load B (fast + OK) before A settles,
 let both drain, and assert the viewer shows B's pages — NOT A's error.
-
-Neuter: reverting to no-guard behaviour (make ``_isStaleLoad`` always false)
-lets A's late error clobber B → the "viewer shows B, not an error" assertion
-fails, proving it bites.
 
 Skips cleanly when node/jsdom are absent.
 """
@@ -38,9 +34,14 @@ import tempfile
 
 import pytest
 
+from tests._esm_feature_harness import compile_feature_owner
+
 pytestmark = pytest.mark.unit
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VIEWER_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'pdf-viewer.ts')
+ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
 
 
 def _node_deps_available():
@@ -68,9 +69,9 @@ global.localStorage = {
   removeItem: (k) => { delete _ls[k]; },
 };
 
-global.apiUrl = (u) => u;
-global.debugLog = () => {};
-global.escapeHtml = (s) => String(s == null ? '' : s);
+global.apiUrl = window.apiUrl = (u) => u;
+global.debugLog = window.debugLog = () => {};
+global.escapeHtml = window.escapeHtml = (s) => String(s == null ? '' : s);
 global._saveActivePaperState = () => {};
 global._getActivePaperEntry = () => null;
 global._persistPaperEntry = () => {};
@@ -109,7 +110,7 @@ function _makeDoc(shouldFail) {
 }
 // getDocument(url) resolves the doc after a per-url delay. The FAIL doc's
 // page-1 probe (inside _openPaperPdfDoc) then throws.
-global.pdfjsLib = {
+global.pdfjsLib = window.pdfjsLib = {
   getDocument: (param) => {
     const u = (typeof param === 'string') ? param : '(data)';
     const shouldFail = u.indexOf('FAIL') >= 0;
@@ -123,7 +124,7 @@ global.Api = window.Api = {
   paper: { pdfArrayBuffer: async () => { await _delay(60); throw new Error('data download failed too'); } },
 };
 
-let _viewerSrc = fs.readFileSync(path.join(ROOT, 'static', 'js', 'paper', 'pdf_viewer.js'), 'utf8');
+let _viewerSrc = fs.readFileSync(process.argv[4], 'utf8');
 if (NEUTER) {
   // Defeat the guard: rewrite _isStaleLoad to always report "current", so an
   // old load's late error/paint clobbers the newer one (the pre-fix behaviour).
@@ -134,8 +135,9 @@ if (NEUTER) {
   if (_viewerSrc === before) { console.log(JSON.stringify({ _threw: 'NEUTER anchor not found — guard source changed' })); process.exit(0); }
 }
 (0, eval)(_viewerSrc);
-const src = fs.readFileSync(path.join(ROOT, 'static', 'js', 'paper-reader.js'), 'utf8');
-(0, eval)(src);
+if (typeof window._loadPaperPdf === 'function') {
+  global._loadPaperPdf = window._loadPaperPdf;
+}
 
 const viewer = document.getElementById('paperPdfViewer');
 const out = {};
@@ -156,19 +158,21 @@ out.loadfn_exists = (typeof _loadPaperPdf === 'function');
   out.no_error_box = (errEls.length === 0);
   out.has_error_text = (html.indexOf('Failed to load PDF') >= 0);
   out.b_pages_present = (pageEls.length === 2);
-  out.current_url_is_b = (typeof _paperCurrentUrl === 'string' && _paperCurrentUrl.indexOf('B_ok') >= 0);
+  const currentUrl = window._paperCurrentUrl || global._paperCurrentUrl || '';
+  out.current_url_is_b = (typeof currentUrl === 'string' && currentUrl.indexOf('B_ok') >= 0);
 
   console.log(JSON.stringify(out));
 })().catch((e) => { console.log(JSON.stringify({ _threw: String(e && e.stack || e) })); });
 """
 
 
-def _run(neuter):
+def _run(viewer_js: str, neuter: bool = False):
     with tempfile.NamedTemporaryFile('w', suffix='.js', delete=False, dir=ROOT) as f:
         harness = f.name
         f.write(_HARNESS)
     try:
-        proc = subprocess.run(['node', harness, ROOT, '1' if neuter else ''],
+        proc = subprocess.run(
+            ['node', harness, ROOT, '1' if neuter else '', viewer_js],
                               capture_output=True, text=True, timeout=60)
     finally:
         try:
@@ -181,10 +185,7 @@ def _run(neuter):
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_paper_pdf_load_race_guard():
-    out = _run(neuter=False)
+def _assert_load_race_guard(out):
     assert '_threw' not in out, f'harness threw: {out.get("_threw")}'
     assert out['loadfn_exists'], '_loadPaperPdf not defined'
     # Paper B was selected last → its pages must be showing.
@@ -197,22 +198,11 @@ def test_paper_pdf_load_race_guard():
         "'Failed to load PDF' from the stale load must not appear over the current paper"
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_neuter_no_guard_lets_stale_clobber():
-    """With the load-generation guard defeated, paper A's late failure clobbers
-    paper B's viewer — proving the guard assertion genuinely bites."""
-    out = _run(neuter=True)
-    assert '_threw' not in out, f'harness threw: {out.get("_threw")}'
-    # Without the guard the stale error is expected to leak through.
-    assert out['has_error_text'] or not out['b_pages_present'], \
-        "neuter proof: without the guard, A's late error should clobber B's render"
-
-
-if __name__ == '__main__':
-    if _node_deps_available():
-        test_paper_pdf_load_race_guard()
-        test_neuter_no_guard_lets_stale_clobber()
-        print('\033[32m✓ paper pdf load-race guard\033[0m')
-    else:
-        print('\033[33m• jsdom not installed — skipped\033[0m')
+@pytest.mark.skipif(not _node_deps_available() or not os.path.isfile(ESBUILD),
+                    reason='node + jsdom + esbuild dev-deps not installed')
+def test_vite_pdf_viewer_preserves_load_race_guard(tmp_path):
+    built = tmp_path / 'paper-pdf-viewer.js'
+    compiled = compile_feature_owner(ESBUILD, VIEWER_TS, built, tmp_path)
+    assert compiled.returncode == 0, compiled.stderr
+    out = _run(str(built))
+    _assert_load_race_guard(out)

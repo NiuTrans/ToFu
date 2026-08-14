@@ -26,12 +26,20 @@ Run: make test-frontend  (skips cleanly when node/jsdom aren't installed)
 """
 
 import os
+import subprocess
+from pathlib import Path
 
 import pytest
 
-from tests._jsdom import JS_DIR, run_harness
+from tests._jsdom import run_harness
+from tests._runtime_sections import runtime_section_path
 
 pytestmark = pytest.mark.unit
+ROOT = Path(__file__).resolve().parents[1]
+MODULE_TS = ROOT / 'frontend/src/features/settings/credentials-vault.ts'
+ESBUILD = ROOT / 'node_modules/.bin/esbuild'
+SAFE_HTML = runtime_section_path('core/safe_html.js')
+SAVE_EXPORT = runtime_section_path('settings/save_export.js')
 
 _BODY = r'''
 const { setup } = require(process.env.JSDOM_HARNESS);
@@ -67,6 +75,24 @@ const { window, document, check, report } = setup({
     },
   },
 });
+
+for (const name of ['HTMLElement', 'HTMLInputElement', 'KeyboardEvent',
+                    'AbortController', 'AbortSignal']) {
+  global[name] = window[name];
+}
+const credentialModule = globalThis.CredentialModule || window.CredentialModule;
+for (const [legacyName, exportName] of [
+  ['_renderCredentialsVault', 'renderCredentialsVault'],
+  ['_credentialAdd', 'credentialAdd'],
+  ['_credentialReveal', 'credentialReveal'],
+  ['_credentialHide', 'credentialHide'],
+  ['_credentialCopy', 'credentialCopy'],
+  ['_credentialRemove', 'credentialRemove'],
+]) {
+  if (credentialModule && typeof credentialModule[exportName] === 'function') {
+    global[legacyName] = credentialModule[exportName];
+  }
+}
 
 // Clipboard: define on the jsdom navigator (read-only object) so the
 // module's navigator.clipboard.writeText path is exercised for real.
@@ -164,7 +190,10 @@ const flush = async () => { for (let i = 0; i < 6; i++) await new Promise((r) =>
     await flush();
     check('reveal_called', revealCalls.join(',') === 'github_pat');
     check('value_shown_after_reveal', html().indexOf('ghp_secretvalue123') !== -1);
-    check('copy_button_shown', html().indexOf('_credentialCopy(') !== -1);
+    check('copy_button_shown',
+      html().indexOf('_credentialCopy(') !== -1 ||
+      Array.from(document.querySelectorAll('.cred-vault-value button'))
+        .some((button) => button.textContent.indexOf('settings.credVaultCopy') !== -1));
     check('autohide_scheduled_30s',
       timers.length === 1 && timers[0].ms === 30000 && typeof timers[0].fn === 'function');
 
@@ -204,11 +233,44 @@ const flush = async () => { for (let i = 0; i < 6; i++) await new Promise((r) =>
 '''
 
 
-def test_credentials_vault_frontend():
+def _compile_credentials_vault(tmp_path):
+    built = tmp_path / 'credentials-vault.js'
+    compiled = subprocess.run(
+        [str(ESBUILD), str(MODULE_TS), '--bundle', '--format=iife',
+         '--platform=browser', '--global-name=CredentialModule',
+         '--footer:js=globalThis.CredentialModule = CredentialModule;',
+         f'--outfile={built}'],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+    return built
+
+
+@pytest.mark.skipif(not ESBUILD.is_file(), reason='esbuild not installed')
+def test_credentials_vault_frontend(tmp_path):
+    built = _compile_credentials_vault(tmp_path)
     run_harness(
-        target_js=os.path.join(JS_DIR, 'settings', 'credentials_vault.js'),
-        extra_targets=[os.path.join(JS_DIR, 'core', 'safe_html.js')],
+        target_js=str(built),
+        extra_targets=[SAFE_HTML],
         body_js=_BODY,
         expect_pass=28,
         label='credentials-vault',
     )
+
+
+@pytest.mark.skipif(not ESBUILD.is_file(), reason='esbuild not installed')
+def test_vite_credentials_vault_matches_privacy_contract(tmp_path):
+    built = _compile_credentials_vault(tmp_path)
+    run_harness(
+        target_js=str(built),
+        extra_targets=[SAFE_HTML],
+        body_js=_BODY,
+        expect_pass=28,
+        label='vite credentials-vault',
+    )
+
+
+def test_settings_close_wipes_revealed_credentials():
+    source = Path(SAVE_EXPORT).read_text()
+    assert "'_destroySpeechTab', '_destroyCredentialsVault', '_destroyAutoSetup'" in source
+    assert "if (typeof cleanup === 'function') cleanup();" in source

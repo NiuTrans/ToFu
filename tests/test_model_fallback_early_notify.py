@@ -109,7 +109,7 @@ def _drive(monkeypatch, *, tool_call_happened, fallback_outcome):
         result = _fb._llm_call_with_fallback(
             task, _body(), _PRIMARY, 0, 4096,
             tool_call_happened=tool_call_happened, tool_list=None,
-            max_tool_rounds=10, messages=_body()['messages'], preset='opus',
+            messages=_body()['messages'], preset='opus',
             thinking_enabled=False,
             accumulated_usage={}, api_rounds=[],
             on_tool_call_ready=None,

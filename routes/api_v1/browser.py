@@ -19,16 +19,19 @@ import subprocess
 import sys
 import time
 
-from flask import Blueprint, request
+from quart import Blueprint, request
 
 from lib.api_response import (
-    api_forbidden, api_internal_error, api_not_found, api_ok, api_payload,
+    api_bad_request, api_forbidden, api_internal_error, api_not_found, api_ok,
+    api_payload,
 )
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.ttl_cache import TTLCache
 
-from .auth import require_auth
+from lib.request_parser import parse_body
+
+from .auth import current_auth, require_auth
 
 logger = get_logger(__name__)
 
@@ -57,11 +60,13 @@ def browser_status():
     import os
 
     from lib.browser import (
-        _commands, _commands_lock, _last_poll_time,
-        get_connected_clients, is_extension_connected,
+        _commands, _commands_lock,
+        get_connected_clients,
     )
-    connected = is_extension_connected()
-    clients = get_connected_clients()
+    ctx = current_auth()
+    user_id = str(getattr(ctx, 'user_id', '') or '')
+    clients = get_connected_clients(user_id=user_id)
+    connected = bool(clients)
     from lib.browser import get_locked_out_clients
     locked_out = get_locked_out_clients()
     # Highest Chromium major across connected clients. Chrome 142+ enforces the
@@ -69,8 +74,10 @@ def browser_status():
     # surface guidance for the browser actually running the bridge.
     chrome_major = max((c.get('chrome_major', 0) or 0 for c in clients), default=0)
     with _commands_lock:
-        pending_count = sum(1 for c in _commands.values() if not c.get('picked_up'))
-        total_count = len(_commands)
+        own_commands = [c for c in _commands.values()
+                        if (c.get('user_id') or '') == user_id]
+        pending_count = sum(1 for c in own_commands if not c.get('picked_up'))
+        total_count = len(own_commands)
     # Absolute on-disk path of the unpacked extension, plus WHICH browser (if
     # any) this machine can actually drive.
     #
@@ -105,10 +112,16 @@ def browser_status():
                          'this UI from it')
         else:
             extension_path = ext_dir
+    from lib.browser import last_browser_fallback, lease_status
+    from lib.browser.protocol import MIN_PROTOCOL_VERSION, PROTOCOL_VERSION
+    freshest = max(clients, key=lambda row: row.get('last_poll', 0)) \
+        if clients else {}
+    user_last_poll = freshest.get('last_poll')
     return api_ok({
         'connected': connected,
-        'lastPoll': _last_poll_time,
-        'secondsAgo': round(time.time() - _last_poll_time, 1) if _last_poll_time else None,
+        'lastPoll': user_last_poll,
+        'secondsAgo': round(time.time() - user_last_poll, 1)
+        if user_last_poll else None,
         'clients': clients,
         'pendingCommands': pending_count,
         'totalCommands': total_count,
@@ -119,13 +132,20 @@ def browser_status():
         # (stale credential — installed but locked out, never to be shown
         # as "not installed").
         'servedExtVersion': _served_ext_version(),
-        'lockedOutClients': locked_out,
+        'lockedOutClients': locked_out if not user_id else [],
         # Only what the UI renders. The binary's absolute path is server
         # filesystem detail the browser has no use for.
         'localBrowser': ({'family': local_browser['family'],
                           'name': local_browser['name'],
                           'extensionsUrl': local_browser['extensionsUrl']}
                          if local_browser else None),
+        'protocolVersion': PROTOCOL_VERSION,
+        'minProtocolVersion': MIN_PROTOCOL_VERSION,
+        'clientProtocolVersion': int(freshest.get('protocol_version') or 0),
+        'capabilities': list(freshest.get('capabilities') or []),
+        'profile': freshest.get('profile', ''),
+        'leases': lease_status(user_id=user_id),
+        'lastFallback': last_browser_fallback(user_id=user_id),
     })
 
 
@@ -142,7 +162,137 @@ def browser_status():
 )
 def browser_clients():
     from lib.browser import get_connected_clients
-    return api_ok({'clients': get_connected_clients()})
+    ctx = current_auth()
+    user_id = str(getattr(ctx, 'user_id', '') or '')
+    return api_ok({'clients': get_connected_clients(user_id=user_id)})
+
+
+def _request_user_id() -> str:
+    ctx = current_auth()
+    return str(getattr(ctx, 'user_id', '') or '')
+
+
+@api_v1_browser_bp.route('/api/v1/browser/access', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='Get browser domain access policy',
+    description=('Returns the current user\'s read-denied domains and durable '
+                 'write grants. Cookie values and page content are never exposed.'),
+    tags=['browser'],
+)
+def browser_access_get():
+    from lib.browser import get_access_policy
+    return api_ok(get_access_policy(_request_user_id()))
+
+
+@api_v1_browser_bp.route('/api/v1/browser/access', methods=['PUT'])
+@require_auth
+@api_meta(
+    summary='Update browser domain access policy',
+    description=(
+        'Replaces ``read_denied_domains`` and/or applies one ``grant`` or '
+        '``revoke`` operation. Write grants are tied to this user and a '
+        'specific browser client/profile; they never carry across domains.'),
+    tags=['browser'],
+)
+def browser_access_put():
+    from lib.browser import (
+        get_access_policy, grant_write, replace_read_denials,
+        replace_write_grants, revoke_write,
+    )
+    body = parse_body() or {}
+    if not isinstance(body, dict):
+        return api_bad_request('JSON object required')
+    user_id = _request_user_id()
+    try:
+        denials = body.get('read_denied_domains', body.get('readDeniedDomains'))
+        if denials is not None:
+            if not isinstance(denials, list):
+                return api_bad_request('read_denied_domains must be an array')
+            replace_read_denials(user_id, denials)
+        grants = body.get('write_grants', body.get('writeGrants'))
+        if grants is not None:
+            if not isinstance(grants, list):
+                return api_bad_request('write_grants must be an array')
+            from lib.browser import get_connected_clients, normalize_domain
+            connected_ids = {
+                str(row.get('client_id') or '')
+                for row in get_connected_clients(user_id=user_id)
+            }
+            current = get_access_policy(user_id)
+            existing = {
+                (normalize_domain(row.get('domain')),
+                 str(row.get('client_id') or row.get('clientId') or ''),
+                 str(row.get('profile') or ''))
+                for row in current.get('write_grants', [])
+                if isinstance(row, dict)
+            }
+            for row in grants:
+                if not isinstance(row, dict):
+                    return api_bad_request(
+                        'each write grant must be an object')
+                identity = (
+                    normalize_domain(row.get('domain')),
+                    str(row.get('client_id') or row.get('clientId') or ''),
+                    str(row.get('profile') or ''),
+                )
+                if identity not in existing and identity[1] not in connected_ids:
+                    return api_bad_request(
+                        'new write grants require one of your connected browsers')
+            ctx = current_auth()
+            replace_write_grants(
+                user_id, grants,
+                granted_by=str(getattr(ctx, 'user_id', '')
+                               or getattr(ctx, 'name', '') or ''))
+        grant = body.get('grant')
+        if isinstance(grant, dict):
+            from lib.browser import get_connected_clients
+            grant_client = str(
+                grant.get('client_id') or grant.get('clientId') or '')
+            owned_clients = {
+                str(row.get('client_id') or '')
+                for row in get_connected_clients(user_id=user_id)
+            }
+            if grant_client not in owned_clients:
+                return api_bad_request(
+                    'grant client_id must name one of your connected browsers')
+            ctx = current_auth()
+            grant_write(
+                user_id, grant.get('domain', ''),
+                client_id=grant_client,
+                profile=grant.get('profile') or '',
+                granted_by=str(getattr(ctx, 'user_id', '')
+                               or getattr(ctx, 'name', '') or ''))
+        revoke = body.get('revoke')
+        if isinstance(revoke, dict):
+            revoke_write(
+                user_id, revoke.get('domain', ''),
+                client_id=revoke.get('client_id') or revoke.get('clientId') or '',
+                profile=revoke.get('profile') or '')
+        return api_ok(get_access_policy(user_id))
+    except ValueError as exc:
+        return api_bad_request(str(exc))
+
+
+@api_v1_browser_bp.route('/api/v1/browser/adapters', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='List browser site adapters and health',
+    description=('Returns commands, read/write classification, schemas, and '
+                 'missing extension capabilities for each adapter.'),
+    tags=['browser'],
+)
+def browser_adapters():
+    from lib.browser import adapters_payload, get_connected_clients
+    clients = get_connected_clients(user_id=_request_user_id())
+    requested = request.args.get('clientId') or ''
+    if requested and requested not in {
+            str(row.get('client_id') or '') for row in clients}:
+        return api_bad_request('clientId is not connected for this user')
+    selected = requested or (str(max(
+        clients, key=lambda row: row.get('last_poll', 0)).get('client_id') or '')
+        if clients else '')
+    return api_ok(adapters_payload(client_id=selected))
 
 
 @api_v1_browser_bp.route('/api/v1/browser/test', methods=['GET'])
@@ -159,20 +309,35 @@ def browser_clients():
 )
 def browser_test():
     from lib.browser import (
-        _commands, _commands_lock, _last_poll_time,
-        get_connected_clients, is_extension_connected,
+        _commands, _commands_lock,
+        get_connected_clients,
         send_browser_command,
     )
-    client_id = request.args.get('clientId') or None
+    user_id = _request_user_id()
+    clients = get_connected_clients(user_id=user_id)
+    requested = request.args.get('clientId') or ''
+    owned = {str(row.get('client_id') or '') for row in clients}
+    if requested and requested not in owned:
+        return api_bad_request('clientId is not connected for this user')
+    client_id = requested or (str(max(
+        clients, key=lambda row: row.get('last_poll', 0)).get('client_id') or '')
+        if clients else '')
+    connected = bool(client_id)
     status = {
-        'connected': is_extension_connected(client_id),
-        'lastPoll': round(time.time() - _last_poll_time, 1) if _last_poll_time else None,
-        'clients': get_connected_clients(),
+        'connected': connected,
+        'lastPoll': round(time.time() - max(
+            (row.get('last_poll', 0) for row in clients), default=0), 1)
+        if clients else None,
+        'clients': clients,
     }
     with _commands_lock:
-        status['pendingCommands'] = len(_commands)
-        status['commandIds'] = list(_commands.keys())[:5]
-    if not is_extension_connected(client_id):
+        own_commands = {
+            command_id: command for command_id, command in _commands.items()
+            if (command.get('user_id') or '') == user_id
+        }
+        status['pendingCommands'] = len(own_commands)
+        status['commandIds'] = list(own_commands)[:5]
+    if not connected:
         return api_payload({'status': status,
                             'error': 'Extension not connected'}, 503)
     result, error = send_browser_command('list_tabs', timeout=10, client_id=client_id)

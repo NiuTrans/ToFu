@@ -60,6 +60,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -67,7 +68,13 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+sys.path.insert(0, HERE)
+from _runtime_sections import runtime_section_path  # noqa: E402
+
+HEALTH_TIMER = runtime_section_path('core/health_stream_timer.js')
+BACKEND_MONITOR = runtime_section_path('core/backend_offline_monitor.js')
+NET_LATENCY = runtime_section_path('net-latency.js')
+ZH_I18N = os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales', 'zh.json')
 
 
 def _node_deps_available() -> bool:
@@ -124,8 +131,14 @@ global.Api = win.Api = {
 
 // Load the REAL i18n.js so t() + the real conn.* keys are exercised (proves the
 // keys exist AND the banner/toast wiring resolves them, in zh).
-eval(fs.readFileSync(process.argv[4], 'utf8'));  // i18n.js (real) → defines t()
-if (typeof t !== 'function' && typeof win.t === 'function') { global.t = win.t; }
+const _MESSAGES = JSON.parse(fs.readFileSync(process.argv[4], 'utf8'));
+let _i18nLang = 'zh';
+global.t = win.t = (key, values) => {
+  let text = _MESSAGES[key] || key;
+  for (const [name, value] of Object.entries(values || {}))
+    text = text.replaceAll('{' + name + '}', String(value));
+  return text;
+};
 
 // Capture toast output to assert the offline toast renders zh.
 let _lastToast = null;
@@ -291,8 +304,14 @@ global.escapeHtml = win.escapeHtml = (s) => String(s == null ? '' : s)
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
 // Load the REAL i18n.js so t() resolves the real conn.* HUD keys in zh.
-eval(fs.readFileSync(process.argv[4], 'utf8'));  // i18n.js
-if (typeof t !== 'function' && typeof win.t === 'function') { global.t = win.t; }
+const _MESSAGES = JSON.parse(fs.readFileSync(process.argv[4], 'utf8'));
+let _i18nLang = 'zh';
+global.t = win.t = (key, values) => {
+  let text = _MESSAGES[key] || key;
+  for (const [name, value] of Object.entries(values || {}))
+    text = text.replaceAll('{' + name + '}', String(value));
+  return text;
+};
 
 // The monitor defines _checkServerHealth + the health-cache state the timer
 // file touches (its self-registered pageshow/visibilitychange listeners fire
@@ -361,9 +380,9 @@ def test_db_banner_clears_on_recovery():
     harness = os.path.join(HERE, '_db_banner_harness.js')
     with open(harness, 'w') as f:
         f.write(_DB_HARNESS)
-    src = os.path.join(JS_DIR, 'core', 'health_stream_timer.js')
-    monitor = os.path.join(JS_DIR, 'core', 'backend_offline_monitor.js')
-    i18n = os.path.join(JS_DIR, 'i18n.js')
+    src = HEALTH_TIMER
+    monitor = BACKEND_MONITOR
+    i18n = ZH_I18N
     try:
         proc = subprocess.run(
             ['node', harness, src, ROOT, i18n, monitor],
@@ -387,7 +406,7 @@ def test_net_latency_staleness_watchdog():
     harness = os.path.join(HERE, '_latency_watchdog_harness.js')
     with open(harness, 'w') as f:
         f.write(_LATENCY_HARNESS)
-    src = os.path.join(JS_DIR, 'net-latency.js')
+    src = NET_LATENCY
     # Second arg is a harmless empty file (harness evals argv[3]); reuse src's
     # dir with an empty stub to keep the eval count stable.
     stub = os.path.join(HERE, '_empty_stub.js')
@@ -417,9 +436,9 @@ def test_stream_hud_renders_zh_on_dead_server():
     harness = os.path.join(HERE, '_hud_i18n_harness.js')
     with open(harness, 'w') as f:
         f.write(_HUD_HARNESS)
-    src = os.path.join(JS_DIR, 'core', 'health_stream_timer.js')
-    monitor = os.path.join(JS_DIR, 'core', 'backend_offline_monitor.js')
-    i18n = os.path.join(JS_DIR, 'i18n.js')
+    src = HEALTH_TIMER
+    monitor = BACKEND_MONITOR
+    i18n = ZH_I18N
     try:
         proc = subprocess.run(
             ['node', harness, src, ROOT, i18n, monitor],

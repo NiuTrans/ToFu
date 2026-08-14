@@ -22,7 +22,7 @@ telling a good change from a bad one. Confirmed by reading the code:
 | Loop | Experience capture | Policy update | **Credit assignment (reward)** |
 |---|---|---|---|
 | **Optimizer** (`lib/optimizer/`) | ✅ `analyzer.gather_evidence` mines logs/audit/DB | ✅ `applier` + TTL-revert | ❌ `outcome_metric` is real **only** for `block_search_domain`; every other action type falls into the `{'note': 'no auto-metric for this action_type'}` branch (`analyzer.py` `_compute_post_apply_metrics`) |
-| **Memory prefetch** (`lib/memory/prefetch.py`) | ✅ records which memories it injected (`task['_memoryPrefetch']`, and `audit_log('memory_prefetch', memory_names=…)`) | ✅ ranking = BM25 → cheap-LLM | ❌ nothing records whether an injected memory *helped*; the corpus only grows |
+| **Memory prefetch** (`lib/memory/prefetch/`) | ✅ records which memories it selected (`task['_memoryPrefetch']` + audit event) | ✅ metadata-only BM25 → deterministic high-confidence gate, max 2, zero auxiliary LLM | ❌ nothing records whether an injected memory *helped*; the corpus only grows |
 | **User profile** (`lib/memory/profile_consolidate.py`) | ✅ consolidation learns preferences; `applied_profile_items` records which bullets were injected | ✅ auto-applied, editable in Settings | ❌ a wrong inference is corrected only if the human notices and edits it |
 
 Without a reward signal a system that accumulates **drifts** — it gets bigger
@@ -288,8 +288,8 @@ pattern to avoid flapping on 1–2 events):
   exactly as today for longer is strictly preferable to graduating on a handful
   of confounded turns. Conservatism is free in shadow mode. Sized against the
   abundant passive signals, NOT the scarce critic).
-- Below the threshold the unit behaves exactly as today (pure BM25→cheap-LLM
-  for memory; pure consolidation confidence for profile).
+- Below the threshold the unit behaves exactly as today (metadata-only local
+  matching for memory; pure consolidation confidence for profile).
 
 ### 6.5 EWMA, not last-value; bounded step
 
@@ -368,7 +368,7 @@ them over weeks:
   keep measuring. (The in-sample co-occurrence chart may still be logged as a
   sanity/plumbing check, but it is NEVER a graduation criterion.)
 - **Would-change rate:** how often would the learned ranking differ from the
-  BM25→cheap-LLM ranking, and in which direction?
+  local metadata/high-confidence ranking, and in which direction?
 - **Attribution coverage:** fraction of injected units that ever get a `used`
   credit (if ~0, attribution is too strict; if ~100%, too loose — §6.2 needs
   tuning).
@@ -405,10 +405,9 @@ Every graduated influence is bounded and reversible, reusing existing seams:
 - **Env kill-switch** per unit type (`TOFU_LEARN_MEMORY=0`, …), fail-open to
   today's behaviour — the `_resolve_feature_flag` pattern already used by
   prefetch/consolidate.
-- Memory influence is a **bounded prior** on the existing cascade (it re-orders
-  and can demote a chronically-useless memory below the injection cut, but the
-  cheap-LLM precision filter still has final say — the weight is a thumb on the
-  scale, not a new gate).
+- Memory influence is a **bounded prior** on the existing local cascade (it
+  re-orders candidates but cannot bypass the exact-identifier/two-token
+  confidence gate — the weight is a thumb on the scale, not a new gate).
 - Optimizer graduation (suggest-only → auto_apply) inherits the **TTL-revert**
   that already exists (`applier.revert_expired_actions`): a graduated action
   that measures negative auto-reverts.

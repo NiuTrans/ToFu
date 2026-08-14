@@ -38,11 +38,15 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
+CONV_REDUCERS_JS = runtime_section_path('core/conv_reducers.js')
+CONV_WINDOW_JS = runtime_section_path('conv_window.js')
+CROSS_TAB_SYNC_JS = runtime_section_path('core/cross_tab_sync.js')
 
 
 def _node_available() -> bool:
@@ -227,15 +231,15 @@ def _run_harness(*js_paths: str) -> subprocess.CompletedProcess:
 
 def _sources(sync_src_path: str):
     return (
-        os.path.join(JS_DIR, 'core', 'conv_reducers.js'),
-        os.path.join(JS_DIR, 'conv_window.js'),
+        CONV_REDUCERS_JS,
+        CONV_WINDOW_JS,
         sync_src_path,
     )
 
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_windowed_verify_adoption():
-    proc = _run_harness(*_sources(os.path.join(JS_DIR, 'core', 'cross_tab_sync.js')))
+    proc = _run_harness(*_sources(CROSS_TAB_SYNC_JS))
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     assert 'HARNESS-ERROR' not in output, output
@@ -250,7 +254,7 @@ def test_windowed_verify_escalate_neuter(tmp_path):
     → (C) fails (no escalation refetch; the wrong anchor pair is adopted),
     every other check stays green. Proves (C) discriminates the escalate.
     Shipped file left byte-identical."""
-    sync_js = os.path.join(JS_DIR, 'core', 'cross_tab_sync.js')
+    sync_js = CROSS_TAB_SYNC_JS
     with open(sync_js, encoding='utf-8') as f:
         src = f.read()
 

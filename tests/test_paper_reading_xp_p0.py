@@ -255,29 +255,26 @@ def test_usage_folded_and_items_persisted():
 def test_persist_insight_v2_meta_written():
     """The REAL _persist_insight writes meta {kind,v,items,baseline,usage}."""
     captured = {}
-    import lib.database as _dbmod
+    import lib.storage as _storage_mod
 
-    class _FakeDB:
-        def execute(self, *a, **k):
-            return self
+    class _FakeClient:
+        def command(self, operation, payload, command_id):
+            captured.update(
+                operation=operation, row=payload, command_id=command_id)
+            return {'saved': True}
 
-    def _fake_upsert(db, table, row, **kw):
-        captured['row'] = row
-
-    orig_thread = getattr(_dbmod, 'get_thread_db', None)
-    import lib.database._core_schema as _schema
-    orig_upsert = _schema.upsert
-    _dbmod.get_thread_db = lambda: _FakeDB()
-    _schema.upsert = _fake_upsert
+    original = _storage_mod.get_storage_client
+    _storage_mod.get_storage_client = lambda *, write=False: _FakeClient()
     try:
         ok = ie._persist_insight('h1', 'en', '## 💡 x\n', 'm1',
                                  items={'thesis': 't'}, usage={'prompt_tokens': 1},
                                  baseline=3.0)
     finally:
-        _dbmod.get_thread_db = orig_thread
-        _schema.upsert = orig_upsert
+        _storage_mod.get_storage_client = original
     assert ok is True
-    meta = json.loads(captured['row']['meta'])
+    assert captured['operation'] == 'paper.report.upsert'
+    assert captured['command_id'].startswith('paper.insight.upsert:')
+    meta = captured['row']['meta']
     assert meta['kind'] == 'insight' and meta['v'] == 2
     assert meta['items'] == {'thesis': 't'}
     assert meta['baseline'] == 3.0 and meta['usage'] == {'prompt_tokens': 1}
@@ -289,7 +286,7 @@ def test_persist_insight_v2_meta_written():
 def test_merge_second_pass_updates_meta_persists_emits():
     from lib.paper.report_engine._hooks import _merge_second_pass
     events = []
-    updates = []
+    persisted = []
     task = {
         'lang': 'en',
         'report_meta': {'model': 'm1', 'providerId': '',
@@ -304,17 +301,26 @@ def test_merge_second_pass_updates_meta_persists_emits():
     import lib.cost as _cost_mod
     orig_compute = _cost_mod.compute_cost
 
-    class _FakeDB:
-        def execute(self, sql, params=None):
-            updates.append((sql, params))
-            return self
+    import lib.storage as _storage_mod
+    orig_client = _storage_mod.get_storage_client
 
-    import lib.database as _dbmod
-    orig_thread = getattr(_dbmod, 'get_thread_db', None)
+    class _Client:
+        def command(self, operation, payload, command_id):
+            persisted.append((operation, payload, command_id))
+            current = json.loads(json.dumps(task['report_meta']))
+            current.setdefault('secondPasses', {})[payload['name']] = payload['entry']
+            current['totalUsage'] = {
+                'prompt_tokens': 1150, 'completion_tokens': 250,
+                'cache_read_tokens': 0, 'cache_write_tokens': 0,
+                'reasoning_tokens': 0,
+            }
+            current['totalCostCny'] = 0.015
+            current['totalCostUsd'] = 0.0015
+            return {'found': True, 'meta': current}
 
     hooks._append_report_event = lambda t, ev: events.append(ev)
     _cost_mod.compute_cost = lambda usage, **k: {'costCny': 0.005, 'costUsd': 0.0005}
-    _dbmod.get_thread_db = lambda: _FakeDB()
+    _storage_mod.get_storage_client = lambda *, write=False: _Client()
     try:
         _merge_second_pass(task, 'h9', 'insight', {
             'fired': True, 'baseline': 3.1,
@@ -325,7 +331,7 @@ def test_merge_second_pass_updates_meta_persists_emits():
     finally:
         hooks._append_report_event = orig_append
         _cost_mod.compute_cost = orig_compute
-        _dbmod.get_thread_db = orig_thread
+        _storage_mod.get_storage_client = orig_client
 
     meta = task['report_meta']
     sp = meta.get('secondPasses', {}).get('insight')
@@ -335,13 +341,14 @@ def test_merge_second_pass_updates_meta_persists_emits():
     # total = body (1000/200) + pass (150/50)
     assert meta['totalUsage']['prompt_tokens'] == 1150
     assert meta['totalUsage']['completion_tokens'] == 250
-    assert meta['totalCostCny'] == 0.005  # recomputed via the (faked) cost fn
-    # meta-only re-persist: UPDATE ... SET meta, body untouched
-    assert updates and 'UPDATE paper_reports SET meta' in updates[0][0], \
-        f'meta-only UPDATE not issued: {updates}'
-    persisted_meta = json.loads(updates[0][1][0])
-    assert 'secondPasses' in persisted_meta
-    assert updates[0][1][1] == 'h9' and updates[0][1][2] == 'en'
+    assert meta['totalCostCny'] == 0.015  # body + the billed second pass
+    # Semantic data-layer mutation persists metadata without touching body.
+    assert persisted, 'semantic metadata mutation was not issued'
+    operation, payload, command_id = persisted[0]
+    assert operation == 'paper.report.second_pass.merge'
+    assert payload['paper_hash'] == 'h9' and payload['lang'] == 'en'
+    assert payload['name'] == 'insight'
+    assert command_id.startswith('paper.report.second-pass:')
     # live event for the finish-tag hot update
     assert any(e.get('type') == 'report_meta' for e in events), \
         'report_meta event not emitted'

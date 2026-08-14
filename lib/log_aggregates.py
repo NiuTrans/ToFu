@@ -278,31 +278,16 @@ class FingerprintHandler(logging.Handler):
 #  落库 — 批量 upsert + TTL 清扫(全部 fail-open)
 # ═══════════════════════════════════════════════════════════════════════
 
-# 双后端同构:PG 与 SQLite 都接受 INSERT ... ON CONFLICT ... DO UPDATE,
-# `?` 占位符由 translate_sql 在 PG 侧翻成 %s。count 用表达式累加,所以
-# 手写而不用 _core_schema.upsert(它只支持整列赋值)。
-_UPSERT_SQL = (
-    'INSERT INTO log_aggregates'
-    ' (fingerprint, level, logger, template, sample, count,'
-    '  first_seen, last_seen)'
-    ' VALUES (?,?,?,?,?,?,?,?)'
-    ' ON CONFLICT(fingerprint) DO UPDATE SET'
-    '   count = log_aggregates.count + excluded.count,'
-    '   last_seen = excluded.last_seen,'
-    '   sample = excluded.sample')
-
-_TTL_DELETE_SQL = 'DELETE FROM log_aggregates WHERE last_seen < ?'
-
 _last_sweep_at = 0.0
 _last_fail_log_at = 0.0
 
 
-def _get_db():
-    from lib.database import DOMAIN_SYSTEM, get_thread_db
-    return get_thread_db(DOMAIN_SYSTEM)
+def _storage(*, write: bool = False):
+    from lib.storage import get_storage_client
+    return get_storage_client(write=write)
 
 
-def flush_once(store: AggregateStore = None, db=None, now_ms: int = None) -> dict:
+def flush_once(store: AggregateStore = None, now_ms: int = None) -> dict:
     """把 ``store`` 的当前快照批量 upsert 进 log_aggregates;顺手做每小时
     一次的 TTL 清扫。
 
@@ -317,36 +302,37 @@ def flush_once(store: AggregateStore = None, db=None, now_ms: int = None) -> dic
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     rows = store.snapshot()
     swept = 0
+    flushed = 0
+    now_mono = time.monotonic()
+    did_sweep = now_mono - _last_sweep_at >= _TTL_SWEEP_INTERVAL_SEC
     try:
-        db = db or _get_db()
-        for r in rows:
-            db.execute(_UPSERT_SQL, (
-                r['fingerprint'], r['level'], r['logger'], r['template'],
-                r['sample'], r['count'], r['first_seen'], r['last_seen']))
-        now_mono = time.monotonic()
-        if now_mono - _last_sweep_at >= _TTL_SWEEP_INTERVAL_SEC:
-            cutoff = now_ms - _ttl_days() * 86400_000
-            cur = db.execute(_TTL_DELETE_SQL, (cutoff,))
-            swept = max(0, getattr(cur, 'rowcount', 0) or 0)
+        chunks = [rows[index:index + 500] for index in range(0, len(rows), 500)]
+        if not chunks and did_sweep:
+            chunks = [[]]
+        for index, chunk in enumerate(chunks):
+            payload = {'rows': chunk}
+            if did_sweep and index == len(chunks) - 1:
+                payload['cutoff_ms'] = now_ms - _ttl_days() * 86400_000
+            result = _storage(write=True).command(
+                'log_aggregate.flush', payload, None, priority='event')
+            flushed += int(result.get('flushed') or 0)
+            swept += int(result.get('swept') or 0)
+        if did_sweep:
             _last_sweep_at = now_mono
-        db.commit()
-        return {'ok': True, 'flushed': len(rows), 'swept': swept}
+        return {'ok': True, 'flushed': flushed, 'swept': swept}
     except Exception as e:
-        if rows:
-            store.requeue(rows)
-        try:
-            if db is not None:
-                db.rollback()
-        except Exception as rb_err:
-            logger.debug('[LogAgg] rollback after flush failure failed: %s',
-                         rb_err)
-        logger.debug('[LogAgg] flush failed (fail-open, rows requeued): %s', e)
+        remaining = rows[flushed:]
+        if remaining:
+            store.requeue(remaining)
+        logger.debug(
+            '[LogAgg] Sidecar flush failed (fail-open, rows requeued): %s',
+            type(e).__name__)
         if time.monotonic() - _last_fail_log_at >= 600:
             _last_fail_log_at = time.monotonic()
             logger.warning(
                 '[LogAgg] aggregate flush failing (counts retained in '
-                'memory, text logs unaffected): %s', e)
-        return {'ok': False, 'flushed': 0, 'swept': 0}
+                'memory, text logs unaffected): %s', type(e).__name__)
+        return {'ok': False, 'flushed': flushed, 'swept': 0}
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -379,29 +365,34 @@ def start_flusher() -> bool:
     return True
 
 
-def stop_flusher(final_flush: bool = True) -> None:
+def stop_flusher(final_flush: bool = True, timeout: float = 5.0) -> bool:
     """停 flusher;默认做最后一次 best-effort flush(PG 停止中则跳过,
-    退出不被挂死)。"""
+    退出不被挂死)。返回线程是否已停止。"""
     global _flusher_thread
     with _flusher_lock:
         t = _flusher_thread
-        _flusher_thread = None
     if t is None:
-        return
+        return True
     _flusher_stop.set()
-    t.join(timeout=5)
-    if not final_flush:
-        return
     try:
-        from lib.database import pg_is_stopping
-        if pg_is_stopping():
-            return
-    except Exception as e:
-        logger.debug('[LogAgg] pg_is_stopping probe failed: %s', e)
+        wait_seconds = max(0.0, float(timeout))
+    except (TypeError, ValueError, OverflowError) as exc:
+        logger.debug('[LogAgg] invalid stop timeout; using 5.0: %s', exc)
+        wait_seconds = 5.0
+    if t is not threading.current_thread():
+        t.join(timeout=wait_seconds)
+    if t.is_alive():
+        return False
+    with _flusher_lock:
+        if _flusher_thread is t:
+            _flusher_thread = None
+    if not final_flush:
+        return True
     try:
         flush_once()
     except Exception as e:  # flush_once 内部已 fail-open,这里是双保险
         logger.debug('[LogAgg] final flush failed: %s', e)
+    return True
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -415,29 +406,14 @@ _SORTS = {
 }
 
 
-def query_aggregates(db=None, *, level: str = '', sort: str = 'count',
+def query_aggregates(*, level: str = '', sort: str = 'count',
                      limit: int = 100, q: str = '') -> dict:
     """按频率/时间读聚合表。返回 {items, total_rows, total_events}。"""
-    db = db or _get_db()
-    where, params = [], []
-    if level:
-        where.append('level = ?')
-        params.append(level)
-    if q:
-        # 转义 LIKE 元字符,子串匹配 template。
-        esc = q.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-        where.append("template LIKE '%' || ? || '%' ESCAPE '\\'")
-        params.append(esc)
-    where_sql = (' WHERE ' + ' AND '.join(where)) if where else ''
-    order = _SORTS.get(sort, _SORTS['count'])
-    rows = db.execute(
-        'SELECT fingerprint, level, logger, template, sample, count,'
-        ' first_seen, last_seen FROM log_aggregates'
-        + where_sql + ' ORDER BY ' + order + ' LIMIT ?',
-        tuple(params) + (limit,)).fetchall()
-    totals = db.execute(
-        'SELECT COUNT(*) AS n, COALESCE(SUM(count),0) AS events'
-        ' FROM log_aggregates' + where_sql, tuple(params)).fetchone()
+    result = _storage().query('log_aggregate.query', {
+        'level': level, 'sort': sort if sort in _SORTS else 'count',
+        'limit': max(1, min(500, int(limit))), 'q': q,
+    })
+    rows = result.get('items') or []
     from datetime import datetime, timezone
 
     def _iso(ms):
@@ -461,8 +437,8 @@ def query_aggregates(db=None, *, level: str = '', sort: str = 'count',
     } for r in rows]
     return {
         'items': items,
-        'total_rows': totals['n'] if totals else 0,
-        'total_events': totals['events'] if totals else 0,
+        'total_rows': int(result.get('total_rows') or 0),
+        'total_events': int(result.get('total_events') or 0),
     }
 
 

@@ -217,7 +217,13 @@ def claude_exchange_code(code: str, pkce_verifier: str, state: str = '',
             'id_token': data.get('id_token', ''),
         }
 
-        save_token('claude', token_data)
+        if not save_token('claude', token_data):
+            raise OAuthExchangeError(
+                'Anthropic authorized successfully, but the credentials '
+                'could not be saved securely. Check data-directory '
+                'permissions or free disk space.',
+                status_code=500,
+            )
         logger.info('[Claude OAuth] Token exchange successful (email=%s, expires_in=%ds)',
                      token_data['email'], expires_in)
         return token_data
@@ -267,7 +273,12 @@ def claude_store_token(data: dict) -> dict:
         'email': _extract_email_from_token(data),
         'id_token': data.get('id_token', ''),
     }
-    save_token('claude', token_data)
+    if not save_token('claude', token_data):
+        raise OAuthExchangeError(
+            'Anthropic credentials could not be saved securely. Check '
+            'data-directory permissions or free disk space.',
+            status_code=500,
+        )
     logger.info('[Claude OAuth] Stored browser-exchanged token (email=%s, expires_in=%ds)',
                 token_data['email'], expires_in)
     return token_data
@@ -298,11 +309,12 @@ def claude_refresh_token(refresh_tok: str = None,
     # Singleflight: concurrent refreshes of the SAME refresh token merge
     # into one upstream call (refresh tokens are single-use; a second call
     # burns the first's result). See token_store.refresh_singleflight.
-    from lib.oauth.token_store import refresh_singleflight
+    from lib.oauth.token_store import refresh_singleflight, token_path
     return refresh_singleflight(
         'claude', refresh_tok,
         lambda rt: _claude_refresh_upstream(rt, user_id=user_id),
-        load=lambda: load_token('claude'))
+        load=lambda: load_token('claude'),
+        lock_path=token_path('claude') + '.refresh')
 
 
 def _claude_refresh_upstream(refresh_tok: str, *, user_id: str = '') -> dict | None:
@@ -345,7 +357,11 @@ def _claude_refresh_upstream(refresh_tok: str, *, user_id: str = '') -> dict | N
                 'expires_in': expires_in,
                 'last_refresh': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
             })
-            save_token('claude', stored)
+            if not save_token('claude', stored):
+                # Refresh tokens can be single-use. Do not retry upstream with
+                # the now-consumed old token after a local persistence failure.
+                logger.error('[Claude OAuth] Refreshed token could not be persisted')
+                return None
             logger.info('[Claude OAuth] Token refreshed (expires_in=%ds)', expires_in)
             return stored
 

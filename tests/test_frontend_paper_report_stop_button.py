@@ -44,12 +44,16 @@ import subprocess
 
 import pytest
 
+from tests._paper_vite import compiled_typescript
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 JS_DIR = os.path.join(ROOT, 'static', 'js')
 REPORT_JS = os.path.join(JS_DIR, 'paper', 'report.js')
+REPORT_RUNTIME_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'report-runtime.ts')
 
 
 def _node_deps_available() -> bool:
@@ -73,6 +77,7 @@ const win = dom.window;
 global.window = win;
 global.document = win.document;
 global.console = console;
+global.HTMLButtonElement = win.HTMLButtonElement;
 // Identity t() → returns the i18n KEY, so we assert on the key the code picked
 // ('paper.reportStop' vs 'paper.reportStopping') rather than translated text.
 win.t = global.t = (k) => k;
@@ -85,6 +90,10 @@ global.Api = win.Api = { paper: {
 }};
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper/report.js (real / patched)
+eval(fs.readFileSync(process.argv[4], 'utf8'));
+Object.keys(win).forEach((name) => {
+  if (name.startsWith('_') && typeof win[name] === 'function') global[name] = win[name];
+});
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -161,10 +170,11 @@ def _run(js_path: str):
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     try:
-        proc = subprocess.run(
-            ['node', harness, js_path, ROOT],
-            capture_output=True, text=True, timeout=60,
-        )
+        with compiled_typescript(REPORT_RUNTIME_TS) as runtime_js:
+            proc = subprocess.run(
+                ['node', harness, js_path, ROOT, runtime_js],
+                capture_output=True, text=True, timeout=60,
+            )
     finally:
         try:
             os.remove(harness)

@@ -7,28 +7,10 @@ v1 branch endpoints end-to-end.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import os
-import sys
 import tempfile
 import unittest
-
-
-def _install_shim():
-    import quart
-    sys.modules['flask'] = quart
-    for attr in ('json', 'globals', 'helpers', 'wrappers', 'ctx'):
-        qs = f'quart.{attr}'
-        if qs in sys.modules:
-            sys.modules[f'flask.{attr}'] = sys.modules[qs]
-    from quart.wrappers import Request as _QR
-    if inspect.iscoroutinefunction(_QR.get_json):
-        _orig = _QR.get_json
-
-        def _sync(self, *a, **kw):
-            return asyncio.run(_orig(self, *a, **kw))
-        _QR.get_json = _sync
 
 
 def _new_loop_run(coro):
@@ -46,7 +28,6 @@ class BranchRouteTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        _install_shim()
         cls._tmp = tempfile.TemporaryDirectory()
         cls._tmp_db = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
         cls._tmp_db.close()

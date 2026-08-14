@@ -102,6 +102,9 @@ class FaceResolution:
             family rule — the caller should surface this, since it is the one
             way a Claude model can legitimately sit on a non-Anthropic wire.
         error: human-readable refusal reason when ``ok`` is False.
+        responses_profile: ``compatible`` / ``openai`` / ``codex`` for a
+            Responses face, otherwise empty. This is a feature boundary, not
+            a second routing decision.
     """
     ok: bool
     base_url: str = ''
@@ -109,6 +112,7 @@ class FaceResolution:
     face_name: str = DEFAULT_FACE
     forced: bool = False
     error: str = ''
+    responses_profile: str = ''
 
 
 def _host(url: str) -> str:
@@ -125,6 +129,7 @@ def provider_faces(provider: dict) -> dict:
         DEFAULT_FACE: {
             'base_url': provider.get('base_url') or '',
             'protocol': provider.get('protocol') or '',
+            'responses_profile': provider.get('responses_profile') or '',
         },
     }
     declared = provider.get('faces')
@@ -138,6 +143,9 @@ def provider_faces(provider: dict) -> dict:
             faces[name] = {
                 'base_url': spec.get('base_url') or provider.get('base_url') or '',
                 'protocol': spec.get('protocol') or '',
+                'responses_profile': (
+                    spec.get('responses_profile')
+                    or provider.get('responses_profile') or ''),
             }
     return faces
 
@@ -224,6 +232,19 @@ def resolve_face(provider: dict, model_entry: dict,
     default = faces[DEFAULT_FACE]
     model_id = (model_entry.get('model_id') or '').strip()
 
+    def _resolved(spec: dict, *, face_name: str, forced: bool = False):
+        from lib.llm.responses_features import (
+            normalize_responses_feature_profile,
+        )
+        raw_profile = (model_entry.get('responses_profile')
+                       or spec.get('responses_profile') or '')
+        return FaceResolution(
+            ok=True, base_url=spec['base_url'], protocol=spec['protocol'],
+            face_name=face_name, forced=forced,
+            responses_profile=normalize_responses_feature_profile(
+                raw_profile, protocol=spec['protocol'],
+                base_url=spec['base_url'], oauth=provider.get('oauth') or ''))
+
     # ── 1. Explicit pin ──
     pinned = (model_entry.get('face') or '').strip()
     if pinned:
@@ -235,9 +256,7 @@ def resolve_face(provider: dict, model_entry: dict,
                        'declare (known: %s)'
                        % (model_id, pinned, provider.get('id', '?'),
                           ', '.join(sorted(faces)))))
-        return FaceResolution(
-            ok=True, base_url=spec['base_url'], protocol=spec['protocol'],
-            face_name=pinned, forced=True)
+        return _resolved(spec, face_name=pinned, forced=True)
 
     # ── 2. Family rule: Claude belongs on the Anthropic wire ──
     # Keyed on the whole routing group (logical id ∪ wire pool), because the
@@ -250,9 +269,7 @@ def resolve_face(provider: dict, model_entry: dict,
         anth = _anthropic_face(faces)
         if anth:
             spec = faces[anth]
-            return FaceResolution(
-                ok=True, base_url=spec['base_url'], protocol=spec['protocol'],
-                face_name=anth)
+            return _resolved(spec, face_name=anth)
 
         # No Anthropic face declared. On a gateway KNOWN to offer one, this
         # is the silent-degradation shape — refuse instead of stripping
@@ -273,9 +290,7 @@ def resolve_face(provider: dict, model_entry: dict,
                           _host(default['base_url']))))
 
     # ── 3. Provider default ──
-    return FaceResolution(
-        ok=True, base_url=default['base_url'], protocol=default['protocol'],
-        face_name=DEFAULT_FACE)
+    return _resolved(default, face_name=DEFAULT_FACE)
 
 
 def _account_anchor(group: list) -> dict | None:

@@ -174,14 +174,12 @@ doc doc that says otherwise (including the CLAUDE.md §1 map) is stale.**
 | `__init__.py` | 73 | OK (facade) | — | — |
 | `code_exec.py` | 27 | leaf | HOT | — |
 
-`registry.py` — **BIG, and it bundles 2 concerns.** (a) The `ToolSpec`/`ToolContext`
-dataclasses + `assemble_tool_list` + the built-in spec registrations + plugin
-discovery (the declarative assembly engine). (b) The prompt-cache stability
-machinery: `_multiroot_sticky` latch (~lines 78-130), the per-conversation
-tool-SCHEMA latch (`latch_tool_list`/`tool_list_diverged`/`tool_list_diff`,
-~130+), which is a distinct concern (cache-key stability, sibling to Unit 1's
-cache invariants). The two share the spec list but the latch machinery could be
-`registry_latch.py`. Classified BIG; see §7.
+`registry.py` — **BIG.** It contains the `ToolSpec`/`ToolContext` dataclasses,
+`assemble_tool_list`, built-in spec registrations and plugin discovery. The
+only conversation-scoped state retained by the registry is the multi-root path
+hint: once emitted, it stays on path-taking schemas so those descriptions do
+not flap. Tool availability itself is rebuilt from the current request.
+Classified BIG; see §7.
 
 `project.py`/`conversation.py`/`browser.py`/`search.py` — all OK. These are
 pure schema-dict files (verified: `project.py` is entirely `PROJECT_TOOL_*`
@@ -276,10 +274,9 @@ its whole purpose, not a leak. Classified BIG, defer.
    registration order (search→fetch→read_files→project|code_exec→browser→
    desktop→image_gen→conv_ref→human_guidance→⟨boundary⟩→memory→scheduler→
    swarm→mcp) is A/B-validated and reproduces the cached prefix byte-for-byte.
-2. **The per-conversation tool-SCHEMA latch is load-bearing.** Any byte change
-   in the tools array between rounds (a toggle, an MCP re-emit) invalidates the
-   whole ~65k-token cached prefix; `registry.py`'s latch + `_multiroot_sticky`
-   prevent flapping. Pairs with Unit 1 + Unit 2 cache invariants.
+2. **Tool availability is request-live.** Composer toggles, MCP changes and
+   project attachment may change the tools array on the next turn. Prompt-cache
+   optimization must never mask those current capabilities.
 3. **Plugin visibility is fail-closed + per-request.** `assemble_tool_list`
    evaluates a plugin spec only when its `plugin_name` is in the request's
    `enabled_plugins` allow-list (default: no third-party plugins). Guarded by
@@ -333,11 +330,7 @@ All schema-dict files (`tools/project`, `conversation`, `browser`, `search`,
    *definition* package (§2c). Its own docstring says it mirrors
    `llm_dispatch/ephemeral.py` — put it next to the execution layer it belongs
    to. Low risk (lazy imports already; `test_custom_tool_isolation` guards it).
-2. **`registry.py` (1218) → extract `registry_latch.py`** for the tool-SCHEMA
-   latch + `_multiroot_sticky` machinery (~lines 78-200 cluster), leaving the
-   `ToolSpec`/assembly engine in `registry.py`. Behind `test_tool_registry` +
-   `test_schema_registry`.
-3. **`handlers/misc.py` → `handlers/coordination.py`** (carried from Unit 1 —
+2. **`handlers/misc.py` → `handlers/coordination.py`** (carried from Unit 1 —
    the charter/board/peer Project-Brain handlers).
 
 **Big but optional (defer unless touched):**

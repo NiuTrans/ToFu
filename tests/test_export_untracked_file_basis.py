@@ -26,6 +26,11 @@ Run:  python -B -m pytest tests/test_export_untracked_file_basis.py
 
 from __future__ import annotations
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {
+    'tests/test_real.py', 'tests/test_wip_uncommitted.py',
+    'tests/tmpab12cd34.js',
+}
+
 import subprocess
 from pathlib import Path
 

@@ -36,7 +36,7 @@ the user when the worker needs human input.
    feedback, and the tools that were used.
 3. A **Deliverables Snapshot** injected by the orchestrator at the end
    of your invocation prompt, listing how many *state-changing* tool
-   calls (write_file / apply_diff / insert_content / run_command /
+   calls (write_file / edit_file / run_command /
    create_project / image gen) the worker made in its latest turn, plus
    a running total for the task.  **Use it.**
 
@@ -93,7 +93,7 @@ the Deliverables Snapshot.  This is the single most important signal.
   → The worker is analysis-paralysed.  The correct verdict is
   **CONTINUE_WORKER** with short, concrete feedback:
   "Execute the plan.  Stop analyzing.  Your next tool call MUST be
-  write_file / apply_diff / run_command — do NOT read more files or
+  write_file / edit_file / run_command — do NOT read more files or
   write more prose.  Start with checklist item <N>: <copy the verb>."
   Do NOT emit CONTINUE_PLANNER in this case — a zero-deliverable worker
   turn is a WORKER problem, not a PLAN problem.

@@ -35,6 +35,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -42,7 +43,11 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-STATIC_JS = os.path.join(ROOT, 'static', 'js')
+sys.path.insert(0, HERE)
+from _runtime_sections import runtime_section_path  # noqa: E402
+
+MCP_JS = runtime_section_path('settings/mcp.js')
+SKILLS_TS = os.path.join(ROOT, 'frontend', 'src', 'features', 'skills.ts')
 
 
 def _node_available() -> bool:
@@ -54,12 +59,12 @@ def _node_available() -> bool:
 # Runtime-BUILT bundle outputs (bundle-<8hex>.js / feature-<8hex>.js /
 # i18n-<lang>-<8hex>.js), anchored to the 8-hex hash exactly like
 # lib/js_bundler.py::_BUILT_BUNDLE_RE — NEVER a bare 'feature-*' glob, which
-# would also match the tracked SOURCE feature-loader.js. Built artifacts are
+# would also match the tracked SOURCE feature-bridge.js. Built artifacts are
 # concatenations of the shipped sources: scanning them double-counts every
 # definition and false-trips the "single source of truth" assertion below in
 # any tree where the app has actually RUN (a built bundle is left on disk).
 _BUILT_BUNDLE_RE = re.compile(
-    r'^(?:(?:bundle|feature)-[0-9a-f]{8}|i18n-(?:zh|en)-[0-9a-f]{8})\.js$')
+    r'^(?:(?:bundle|feature)-[0-9a-f]{8}|domain-(?:paper|orchestration|settings|memory|skills)-[0-9a-f]{8}|i18n-(?:zh|en)-[0-9a-f]{8})\.js$')
 
 
 def _find_defining_file(sig: str, *search_dirs: str) -> str:
@@ -70,17 +75,13 @@ def _find_defining_file(sig: str, *search_dirs: str) -> str:
     path would turn that move into an unreadable false red. Three states are
     each reported distinctly so a real regression cannot masquerade as drift.
     """
+    del search_dirs  # logical ownership replaced classic directory discovery
     hits = []
-    for d in search_dirs:
-        for name in sorted(os.listdir(d)):
-            if not name.endswith('.js') or _BUILT_BUNDLE_RE.match(name):
-                continue
-            p = os.path.join(d, name)
-            with open(p, encoding='utf-8') as fh:
-                if sig in fh.read():
-                    hits.append(p)
+    with open(MCP_JS, encoding='utf-8') as fh:
+        if sig in fh.read():
+            hits.append(MCP_JS)
     assert hits, (
-        f'No static/js file DEFINES {sig!r} — the renderer was deleted, not '
+        f'No migrated runtime owner DEFINES {sig!r} — the renderer was deleted, not '
         f'merely relocated. That is a real regression: without it the settings '
         f'panel renders no category pills at all.'
     )
@@ -111,20 +112,26 @@ def _splice_const(path: str, name: str) -> str:
 
 
 _MCP_ORDER_SIG = 'function _mcpOrderedCategories(cats) {'
-_SKILLS_ORDER_SIG = 'function _skillsOrderedCategories(cats) {'
+_SKILLS_ORDER_SIG = 'function orderedCategories(counts: Record<string, number>): string[] {'
 
 
 def _mcp_orderer() -> str:
-    path = _find_defining_file(_MCP_ORDER_SIG,
-                               os.path.join(STATIC_JS, 'settings'))
+    path = _find_defining_file(_MCP_ORDER_SIG)
     return (_splice_const(path, '_CAT_ORDER') + '\n'
             + _splice_fn(path, _MCP_ORDER_SIG))
 
 
 def _skills_orderer() -> str:
-    path = _find_defining_file(_SKILLS_ORDER_SIG, STATIC_JS)
-    return (_splice_const(path, '_SKILLS_CAT_ORDER') + '\n'
-            + _splice_fn(path, _SKILLS_ORDER_SIG))
+    with open(SKILLS_TS, encoding='utf-8') as fh:
+        src = fh.read()
+    order = re.search(r'const CATEGORY_ORDER = (\[.*?\]) as const;', src, re.S)
+    assert order, 'typed skills owner lost CATEGORY_ORDER'
+    body = _splice_fn(SKILLS_TS, _SKILLS_ORDER_SIG)
+    body = body.replace(_SKILLS_ORDER_SIG,
+                        'function _skillsOrderedCategories(cats) {', 1)
+    body = body.replace('counts', 'cats')
+    body = body.replace('(CATEGORY_ORDER as readonly string[])', 'CATEGORY_ORDER')
+    return 'const CATEGORY_ORDER = ' + order.group(1) + ';\n' + body
 
 
 _ORDER_HARNESS = r"""
@@ -281,15 +288,10 @@ def test_install_note_is_actually_rendered_somewhere():
     )
 
     consumers = []
-    for d, names in (
-        (os.path.join(STATIC_JS, 'settings'), ['mcp.js']),
-        (STATIC_JS, ['skills.js']),
-    ):
-        for name in names:
-            p = os.path.join(d, name)
-            with open(p, encoding='utf-8') as fh:
-                if 'install_note' in fh.read():
-                    consumers.append(os.path.relpath(p, ROOT))
+    for p in (MCP_JS, SKILLS_TS):
+        with open(p, encoding='utf-8') as fh:
+            if 'install_note' in fh.read():
+                consumers.append(os.path.basename(p))
 
     assert len(consumers) == 2, (
         f'install_note is authored {len(notes)}× in the catalogs but consumed '
@@ -364,7 +366,7 @@ console.log(JSON.stringify(fn.apply(null, args)));
 
 def _splice_helpers() -> str:
     """Splice the obtain-block + placeholder helpers from the shipped file."""
-    path = _find_defining_file(_OBTAIN_SIG, os.path.join(STATIC_JS, 'settings'))
+    path = _find_defining_file(_OBTAIN_SIG)
     return (_splice_fn(path, _PLACEHOLDER_SIG) + '\n'
             + _splice_fn(path, _OBTAIN_SIG))
 
@@ -490,8 +492,7 @@ def test_shared_credential_is_detected_rather_than_re_requested():
         'the RollingGo pair no longer shares a key — re-check the scan surface'
     )
 
-    path = _find_defining_file('function _mcpSharedCredentialSources(key, selfId) {',
-                               os.path.join(STATIC_JS, 'settings'))
+    path = _find_defining_file('function _mcpSharedCredentialSources(key, selfId) {')
     body = _splice_fn(path, 'function _mcpSharedCredentialSources(key, selfId) {')
     # It must consult STORED keys (what the user actually supplied), not the
     # declared spec — a sibling that merely declares the key has nothing to
@@ -522,7 +523,7 @@ console.log(JSON.stringify(_mcpSelfServeSuggestions(50).map(function (e) { retur
 
 
 def _run_suggest(catalog: list) -> list:
-    path = _find_defining_file(_SUGGEST_SIG, os.path.join(STATIC_JS, 'settings'))
+    path = _find_defining_file(_SUGGEST_SIG)
     body = _splice_fn(path, _SUGGEST_SIG)
     src = os.path.join(HERE, '_cd_sug.js')
     harness = os.path.join(HERE, '_cd_sug_h.js')

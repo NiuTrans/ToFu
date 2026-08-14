@@ -110,19 +110,14 @@ class TestSchemeAndHostGuards:
         Err, _is_blocked, fetch = _import_helpers()
         monkeypatch.setenv('TOFU_IMAGE_FETCH_ALLOW_HOSTS', 'internal.example.com')
 
-        # _safe_image_fetch does a function-local `from lib.http_client
-        # import http_get` (which calls requests.request, NOT requests.get),
-        # so patch it at its source module — that's the binding the local
-        # import resolves at call time.
-        with patch('lib.http_client.http_get') as mock_get:
-            mock_resp = mock_get.return_value
-            mock_resp.raise_for_status.return_value = None
-            mock_resp.headers = {'Content-Type': 'image/png', 'Content-Length': '10'}
-            mock_resp.iter_content = lambda chunk_size: [b'PNGDATA000']
+        with patch('lib.safe_fetch.fetch_public_bytes',
+                   return_value=(b'PNGDATA000', 'image/png',
+                                 'http://internal.example.com/cat.png')) as guarded:
             body, ct = fetch('http://internal.example.com/cat.png')
         assert body == b'PNGDATA000'
         assert ct == 'image/png'
-        mock_get.assert_called_once()
+        assert guarded.call_args.kwargs['allow_hosts_env'] == \
+            'TOFU_IMAGE_FETCH_ALLOW_HOSTS'
 
 
 # ═══════════════════════════════════════════════════════════
@@ -137,11 +132,14 @@ class TestSizeCap:
         monkeypatch.setenv('TOFU_IMAGE_FETCH_ALLOW_HOSTS', 'cdn.example.com')
         monkeypatch.setenv('TOFU_IMAGE_FETCH_MAX_BYTES', '1024')
 
-        with patch('lib.http_client.http_get') as mock_get:
-            mock_resp = mock_get.return_value
+        with patch('lib.safe_fetch._session_for') as session_for:
+            session = session_for.return_value
+            session.max_redirects = 30
+            mock_resp = session.get.return_value
             mock_resp.raise_for_status.return_value = None
             mock_resp.headers = {'Content-Length': '999999999', 'Content-Type': 'image/png'}
             mock_resp.iter_content = lambda chunk_size: [b'never seen']
+            mock_resp.url = 'https://cdn.example.com/huge.bin'
             with pytest.raises(Err, match='Content-Length'):
                 fetch('https://cdn.example.com/huge.bin')
 
@@ -150,12 +148,15 @@ class TestSizeCap:
         monkeypatch.setenv('TOFU_IMAGE_FETCH_ALLOW_HOSTS', 'cdn.example.com')
         monkeypatch.setenv('TOFU_IMAGE_FETCH_MAX_BYTES', '100')
 
-        with patch('lib.http_client.http_get') as mock_get:
-            mock_resp = mock_get.return_value
+        with patch('lib.safe_fetch._session_for') as session_for:
+            session = session_for.return_value
+            session.max_redirects = 30
+            mock_resp = session.get.return_value
             mock_resp.raise_for_status.return_value = None
             # No Content-Length header → forces the streaming path.
             mock_resp.headers = {'Content-Type': 'image/png'}
             mock_resp.iter_content = lambda chunk_size: [b'A' * 60, b'B' * 60]
+            mock_resp.url = 'https://cdn.example.com/sneaky.bin'
             with pytest.raises(Err, match='response too large'):
                 fetch('https://cdn.example.com/sneaky.bin')
 
@@ -164,11 +165,14 @@ class TestSizeCap:
         monkeypatch.setenv('TOFU_IMAGE_FETCH_ALLOW_HOSTS', 'cdn.example.com')
         monkeypatch.setenv('TOFU_IMAGE_FETCH_MAX_BYTES', '1024')
 
-        with patch('lib.http_client.http_get') as mock_get:
-            mock_resp = mock_get.return_value
+        with patch('lib.safe_fetch._session_for') as session_for:
+            session = session_for.return_value
+            session.max_redirects = 30
+            mock_resp = session.get.return_value
             mock_resp.raise_for_status.return_value = None
             mock_resp.headers = {'Content-Length': '15', 'Content-Type': 'image/jpeg'}
             mock_resp.iter_content = lambda chunk_size: [b'JPEGBYTES012345']
+            mock_resp.url = 'https://cdn.example.com/cat.jpg'
             body, ct = fetch('https://cdn.example.com/cat.jpg')
         assert body == b'JPEGBYTES012345'
         assert ct == 'image/jpeg'

@@ -37,11 +37,13 @@ import tempfile
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-REDUCER_JS = os.path.join(ROOT, 'static', 'js', 'ui', 'stream_reducer.js')
+REDUCER_JS = runtime_section_path('ui/stream_reducer.js')
 
 
 def _run_node(body: str) -> dict:

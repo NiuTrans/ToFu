@@ -33,8 +33,10 @@ by a napari/vispy GL import at collection — run standalone:
 import importlib
 import json
 import os
+import shutil
 import sys
 import tempfile
+from contextlib import contextmanager
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -42,44 +44,74 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _SEED_N = [0]
 
 
+@contextmanager
 def _seed_sqlite_conv(model_in_settings, with_max_tokens=False):
     """Create a throwaway SQLite DB with one conversation whose tail is killed.
 
-    Returns (conv_id, db_dir) — the caller keeps db_dir alive for the test.
+    Yield ``(conv_id, db_dir)`` and restore the process-wide DB binding on
+    exit.  Restoring is load-bearing: this test reloads ``lib.database`` to
+    point at its throwaway DB, and a later subprocess would otherwise inherit
+    that path (and could boot a test-backed server on the production port).
     """
     db_dir = tempfile.mkdtemp(prefix='tofu_kr_it_')
-    os.environ['TOFU_DB_BACKEND'] = 'sqlite'
-    os.environ['TOFU_DB_PATH'] = os.path.join(db_dir, 'tofu.db')
+    old_backend = os.environ.get('TOFU_DB_BACKEND')
+    old_path = os.environ.get('TOFU_DB_PATH')
+    try:
+        os.environ['TOFU_DB_BACKEND'] = 'sqlite'
+        os.environ['TOFU_DB_PATH'] = os.path.join(db_dir, 'tofu.db')
 
-    # Reload the DB layer so it binds the temp path + sqlite backend.
-    import lib.database._core as _core
-    importlib.reload(_core)
-    import lib.database as _db
-    importlib.reload(_db)
-    _db.init_db()
+        # Reload the DB layer so it binds the temp path + sqlite backend.
+        import lib.database._core as _core
+        importlib.reload(_core)
+        import lib.database as _db
+        importlib.reload(_db)
+        _db.init_db()
 
-    # Distinct conv id per seed: the first create_task registers a running task
-    # for this conv in the shared _chat_runtime, so a reused id would make the
-    # next _conv_has_live_task() short-circuit (skip) — a harness artefact, not
-    # a product bug.
-    _SEED_N[0] += 1
-    conv_id = 'kritconv%04d' % _SEED_N[0]
-    settings = {'model': model_in_settings}
-    if with_max_tokens:
-        settings['maxTokens'] = 64000
-    messages = [
-        {'role': 'user', 'content': 'ping', '_msgId': 'u-int-1'},
-        {'role': 'assistant', 'content': 'partial…',
-         'finishReason': 'interrupted', 'interruptedReason': 'killed'},
-    ]
-    db = _db.get_thread_db(_db.DOMAIN_CHAT)
-    db.execute(
-        'INSERT INTO conversations (id, user_id, title, messages, settings, '
-        'created_at, updated_at) VALUES (?,1,?,?,?,?,?)',
-        (conv_id, 'kr-it', json.dumps(messages), json.dumps(settings),
-         0, 0))
-    db.commit()
-    return conv_id, db_dir
+        # Distinct conv id per seed: the first create_task registers a running
+        # task for this conv in the shared _chat_runtime, so a reused id would
+        # make the next _conv_has_live_task() short-circuit (skip) — a harness
+        # artefact, not a product bug.
+        _SEED_N[0] += 1
+        conv_id = 'kritconv%04d' % _SEED_N[0]
+        settings = {'model': model_in_settings}
+        if with_max_tokens:
+            settings['maxTokens'] = 64000
+        messages = [
+            {'role': 'user', 'content': 'ping', '_msgId': 'u-int-1'},
+            {'role': 'assistant', 'content': 'partial…',
+             'finishReason': 'interrupted', 'interruptedReason': 'killed'},
+        ]
+        db = _db.get_thread_db(_db.DOMAIN_CHAT)
+        db.execute(
+            'INSERT INTO conversations (id, user_id, title, messages, settings, '
+            'created_at, updated_at) VALUES (?,1,?,?,?,?,?)',
+            (conv_id, 'kr-it', json.dumps(messages), json.dumps(settings),
+             0, 0))
+        db.commit()
+        yield conv_id, db_dir
+    finally:
+        try:
+            import lib.database as _db
+            _db.close_thread_db()
+        except Exception:
+            pass
+        if old_backend is None:
+            os.environ.pop('TOFU_DB_BACKEND', None)
+        else:
+            os.environ['TOFU_DB_BACKEND'] = old_backend
+        if old_path is None:
+            os.environ.pop('TOFU_DB_PATH', None)
+        else:
+            os.environ['TOFU_DB_PATH'] = old_path
+        # Rebind frozen module globals to the restored environment before any
+        # later test (or subprocess launch) can observe the throwaway path.
+        try:
+            import lib.database._core as _core
+            importlib.reload(_core)
+            import lib.database as _db
+            importlib.reload(_db)
+        finally:
+            shutil.rmtree(db_dir, ignore_errors=True)
 
 
 def _drive_real_chain(conv_id):
@@ -141,8 +173,17 @@ def test_real_redispatch_chain_builds_valid_request_no_maxtokens_in_settings():
     Before the fix this drove the whole real chain to a FATAL. Now it must
     build a valid request with a positive-int max_tokens.
     """
-    conv_id, db_dir = _seed_sqlite_conv('aws.claude-opus-4.8', with_max_tokens=False)
-    body, mt = _drive_real_chain(conv_id)
+    old_backend = os.environ.get('TOFU_DB_BACKEND')
+    old_path = os.environ.get('TOFU_DB_PATH')
+    with _seed_sqlite_conv(
+            'aws.claude-opus-4.8', with_max_tokens=False) as (conv_id, db_dir):
+        body, mt = _drive_real_chain(conv_id)
+    assert os.environ.get('TOFU_DB_BACKEND') == old_backend
+    assert os.environ.get('TOFU_DB_PATH') == old_path
+    import lib.database._core as _core
+    if old_path is not None:
+        assert _core.DB_PATH == old_path
+    assert not os.path.exists(db_dir)
     assert mt > 0
     print('OK real chain (no maxTokens in settings): built body, max_tokens=%d' % mt)
 
@@ -157,8 +198,9 @@ def test_real_redispatch_chain_positive_int_for_non_claude_model():
     recovery path injects (128000), then clamped to the model's ceiling. The
     load-bearing assertion is "positive int, no FATAL", not a specific number.
     """
-    conv_id, db_dir = _seed_sqlite_conv('gpt-4o', with_max_tokens=False)
-    body, mt = _drive_real_chain(conv_id)
+    with _seed_sqlite_conv(
+            'gpt-4o', with_max_tokens=False) as (conv_id, _):
+        body, mt = _drive_real_chain(conv_id)
     assert isinstance(mt, int) and mt > 0, mt
     # build_body's body max_tokens is positive too (it may be further reduced
     # by the context-window clamp — the point is it never becomes None/crashes).

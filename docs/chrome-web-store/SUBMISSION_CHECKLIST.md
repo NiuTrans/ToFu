@@ -30,9 +30,10 @@ kit.
       `browser_extension/manifest.json` (the script derives both the shipped
       version and the filename from the manifest it packages).
 - [ ] (Sanity) the zip's `manifest.json` declares fewer permissions than the
-      dev manifest, and **includes `downloads`** — the `download` wire command
-      throws without it. `tests/test_chrome_store_manifest_parity.py` checks
-      this automatically; run it rather than counting by hand.
+      dev manifest, and **includes `downloads` and `webRequest`** — download
+      waiting and scoped response capture throw without them.
+      `tests/test_chrome_store_manifest_parity.py` checks this automatically;
+      run it rather than counting by hand.
 
 ## 3. Host the privacy policy **[you]**
 

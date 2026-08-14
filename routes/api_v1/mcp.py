@@ -18,7 +18,7 @@ UI users have admin scope locally so the settings panel keeps working.
 
 from __future__ import annotations
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.api_response import (
     api_bad_request, api_error, api_internal_error, api_not_found, api_ok,
@@ -33,30 +33,6 @@ from .auth import require_auth
 logger = get_logger(__name__)
 
 api_v1_mcp_bp = Blueprint('api_v1_mcp', __name__)
-
-
-def _invalidate_tool_latches(reason: str) -> None:
-    """Drop every conversation's tool-schema latch after an MCP mutation.
-
-    The per-conversation latch (lib/tools/registry.py) freezes the tool array
-    a conversation first used to keep the prompt-cache prefix byte-identical,
-    deferring composer-toggle flaps to the next NEW conversation. But an MCP
-    install / uninstall / connect / disconnect changes the GLOBAL tool surface
-    on purpose — the user expects the new (or removed) tools to take effect on
-    the next round of EVERY conversation, not just a brand-new one. Clearing
-    all latches makes that happen; conversations whose effective tool set is
-    unchanged re-latch byte-identically next round (no cache rebuild), so the
-    cost is paid only where the tool set genuinely changed.
-    """
-    try:
-        from lib.tools import clear_all_tool_list_latches
-        n = clear_all_tool_list_latches()
-        if n:
-            logger.info('[MCP.v1] %s → cleared %d tool-schema latch(es)',
-                        reason, n)
-    except Exception as e:
-        logger.warning('[MCP.v1] tool-latch invalidation failed (%s): %s',
-                        reason, e)
 
 
 # ── Config CRUD ──────────────────────────────────────────────────────
@@ -91,6 +67,8 @@ def list_servers_v1():
         tool_names: list[str] = []
         server_version = ''
         server_impl_name = ''
+        protocol_version = ''
+        compatibility_notice = None
         if is_connected:
             for s in bridge.list_servers():
                 if s['name'] == name:
@@ -98,6 +76,8 @@ def list_servers_v1():
                     tool_names = s['tool_names']
                     server_version = s.get('server_version', '') or ''
                     server_impl_name = s.get('server_impl_name', '') or ''
+                    protocol_version = s.get('protocol_version', '') or ''
+                    compatibility_notice = s.get('compatibility_notice')
                     break
         # Circuit-breaker status: present only for servers whose automatic
         # reconnect is currently failing+backing off, so the UI can show
@@ -122,6 +102,8 @@ def list_servers_v1():
             'enabled_tools_count': max(0, tools_count - len(disabled_tools)),
             'server_version': server_version,
             'server_impl_name': server_impl_name,
+            'protocol_version': protocol_version,
+            'compatibility_notice': compatibility_notice,
             'breaker': breaker,
             'cred_health': cred_health,
         })
@@ -167,7 +149,6 @@ def upsert_server_v1():
 
     cfg_upsert(name, data)
     logger.info('[MCP.v1] config upserted: %s (transport=%s)', name, transport)
-    _invalidate_tool_latches(f'server upsert {name}')
     return api_ok(message=f'Server "{name}" configured')
 
 
@@ -189,7 +170,6 @@ def delete_server_v1(name):
 
     cfg_remove(name)
     logger.info('[MCP.v1] config removed: %s', name)
-    _invalidate_tool_latches(f'server removal {name}')
     return api_ok(message=f'Server "{name}" removed')
 
 
@@ -218,12 +198,9 @@ def connect_servers_v1():
         try:
             tools = bridge.connect_server(target, config[target])
             if not config[target].get('enabled', True):
-                from lib.mcp.config import upsert_server as cfg_upsert
-                updated = dict(config[target])
-                updated['enabled'] = True
-                cfg_upsert(target, updated)
+                from lib.mcp.config import patch_server as cfg_patch
+                cfg_patch(target, {'enabled': True})
                 logger.info('[MCP.v1] re-enabled %s on connect', target)
-            _invalidate_tool_latches(f'connect {target}')
             return api_ok({
                 'server': target,
                 'tools_count': len(tools),
@@ -241,7 +218,6 @@ def connect_servers_v1():
     try:
         result = bridge.connect_all()
         total_tools = sum(len(v) for v in result.values())
-        _invalidate_tool_latches('connect_all')
         return api_ok({
             'servers': {k: {'tools': v} for k, v in result.items()},
             'total_tools': total_tools,
@@ -267,7 +243,6 @@ def disconnect_servers_v1():
         try:
             bridge._disconnect_one(target, forget=True)
             logger.info('[MCP.v1] disconnected %s', target)
-            _invalidate_tool_latches(f'disconnect {target}')
             return api_ok(message=f'Disconnected from "{target}"')
         except Exception as e:
             logger.error('[MCP.v1] disconnect %s failed: %s', target, e,
@@ -276,7 +251,6 @@ def disconnect_servers_v1():
 
     try:
         bridge.disconnect_all()
-        _invalidate_tool_latches('disconnect_all')
         return api_ok({'message': 'All MCP servers disconnected'})
     except Exception as e:
         logger.error('[MCP.v1] disconnect_all failed: %s', e, exc_info=True)
@@ -293,7 +267,7 @@ def disconnect_servers_v1():
     tags=['mcp'],
 )
 def list_tools_v1():
-    from flask import request
+    from quart import request
 
     from lib.mcp import get_bridge
     from lib.mcp.config import load_mcp_config
@@ -341,7 +315,7 @@ def list_tools_v1():
 )
 def set_server_tools_v1(name):
     from lib.mcp import get_bridge
-    from lib.mcp.config import load_mcp_config, upsert_server as cfg_upsert
+    from lib.mcp.config import load_mcp_config, patch_server as cfg_patch
 
     data = parse_body()
     disabled = data.get('disabled_tools', [])
@@ -353,14 +327,13 @@ def set_server_tools_v1(name):
     config = load_mcp_config()
     if name not in config:
         return api_not_found(f'Server "{name}" not in config')
-    srv_cfg = dict(config[name])
-    srv_cfg['disabled_tools'] = sorted(set(disabled))
-    cfg_upsert(name, srv_cfg)
-    get_bridge().set_disabled_tools(name, srv_cfg['disabled_tools'])
+    disabled_tools = sorted(set(disabled))
+    if cfg_patch(name, {'disabled_tools': disabled_tools}) is None:
+        return api_not_found(f'Server "{name}" not in config')
+    get_bridge().set_disabled_tools(name, disabled_tools)
     logger.info('[MCP.v1] tool filter set: %s → %d disabled tool(s)',
-                name, len(srv_cfg['disabled_tools']))
-    _invalidate_tool_latches(f'tool filter {name}')
-    return api_ok({'server': name, 'disabled_tools': srv_cfg['disabled_tools']})
+                name, len(disabled_tools))
+    return api_ok({'server': name, 'disabled_tools': disabled_tools})
 
 
 # ── Catalog (App-Store) ─────────────────────────────────────────────
@@ -372,6 +345,7 @@ def set_server_tools_v1(name):
     description=(
         'Returns each catalog entry annotated with ``installed`` / '
         '``connected`` / ``tools_count`` / ``server_version`` / '
+        '``protocol_version`` / ``compatibility_notice`` / '
         '``stored_env_keys`` (which env vars already have a stored value, '
         '*without* leaking the value) / ``cred_health`` (``expired`` when the '
         'stored session cookie/token no longer authenticates a live server). '
@@ -390,13 +364,17 @@ def get_catalog_v1():
     connected_names = {s['name'] for s in bridge.list_servers()}
 
     def _live_meta(sid):
-        """(tools_count, server_version, server_impl_name) for a connected server."""
+        """Runtime metadata for one connected server."""
         for s in bridge.list_servers():
             if s['name'] == sid:
-                return (s['tools_count'],
-                        s.get('server_version', '') or '',
-                        s.get('server_impl_name', '') or '')
-        return (0, '', '')
+                return {
+                    'tools_count': s['tools_count'],
+                    'server_version': s.get('server_version', '') or '',
+                    'server_impl_name': s.get('server_impl_name', '') or '',
+                    'protocol_version': s.get('protocol_version', '') or '',
+                    'compatibility_notice': s.get('compatibility_notice'),
+                }
+        return {}
 
     entries = []
     catalog_ids = set()
@@ -405,8 +383,8 @@ def get_catalog_v1():
         catalog_ids.add(sid)
         installed = sid in config
         connected = sid in connected_names
-        tools_count, server_version, server_impl_name = (
-            _live_meta(sid) if connected else (0, '', ''))
+        live = _live_meta(sid) if connected else {}
+        tools_count = int(live.get('tools_count') or 0)
         stored_env = (config.get(sid, {}) or {}).get('env', {}) or {}
         stored_env_keys = [k for k, v in stored_env.items()
                            if isinstance(v, str) and v.strip()]
@@ -417,8 +395,10 @@ def get_catalog_v1():
             'tools_count': tools_count,
             'disabled_tools': [t for t in ((config.get(sid, {}) or {}).get('disabled_tools') or [])
                                if isinstance(t, str)],
-            'server_version': server_version,
-            'server_impl_name': server_impl_name,
+            'server_version': live.get('server_version', ''),
+            'server_impl_name': live.get('server_impl_name', ''),
+            'protocol_version': live.get('protocol_version', ''),
+            'compatibility_notice': live.get('compatibility_notice'),
             'stored_env_keys': stored_env_keys,
             'breaker': bridge.get_breaker_state(sid),
             'cred_health': bridge.get_cred_health(sid),
@@ -434,8 +414,8 @@ def get_catalog_v1():
         if sid in catalog_ids:
             continue
         connected = sid in connected_names
-        tools_count, server_version, server_impl_name = (
-            _live_meta(sid) if connected else (0, '', ''))
+        live = _live_meta(sid) if connected else {}
+        tools_count = int(live.get('tools_count') or 0)
         stored_env = (srv_cfg or {}).get('env', {}) or {}
         stored_env_keys = [k for k, v in stored_env.items()
                            if isinstance(v, str) and v.strip()]
@@ -462,8 +442,10 @@ def get_catalog_v1():
             'tools_count': tools_count,
             'disabled_tools': [t for t in (srv_cfg.get('disabled_tools') or [])
                                if isinstance(t, str)],
-            'server_version': server_version,
-            'server_impl_name': server_impl_name,
+            'server_version': live.get('server_version', ''),
+            'server_impl_name': live.get('server_impl_name', ''),
+            'protocol_version': live.get('protocol_version', ''),
+            'compatibility_notice': live.get('compatibility_notice'),
             'stored_env_keys': stored_env_keys,
             'breaker': bridge.get_breaker_state(sid),
             'cred_health': bridge.get_cred_health(sid),
@@ -569,7 +551,6 @@ def _connect_after_install(server_id, server_cfg, display_name):
     bridge = get_bridge()
     try:
         tools = bridge.connect_server(server_id, server_cfg)
-        _invalidate_tool_latches(f'catalog install {server_id}')
         return api_ok({
             'status': 'ready',
             'message': f'{display_name} installed and connected',
@@ -603,7 +584,7 @@ def _connect_after_install(server_id, server_cfg, display_name):
     tags=['mcp'],
 )
 def install_status_v1():
-    from flask import request
+    from quart import request
 
     from lib.mcp.client import (
         _launcher_install_hint, get_install_job,
@@ -662,7 +643,7 @@ def uninstall_from_catalog_v1():
     from lib.mcp import get_bridge
     from lib.mcp.config import (
         load_mcp_config, remove_server as cfg_remove,
-        upsert_server as cfg_upsert,
+        patch_server as cfg_patch,
     )
 
     data = parse_body()
@@ -684,18 +665,15 @@ def uninstall_from_catalog_v1():
         cfg_remove(server_id)
         audit_log('mcp_uninstall', server=server_id, mode='purge')
         logger.info('[MCP.v1] catalog uninstall (purge): %s', server_id)
-        _invalidate_tool_latches(f'catalog uninstall/purge {server_id}')
         return api_ok(message=f'Uninstalled {server_id}', purged=True)
 
     config = load_mcp_config()
     if server_id in config:
-        srv_cfg = dict(config[server_id])
-        srv_cfg['enabled'] = False
-        cfg_upsert(server_id, srv_cfg)
+        if cfg_patch(server_id, {'enabled': False}) is None:
+            return api_ok(message=f'{server_id} was not installed', purged=False)
         audit_log('mcp_uninstall', server=server_id, mode='soft')
         logger.info('[MCP.v1] catalog uninstall (soft, env kept): %s',
                     server_id)
-        _invalidate_tool_latches(f'catalog uninstall/soft {server_id}')
         return api_ok({
             'message': f'{server_id} disabled (credentials kept for re-enable)',
             'purged': False,

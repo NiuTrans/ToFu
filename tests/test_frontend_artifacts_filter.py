@@ -19,7 +19,8 @@ import os
 
 import pytest
 
-from tests._jsdom import JS_DIR, run_harness
+from tests._jsdom import run_harness
+from tests._runtime_sections import runtime_section_path
 
 pytestmark = pytest.mark.unit
 
@@ -79,7 +80,7 @@ report();
 
 def test_artifacts_filter_shows_empty_state():
     run_harness(
-        target_js=os.path.join(JS_DIR, 'artifacts.js'),
+        target_js=runtime_section_path('artifacts.js'),
         body_js=_BODY,
         min_pass=7,
         label='artifacts filter',

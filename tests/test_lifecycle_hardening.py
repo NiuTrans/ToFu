@@ -191,10 +191,52 @@ def test_server_records_serve_mode_after_tls_decision(tmp_path):
         server._record_serve_mode('ftp', path=str(p))
 
     src = _read(SERVER_PY)
-    decide = src.index('_ensure_tls_certs(args.certfile')
+    decide = src.index('_tls_cert, _tls_key = _ensure_tls_certs(')
     record = src.index("_record_serve_mode('https' if")
     assert record > decide, \
         'the mode must be recorded AFTER the TLS decision, not before it'
+
+
+@pytest.mark.parametrize(
+    ('kwargs', 'expected_tls', 'expected_reason'),
+    [
+        ({}, False, 'proxy-safe-default'),
+        ({'behind_proxy': True}, False, 'reverse-proxy'),
+        ({'tls_value': '1'}, True, 'explicitly-enabled'),
+        ({'tls_value': 'true'}, True, 'explicitly-enabled'),
+        ({'tls_value': '0'}, False, 'explicitly-disabled'),
+        ({'tls_value': 'off'}, False, 'explicitly-disabled'),
+        ({'certfile': 'cert.pem', 'keyfile': 'key.pem'},
+         True, 'configured-certificate'),
+        ({'behind_proxy': True, 'tls_value': '1'},
+         True, 'explicitly-enabled'),
+        ({'no_tls': True, 'tls_value': '1'},
+         False, 'command-line-disabled'),
+        ({'tls_value': '0', 'certfile': 'cert.pem', 'keyfile': 'key.pem'},
+         False, 'explicitly-disabled'),
+    ],
+)
+def test_listener_tls_policy_is_explicit_and_proxy_safe(
+        kwargs, expected_tls, expected_reason):
+    """Unknown/sparse launch environments must never guess TLS.
+
+    This covers interactive starts, manager recovery, cron/systemd's reduced
+    environment, and arbitrary HTTPS-terminating proxies. Direct TLS remains
+    available through an explicit flag or certificate pair.
+    """
+    import server
+    use_tls, reason, invalid = server._resolve_tls_policy(**kwargs)
+    assert use_tls is expected_tls
+    assert reason == expected_reason
+    assert invalid == ''
+
+
+def test_listener_tls_policy_rejects_ambiguous_values_to_http():
+    import server
+    use_tls, reason, invalid = server._resolve_tls_policy(tls_value='sometimes')
+    assert use_tls is False
+    assert reason == 'proxy-safe-default'
+    assert invalid == 'sometimes'
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -395,12 +437,13 @@ def test_heartbeat_task_wires_listener_watch():
     src = _read(SERVER_PY)
     assert '_listener_death_decide(' in src, 'no pure decision for listener loss'
     assert '_port_bound(' in src, 'no listener probe helper'
-    hb = src.index('async def _loop_heartbeat_task')
-    trigger = src.index('async def _shutdown_trigger')
-    region = src[hb:trigger]
-    assert '_listener_death_decide(' in region, \
+    owner = _read(os.path.join(ROOT, 'lib', 'server_loop_watchdog.py'))
+    hb = owner.index('async def _heartbeat_loop')
+    watcher = owner.index('def _stall_watch', hb)
+    region = owner[hb:watcher]
+    assert 'self.hooks._listener_death_decide(' in region, \
         'the heartbeat task does not consult the listener watch'
-    assert 'os._exit' in region, \
+    assert 'self.exit_process(1)' in region, \
         'a confirmed serve death must exit the process (watchdog handles deaths)'
 
 
@@ -443,6 +486,56 @@ def test_probe_b_reads_the_stream_that_carries_the_line():
     assert 'LAUNCH_STAMP' in region, \
         'app.log is append-only — the grep must be scoped to lines at/after launch'
     assert 'Loop blocking-guard' in region
+
+
+def test_guard_death_evidence_cannot_block_relaunch_or_hold_guard_lock():
+    """FUSE log tails are forensic best-effort, never a recovery gate."""
+    src = _read(GUARD_SH)
+    assert 'record_death_evidence_async()' in src
+    async_region = src[
+        src.index('record_death_evidence_async()'):
+        src.index('_heartbeat_file()', src.index('record_death_evidence_async()'))
+    ]
+    assert 'exec 9>&-' in async_region, \
+        'the evidence child can inherit and strand the singleton guard lock'
+    assert re.search(r'\)\s*&', async_region), \
+        'death evidence is still synchronous on the recovery path'
+    direct_calls = re.findall(
+        r'^\s*record_death_evidence\s*$', src, flags=re.MULTILINE)
+    assert len(direct_calls) == 1, \
+        'only the async child may invoke synchronous evidence collection'
+    assert len(re.findall(
+        r'^\s*record_death_evidence_async\s*$', src,
+        flags=re.MULTILINE)) == 2
+    assert '$1 == "oom_kill"' in src, \
+        'OOM evidence prefix-matches disable/local counters as extra values'
+
+
+def test_guard_relaunched_server_cannot_inherit_singleton_lock():
+    """A server child holding fd 9 makes a dead guard impossible to replace."""
+    src = _read(GUARD_SH)
+    start = src.index('relaunch()')
+    end = src.index('check_once()', start)
+    region = src[start:end]
+    launch = next(line for line in region.splitlines()
+                  if 'setsid nohup' in line and 'server.py' in line
+                  and '2>&1' in line)
+    assert '9>&-' in launch, \
+        'server.py inherits the guard singleton flock fd across exec'
+    assert 'LD_LIBRARY_PATH="${PY_ENV_LIB}' in region, \
+        'selected Python environment lib dir is not first in the child path'
+    loop_start = src.index('loop()')
+    loop_region = src[loop_start:src.index('ensure()', loop_start)]
+    assert re.search(r'sleep\s+"\$\{INTERVAL\}"\s+9>&-', loop_region), \
+        'the interval child can retain the guard lock after the guard exits'
+
+
+def test_guard_normalizes_injected_dolphin_preload_with_opt_out():
+    src = _read(GUARD_SH)
+    setup = src[:src.index('SCRIPT=')]
+    assert 'dolphinfs_client_preload.so' in setup
+    assert 'TOFU_GUARD_KEEP_DOLPHIN_PRELOAD' in setup
+    assert 'unset LD_PRELOAD' in setup
 
 
 def test_all_three_scripts_are_valid_bash():

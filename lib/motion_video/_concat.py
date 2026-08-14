@@ -1,17 +1,20 @@
 """lib/motion_video/_concat.py — Scene MP4 normalization + concatenation.
 
 Final assembly of the motion-video pipeline: take the per-scene silent MP4s
-and produce ``final.mp4``. Two paths, mirroring auto-motion's rule
+and produce ``final.mp4``. Three paths, mirroring auto-motion's rule
 ("confirm uniform specs first; transcode-normalize when they differ"):
 
   * **uniform specs** (same codec/size/fps, no audio) → concat demuxer with
     ``-c copy`` (fast + lossless);
   * **mismatched specs** → single-pass re-encode to the first input's spec
     (scale + fps + yuv420p + silent).
+  * **overlap transitions** → normalize every input in one filter graph, then
+    chain xfade/concat edits. The caller supplies visual handles, so subtracting
+    overlaps preserves the program duration used by narration and subtitles.
 
 The output is written atomically (tmp file + ``os.replace``) and the result
-is probe-verified: total duration ≈ Σ scene durations (±0.5s), no audio
-track.
+is probe-verified: total duration ≈ Σ rendered clips − Σ overlaps (±0.5s),
+no audio track. With timeline visual handles that equals program duration.
 """
 
 from __future__ import annotations
@@ -90,8 +93,81 @@ def _run_ffmpeg(args: list[str], *, timeout: int, abort_event=None,
             'elapsed': time.time() - start, 'category': category}
 
 
+_XFADE_NAMES = frozenset({
+    'fade', 'wipeleft', 'wiperight', 'wipeup', 'wipedown',
+    'slideleft', 'slideright', 'slideup', 'slidedown',
+})
+
+
+def _normalise_transitions(transitions, count: int) -> list[dict]:
+    if transitions is None:
+        return [{'duration_s': 0.0, 'ffmpeg': ''}
+                for _ in range(max(0, count - 1))]
+    if not isinstance(transitions, (list, tuple)) or len(transitions) != count - 1:
+        raise ValueError(f'transitions must contain exactly {max(0, count - 1)} '
+                         'boundary entries')
+    out = []
+    for index, raw in enumerate(transitions, 1):
+        item = raw if isinstance(raw, dict) else {}
+        try:
+            duration = max(0.0, float(item.get('duration_s') or 0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f'transition #{index} has invalid duration') from exc
+        name = str(item.get('ffmpeg') or '')
+        if duration > 0.8:
+            raise ValueError(
+                f'transition #{index} exceeds the 0.8s overlap ceiling')
+        if duration and name not in _XFADE_NAMES:
+            raise ValueError(f'transition #{index} has unsupported xfade {name!r}')
+        out.append({'duration_s': round(duration, 4), 'ffmpeg': name})
+    return out
+
+
+def _transition_args(ffmpeg: str, inputs: list[str], probes: list[dict],
+                     transitions: list[dict], tmp_out: str) -> tuple[list[str], float]:
+    """Build one deterministic video-only xfade/concat filter graph."""
+    first = probes[0]
+    width = int(first['width'])
+    height = int(first['height'])
+    fps = max(1, int(round(float(first.get('fps') or 30))))
+    args = [ffmpeg, '-y']
+    for path in inputs:
+        args += ['-i', path]
+    filters = []
+    for index in range(len(inputs)):
+        filters.append(
+            f'[{index}:v]settb=AVTB,setpts=PTS-STARTPTS,'
+            f'scale={width}:{height},setsar=1,fps={fps},format=yuv420p[v{index}]')
+    current = 'v0'
+    current_duration = float(probes[0].get('duration') or 0)
+    for index, transition in enumerate(transitions, 1):
+        incoming_duration = float(probes[index].get('duration') or 0)
+        overlap = float(transition['duration_s'])
+        out = f'vx{index}'
+        if overlap:
+            if overlap >= min(current_duration, incoming_duration):
+                raise ValueError(
+                    f'transition #{index} duration {overlap:.3f}s exceeds a clip')
+            offset = current_duration - overlap
+            filters.append(
+                f'[{current}][v{index}]xfade=transition={transition["ffmpeg"]}:'
+                f'duration={overlap:.4f}:offset={offset:.4f}[{out}]')
+            current_duration += incoming_duration - overlap
+        else:
+            filters.append(
+                f'[{current}][v{index}]concat=n=2:v=1:a=0[{out}]')
+            current_duration += incoming_duration
+        current = out
+    args += [
+        '-filter_complex', ';'.join(filters), '-map', f'[{current}]',
+        '-an', '-r', str(fps), '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+        '-crf', '18', '-preset', 'medium', '-movflags', '+faststart', tmp_out,
+    ]
+    return args, current_duration
+
+
 def concat_mp4s(inputs: list[str], output: str, *, timeout: int = 1800,
-                abort_event=None) -> dict:
+                abort_event=None, transitions=None) -> dict:
     """Concatenate scene MP4s into ``final.mp4`` (atomic + probe-verified).
 
     Args:
@@ -100,8 +176,9 @@ def concat_mp4s(inputs: list[str], output: str, *, timeout: int = 1800,
         timeout: wall-clock seconds for each ffmpeg invocation.
         abort_event: optional threading.Event for cooperative cancel.
 
-    Returns a result dict; on success ``{'ok': True, 'output', 'duration',
-    'mode', 'elapsed'}`` where mode is ``'copy'`` or ``'reencode'``.
+    ``transitions`` is an optional ordered N-1 list of
+    ``{duration_s, ffmpeg}`` boundary records. Returns a result dict; on
+    success mode is ``copy``, ``reencode`` or ``transition``.
     """
     from lib.motion_video._env import ffmpeg_bin
     from lib.motion_video._gates import probe_video
@@ -122,71 +199,93 @@ def concat_mp4s(inputs: list[str], output: str, *, timeout: int = 1800,
         bad = inputs[probes.index(None)]
         return {'ok': False, 'category': 'io',
                 'detail': f'cannot probe scene file: {bad}'}
-    expected_total = sum(float(p.get('duration') or 0) for p in probes)
+    try:
+        transition_items = _normalise_transitions(transitions, len(inputs))
+    except ValueError as exc:
+        logger.debug('[MotionVideo] invalid transition contract: %s', exc)
+        return {'ok': False, 'category': 'contract', 'detail': str(exc)}
+    overlap_total = sum(float(item['duration_s'])
+                        for item in transition_items)
+    expected_total = (sum(float(p.get('duration') or 0) for p in probes)
+                      - overlap_total)
 
     out_dir = os.path.dirname(os.path.abspath(output)) or '.'
     os.makedirs(out_dir, exist_ok=True)
+    has_overlap = overlap_total > 0
     uniform = _uniform_spec(probes)
-    mode = 'copy' if uniform else 'reencode'
+    mode = ('transition' if has_overlap else
+            ('copy' if uniform else 'reencode'))
     logger.info('[MotionVideo] concat %d scene(s) → %s (mode=%s, Σ=%.2fs)',
                 len(inputs), output, mode, expected_total)
 
-    list_fd, list_path = tempfile.mkstemp(prefix='mvconcat-', suffix='.txt',
-                                          dir=out_dir, text=True)
-    tmp_out = output + '.tmp.mp4'
-    try:
-        with os.fdopen(list_fd, 'w') as lf:
-            for p in inputs:
-                safe = os.path.abspath(p).replace("'", "'\\''")
-                lf.write(f"file '{safe}'\n")
-        args = [ffmpeg, '-y', '-f', 'concat', '-safe', '0', '-i', list_path]
-        if uniform:
-            args += ['-c', 'copy']
-        else:
-            first = probes[0]
-            args += [
-                '-vf', f"scale={first['width']}:{first['height']},setsar=1",
-                '-r', str(int(round(float(first.get('fps') or 30)))),
-                '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '18',
-                '-preset', 'medium', '-an',
-            ]
-        args += ['-movflags', '+faststart', tmp_out]
-        res = _run_ffmpeg(args, timeout=timeout, abort_event=abort_event)
-        if res['category'] or res['rc'] != 0:
-            return {'ok': False,
-                    'category': res['category'] or 'unknown',
-                    'detail': res['err'][-1500:]}
-        if not os.path.isfile(tmp_out) or os.path.getsize(tmp_out) == 0:
-            return {'ok': False, 'category': 'io',
-                    'detail': 'ffmpeg produced no output'}
-        os.replace(tmp_out, output)
-    finally:
+    list_path = ''
+    from lib.json_store import temporary_output_path
+    with temporary_output_path(output, suffix='.tmp.mp4') as tmp_out:
         try:
-            os.unlink(list_path)
-        except OSError as e:
-            logger.debug('[MotionVideo] concat list cleanup failed: %s', e)
-        if os.path.isfile(tmp_out):
-            try:
-                os.unlink(tmp_out)
-            except OSError as e:
-                logger.debug('[MotionVideo] tmp output cleanup failed: %s', e)
+            if has_overlap:
+                try:
+                    args, expected_total = _transition_args(
+                        ffmpeg, inputs, probes, transition_items, tmp_out)
+                except ValueError as exc:
+                    logger.debug(
+                        '[MotionVideo] transition graph rejected: %s', exc)
+                    return {'ok': False, 'category': 'contract',
+                            'detail': str(exc)}
+            else:
+                list_fd, list_path = tempfile.mkstemp(
+                    prefix='mvconcat-', suffix='.txt', dir=out_dir, text=True)
+                with os.fdopen(list_fd, 'w') as lf:
+                    for p in inputs:
+                        safe = os.path.abspath(p).replace("'", "'\\''")
+                        lf.write(f"file '{safe}'\n")
+                args = [ffmpeg, '-y', '-f', 'concat', '-safe', '0',
+                        '-i', list_path]
+                if uniform:
+                    args += ['-c', 'copy']
+                else:
+                    first = probes[0]
+                    args += [
+                        '-vf',
+                        f"scale={first['width']}:{first['height']},setsar=1",
+                        '-r', str(int(round(float(first.get('fps') or 30)))),
+                        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '18',
+                        '-preset', 'medium', '-an',
+                    ]
+                args += ['-movflags', '+faststart', tmp_out]
+            res = _run_ffmpeg(args, timeout=timeout, abort_event=abort_event)
+            if res['category'] or res['rc'] != 0:
+                return {'ok': False,
+                        'category': res['category'] or 'unknown',
+                        'detail': res['err'][-1500:]}
+            if not os.path.isfile(tmp_out) or os.path.getsize(tmp_out) == 0:
+                return {'ok': False, 'category': 'io',
+                        'detail': 'ffmpeg produced no output'}
+        finally:
+            if list_path:
+                try:
+                    os.unlink(list_path)
+                except OSError as e:
+                    logger.debug(
+                        '[MotionVideo] concat list cleanup failed: %s', e)
 
-    # ── Post-verify: duration ≈ Σ scenes, silent ──
-    final_probe = probe_video(output)
-    detail = ''
-    if final_probe is None:
-        return {'ok': False, 'category': 'io',
-                'detail': 'post-concat probe failed'}
-    got = float(final_probe.get('duration') or 0)
-    if expected_total > 0 and abs(got - expected_total) > 0.5:
-        detail = (f'duration mismatch: final {got:.3f}s vs Σ scenes '
-                  f'{expected_total:.3f}s')
-        logger.warning('[MotionVideo] concat verify: %s', detail)
-        return {'ok': False, 'category': 'io', 'detail': detail}
-    if final_probe.get('has_audio'):
-        logger.warning('[MotionVideo] concat verify: final has an audio track')
-        return {'ok': False, 'category': 'io',
-                'detail': 'final MP4 unexpectedly has an audio track'}
+        # Probe the staged candidate before replacing the last good output.
+        final_probe = probe_video(tmp_out)
+        detail = ''
+        if final_probe is None:
+            return {'ok': False, 'category': 'io',
+                    'detail': 'post-concat probe failed'}
+        got = float(final_probe.get('duration') or 0)
+        if expected_total > 0 and abs(got - expected_total) > 0.5:
+            detail = (f'duration mismatch: final {got:.3f}s vs Σ scenes '
+                      f'{expected_total:.3f}s')
+            logger.warning('[MotionVideo] concat verify: %s', detail)
+            return {'ok': False, 'category': 'io', 'detail': detail}
+        if final_probe.get('has_audio'):
+            logger.warning(
+                '[MotionVideo] concat verify: final has an audio track')
+            return {'ok': False, 'category': 'io',
+                    'detail': 'final MP4 unexpectedly has an audio track'}
+        os.replace(tmp_out, output)
 
     logger.info('[MotionVideo] concat done: %s (%.2fs)', output, got)
     return {'ok': True, 'output': output, 'duration': round(got, 3),
@@ -408,65 +507,56 @@ def burn_in_subtitles(video_path: str, srt_path: str, output: str, *,
     if force_style:
         filt += f":force_style='{force_style}'"
 
-    tmp_out = output + '.tmp.mp4'
-    args = [ffmpeg, '-y', '-i', video_path, '-vf', filt,
-            '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '18',
-            '-preset', 'medium', '-an', '-movflags', '+faststart', tmp_out]
-    logger.info('[MotionVideo] burn-in %s → %s', srt_path, output)
-    res = _run_ffmpeg(args, timeout=timeout, abort_event=abort_event)
-    if res['category'] or res['rc'] != 0:
-        return {'ok': False, 'category': res['category'] or 'unknown',
-                'detail': res['err'][-1500:]}
-    if _font_burn_failed(res['err']):
-        logger.warning('[MotionVideo] burn-in refused: libass resolved no '
-                       'font for the subtitle glyphs — the burn would be a '
-                       'silent no-op')
-        try:
-            os.unlink(tmp_out)
-        except OSError as _e:
-            logger.debug('burn in subtitles: unreadable (%s)', _e)
-            pass  # tmp output may not exist yet — nothing to clean
-        return {'ok': False, 'category': 'font_missing',
-                'detail': 'libass resolved no usable font for the subtitle '
-                          'text (fontconfig config missing, or no installed '
-                          'font covers the glyphs — install a CJK-capable '
-                          'font or pass burn_in_fontsdir); refusing to ship '
-                          'a silent no-op burn'}
-    if not os.path.isfile(tmp_out) or os.path.getsize(tmp_out) == 0:
-        return {'ok': False, 'category': 'io',
-                'detail': 'ffmpeg produced no output'}
-
-    # ── Safe-box verification BEFORE the output is promoted ──
-    # Runs on tmp_out so a defective burn never reaches the deliverable path.
-    safe_checked = 0
-    if verify_safe_box and cues and frame_w > 0 and frame_h > 0:
-        vres = _verify_safe_box(
-            video_path, tmp_out, cues, frame_w, frame_h, ffmpeg=ffmpeg,
-            env=build_render_env(),
-            workdir=os.path.dirname(os.path.abspath(output)) or '.')
-        if not vres.get('ok'):
-            logger.warning('[MotionVideo] burn-in rejected: %s',
-                           vres.get('detail'))
-            try:
-                os.unlink(tmp_out)
-            except OSError as e:
-                logger.debug('[MotionVideo] rejected burn cleanup: %s', e)
-            return vres
-        safe_checked = vres.get('checked', 0)
-
-    os.replace(tmp_out, output)
-
-    v_probe = probe_video(video_path)
-    f_probe = probe_video(output)
-    if f_probe is None:
-        return {'ok': False, 'category': 'io',
-                'detail': 'post-burn probe failed'}
-    if v_probe:
-        dv = abs(float(f_probe.get('duration') or 0)
-                 - float(v_probe.get('duration') or 0))
-        if dv > 0.5:
+    from lib.json_store import temporary_output_path
+    with temporary_output_path(output, suffix='.tmp.mp4') as tmp_out:
+        args = [ffmpeg, '-y', '-i', video_path, '-vf', filt,
+                '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '18',
+                '-preset', 'medium', '-an', '-movflags', '+faststart', tmp_out]
+        logger.info('[MotionVideo] burn-in %s → %s', srt_path, output)
+        res = _run_ffmpeg(args, timeout=timeout, abort_event=abort_event)
+        if res['category'] or res['rc'] != 0:
+            return {'ok': False, 'category': res['category'] or 'unknown',
+                    'detail': res['err'][-1500:]}
+        if _font_burn_failed(res['err']):
+            logger.warning('[MotionVideo] burn-in refused: libass resolved no '
+                           'font for the subtitle glyphs — the burn would be a '
+                           'silent no-op')
+            return {'ok': False, 'category': 'font_missing',
+                    'detail': 'libass resolved no usable font for the subtitle '
+                              'text (fontconfig config missing, or no installed '
+                              'font covers the glyphs — install a CJK-capable '
+                              'font or pass burn_in_fontsdir); refusing to ship '
+                              'a silent no-op burn'}
+        if not os.path.isfile(tmp_out) or os.path.getsize(tmp_out) == 0:
             return {'ok': False, 'category': 'io',
-                    'detail': f'burned duration drifted {dv:.3f}s'}
+                    'detail': 'ffmpeg produced no output'}
+
+        # Safe-box and media probes run before promotion, so a rejected burn
+        # cannot overwrite the last good deliverable.
+        safe_checked = 0
+        if verify_safe_box and cues and frame_w > 0 and frame_h > 0:
+            vres = _verify_safe_box(
+                video_path, tmp_out, cues, frame_w, frame_h, ffmpeg=ffmpeg,
+                env=build_render_env(),
+                workdir=os.path.dirname(os.path.abspath(output)) or '.')
+            if not vres.get('ok'):
+                logger.warning('[MotionVideo] burn-in rejected: %s',
+                               vres.get('detail'))
+                return vres
+            safe_checked = vres.get('checked', 0)
+
+        v_probe = probe_video(video_path)
+        f_probe = probe_video(tmp_out)
+        if f_probe is None:
+            return {'ok': False, 'category': 'io',
+                    'detail': 'post-burn probe failed'}
+        if v_probe:
+            dv = abs(float(f_probe.get('duration') or 0)
+                     - float(v_probe.get('duration') or 0))
+            if dv > 0.5:
+                return {'ok': False, 'category': 'io',
+                        'detail': f'burned duration drifted {dv:.3f}s'}
+        os.replace(tmp_out, output)
     logger.info('[MotionVideo] burn-in done: %s (safe-box verified on %d cue(s))',
                 output, safe_checked)
     return {'ok': True, 'output': output,

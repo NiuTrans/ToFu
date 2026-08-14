@@ -46,13 +46,22 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg  # noqa: E402
+from lib.database import (  # noqa: E402
+    DOMAIN_CHAT, _BACKEND, get_thread_db, json_dumps_pg,
+)
 from lib.log import get_logger  # noqa: E402
 from lib.tasks_pkg.snapshot_delta import (  # noqa: E402
     DELTA_MARKER,
     SnapshotProjector,
     rebuild_snapshots,
 )
+
+# Keep reconstruction of the EXISTING authoritative chain separate from the
+# verification seam below.  The corruption-control test deliberately neuters
+# ``rebuild_snapshots`` to prove verify-before-write is load-bearing; letting
+# that neuter fabricate the input baseline too would make the projector see
+# non-snapshot objects and invalidate the control rather than the verifier.
+_rebuild_existing_snapshots = rebuild_snapshots
 
 logger = get_logger(__name__)
 
@@ -87,18 +96,45 @@ def _snapshot_bytes(db) -> int:
         return int(row[0] or 0)
 
 
-def _tasks_with_full_rows(db, limit=0) -> list:
-    """Task ids that still have at least one FULL (un-projected) snapshot row."""
+def _tasks_with_full_rows(db, limit=0, *, comprehensive=False) -> list:
+    """Task ids that still have at least one FULL snapshot row.
+
+    The original probe inspected only the first snapshot.  A mixed deployment
+    can write delta rows first and legacy full rows later (measured: 23 tasks /
+    797 full rows hidden this way), so that probe falsely declared the fleet
+    complete.  The maintenance daemon uses cheap first+latest probes; mode
+    transitions are chronological and this catches both old->new and new->old
+    deployments without detoasting 100k payloads every 15 minutes.  The
+    one-shot migration requests ``comprehensive=True`` and scans the marker
+    explicitly, so even a delta->full->delta sandwich cannot be missed.
+    """
+    if comprehensive:
+        if _BACKEND == 'pg':
+            marker_missing = "NOT jsonb_exists(payload, 'prefixLen')"
+        else:
+            marker_missing = "json_extract(payload, '$.prefixLen') IS NULL"
+        sql = ("SELECT DISTINCT task_id FROM task_events "
+               "WHERE type='messages_snapshot' AND " + marker_missing +
+               " ORDER BY task_id")
+        params = ()
+        if limit:
+            sql += ' LIMIT ?'
+            params = (int(limit),)
+        return [r[0] for r in db.execute(sql, params).fetchall()]
+
     rows = db.execute(
         "SELECT DISTINCT task_id FROM task_events WHERE type='messages_snapshot'"
     ).fetchall()
     out = []
     for r in rows:
         tid = r[0]
-        probe = db.execute(
+        probes = db.execute(
             "SELECT payload FROM task_events WHERE task_id=? AND type='messages_snapshot' "
-            "ORDER BY event_id ASC LIMIT 1", (tid,)).fetchone()
-        if probe and DELTA_MARKER not in _payload(probe[0]):
+            "ORDER BY event_id ASC LIMIT 1", (tid,)).fetchall()
+        probes += db.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND type='messages_snapshot' "
+            "ORDER BY event_id DESC LIMIT 1", (tid,)).fetchall()
+        if any(DELTA_MARKER not in _payload(probe[0]) for probe in probes):
             out.append(tid)
         if limit and len(out) >= limit:
             break
@@ -117,16 +153,36 @@ def migrate_task(db, task_id: str, *, dry_run=False) -> dict:
     if not rows:
         return {'task': task_id, 'status': 'empty', 'rounds': 0}
 
-    originals = [(int(r[0]), _payload(r[1])) for r in rows]
-    if all(DELTA_MARKER in p for _, p in originals):
-        return {'task': task_id, 'status': 'already-delta', 'rounds': len(originals)}
+    stored = [(int(r[0]), _payload(r[1])) for r in rows]
+    if all(DELTA_MARKER in p for _, p in stored):
+        return {'task': task_id, 'status': 'already-delta', 'rounds': len(stored)}
 
-    before = sum(len(_canon(p)) for _, p in originals)
+    # Mixed tables are legal and the read path already knows how to rebuild
+    # them.  Establish one FULL authoritative baseline for every row before
+    # re-projecting; otherwise an already-delta prefix is compared as though it
+    # were a full payload (``messages`` absent) and a healthy mixed task is
+    # falsely refused.  Refuse honestly if the existing chain itself is
+    # degraded — never manufacture a new baseline from incomplete data.
+    originals = _rebuild_existing_snapshots(
+        [{'type': SNAPSHOT, 'payload': p} for _, p in stored])
+    if len(originals) != len(stored):
+        return {'task': task_id, 'status': 'FAILED',
+                'reason': ('existing mixed chain rebuilt %d of %d rounds'
+                           % (len(originals), len(stored))),
+                'rounds': len(stored)}
+    for (eid, _), full in zip(stored, originals):
+        if full.get('degraded'):
+            return {'task': task_id, 'status': 'FAILED',
+                    'reason': ('existing event %d is degraded: %s'
+                               % (eid, full.get('degradedReason'))),
+                    'rounds': len(stored)}
+
+    before = sum(len(_canon(p)) for _, p in stored)
 
     # ── project ──
     proj = SnapshotProjector()
     projected = []
-    for eid, p in originals:
+    for (eid, _stored_payload), p in zip(stored, originals):
         projected.append((eid, proj.project(task_id, p)))
     after = sum(len(_canon(p)) for _, p in projected)
 
@@ -137,7 +193,7 @@ def migrate_task(db, task_id: str, *, dry_run=False) -> dict:
         return {'task': task_id, 'status': 'FAILED',
                 'reason': f'rebuild produced {len(rebuilt)} of {len(originals)} rounds',
                 'rounds': len(originals)}
-    for (eid, orig), got in zip(originals, rebuilt):
+    for (eid, _), orig, got in zip(stored, originals, rebuilt):
         if got.get('degraded'):
             return {'task': task_id, 'status': 'FAILED', 'rounds': len(originals),
                     'reason': f'event {eid} rebuilt degraded: {got.get("degradedReason")}'}
@@ -184,7 +240,8 @@ def main():
 
     db = get_thread_db(DOMAIN_CHAT)
     total_before_bytes = _snapshot_bytes(db)
-    tasks = _tasks_with_full_rows(db, limit=args.limit)
+    tasks = _tasks_with_full_rows(
+        db, limit=args.limit, comprehensive=True)
     print(f'snapshot bytes BEFORE : {total_before_bytes/1e6:.1f} MB')
     print(f'tasks with full rows  : {len(tasks)}')
     if not tasks:

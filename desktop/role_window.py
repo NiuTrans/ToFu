@@ -8,9 +8,9 @@ system tray. This module is the ONE authoring consumed by BOTH launchers
 (the connect_ui.py pattern — two copies of a role sentence would drift):
 
 * **Full app** declares 「这台电脑是 Tofu 服务器」 and hosts the computer-
-  control panel (enable toggle, permission tiers, connect-to-remote).
+  control panel (enable toggle and permission tiers).
 * **Agent app** declares 「这台电脑是 Tofu 受控端」 and hosts its four
-  tiers, autostart and reconnect.
+  tiers and autostart. Its server attachment is supplied by the installer.
 
 Deliberately split so headless CI can test every fact the window shows:
 
@@ -84,10 +84,13 @@ def persist_show_at_startup(flag: bool) -> None:
     displayed. Failures are logged, never fatal.
     """
     try:
-        from lib.desktop_agent.config import load_config, save_config
-        cfg = load_config()
-        cfg['show_role_window'] = bool(flag)
-        save_config(cfg)
+        from lib.desktop_agent.config import update_config
+
+        def _mutate(cfg):
+            cfg['show_role_window'] = bool(flag)
+            return cfg
+
+        update_config(_mutate)
     except Exception as e:
         logger.warning('Could not persist show_role_window: %s', e)
 
@@ -123,7 +126,7 @@ def role_state_full(port, cc_state, attached_url, show_flag=True,
 
 
 def role_state_agent(url, perms, autostart, show_flag=True,
-                     lang=None, link_text='') -> dict:
+                     lang=None, link_text='', link_state='') -> dict:
     """Display facts for the AGENT app's role window (the client side).
 
     ``autostart=None`` means the platform does not support the toggle
@@ -142,6 +145,7 @@ def role_state_agent(url, perms, autostart, show_flag=True,
         'server_url': url or '',
         'attached': bool(url),
         'link_text': str(link_text or ''),
+        'link_state': str(link_state or ''),
         'perms': {k: bool(v) for k, v in (perms or {}).items()},
         'tiers': ['allow_write', 'allow_exec', 'allow_gui', 'allow_egress'],
         'autostart': autostart,
@@ -223,13 +227,13 @@ def show_role_window(kind, state_fn, actions, log=_noop_log) -> None:
     theme.set_window_icon(root)
     root.protocol('WM_DELETE_WINDOW', lambda: _close())
 
-    frame = ttk.Frame(root, style='Tofu.TFrame', padding=(22, 20))
+    frame = ttk.Frame(root, style='Tofu.TFrame', padding=(28, 24))
     frame.grid(sticky='nsew')
 
     # ── Header: brand + role sentence + plain-language subtitle ──
     header = ttk.Frame(frame, style='Tofu.TFrame')
     header.grid(row=0, column=0, sticky='we')
-    photo = theme.load_logo_photo(root, size=44)
+    photo = theme.load_logo_photo(root, size=48)
     if photo is not None:
         ttk.Label(header, image=photo, style='Tofu.TLabel').grid(
             row=0, column=0, rowspan=2, padx=(0, 12), sticky='n')
@@ -237,7 +241,7 @@ def show_role_window(kind, state_fn, actions, log=_noop_log) -> None:
               style='Tofu.Title.TLabel').grid(row=0, column=1, sticky='w')
     sub_key = ('desktop.role.serverSub' if state['kind'] == 'full'
                else 'desktop.role.agentSub')
-    ttk.Label(header, text=theme.t(sub_key, lang), wraplength=400,
+    ttk.Label(header, text=theme.t(sub_key, lang), wraplength=560,
               justify='left', style='Tofu.Sub.TLabel').grid(
         row=1, column=1, sticky='w', pady=(3, 0))
 
@@ -288,23 +292,30 @@ def show_role_window(kind, state_fn, actions, log=_noop_log) -> None:
         except tk.TclError:
             pass
 
-    def _tier_rows(card, key, st, row):
+    def _tier_tile(grid, key, st, index):
+        """One compact permission tile in the two-column capability grid."""
         var = tk.BooleanVar(value=bool(st['perms'].get(key)))
         tier_vars[key] = var
+        tile = tk.Frame(grid, bg=palette['bg3'],
+                        highlightthickness=1,
+                        highlightbackground=palette['border'],
+                        highlightcolor=palette['border'])
+        tile.grid(row=index // 2, column=index % 2, sticky='nsew',
+                  padx=(0, 6) if index % 2 == 0 else (6, 0),
+                  pady=(0, 8))
         cb = ttk.Checkbutton(
-            card, text=theme.t('desktop.tray.' + _TIER_KEYS[key], st['lang']),
-            style='Tier.TCheckbutton', variable=var,
+            tile, text=theme.t('desktop.tray.' + _TIER_KEYS[key], st['lang']),
+            style='Tile.TCheckbutton', variable=var,
             command=lambda k=key: _act('toggle_perm', k))
         # The full app gates tiers behind the CC enable toggle (mirroring
         # the tray's _perm_enabled); the agent's tiers are always live.
         if st['kind'] == 'full' and not st['cc_enabled']:
             cb.state(['disabled'])
-        cb.grid(row=row, column=0, sticky='w', padx=(10, 12), pady=(2, 0))
-        ttk.Label(card, text=theme.t(_TIER_DESC_KEYS[key], st['lang']),
-                  style='CardSub.TLabel', wraplength=410,
-                  justify='left').grid(row=row + 1, column=0, sticky='w',
-                                       padx=(34, 12), pady=(0, 4))
-        return row + 2
+        cb.grid(row=0, column=0, sticky='w', padx=10, pady=(8, 1))
+        ttk.Label(tile, text=theme.t(_TIER_DESC_KEYS[key], st['lang']),
+                  style='TileSub.TLabel', wraplength=260,
+                  justify='left').grid(row=1, column=0, sticky='w',
+                                       padx=(30, 10), pady=(0, 8))
 
     def _hairline(parent_widget, row):
         line = tk.Frame(parent_widget, bg=palette['border'], height=1)
@@ -329,11 +340,11 @@ def show_role_window(kind, state_fn, actions, log=_noop_log) -> None:
         url_text = st['server_url'] or theme.t('desktop.tray.notAttached',
                                                st['lang'])
         ttk.Label(card, text=url_text, style='CardName.TLabel',
-                  wraplength=430, justify='left').grid(
+                  wraplength=590, justify='left').grid(
             row=1, column=0, sticky='w', padx=12, pady=(2, 6))
         card_row = 2
         if st['kind'] == 'full' and st.get('dual_role'):
-            ttk.Label(card, wraplength=410, justify='left',
+            ttk.Label(card, wraplength=580, justify='left',
                       style='CardSub.TLabel',
                       text=theme.t('desktop.role.alsoClient', st['lang'])
                       .replace('{url}', st['attached_url'])).grid(
@@ -346,14 +357,12 @@ def show_role_window(kind, state_fn, actions, log=_noop_log) -> None:
                        style='Tofu.Accent.TButton',
                        command=lambda: _act('open')).grid(row=0, column=0,
                                                           padx=(0, 8))
-        ttk.Button(btns,
-                   text=theme.t('desktop.tray.connectRemote'
-                                if st['kind'] == 'full'
-                                else 'desktop.tray.connectDifferent',
-                                st['lang']),
-                   style='Tofu.TButton',
-                   command=lambda: _act('connect')).grid(row=0, column=1)
-
+        elif actions.get('browser_relay'):
+            ttk.Button(btns,
+                       text=theme.t('desktop.tray.browserRelay', st['lang']),
+                       style='Tofu.Accent.TButton',
+                       command=lambda: _act('browser_relay')).grid(
+                row=0, column=0, padx=(0, 8))
         # ── Computer-control card ──
         cc = theme.card_frame(body, palette)
         cc.grid(row=row, column=0, sticky='we')
@@ -377,12 +386,18 @@ def show_role_window(kind, state_fn, actions, log=_noop_log) -> None:
                           else 'desktop.role.ccOff')
             style = ('Status.Ok.TLabel' if st['cc_enabled']
                      else 'CardSub.TLabel')
-            ttk.Label(cc, wraplength=410, justify='left', style=style,
+            ttk.Label(cc, wraplength=580, justify='left', style=style,
                       text=theme.t(status_key, st['lang'])).grid(
                 row=tier_row, column=0, sticky='w', padx=12, pady=(0, 4))
             tier_row += 1
-        for key in st['tiers']:
-            tier_row = _tier_rows(cc, key, st, tier_row)
+        perm_grid = ttk.Frame(cc, style='Card.TFrame')
+        perm_grid.grid(row=tier_row, column=0, sticky='we', padx=12,
+                       pady=(4, 2))
+        perm_grid.columnconfigure(0, weight=1, uniform='perm')
+        perm_grid.columnconfigure(1, weight=1, uniform='perm')
+        for index, key in enumerate(st['tiers']):
+            _tier_tile(perm_grid, key, st, index)
+        tier_row += 1
         if st['kind'] == 'agent' and st.get('autostart') is not None:
             var = tk.BooleanVar(value=bool(st['autostart']))
             ttk.Checkbutton(
@@ -393,13 +408,13 @@ def show_role_window(kind, state_fn, actions, log=_noop_log) -> None:
                 pady=(2, 0))
             ttk.Label(cc, text=theme.t('desktop.role.autostartDesc',
                                        st['lang']),
-                      style='CardSub.TLabel', wraplength=410,
+                      style='CardSub.TLabel', wraplength=580,
                       justify='left').grid(row=tier_row + 1, column=0,
                                            sticky='w', padx=(34, 12),
                                            pady=(0, 4))
             tier_row += 2
         tier_row = _hairline(cc, tier_row)
-        ttk.Label(cc, wraplength=410, justify='left', style='CardSub.TLabel',
+        ttk.Label(cc, wraplength=580, justify='left', style='CardSub.TLabel',
                   text=theme.t('desktop.role.permHint', st['lang'])).grid(
             row=tier_row, column=0, sticky='w', padx=12, pady=(4, 10))
 
@@ -415,20 +430,39 @@ def show_role_window(kind, state_fn, actions, log=_noop_log) -> None:
     # action), and a 3s tick re-pulls state_fn so a connecting/dropping
     # link shows within one beat.
     link_lbl = None
+    link_dot = None
     if state['kind'] == 'agent':
-        link_lbl = ttk.Label(frame, style='Tofu.Sub.TLabel',
-                             wraplength=440, justify='left')
-        link_lbl.grid(row=2, column=0, sticky='w', pady=(14, 0))
+        link_box = tk.Frame(frame, bg=palette['bg2'],
+                            highlightthickness=1,
+                            highlightbackground=palette['border'],
+                            highlightcolor=palette['border'])
+        link_box.grid(row=2, column=0, sticky='we', pady=(12, 0))
+        link_dot = tk.Canvas(link_box, width=12, height=12,
+                             bg=palette['bg2'], highlightthickness=0)
+        link_dot.grid(row=0, column=0, padx=(12, 8), pady=11)
+        link_lbl = ttk.Label(link_box, style='CardName.TLabel',
+                             wraplength=570, justify='left')
+        link_lbl.grid(row=0, column=1, sticky='w', padx=(0, 12), pady=9)
+        link_box.columnconfigure(1, weight=1)
 
     def _tick_link():
         if link_lbl is None or _OPEN.get('root') is not root:
             return
         try:
             st = state_fn()
+            code = st.get('link_state') or ''
             link_lbl.config(
                 text=theme.t('desktop.tray.linkState',
                              st.get('lang') or lang)
                 .replace('{status}', st.get('link_text') or '…'))
+            if link_dot is not None:
+                color = (palette['success'] if code == 'ok'
+                         else palette['error'] if code in
+                         ('auth', 'proxy', 'unreachable', 'error')
+                         else palette['text3'])
+                link_dot.delete('all')
+                link_dot.create_oval(2, 2, 10, 10, fill=color,
+                                     outline=color)
         except tk.TclError:
             return  # window already gone
         except Exception as e:
@@ -487,7 +521,7 @@ def show_role_window(kind, state_fn, actions, log=_noop_log) -> None:
     _refresh()
     if link_lbl is not None:
         _tick_link()
-    theme.center_on_screen(root, width=500)
+    theme.center_on_screen(root, width=680)
     if parent is not None:
         # Host-backed: the tray is already running — the title-bar
         # minimize also sends the window to it, and we never block.

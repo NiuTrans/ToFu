@@ -37,6 +37,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 
 import pytest
 
@@ -44,28 +45,16 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
-def _reader_src() -> str:
-    """The shipped file defining the recommend-stream seam, resolved BY SYMBOL.
-
-    These functions were extracted OUT of paper-reader.js into paper/arxiv.js
-    (a DEFERRED-bundle file). A pinned path turned that legitimate refactor into
-    'reconciler seam not exposed: applyEv undefined', which reads like the seam
-    was deleted. Resolving from the production manifests means the next
-    extraction carries this harness — and its NEUTERs, which patch a COPY of
-    whatever this returns — along with it.
-    """
-    from tests._conv_bundle_sources import sources_defining
-    return sources_defining('_applyRecommendEvent')[-1]
-
-
-_READER_SRC = _reader_src()
+_READER_SRC = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'paper', 'recommend.ts')
+ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
 
 
 def _node_deps_available():
     if not shutil.which('node'):
         return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
+    return (os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
+            and os.path.isfile(ESBUILD))
 
 
 _DOM = r'''<!DOCTYPE html><body>
@@ -130,7 +119,7 @@ win._openRecommendResult = global._openRecommendResult = () => {};
 win._openRecommendCorrection = global._openRecommendCorrection = () => {};
 win._showPaperLanding = global._showPaperLanding = () => {};
 // Cross-file peer: _applyRecommendEvent persists each grounded card to the
-// bookshelf via _persistRecommendedCard, which lives in paper/library.js. This
+// bookshelf via the native _persistRecommendedCard owner. This
 // suite is about the RECONCILER, not the library write, so stub it — the same
 // treatment the other paper/* peers above get. Without it the candidate branch
 // throws ReferenceError and every assertion dies before it runs.
@@ -141,9 +130,9 @@ eval(fs.readFileSync(READER, 'utf8'));
 (function main() {
 // The eval'd `function`/`var` declarations hoist into THIS function scope
 // (bare names), not onto `win` — reference them directly.
-const applyEv = (typeof _applyRecommendEvent === 'function') ? _applyRecommendEvent : undefined;
-const paint = (typeof _paintRecommendNow === 'function') ? _paintRecommendNow : undefined;
-const newStream = (typeof _newRecStream === 'function') ? _newRecStream : undefined;
+const applyEv = win._applyRecommendEvent;
+const paint = win._paintRecommendNow;
+const newStream = win._newRecStream;
 if (typeof applyEv !== 'function' || typeof paint !== 'function' || typeof newStream !== 'function') {
   console.log('__RESULT__' + JSON.stringify({ _missing: {
     applyEv: typeof applyEv, paint: typeof paint, newStream: typeof newStream } }));
@@ -158,7 +147,7 @@ const out = {};
 // module's own `var _recStream` (bare name, same eval scope) so the reconciler
 // (which reads `_recStream`) sees it.
 const s = newStream('diffusion LM award papers');
-_recStream = s;
+win._recStream = s;
 
 // ── Phase 1: interpret_done(candidateCount=2) → two searching skeletons ──
 applyEv(s, { type: 'interpret_done', query: s.description, candidateCount: 2, correctionPending: true });
@@ -225,9 +214,24 @@ console.log('__RESULT__' + JSON.stringify(out));
 
 
 def _run(reader=_READER_SRC):
-    proc = subprocess.run(
-        ['node', '-e', _harness(), reader, ROOT],
-        capture_output=True, text=True, timeout=60)
+    with tempfile.TemporaryDirectory(prefix='tofu-recommend-render-') as temp_dir:
+        built = os.path.join(temp_dir, 'recommend.js')
+        with open(reader, encoding='utf-8') as source_file:
+            source = source_file.read()
+        dependency = os.path.join(
+            os.path.dirname(_READER_SRC), 'push-transport.ts').replace('\\', '/')
+        source = source.replace(
+            "from './push-transport';", f'from {json.dumps(dependency)};')
+        compiled = subprocess.run(
+            [ESBUILD, '--bundle', '--format=iife', '--platform=browser',
+             '--loader=ts', '--sourcefile=recommend.ts',
+             f'--outfile={built}'], input=source, capture_output=True,
+            text=True, timeout=60)
+        if compiled.returncode != 0:
+            raise AssertionError(f'esbuild failed: {compiled.stderr or compiled.stdout}')
+        proc = subprocess.run(
+            ['node', '-e', _harness(), built, ROOT],
+            capture_output=True, text=True, timeout=60)
     if proc.returncode != 0:
         raise AssertionError(f'harness failed: {proc.stderr or proc.stdout}')
     for line in proc.stdout.splitlines():
@@ -275,12 +279,12 @@ def test_NC1_child_node_identity_compare_before_swap_is_load_bearing(tmp_path):
     Shipped file byte-identical after."""
     with open(_READER_SRC, encoding='utf-8') as f:
         original = f.read()
-    anchor = '    if (node._recSig === sig) continue;            // compare-before-swap'
+    anchor = '    if (node._recSig === signature) continue;'
     assert anchor in original, 'compare-before-swap anchor not found — update the neuter target'
     patched = original.replace(
         anchor, '    /* NC-1: compare-before-swap removed (always rewrite) */', 1)
     assert patched != original, 'NC-1 patch did not apply'
-    src = os.path.join(tmp_path, 'paper-reader-nc1.js')
+    src = os.path.join(tmp_path, 'paper-recommend-nc1.ts')
     with open(src, 'w', encoding='utf-8') as f:
         f.write(patched)
     out = _run(reader=src)
@@ -299,15 +303,19 @@ def test_NC2_incremental_reveal_is_load_bearing(tmp_path):
     byte-identical after."""
     with open(_READER_SRC, encoding='utf-8') as f:
         original = f.read()
-    anchor = 'function _paintRecommendNow() {\n  var s = _recStream;\n  if (!s) return;'
+    anchor = ('export function paintRecommendNow(): void {\n'
+              '  const stream = state()._recStream;\n'
+              '  if (!stream) return;')
     assert anchor in original, 'paint-now anchor not found — update the neuter target'
     patched = original.replace(
         anchor,
-        ('function _paintRecommendNow() {\n  var s = _recStream;\n  if (!s) return;\n'
-         "  if (s.status !== 'done') return;  // NC-2: only ever paint at done"),
+        ('export function paintRecommendNow(): void {\n'
+         '  const stream = state()._recStream;\n'
+         '  if (!stream) return;\n'
+         "  if (stream.status !== 'done') return;  // NC-2: only ever paint at done"),
         1)
     assert patched != original, 'NC-2 patch did not apply'
-    src = os.path.join(tmp_path, 'paper-reader-nc2.js')
+    src = os.path.join(tmp_path, 'paper-recommend-nc2.ts')
     with open(src, 'w', encoding='utf-8') as f:
         f.write(patched)
     out = _run(reader=src)

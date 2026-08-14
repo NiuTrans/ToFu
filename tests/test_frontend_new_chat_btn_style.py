@@ -54,7 +54,7 @@ def _strip_comments(css: str) -> str:
     Delegates to the SINGLE shared implementation (charter #24).
 
     EQUIVALENCE, MEASURED on the real 22k-line static/styles.css rather than
-    assumed: the local ``re.sub(r'/\*.*?\*/', '', css, flags=re.DOTALL)`` this
+    assumed: the local ``re.sub(r'/\\*.*?\\*/', '', css, flags=re.DOTALL)`` this
     replaced and ``strip_comments(lang='css', inline=True)`` produce an
     IDENTICAL selector set (6466 rules, 0 selectors unique to either side) and
     a byte-identical whitespace-stripped content signature. They differ only in

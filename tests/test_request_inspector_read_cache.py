@@ -24,6 +24,7 @@ import json
 import os
 import sys
 import uuid
+from contextlib import contextmanager
 
 import pytest
 
@@ -111,7 +112,12 @@ def test_round_walk_issues_one_read_not_one_per_round(monkeypatch):
     _seed(tid, [_snap(i, i + 1) for i in range(1, 13)])
     _clear_cache()
     counting = _CountingDB(get_thread_db(DOMAIN_CHAT))
-    monkeypatch.setattr(ri, 'get_thread_db', lambda *_a, **_k: counting)
+
+    @contextmanager
+    def _counting_lease(*_a, **_k):
+        yield counting
+
+    monkeypatch.setattr(ri, 'pooled_db', _counting_lease)
     try:
         fold = ri.fold_request_log(tid)
         assert fold['requestCount'] == 12

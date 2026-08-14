@@ -80,6 +80,7 @@ from lib.project_mod.write_tools import (  # noqa: E402,F401
     _touch_for_vscode,
     tool_apply_diff,
     tool_apply_diffs,
+    tool_edit_file,
     tool_create_project,
     tool_insert_content,
     tool_insert_contents,
@@ -728,6 +729,15 @@ def _exec_apply_diffs(fn_args, base_path, conv_id, task_id, kwargs):
     return tool_apply_diffs(base_path, edits, conv_id=conv_id, task_id=task_id)
 
 
+def _exec_edit_file(fn_args, base_path, conv_id, task_id, kwargs):
+    edits = fn_args.get('edits')
+    if not edits or not isinstance(edits, list):
+        return _edits_not_array_msg(
+            'edit_file', edits, '{path, operation, anchor, content}')
+    return tool_edit_file(
+        base_path, edits, conv_id=conv_id, task_id=task_id)
+
+
 def _exec_insert_content(fn_args, base_path, conv_id, task_id, kwargs):
     def _rb(bp_arg, rp_arg):
         return _resolve_base(bp_arg, rp_arg, conv_id=conv_id)
@@ -863,7 +873,9 @@ def _exec_run_command(fn_args, base_path, conv_id, task_id, kwargs):
                               task=kwargs.get('task'),
                               on_chunk=kwargs.get('on_chunk'),
                               on_spawn=kwargs.get('on_spawn'),
-                              cwd_sink=cwd_sink)
+                              on_grep_intercept=kwargs.get('on_grep_intercept'),
+                              cwd_sink=cwd_sink,
+                              credentials=fn_args.get('credentials'))
 
     # ★ Diff snapshot after command (only if we took one)
     if snap_before is not None:
@@ -907,6 +919,7 @@ _EXEC_HANDLERS = {
     'find_files': _exec_find_files,
     'create_project': _exec_create_project,
     'write_file': _exec_write_file,
+    'edit_file': _exec_edit_file,
     'apply_diff': _exec_apply_diff,
     'apply_diffs': _exec_apply_diffs,
     'insert_content': _exec_insert_content,
@@ -929,7 +942,8 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
 
 
 def execute_standalone_command(fn_name, fn_args, working_dir=None, stdin_callback=None,
-                               on_chunk=None, on_spawn=None, task=None):
+                               on_chunk=None, on_spawn=None, task=None,
+                               on_grep_intercept=None):
     """Execute run_command without requiring a project path.
 
     ``task`` is the SAME cooperative-control seam the project path already
@@ -947,7 +961,9 @@ def execute_standalone_command(fn_name, fn_args, working_dir=None, stdin_callbac
                                 stdin_callback=stdin_callback,
                                 on_chunk=on_chunk,
                                 on_spawn=on_spawn,
-                                task=task)
+                                on_grep_intercept=on_grep_intercept,
+                                task=task,
+                                credentials=fn_args.get('credentials'))
     return f'Unknown tool: {fn_name}'
 
 
@@ -956,7 +972,7 @@ def execute_standalone_command(fn_name, fn_args, working_dir=None, stdin_callbac
 #: edit — ``format_tool_args_brief`` relies on this membership set.
 _PROJECT_DISPLAY_TOOLS = frozenset({
     'list_dir', 'read_files', 'grep_search', 'find_files', 'create_project',
-    'write_file', 'apply_diff', 'apply_diffs',
+    'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
     'insert_content', 'insert_contents', 'run_command',
 })
 
@@ -1084,6 +1100,17 @@ def project_tool_display(fn_name, fn_args):
         p = fn_args.get('path', '?')
         desc = fn_args.get('description', '')
         return f'Write {p}' + (f' — {desc}' if desc else '')
+    elif fn_name == 'edit_file':
+        edits = fn_args.get('edits')
+        if edits and isinstance(edits, list):
+            paths = list(dict.fromkeys(
+                e.get('path', '?') for e in edits if isinstance(e, dict)))
+            ops = [e.get('operation', '?') for e in edits if isinstance(e, dict)]
+            label = (f'Edit {paths[0]}' if len(paths) == 1
+                     else f'Edit {len(paths)} files')
+            return f'{label} ({len(edits)} edits: {", ".join(ops[:3])}' \
+                   + (f', +{len(ops)-3} more' if len(ops) > 3 else '') + ')'
+        return 'Edit (empty)'
     elif fn_name == 'apply_diff':
         p = fn_args.get('path', '?')
         desc = fn_args.get('description', '')
@@ -1199,4 +1226,3 @@ def format_tool_args_brief(fn_name, fn_args, max_len=200):
             return _clip_brief(_batch_terms_brief(urls, 'url', 'URLs'), max_len)
         return _clip_brief(str(fn_args.get('url') or 'fetch_url'), max_len)
     return _clip_brief(str(fn_args), max_len)
-

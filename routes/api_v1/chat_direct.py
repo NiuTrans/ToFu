@@ -36,7 +36,7 @@ import asyncio
 import json
 import time
 
-from flask import Blueprint
+from quart import Blueprint
 
 from lib.agent_core.admission import controller
 from lib.api_response import api_bad_request, api_error, sse_response

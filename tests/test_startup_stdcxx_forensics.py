@@ -57,6 +57,9 @@ def _boot_stderr(extra_env=None, timeout=90):
     """
     env = dict(os.environ)
     env.pop('LD_PRELOAD', None)
+    # Bypass the human CLI's manager handoff/help shortcut and exercise the
+    # actual server worker prologue where native bindings are established.
+    env['TOFU_SERVER_WORKER'] = '1'
     if extra_env:
         env.update(extra_env)
     proc = subprocess.run([sys.executable, _SERVER, '--help'],

@@ -4,8 +4,8 @@
 Proven here (pure — the R1–R3 seams are monkeypatched, so no DB / network /
 LLM; only a temp workdir is touched):
 
-  1. THREE-STAGE GRAPH — build_research_from_direction runs harvest → survey →
-     ideate in order, threading the pinned data contract: harvest's folder_id +
+  1. FOUR-STAGE GRAPH — build_research_from_direction runs harvest → survey →
+     ideate → evaluate in order, threading the pinned data contract: harvest's folder_id +
      arxiv_ids reach survey, survey's open_gaps reaches ideate, and the final
      result carries accepted/rejected/open_gaps/corpus_size.
 
@@ -20,7 +20,7 @@ LLM; only a temp workdir is touched):
        ↳ NEUTER: delete the survey checkpoint entry between passes → survey
          re-runs (its seam is called again) while harvest still does not.
 
-  4. NO-REDO — a fully completed job re-invoked does zero work (all three seams
+  4. NO-REDO — a fully completed job re-invoked does zero work (all four seams
      called zero times; result served from the checkpoint).
 
 Run standalone:  python tests/test_research_recipe.py
@@ -58,11 +58,16 @@ class _Seams:
         self.harvest_calls = []
         self.survey_calls = []
         self.ideate_calls = []
+        self.evaluate_calls = []
         self.harvest_ids = ['2305.11111', '2401.22222', '2402.33333', '2403.44444']
         self.open_gaps = {
             'schema_version': 1, 'open_gaps': [
                 {'id': 'gap_1', 'gap': 'no exact recall', 'evidence': ['2305.11111']}],
-            'clusters': [], 'method_matrix': [], 'stripped_ids': [], 'missing_ids': []}
+            'clusters': [],
+            'method_matrix': [{'paper': aid, 'method': 'm'}
+                              for aid in self.harvest_ids],
+            'surveyed_arxiv_ids': list(self.harvest_ids),
+            'stripped_ids': [], 'missing_ids': []}
 
     def harvest(self, arxiv_ids, *, folder_id, user_id, abort_check=None, on_progress=None):
         self.harvest_calls.append({'ids': list(arxiv_ids), 'folder_id': folder_id})
@@ -85,6 +90,17 @@ class _Seams:
                 'rejected': [{'id': 'idea_2', 'title': 'Stitch',
                               'reject_stage': 'structural', 'reject_reason': 'no gap'}]}
 
+    def evaluate(self, direction, result, *, model=None, abort=None):
+        self.evaluate_calls.append({'direction': direction, 'result': result})
+        return {
+            'ok': True, 'schema_version': 1, 'judge_count': 2,
+            'attempted_judges': 2, 'scores': {'survey_coverage': 4.0},
+            'overall_score': 4.0, 'worth_following_up': True,
+            'consensus': 'unanimous', 'degraded': False,
+            'failure_modes': [], 'recommended_changes': [],
+            'usage': {'calls': 2, 'prompt_tokens': 100},
+        }
+
     def search_arxiv(self, query, max_results=20):
         return [{'arxiv_id': a, 'title': f't{a}'} for a in self.harvest_ids]
 
@@ -94,10 +110,12 @@ def _install(seams, *, fail_ideate=False):
     (to simulate a crash inside the last stage)."""
     import lib.research.recipe as rc
     saved = {k: getattr(rc, k) for k in
-             ('_harvest_batch', '_build_survey', '_generate_ideas', '_search_arxiv')}
+             ('_harvest_batch', '_build_survey', '_generate_ideas',
+              '_evaluate_result', '_search_arxiv')}
     rc._harvest_batch = seams.harvest
     rc._build_survey = seams.build_survey
     rc._search_arxiv = seams.search_arxiv
+    rc._evaluate_result = seams.evaluate
     if fail_ideate:
         def _boom(direction, open_gaps, *, lang, n_ideas, abort=None):
             seams.ideate_calls.append({'direction': direction, 'open_gaps': open_gaps})
@@ -110,7 +128,7 @@ def _install(seams, *, fail_ideate=False):
 
 # ── Test 1 + 2: graph + data contract ──────────────────────────────────────
 
-def test_three_stage_graph_and_data_contract():
+def test_four_stage_graph_and_data_contract():
     import lib.research.recipe as rc
     seams = _Seams()
     restore = _install(seams)
@@ -118,10 +136,11 @@ def test_three_stage_graph_and_data_contract():
     try:
         res = rc.build_research_from_direction('long-context KV compression', wd,
                                                lang='en', harvest_n=20)
-        # graph ran all three, once each
+        # graph ran all four, once each
         assert len(seams.harvest_calls) == 1, seams.harvest_calls
         assert len(seams.survey_calls) == 1
         assert len(seams.ideate_calls) == 1
+        assert len(seams.evaluate_calls) == 1
         # data contract: survey got harvest's folder_id + id list
         folder = seams.harvest_calls[0]['folder_id']
         assert seams.survey_calls[0]['folder_id'] == folder, 'folder_id not threaded'
@@ -133,10 +152,12 @@ def test_three_stage_graph_and_data_contract():
         assert len(res['accepted']) == 1 and len(res['rejected']) == 1
         assert res['open_gaps']['open_gaps'][0]['id'] == 'gap_1'
         assert res['corpus_size'] == 4 and res['folder_id'] == folder
+        assert res['evaluation']['overall_score'] == 4.0
+        assert res['usage']['stages']['evaluate']['calls'] == 2
     finally:
         restore()
         shutil.rmtree(wd, ignore_errors=True)
-    _ok('3-stage graph runs harvest→survey→ideate, threading folder_id + open_gaps contract')
+    _ok('4-stage graph runs harvest→survey→ideate→evaluate with frozen artifacts')
 
 
 # ── Test 3: crash-resume from first unfinished stage + NEUTER ──────────────
@@ -178,6 +199,7 @@ def test_crash_resume_reruns_only_unfinished_stage():
         assert len(seams2.harvest_calls) == 0, 'harvest MUST NOT re-run on resume'
         assert len(seams2.survey_calls) == 0, 'survey MUST NOT re-run on resume'
         assert len(seams2.ideate_calls) == 1, 'ideate must re-run (it never finished)'
+        assert len(seams2.evaluate_calls) == 1, 'evaluation follows resumed ideate'
         assert len(res['accepted']) == 1, 'resumed run should complete ideate'
     finally:
         shutil.rmtree(wd, ignore_errors=True)
@@ -241,7 +263,8 @@ def test_fully_complete_job_redoes_nothing():
         finally:
             restore2()
         assert len(seams2.harvest_calls) == 0 and len(seams2.survey_calls) == 0 \
-            and len(seams2.ideate_calls) == 0, 'completed job must redo nothing'
+            and len(seams2.ideate_calls) == 0 and len(seams2.evaluate_calls) == 0, \
+            'completed job must redo nothing'
         assert len(res['accepted']) == 1, 'result still served from checkpoint'
     finally:
         shutil.rmtree(wd, ignore_errors=True)
@@ -272,6 +295,45 @@ def test_harvest_gate_fails_on_thin_corpus():
     finally:
         shutil.rmtree(wd, ignore_errors=True)
     _ok('harvest gate fails on a corpus below the fan-in minimum (survey never runs)')
+
+
+def test_survey_gate_rejects_an_empty_comparison_matrix():
+    import lib.research.recipe as rc
+
+    artifact = {'open_gaps': {
+        'open_gaps': [{'id': 'g1'}],
+        'surveyed_arxiv_ids': [f'2301.0000{n}' for n in range(1, 6)],
+        'method_matrix': [],
+    }}
+    errors = rc._gate_survey({}, artifact)
+    assert errors and 'method_matrix' in errors[0]
+    artifact['open_gaps']['method_matrix'] = [
+        {'paper': f'2301.0000{n}', 'method': 'm'} for n in range(1, 5)]
+    assert rc._gate_survey({}, artifact) == []
+
+
+def test_evaluation_failure_is_committed_as_degraded_without_losing_ideas(monkeypatch):
+    import lib.research.recipe as rc
+
+    persisted = []
+    monkeypatch.setattr(
+        rc, '_evaluate_result',
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError('judge offline')))
+    monkeypatch.setattr(rc, '_persist_ideate',
+                        lambda direction, lang, art: persisted.append(art) or True)
+    ctx = {
+        'direction': 'd', 'lang': 'en', 'abort': lambda: False,
+        'artifacts': {
+            'harvest': {'arxiv_ids': ['2301.00001']},
+            'survey': {'survey_md': '# S', 'open_gaps': {'open_gaps': []}},
+            'ideate': {'accepted': [{'title': 'kept'}], 'rejected': [],
+                        'threshold': 4.0, 'gate_reached': 'accepted'},
+        },
+    }
+    result = rc._run_evaluate(ctx)
+    assert result['degraded'] is True and result['judge_count'] == 0
+    assert persisted[0]['accepted'][0]['title'] == 'kept'
+    assert persisted[0]['evaluation']['degraded'] is True
 
 
 # ── Test 7-10: pipeline-pathology propagation (END-TO-END, not per-function) ──
@@ -446,7 +508,7 @@ def main():
     print(_color('═══ R4 Research Recipe / Stage-Graph Tests ═══', '36'))
     print()
     tests = [
-        test_three_stage_graph_and_data_contract,
+        test_four_stage_graph_and_data_contract,
         test_crash_resume_reruns_only_unfinished_stage,
         test_delete_mid_checkpoint_reruns_that_stage_NEUTER,
         test_fully_complete_job_redoes_nothing,

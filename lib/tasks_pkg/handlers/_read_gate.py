@@ -54,11 +54,17 @@ from lib.log import get_logger
 logger = get_logger(__name__)
 
 
-_GATED_TOOLS = ('apply_diff', 'apply_diffs', 'insert_content', 'insert_contents')
+_GATED_TOOLS = (
+    'edit_file', 'apply_diff', 'apply_diffs',
+    'insert_content', 'insert_contents',
+)
 
 # Tools whose successful invocation gives the model authoritative content
 # of the targeted file — they all satisfy the gate.
-_SATISFYING_TOOLS = ('read_files', 'write_file', 'apply_diff', 'apply_diffs', 'insert_content', 'insert_contents')
+_SATISFYING_TOOLS = (
+    'read_files', 'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
+    'insert_content', 'insert_contents',
+)
 
 
 def _gate_enabled() -> bool:
@@ -310,7 +316,8 @@ def _result_indicates_success(name: str, result_text: str) -> bool:
     s = result_text.lstrip()
     if s.startswith(('Error:', 'ERROR:')):
         return False
-    if name in ('apply_diff', 'apply_diffs', 'insert_content', 'insert_contents', 'write_file'):
+    if name in ('edit_file', 'apply_diff', 'apply_diffs',
+                'insert_content', 'insert_contents', 'write_file'):
         if s.startswith(('Diff failed', 'Insert failed', 'Write failed', 'Failed')):
             return False
     return True

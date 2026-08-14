@@ -34,9 +34,11 @@ import re
 import subprocess
 from pathlib import Path
 
+from tests._runtime_sections import runtime_section_path
+
 REPO = Path(__file__).resolve().parent.parent
-SYNC_JS = REPO / "static" / "js" / "core" / "cross_tab_sync.js"
-CONV_JS = REPO / "static" / "js" / "core" / "conversations.js"
+SYNC_JS = Path(runtime_section_path('core/cross_tab_sync.js'))
+CONV_JS = Path(runtime_section_path('core/conversations.js'))
 
 
 def _extract_fn(src: str, name: str) -> str:
@@ -71,6 +73,7 @@ let _now = 1000000;
 const _realDateNow = Date.now;
 Date.now = () => _now;
 const window = {};
+const runtimeScope = window;
 
 __CONST__
 __BOOT_HELD__

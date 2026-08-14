@@ -57,6 +57,56 @@ def _tool_display_web_search(fn_name, fn_args, tc_id, tc_args_str):
     return query, {'toolName': 'web_search'}
 
 
+def _tool_display_knowledge(fn_name, fn_args, tc_id, tc_args_str):
+    """Show the grounded local-knowledge query instead of a raw tool name."""
+    query = str((fn_args or {}).get('query') or '').strip()
+    display = (f'Searching local knowledge: {query}' if query
+               else 'Searching local knowledge')
+    return display, {'toolName': fn_name}
+
+
+def _tool_display_tool_search(fn_name, fn_args, tc_id, tc_args_str):
+    """Show the discovery query while the catalog lookup is in flight."""
+    query = str(fn_args.get('query') or '').strip()
+    namespace = str(fn_args.get('namespace') or '').strip()
+    if namespace:
+        query = f'{query} · {namespace}' if query else namespace
+    return query or 'Tool Search', {'toolName': 'search_tools'}
+
+
+def _tool_display_execute(fn_name, fn_args, tc_id, tc_args_str):
+    """Label the protocol adapter for logs/Inspector without warning spam."""
+    args = fn_args if isinstance(fn_args, dict) else {}
+    program = args.get('program')
+    if isinstance(program, str) and program.strip():
+        label = 'Programmatic tool call'
+    else:
+        calls = args.get('calls')
+        if isinstance(calls, dict):
+            calls = [calls]
+        if not isinstance(calls, list):
+            calls = []
+        names = []
+        for call in calls:
+            if not isinstance(call, dict):
+                continue
+            function = call.get('function')
+            function = function if isinstance(function, dict) else {}
+            name = call.get('name') or call.get('tool') or function.get('name')
+            if name:
+                names.append(str(name))
+        if names:
+            preview = ', '.join(names[:3])
+            if len(names) > 3:
+                preview += f' +{len(names) - 3} more'
+            label = f'Tool batch: {preview}'
+        elif calls:
+            label = f'Tool batch ({len(calls)} calls)'
+        else:
+            label = 'Tool execution batch'
+    return label, {'toolName': 'execute_tools', '_hiddenToolAdapter': True}
+
+
 def _short_url(url, max_len=60):
     """Return a human-friendly short URL: hostname + path (truncated).
 
@@ -251,12 +301,14 @@ def _tool_display_memory(fn_name, fn_args, tc_id, tc_args_str):
 
 
 def _tool_display_skills(fn_name, fn_args, tc_id, tc_args_str):
-    """Build display info for skill activation calls.
+    """Build display info for current loads and legacy activation history.
 
     No emoji prefix — the frontend renders a per-tool SVG icon (§3.4).
     """
-    skill = fn_args.get('skill', '?') if isinstance(fn_args, dict) else '?'
-    return f'Activating skill: {skill}', {'toolName': fn_name}
+    args = fn_args if isinstance(fn_args, dict) else {}
+    skill = args.get('skill_id') or args.get('skill') or '?'
+    verb = 'Loaded' if fn_name == 'load_skill' else 'Previously activated'
+    return f'{verb} skill: {skill}', {'toolName': fn_name}
 
 
 def _tool_display_conv_ref(fn_name, fn_args, tc_id, tc_args_str):
@@ -609,13 +661,28 @@ def _tool_display_mcp(fn_name, fn_args, tc_id, tc_args_str):
     that segment as a clickable link instead of an unreadable id jumble.
     """
     extra = {'toolName': fn_name}
-    display, multiline = compose_mcp_display(fn_name, fn_args)
+    # Progressive MCP exposes three small bridge tools instead of hundreds of
+    # raw schemas.  For read/write calls, render the underlying namespaced
+    # target and its real arguments; a bare ``call_mcp_read_tool`` card hides
+    # the resource the user actually asked us to touch.
+    nested_args = fn_args
+    display_name = fn_name
+    if fn_name in ('call_mcp_read_tool', 'call_mcp_write_tool') \
+            and isinstance(fn_args, dict):
+        target = fn_args.get('name')
+        arguments = fn_args.get('arguments')
+        if isinstance(target, str) and target:
+            display_name = target
+            extra['_mcpTarget'] = target
+        if isinstance(arguments, dict):
+            nested_args = arguments
+    display, multiline = compose_mcp_display(display_name, nested_args)
     if multiline:
         # Batch-file form (one path per line) — expose the multiline text via
         # _display_query so it survives verbatim into the SSE tool_start event.
         extra['_display_query'] = display
         return display, extra
-    links = _mcp_links(fn_args)
+    links = _mcp_links(nested_args)
     if links:
         extra['_mcpLinks'] = links
     return display, extra

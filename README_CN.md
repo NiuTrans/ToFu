@@ -8,7 +8,6 @@
   <a href="https://github.com/rangehow/ToFu/actions/workflows/ci.yml"><img src="https://github.com/rangehow/ToFu/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776ab?logo=python&logoColor=white" alt="Python" />
   <img src="https://img.shields.io/badge/SQLite-3-003B57?logo=sqlite&logoColor=white" alt="SQLite" />
-  <img src="https://img.shields.io/badge/PostgreSQL-18+ (可选)-336791?logo=postgresql&logoColor=white" alt="PostgreSQL 可选" />
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
   <img src="https://img.shields.io/badge/platform-Linux%20·%20macOS%20·%20Windows-lightgrey" alt="Platform" />
 </p>
@@ -72,7 +71,20 @@ Tofu 是一个**完全自托管的 AI 助手**，一条命令即可启动。它�
 > Tofu 受控端」——它同时就是控制面板（权限、连接命令、开机自启），重要功能不再只藏在托盘里。
 > 取消勾选「启动时显示此窗口」即可直达托盘；托盘里保留「控制面板…」随时重新打开。
 
-就这一步。每个方式都会自动处理运行时、依赖、数据库、浏览器引擎，并启动服务器 —— 无需任何参数，无需后续操作。Linux/macOS 上安装器默认走 [uv](https://github.com/astral-sh/uv) 快速路径（预编译 wheel，约 1–2 分钟），在较旧系统（glibc < 2.28）上自动回退到 conda；可用 `--use-conda` 强制走 conda。数据库默认使用 **SQLite**（零配置）；仅当你需要 PostgreSQL 的更高并发（100+ 用户）时，才在命令后加 `--with-postgres`。
+就这一步。每个方式都会自动处理运行时、依赖、数据库、浏览器引擎，并启动服务器 —— 无需任何参数，无需后续操作。Linux/macOS 上安装器默认走 [uv](https://github.com/astral-sh/uv) 快速路径（预编译 wheel，约 1–2 分钟），在较旧系统（glibc < 2.28）上自动回退到 conda；可用 `--use-conda` 强制走 conda。默认存储后端是 **SQLite**（零配置、WAL），PostgreSQL 是同等级、仅由 `TOFU_DB_BACKEND=postgres` 显式启用的选项；两者都由项目内 Storage Sidecar 独占，所选后端不可用时拒绝启动而不切换引擎。详见[存储契约](docs/STORAGE_REDESIGN.md)。
+
+源码目录里的日常启动命令仍然是：
+
+```bash
+python server.py
+```
+
+它现在会启动或连接项目内的用户态 manager，等唯一的 server 就绪后返回；重复运行不会创建第二个实例。运维时使用 `python serverctl.py status|stop|restart|doctor`，查看控制台日志使用 `python serverctl.py logs -f`。显式 `stop` 后会保持停止；崩溃或 OOM 退出则会自动恢复。
+
+如果这个源码目录还需要在主机或用户会话重启后自动恢复 manager，执行一次 `python serverctl.py install`。它会安全替换旧的 `tofu_guard` cron 项，不会重启健康的 server。
+
+生产环境的内存隔离、告警阈值、备份恢复演练和 Kubernetes 基线见
+[《极致稳定运行手册》](docs/RELIABILITY_RUNBOOK.md)。
 
 > 想预设 API 密钥、改端口、或安装失败需要恢复？所有可选参数和故障排查方案都在 **[docs/INSTALL.md](docs/INSTALL.md)**。
 
@@ -93,6 +105,8 @@ Tofu 是一个**完全自托管的 AI 助手**，一条命令即可启动。它�
 | Azure OpenAI | 模板可用，填入部署专属的 Base URL |
 
 **同一服务商多个密钥** —— 添加多个 API 密钥，当某个密钥触发限速时自动轮换到下一个。跨服务商的智能调度器会根据实时延迟评分和错误率追踪来路由请求。
+
+**模型列表自动与服务商保持一致** —— 模板只负责第一次配置所需的元数据。保存密钥后，Tofu 会定期用该账号已认证的 `/models` 目录对账：新开放的模型自动出现；连续两次成功对账都缺失的模型才会退出。网络失败或空响应始终保留最后一次正确列表，手工添加的私有部署会自动固定，不会被清理。可在每个服务商卡片上单独关闭；`TOFU_MODEL_CATALOG_SYNC=0` 可全局关闭。
 
 **本地引擎自动发现** —— Tofu 启动后约 5 秒、之后每 2 分钟探测一次本机规范端口（Ollama `:11434`、vLLM `:8000`、SGLang `:30000`，另加 `$OLLAMA_HOST`）。引擎返回非空模型列表时会自动注册为普通本地服务商——健康检查和设置卡片与手动添加完全一致。删除自动添加的服务商后其端口会被永久忽略（不会复活）。设 `TOFU_LOCAL_AUTODISCOVER=0` 可关闭。
 
@@ -176,6 +190,20 @@ cd clients/typescript && npm install
 1. **微压缩**（零成本）：旧的工具调用结果被替换为摘要，只保留最近的"热尾巴"
 2. **结构化截断**：思考过程块、过大的参数、冗余截图被裁剪
 3. **LLM 摘要**（强制触发）：当上下文压力过高时，一个廉价模型评估每轮对话的相关性并据此压缩
+
+智能体工具循环还会默认维持 **128K token 的经济工作集**，即使模型声明了
+1M 上下文，也不会等到接近窗口上限才压缩，从而限制每轮反复计费和传输的提示词。
+可按请求设置 `compaction.workingSetTokens`，或全局设置
+`TOFU_WORKING_CONTEXT_TOKENS`（设为 `0` 恢复旧的“只看窗口上限”行为）。
+GPT-5.6 Responses 请求还会使用稳定的哈希缓存命名空间、显式稳定前缀断点、
+加密 reasoning 往返，以及无状态服务端压缩兜底。
+
+为了安全验证节省效果，**设置 → 高级**提供默认关闭、按对话稳定分组的
+**成本优化 A/B 实验**。它对比兼容基线（MCP schema 全内联、只按窗口压缩）与
+当前优化策略；完成的每轮会显示所在组，报表按“提供商 usage × 当轮价格快照”统计
+真实成本、定价覆盖率、token、缓存命中、延迟和无错误结束代理指标。显式的按请求
+覆盖会自动排除。首次启用默认只灰度 10% 对话；已保存实验若调整流量或分组比例，
+必须更换实验 ID，避免旧对话换组。关闭开关即可立即回滚。
 
 **想整理你的对话？** 在侧边栏创建文件夹来分组相关对话。可以在文件夹之间拖拽，也可以不归类。
 
@@ -279,13 +307,12 @@ cd clients/typescript && npm install
 | `grep_search` | 使用 ripgrep 跨文件搜索（正则、上下文行、计数模式） |
 | `find_files` | 按通配符模式查找文件 |
 | `write_file` | 创建或覆盖文件 |
-| `apply_diff` | 精确的搜索替换编辑（支持批量多文件编辑） |
-| `insert_content` | 在锚点前后添加代码，不替换原内容 |
+| `edit_file` | 替换文本或在锚点前后插入内容，支持混合批量编辑 |
 | `run_command` | 在项目目录中执行 Shell 命令 |
 
 **想快速了解一个新代码库？** —— "给我概述一下这个项目的架构。"助手会浏览目录树、阅读关键文件，梳理出整体结构。
 
-**需要修 Bug？** —— "登录页提交后白屏了。"助手会 grep 相关代码、阅读组件、定位问题，然后用 `apply_diff` 修复。
+**需要修 Bug？** —— "登录页提交后白屏了。"助手会 grep 相关代码、阅读组件、定位问题，然后用 `edit_file` 精确修复。
 
 **想安全地实验？** —— 每次文件修改都按对话跟踪，支持完整撤销。点击撤销按钮即可回滚助手做的任何改动。
 
@@ -447,6 +474,25 @@ python -m lib.desktop_agent --server http://your-server:15000 --allow-write --al
 
 > ⚠️ **Beta：** 论文阅读模式正在持续迭代中，欢迎在 [GitHub Issues](https://github.com/rangehow/ToFu/issues) 反馈。
 
+#### 默认 PDF 解析栈与修复
+
+`install.sh` 会把默认富文本解析器作为一组精确兼容的三件套安装
+（`pymupdf`、`pymupdf_layout`、`pymupdf4llm`），并在宣布安装成功前实际跑一页
+Markdown 抽取。检查已有环境：
+
+```bash
+python scripts/verify_pdf_stack.py
+```
+
+若报告缺包或版本分裂，请把 `requirements.txt` 中的三个固定版本一起重装，不要只装
+`pymupdf4llm`，然后重新运行检查：
+
+```bash
+python -m pip install --upgrade --force-reinstall \
+  "pymupdf==1.27.2.3" "pymupdf_layout==1.27.2.3" "pymupdf4llm==1.27.2.3"
+python scripts/verify_pdf_stack.py
+```
+
 #### 可选：使用 Docling 进行版面感知的 PDF 解析
 
 默认的 PDF 解析管线（`pymupdf4llm`）在大多数论文上表现良好，但在 ML / 理论 CS 论文中常见的**无框表格**和**复杂数学公式**上效果较差。对于这类论文，Tofu 可以路由到
@@ -481,21 +527,38 @@ pip install docling --extra-index-url https://download.pytorch.org/whl/cpu
 
 ---
 
+### 📊 演示文稿（可编辑 PPTX）
+
+只要给一个主题，Tofu 就能生成可编辑 PowerPoint，不依赖 Kimi 网站或编辑器。流水线先研究带真实 URL 的事实卡，再规划整套 deck 的叙事与版式节奏，在逐页创作前生成所需主视觉，渲染预览，同时审查单页和整套接触表，最后导出原生 PPTX。
+
+- **整套先规划** —— 每页都有叙事职责、命名版式原型、信息密度、相邻页上下文和素材义务；连续内容页不会悄悄退化成同一种卡片模板
+- **事实既有出处也有时效** —— PPT 与主题视频共用同一证据内核：事实性主题并发检索“当前状态 / 官方来源候选 / 背景材料”，PPT 使用近一月 profile，新闻视频使用近一周并为常青主题回退不限时；来源卡保留发布日期、检索车道和研究截止时间，跨站一致金额与单一摘要分开提示，同一个当前事实硬闸会拒绝遗漏或冲突的发布、预售与价格状态
+- **素材先于排版** —— 每个必需主视觉先明确它要支撑的判断或可见对象，再在页面创作前生成并缓存；页面若生成后不使用该素材，校验会拒绝
+- **整套质量审查** —— 带页码接触表检查视觉身份一致性、版式重复和素材相关性；逐页 VLM 会沿每条引线追到可见端点，防止标注指错物体或部位；浏览器还会按真实字形行框加 PowerPoint 字体度量安全区，检查文字溢出、互相遮挡以及后置图片盖字，并把元素 ID 送回最小修复回路
+- **原生交付** —— 文字、形状、表格、图表和图片在 PowerPoint/WPS 中保持可编辑；固定文本框默认写入原生缩小适应，源码缩进不会再生成幽灵空段落，字体按实际字符及粗/斜体槽做最小子集嵌入；后续对话可只重做某一页并重新导出
+
+---
+
 ### 🎬 动画视频（MG 动效）
 
 把字幕稿（SRT）变成竖屏 MG 动画视频 —— Tofu 会把字幕按语义分镜、为每个镜头编写 HyperFrames HTML 动画、用无头 Chrome 逐镜头渲染，最后拼接出 `final.mp4`。不依赖任何外部 agent 命令行，也不需要视频剪辑软件。
 
 **使用方法：** 挂载项目（Studio），贴一段 SRT（或给一个口播主题），然后说生成视频 —— 例如“把这份字幕做成竖屏短视频”。助手会在项目的 `.tofu/motion_video/<slug>/` 下工作，并报告成品 MP4 路径。
 
+- **逐镜证据关联** —— 主题视频复用 PPT 的时效研究与当前事实硬闸；每个事实镜头的 `S#` 来源 ID 会一直保留到 `scenes.json`，静音片尾来源卡只负责署名，不再替代逐镜事实关联
 - **确定性渲染** —— 每一帧都由时间戳独立计算（可寻址的 GSAP 时间轴）；某个镜头不满意时，只重渲该镜头再重新拼接即可
+- **结构化镜头配方** —— 每镜都有 renderer-neutral 的 `motion-shot-v1` 合同：叙事职责、13 种实证配方之一、运动族、能量、建议时长、相位数、落定停留、QA 锚点、约束、标志动作和转场意图；作者开工前直接拿到对应 HyperFrames 蓝图全文，自动规划的相邻镜头还会主动避开同一种运动语法
+- **真实重叠转场** —— `motion-timeline-v1` 把口播内容时长与视觉 handle 分开：push / wipe / dissolve 通过 FFmpeg `xfade` 真正重叠，但成片总时长、字幕与旁白时钟保持不变；场景面板会显示实际转场种类和秒数
+- **素材先于构图** —— 分镜要求的 subject/diagram 必须写清具体语义目标（素材要证明的可见对象、部位或关系），再在写 HTML 前生成并缓存；生成了却没被构图使用，会进入质量记录
+- **配方感知的多时刻质检** —— 不再固定抽 15% / 50% / 90%：每种配方选择 setup / peak / settle / resolved hold 四个语义锚点；截图前必须等字体就绪、全部图片 decode，视觉模型同时拿到接触表和该镜头的语义约束，能发现空白开场、中途证据错配、碰撞和未完成收束
 - **零 LLM 质量闸** —— 分镜时间轴校验（完整覆盖、时长和 ±0.1s）、每次渲染前的 HyperFrames lint/validate/inspect、渲染后的 ffprobe 规格复核（分辨率/帧率/时长/静音）
 - **工具链自举** —— `motion_video_env_check` 首次使用自动安装钉版 HyperFrames CLI；ffmpeg 来自 `imageio-ffmpeg`、ffprobe 来自静态构建（均免 root）；Chrome 复用 Playwright 缓存
 - **失败分类** —— 渲染错误按类返回（`env_missing` / `lint` / `chrome` / `timeout` / `aborted`）并附带上游修复提示，不用啃原始日志
-- **TTS 配音（音画合成）** —— `motion_video_narrate` 用字幕文本为每个镜头配音（复用播客链的 TTS 槽位），音频偏长的镜头自动延长对齐，`motion_video_mux` 以响度归一的 AAC 收尾；没有配置 TTS 槽位时自动降级为静音视频而不是报错
-- **无头 API + 并行渲染** —— `POST /api/v1/motion/videos` 在服务端跑完整条流水线（零 LLM 分镜 + 模板镜头、有界并行渲染、重复请求自动合并入队），成品经支持 Range 的 `/api/v1/motion/videos/<id>/file` 下载，并附对齐后的侧车 SRT
+- **专业音频时间线** —— `motion_video_narrate` 负责真实 TTS 时长；可选 `motion-audio-v1` 在整片层加入有授权/来源、经哈希固化的本地 BGM 与 SFX，支持动作峰值、镜头进度和已验证节拍对齐、旁白触发 BGM ducking 与目标响度，并交付音频归因清单；没有 TTS 时仍可生成静音或 BGM/SFX-only 视频
+- **无头 API + 并行渲染** —— `POST /api/v1/motion/videos` 在服务端跑完整条流水线（标准化整片计划 + 逐镜作者构图、有界并行渲染、重复请求自动合并入队），成品经支持 Range 的 `/api/v1/motion/videos/<id>/file` 下载，并附对齐后的侧车 SRT
 - **单镜重生成 + 字幕烧录** —— 只重渲某一个镜头并自动重组装（`POST …/scenes/<id>/regen`，成品 URL 不变），逐镜状态可查（`GET …/scenes`），可选硬烧字幕（`burn_in: true`，libass，支持中文字体）
 - **论文视频摘要** —— 一次调用把论文报告变成一条配音 MG 短视频（`POST /api/v1/paper/video/start`，与播客链同款报告门）
-- **论文「视频」页签** —— 论文阅读器第五个页签：生成卡（语言/画质/音色/配音/烧录）、实时相位进度、内嵌播放器，以及逐镜网格——每个镜头都有自己的预览和重渲按钮
+- **论文「视频」页签** —— 论文阅读器第五个页签：生成卡（语言/画质/音色/配音/烧录）、实时相位进度、内嵌播放器，以及逐镜网格——每个镜头的配方/能量/真实转场会和预览、重渲按钮一起显示；可下载音频归因清单，`GET /api/v1/motion/shot-recipes` 与 `/audio-contract` 开放同一合同给未来 Studio 与其他渲染 adapter
 - **深度知识包** —— 来自 vibe-motion/auto-motion 的 29 条动效规则、13 个镜头蓝图、20+ 设计帧预设，在 设置 → 技能 里搜 “hyperframes” 一键安装
 
 ---
@@ -513,6 +576,13 @@ pip install docling --extra-index-url https://download.pytorch.org/whl/cpu
 当你想连接外部工具服务器 —— GitHub、数据库、自定义 API —— MCP 可以把它们桥接到 Tofu 的工具系统中。
 
 **工作原理：** MCP 服务器既可以作为本地子进程运行（stdio），也可以是远程 HTTP 端点（`streamable-http` / `sse`），统一使用 JSON-RPC 2.0 通信。Tofu 将它们的工具翻译成 OpenAI function-calling 格式，让 LLM 可以像使用原生工具一样发现和调用它们。
+
+大型目录会自动采用**渐进式披露**：MCP 工具不超过 16 个时仍直接内联；超过后，
+每轮请求只携带 3 个稳定元工具，分别负责目录检索、只读调用和写调用。检索命中后
+才返回所需工具的精确 schema；MCP 的只读/写入注解仍继续控制并行与审批边界。
+可用 `mcpToolExposure=inline|progressive|auto` 和 `mcpInlineToolLimit`
+按请求覆盖，或使用对应的 `TOFU_MCP_TOOL_EXPOSURE` /
+`TOFU_MCP_INLINE_TOOL_LIMIT` 环境变量。
 
 **配置：** 在 **设置** 中或编辑 `data/config/mcp_servers.json`：
 ```json
@@ -607,9 +677,9 @@ Tofu 会默默观察自己的表现，并提议一些小改进 —— 每一处�
 
 当助手发现了有用的东西 —— 一个 Bug 模式、一个项目规范、你偏好的编码风格 —— 它可以把这些知识保存为**记忆**，供未来的会话使用。
 
-**工作原理：** 项目级记忆以 Markdown 文件形式存储在项目内的 `.tofu/memories/`；全局记忆（跨项目共享）存放在服务端存储 `data/memories/global/`。助手会主动创建记忆，你也可以要求它创建。在之后的对话中，相关的记忆会自动加载到上下文中。
+**工作原理：** 项目级记忆以 Markdown 文件形式存储在项目内的 `.tofu/memories/`；全局记忆（跨项目共享）存放在服务端存储 `data/memories/global/`。每个新任务只用本地元数据做高置信匹配，最多自动带入两条；需要时助手仍可显式搜索完整记忆库。自动检索不会暗中调用另一个 LLM。
 
-**工具：** `create_memory`、`update_memory`、`delete_memory`、`merge_memories` —— 助手跨会话管理自己的知识库。
+**工具：** `search_memories`、`create_memory`、`update_memory`、`delete_memory`、`merge_memories` —— 助手跨会话管理自己的知识库。关闭 Memory 会同时移除记忆上下文和这些工具。
 
 **使用场景：** "记住我们的 API 总是返回 snake_case。" —— 助手保存这个规范，并在以后为这个项目生成代码时自动应用。
 
@@ -620,6 +690,8 @@ Tofu 会默默观察自己的表现，并提议一些小改进 —— 每一处�
 当你想给助手一套可复用的、打包好的专项本领 —— 针对某类任务的说明加辅助脚本 —— 安装一个**技能（Skill）**。
 
 **工作原理：** 技能遵循开放的 Claude / OpenClaw / AgentSkills 格式（一个 `SKILL.md` 加可选的参考文件与脚本）。打开 **设置 → Skills**，浏览推荐技能的**目录（Catalog）**（如 Anthropic 的 docx / xlsx / pdf / skill-creator）并**一键安装**，或**拖拽本地 `.zip`** 进来。新安装默认放在**全局**（所有对话可用，也可在头部切换为仅本项目）；已安装的技能出现在**已安装（Installed）**页签，可查看文件、在全局/本项目之间移动、或卸载。附带的 `install.sh` 脚本只作为提示展示 —— 绝不会自动执行。
+
+模型平时只看到精简索引；任务匹配时才用准确 id 调用 `load_skill`，把指南加载到当前任务。“启用”是设置中的持久状态，“加载”不是另一套激活状态。Skill 是用户安装的工作流，Memory 是模型积累的经验记录。
 
 **密钥配置：** 需要 API Key 的技能（如飞猪 FlyAI）会在卡片上列出所需的环境变量，点「配置」填入即可——值加密存放在**凭证保管库**（`data/config/`，600 权限，永不进仓、永不导出），执行工具调用时自动注入子进程环境，无需重启服务，也无需把密钥贴进聊天。卸载技能会一并删除它在保管库里的密钥。
 
@@ -655,7 +727,7 @@ Tofu 会默默观察自己的表现，并提议一些小改进 —— 每一处�
 | **📦 显示** | 下拉列表中显示哪些模型、默认模型、备选模型 |
 | **🔍 搜索与抓取** | 结果数量、超时、字符限制、屏蔽域名、内容过滤 |
 | **🌐 翻译** | 机器翻译服务商（小牛翻译 / 自定义）、API 密钥、端点 |
-| **🌐 网络** | HTTP/HTTPS 代理、代理绕过域名 |
+| **🌐 网络** | 代理池（有序、分域：仅订阅流量/全局流量，失败自动故障转移，凭证入凭证保管库，逐条连通性测试）、代理绕过域名 |
 | **🔀 订阅登录** | 登录 Claude Pro/Max 或 ChatGPT，当作服务商使用 |
 | **🐦 飞书** | 应用凭证、默认项目路径、允许的用户 |
 | **🔗 MCP** | 模型上下文协议服务器（App-Store 目录 + 自定义） |
@@ -686,6 +758,10 @@ vim .env   # 填入你的值
 | `BIND_HOST` | 绑定地址 | `0.0.0.0`（所有网卡） |
 | `TOFU_AUTH_MODE` | 强制认证模式并锁定 UI：`open` / `private` / `multi-user` | *（以配置文件为准）* |
 | `TOFU_AUTO_KEY` | 设为 `0` 可跳过首次启动的管理员密钥初始化 | `1` |
+| `TOFU_MODEL_CATALOG_SYNC` | 自动维护远程服务商模型列表；设为 `0` 可全局关闭 | `1` |
+| `TOFU_WORKING_CONTEXT_TOKENS` | 反复重放提示词的经济工作集上限；`0` 表示禁用 | `128000` |
+| `TOFU_MCP_TOOL_EXPOSURE` | MCP schema 模式：`auto` / `inline` / `progressive` | `auto` |
+| `TOFU_MCP_INLINE_TOOL_LIMIT` | `auto` 模式下允许直接内联的 MCP 工具数 | `16` |
 | `TUNNEL_TOKEN` | **已废弃**，仅作向后兼容垫——请改用 API Keys 体系 | *（关闭）* |
 | `TRADING_ENABLED` | 启用交易模块（`1`/`0`） | `0` |
 | `PDF_TEXT_MODE` | 默认 PDF 文本提取策略：`rich`（pymupdf4llm，默认）、`structured`（Docling，需 `pip install docling`）、`fast` | `rich` |
@@ -707,7 +783,9 @@ vim .env   # 填入你的值
 │   ├── agent_core/            可复用智能体基座（运行循环、调度、TaskRuntime、push、profiles）
 │   ├── llm/                   LLM API 客户端包（build_body / stream / cache / diagnostics）
 │   ├── llm_dispatch/          多密钥多模型智能调度器
-│   ├── database/              双后端—— SQLite 默认，PostgreSQL 通过 --with-postgres 开启
+│   ├── storage/               storage.v1 客户端与监督器（不加载数据库驱动）
+│   ├── storage_sidecar/       独占 SQLite/PostgreSQL 驱动、连接与事务
+│   ├── database/              正迁往命名存储操作的仓储层
 │   ├── tasks_pkg/             任务编排与上下文压缩
 │   │   ├── orchestrator/      LLM ↔ 工具主循环（包）
 │   │   ├── executor/          工具执行引擎（包）
@@ -719,7 +797,7 @@ vim .env   # 填入你的值
 │   ├── research/             自动科研流水线（检索 → 综述 → 选题）
 │   ├── longform/             长篇研究报告
 │   ├── motion_video/         动画视频流水线
-│   ├── production/           生产基座（阶段图、崩溃续跑）
+│   ├── production/           生产基座（阶段图、证据/内容契约、崩溃续跑）
 │   ├── tts/                  语音合成 / 旁白
 │   ├── skills/               用户安装的技能包（AgentSkills 格式）
 │   ├── browser/               浏览器插件桥接
@@ -755,8 +833,8 @@ vim .env   # 填入你的值
 | 功能 | Linux | macOS | Windows |
 |---|:---:|:---:|:---:|
 | 核心对话与工具 | ✅ | ✅ | ✅ |
-| SQLite（默认，零配置） | ✅ | ✅ | ✅ |
-| PostgreSQL（通过 `--with-postgres` 开启） | ✅ | ✅ | ✅ |
+| SQLite Sidecar 后端 | ✅ | ✅ | ✅ |
+| PostgreSQL Sidecar 后端 | ✅ | ✅ | ✅ |
 | 项目协作 | ✅ | ✅ | ✅ |
 | Shell 命令 | ✅ | ✅ | ✅ (`cmd.exe`) |
 | 桌面代理 | ✅ | ✅ | ✅ |
@@ -797,6 +875,8 @@ Tofu 采用三态认证模型，持久化在 `data/config/auth.json`，可在 **
 | `multi-user` | 与 `private` 同样闸道，加上每用户钱包 + 注册页面 | 付费中继站，服务多个用户 |
 
 **默认绑定 `0.0.0.0`** —— API 开箱即可从局域网访问（桌面代理配对流程依赖这一点）。传入 `--host 127.0.0.1` 或设置 `BIND_HOST=127.0.0.1` 可仅绑定本机；打包桌面版会自行锁定本机绑定。默认 `open` 认证模式下这意味着局域网无需令牌即可访问——启动横幅会对该组合发出醒目警告，在不可信网络上请切换到 `private` 模式（设置 → API Keys）。
+
+**开放模式限流按暴露面自动决定。** 针对昂贵接口（聊天 / 智能体 / 搜索 / 生成）的每 IP 防刷帽，只在 `TOFU_OPEN_MODE_ALLOW_REMOTE=1` 放行未认证远端访客时才自动启用（120 次/分钟/IP）。仅本机使用的个人部署默认**不限流**——桶里能看到的只有你自己的标签页和后台轮询；即使帽子启用，环境心跳读（任务轮询、状态探测）也从不计入。`TOFU_OPEN_MODE_RPM=<n>` 双向覆盖（n>0 强制启用，`0` 强制关闭）。同机隧道下所有访客都是 `127.0.0.1`，IP 帽无法区分你和陌生人——那种形态的正解是 `private` 模式或 API Key，而不是 IP 限流。
 
 **首次启动初始化**（仅 private/multi-user）—— 当 api_keys 存储为空且 `TUNNEL_TOKEN` 未设置时，Tofu 会在启动时造一把 `tofu_admin_<hex>` 密钥，将明文 + 一次性 `?token=<...>` URL 打印到 stderr，同时将明文写入 `data/config/.first_run_token`（chmod 0600）。设置 `TOFU_AUTO_KEY=0` 可禁用。
 

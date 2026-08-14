@@ -6,6 +6,11 @@ their public APIs correctly through __init__.py façades, that all consumer
 import sites work, and that Flask route registration is complete.
 """
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {
+    'lib/browser.py', 'lib/browser_advanced.py', 'lib/pdf_parser.py',
+    'lib/search.py', 'lib/skills.py',
+}
+
 import pytest
 
 # ═══════════════════════════════════════════════════════════
@@ -70,7 +75,9 @@ class TestSearchFacade:
 @pytest.mark.unit
 class TestBrowserFacade:
     def test_package_import(self):
-        import lib.browser  # noqa: F401
+        import lib.browser
+        assert lib.browser.__name__ == 'lib.browser'
+        assert isinstance(lib.browser.__all__, list)
 
     def test_queue_api(self):
         from lib.browser import (
@@ -125,7 +132,9 @@ class TestBrowserFacade:
 @pytest.mark.unit
 class TestPdfParserFacade:
     def test_package_import(self):
-        import lib.pdf_parser  # noqa: F401
+        import lib.pdf_parser
+        assert lib.pdf_parser.__name__ == 'lib.pdf_parser'
+        assert 'parse_pdf' in lib.pdf_parser.__all__
 
     def test_core(self):
         from lib.pdf_parser import extract_pdf_text, parse_pdf
@@ -162,7 +171,9 @@ class TestPdfParserFacade:
 @pytest.mark.unit
 class TestSkillsFacade:
     def test_package_import(self):
-        import lib.memory  # noqa: F401
+        import lib.memory
+        assert lib.memory.__name__ == 'lib.memory'
+        assert 'list_memories' in lib.memory.__all__
 
     def test_storage_crud(self):
         from lib.memory import (

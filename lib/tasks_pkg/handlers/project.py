@@ -15,6 +15,7 @@ from lib.tasks_pkg.executor import (
     tool_registry,
 )
 from lib.tasks_pkg.handlers.code_exec import (
+    _make_grep_intercept_cb,
     _make_run_command_progress_cb,
     _make_run_command_spawn_cb,
     _make_stdin_callback,
@@ -44,6 +45,7 @@ _REMOTE_CMD_MAP = {
     'read_files': 'project_read_files',
     'write_file': 'project_write_file',
     'apply_diff': 'project_apply_diff',
+    'edit_file': 'project_edit_file',
     'grep_search': 'project_grep_search',
     'find_files': 'project_find_files',
     'run_command': 'project_run_command',
@@ -70,6 +72,18 @@ def _execute_remote_run_command(task, tc_id, fn_args, rn, round_entry,
     command = fn_args.get('command', '')
     round_entry.setdefault('toolCallId', tc_id)
     round_entry.setdefault('toolName', 'run_command')
+    if 'credentials' in fn_args:
+        text = ('Error: server vault credentials are unavailable for remote '
+                'worktree commands; configure credentials on the desktop '
+                'agent or run the command on the server workspace.')
+        meta = {
+            'toolName': 'run_command', 'command': command, 'output': text,
+            'source': f'Remote:{remote["agent_id"][:8]}',
+            'remoteRoot': remote['root'], 'badge': 'credential unavailable',
+            'exitCode': 'not-run', 'notRun': True,
+        }
+        _finalize_tool_round(task, rn, round_entry, [meta])
+        return tc_id, text, False
     cmd_id = _uuid.uuid4().hex
     try:
         bridge_timeout = min(
@@ -254,7 +268,7 @@ def _maybe_promote_write_to_artifact(task, fn_name, fn_args, project_path, meta)
     This is best-effort: any failure (DB unavailable, read race, oversize)
     logs and degrades to "no artifact, just the normal tool round".
     """
-    if fn_name not in ('write_file', 'apply_diff', 'apply_diffs', 'insert_content', 'insert_contents'):
+    if fn_name not in ('write_file', 'edit_file', 'apply_diff', 'apply_diffs', 'insert_content', 'insert_contents'):
         return
     rel_path = (fn_args.get('path') or '').strip()
     if not rel_path:
@@ -440,7 +454,7 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                                'paths': _collect_target_paths(fn_name, fn_args)}
             _finalize_tool_round(task, rn, round_entry, [meta])
             return tc_id, _gate_err, False
-    elif fn_name in ('apply_diffs', 'insert_contents') and project_path:
+    elif fn_name in ('edit_file', 'apply_diffs', 'insert_contents') and project_path:
         try:
             _skip_idx, _unread_raw = partition_batch_edits(task, fn_name, fn_args, project_path)
         except Exception as _ge:
@@ -496,7 +510,7 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                                'paths': _collect_target_paths(fn_name, fn_args)}
             _finalize_tool_round(task, rn, round_entry, [meta])
             return tc_id, _fresh_err, False
-    elif fn_name in ('apply_diffs', 'insert_contents') and project_path:
+    elif fn_name in ('edit_file', 'apply_diffs', 'insert_contents') and project_path:
         try:
             _stale_idx, _stale_raw = partition_stale_edits(task, fn_args, project_path)
         except Exception as _fe:
@@ -583,6 +597,8 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                     # _handle_code_exec uses, so both entry points share ONE
                     # implementation (the lesson of the entrance-count drift).
                     'on_spawn': _make_run_command_spawn_cb(task, rn, round_entry),
+                    'on_grep_intercept': _make_grep_intercept_cb(
+                        task, rn, round_entry),
                     'task': task,  # enable cooperative abort of subprocesses
                 }
             try:
@@ -695,6 +711,9 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
             extra={'url': ''},
         )
 
+    if fn_name == 'run_command' and round_entry.get('grepSearchIntercepted'):
+        meta['grepSearchIntercepted'] = True
+
     if _gate_skip_note:
         meta['badge'] = 'partial: read first'
         meta['refusal'] = {'kind': 'partial_read_first',
@@ -718,7 +737,7 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
 
     # ── Promote renderable writes to a chat artifact ──
     # Best-effort: failure here MUST NOT fail the tool round itself.
-    if fn_name in ('write_file', 'apply_diff', 'apply_diffs', 'insert_content', 'insert_contents') and project_path:
+    if fn_name in ('write_file', 'edit_file', 'apply_diff', 'apply_diffs', 'insert_content', 'insert_contents') and project_path:
         try:
             _maybe_promote_write_to_artifact(task, fn_name, fn_args, project_path, meta)
         except Exception as e:

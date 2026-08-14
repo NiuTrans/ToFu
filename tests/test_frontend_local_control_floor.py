@@ -52,12 +52,14 @@ from pathlib import Path
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path, runtime_sections_dir
+
 pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parent.parent
-JS_DIR = ROOT / "static" / "js"
+JS_DIR = Path(runtime_sections_dir())
 INDEX_HTML = ROOT / "index.html"
-LC_JS = JS_DIR / "local-control.js"
+LC_JS = Path(runtime_section_path("local-control.js"))
 
 
 def _node() -> str:
@@ -160,14 +162,16 @@ def test_every_floor_string_is_translated():
     is visible before any JS could correct it.
     """
     html = INDEX_HTML.read_text(encoding="utf-8")
-    i18n = (JS_DIR / "i18n.js").read_text(encoding="utf-8")
+    locale_dir = ROOT / "frontend" / "src" / "i18n" / "locales"
+    zh = json.loads((locale_dir / "zh.json").read_text(encoding="utf-8"))
+    en = json.loads((locale_dir / "en.json").read_text(encoding="utf-8"))
     keys = set()
     for div_id in ("lcBrowserSetup", "lcDesktopSetup"):
         keys |= set(re.findall(r'data-i18n="([^"]+)"', _setup_div(html, div_id)))
     assert keys, "the floor renders no translated strings at all"
     for key in sorted(keys):
-        assert re.search(r"^\s*'%s':" % re.escape(key), i18n, re.M), (
-            f"floor string {key!r} is not defined in i18n.js — it would "
+        assert key in zh and key in en, (
+            f"floor string {key!r} is not defined in both locale JSON files — it would "
             f"render as the literal key on first paint")
 
 

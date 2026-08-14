@@ -67,6 +67,13 @@ def apply_new_preference(text: str, header: str = _DEFAULT_HEADER,
                 'over_cap': False}
     body = load_profile(scope)
     bullet = f'- {text}'
+    if any(line.strip() == bullet for line in body.splitlines()):
+        # Resolution is retryable: a crash may occur after the profile write
+        # but before its pending record is consumed.  Exact-line idempotence
+        # prevents that retry from duplicating a confirmed preference.
+        return {'saved': True, 'chars': profile_char_count(body),
+                'over_cap': profile_over_cap(body),
+                'already_present': True}
     if not body:
         new_body = f'{header}\n{bullet}'
     elif header in body:

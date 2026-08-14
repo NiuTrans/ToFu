@@ -99,8 +99,12 @@ def test_conv_has_candidates_gate():
 # ── Async DB fakes ───────────────────────────────────────────────────────────
 
 class _Cursor:
-    def __init__(self, rowcount):
+    def __init__(self, rowcount, row=None):
         self.rowcount = rowcount
+        self._row = row
+
+    def fetchone(self):
+        return self._row
 
 
 class _FakeTxnConn:
@@ -109,52 +113,64 @@ class _FakeTxnConn:
         self.calls = []
         self.messages_written = None
         self.rev_after = current_rev
+        self.replace_calls = []
 
-    async def execute(self, sql, params=()):
+    def execute(self, sql, params=()):
         s = ' '.join(sql.split())
         self.calls.append((s, params))
         if s.startswith('UPDATE conversations SET messages='):
-            _msgs, _cid, cas_rev = params
+            _msgs, _msg_count, _cid, _user_id, cas_rev = params
             if cas_rev != self.current_rev:
                 return _Cursor(0)
             self.messages_written = _msgs
             self.rev_after = self.current_rev + 1
             return _Cursor(1)
         if s.startswith('UPDATE conversations SET rev='):
-            new_rev, _cid = params
+            new_rev, _cid, _user_id = params
             self.rev_after = new_rev
             return _Cursor(1)
+        if s.startswith('SELECT rev FROM conversations'):
+            return _Cursor(0, {'rev': self.rev_after})
         return _Cursor(0)
 
+    def begin(self):
+        pass
 
-class _FakeTxnCtx:
-    def __init__(self, conn):
-        self.conn = conn
+    def commit(self):
+        pass
 
-    async def __aenter__(self):
-        return self.conn
-
-    async def __aexit__(self, *exc):
-        return False
+    def rollback(self):
+        pass
 
 
 def _patch_db(monkeypatch, messages, rev=3):
-    """Fake async_fetchone (row read) + async_transaction (rev-neutral write).
+    """Fake async read plus the off-loop repository write.
 
     backfill_conv_narration_segments imports these INSIDE the function from
-    ``lib.database`` / ``lib.database.aio``, so patch them on those modules.
+    ``lib.database``, so patch both seams on that module.
     """
-    row = {'messages': json.dumps(messages), 'rev': rev}
     conn = _FakeTxnConn(current_rev=rev)
 
     import lib.database as dbmod
-    import lib.database.aio as aiomod
+    monkeypatch.setattr(dbmod, 'get_thread_db', lambda *_a, **_k: conn)
+    import lib.database.conversation_repository as repo
 
-    async def _fake_fetchone(sql, params=(), **kw):
-        return row
+    def _load(_db_conn, conv_id, **_kwargs):
+        return repo.ConversationSnapshot(
+            metadata={'rev': rev}, messages=messages,
+            source='test_repository')
 
-    monkeypatch.setattr(dbmod, 'async_fetchone', _fake_fetchone, raising=False)
-    monkeypatch.setattr(aiomod, 'async_transaction', lambda: _FakeTxnCtx(conn), raising=False)
+    def _replace(_db_conn, conv_id, written, **kwargs):
+        conn.replace_calls.append(kwargs)
+        if kwargs.get('expected_rev') != conn.current_rev:
+            return repo.ConversationWriteResult(applied=False, rev=None)
+        conn.messages_written = json.dumps(written)
+        if not kwargs.get('preserve_rev'):
+            conn.rev_after += 1
+        return repo.ConversationWriteResult(applied=True, rev=conn.rev_after)
+
+    monkeypatch.setattr(repo, 'load_conversation', _load)
+    monkeypatch.setattr(repo, 'replace_messages', _replace)
     return conn
 
 
@@ -189,10 +205,14 @@ def test_onopen_backfill_rev_neutral_no_updated_at(monkeypatch):
     monkeypatch.setattr(rt, '_translate_freetext', _fake_tf)
     conn = _patch_db(monkeypatch, [_msg()], rev=5)
     asyncio.run(sb.backfill_conv_narration_segments('c1'))
-    # messages UPDATE then rev-reset; nothing touches updated_at.
-    assert any(c[0].startswith('UPDATE conversations SET messages=') for c in conn.calls)
-    assert any(c[0].startswith('UPDATE conversations SET rev=') for c in conn.calls)
-    assert all('updated_at' not in c[0] for c in conn.calls)
+    # The semantic repository write carries the rev-neutral policy; business
+    # code does not spell the blob UPDATE/reset choreography itself.
+    assert len(conn.replace_calls) == 1
+    call = conn.replace_calls[0]
+    assert call['expected_rev'] == 5
+    assert call['preserve_rev'] is True
+    assert call['changed_seqs'] == [0]
+    assert 'metadata' not in call
     assert conn.rev_after == 5
 
 

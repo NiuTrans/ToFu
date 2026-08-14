@@ -61,7 +61,6 @@ class SubTaskSpec:
       depends_on    — IDs of specs that must complete first
       id            — unique identifier (auto-generated if not set)
       priority      — higher = run sooner within the same wave
-      max_rounds    — max LLM rounds for this sub-agent (0 = unlimited)
       timeout_seconds — wall-clock ceiling, default 1800s (0 = unlimited)
       tools_hint    — preferred tools (empty = all allowed for role)
       max_retries   — auto-retry on failure (0 = no retry)
@@ -73,7 +72,6 @@ class SubTaskSpec:
     depends_on: list = field(default_factory=list)  # IDs of specs this depends on
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     priority: int = 0                            # Higher = run sooner (within wave)
-    max_rounds: int = 0                          # Max LLM rounds (0 = unlimited)
     tools_hint: list = field(default_factory=list)  # Preferred tools (empty = all allowed)
     timeout_seconds: int = 0                     # explicit ceiling (0 = liveness-governed)
     """OPTIONAL hard wall-clock ceiling. ``0`` (default) = governed by liveness.
@@ -110,7 +108,11 @@ class SubTaskSpec:
 
     @classmethod
     def from_dict(cls, d: dict) -> SubTaskSpec:
-        """Construct from a dict, ignoring unknown keys."""
+        """Construct from a dict; reject the removed round-limit contract."""
+        if 'max_rounds' in d:
+            raise ValueError(
+                'max_rounds has been removed; sub-agents run until the model '
+                'naturally completes')
         known = {f for f in cls.__dataclass_fields__}
         return cls(**{k: v for k, v in d.items() if k in known})
 

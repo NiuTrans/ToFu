@@ -1,19 +1,18 @@
 /* tests/orch_nested_roundtrip_harness.js
  *
  * Headless (jsdom) exercise of the Orchestration Studio's nested-canvas
- * GROUP (subflow) state logic in static/js/orchestration.js. This is the
- * enter→edit→exit→serialize round-trip that silently rots: it lives purely
- * in module-global arrays (_orchNodes/_orchEdges/_orchStack) with no backend
- * seam, so neither the tsc ratchet nor the Python suites can see a regression
- * in it.
+ * GROUP (subflow) state logic across orchestration-editor-state.js and the
+ * orchestration.js facade. This is the enter→edit→exit→serialize round-trip
+ * that silently rots: its in-canvas state transition has no backend seam, so
+ * neither the tsc ratchet nor the Python suites can see a regression in it.
  *
  * Strategy
  * --------
- * orchestration.js is sloppy-mode vanilla JS sharing window scope (no
- * import/export). We eval it inside a jsdom window with minimal stubs for
- * the cross-file globals it reads (escapeHtml, t, BASE_PATH). The render
- * helpers each early-return when their DOM element is absent, so we drive
- * the state functions directly without building the DOM.
+ * The ordered Studio files are sloppy-mode vanilla JS sharing window scope
+ * (no import/export). We eval them inside a jsdom window with minimal stubs
+ * for the cross-file globals they read (escapeHtml, t, BASE_PATH). The render
+ * helpers each early-return when their DOM element is absent, so we drive the
+ * state functions directly without building the DOM.
  *
  * On success: prints "ALL_OK" and a single line "RESULT_JSON=<json>" carrying
  * the final root definition, which the Python wrapper re-validates against the
@@ -29,12 +28,10 @@ const path = require('path');
 const { JSDOM } = require('jsdom');
 
 const ROOT = path.join(__dirname, '..');
-// The role/control/glyph catalog was extracted out of orchestration.js into
-// orchestration-catalog.js (2026-07) and is read at runtime by the module
-// under test (_ORCH_CONTROLS / _ORCH_ROLES). The production bundle concatenates
-// it BEFORE orchestration.js, so the harness must eval it first too.
-const CATALOG = fs.readFileSync(path.join(ROOT, 'static', 'js', 'orchestration-catalog.js'), 'utf8');
-const SRC = fs.readFileSync(path.join(ROOT, 'static', 'js', 'orchestration.js'), 'utf8');
+// Python supplies the canonical production prefix from the orchestration
+// classic-domain manifest. Keeping module ownership there means a newly
+// extracted controller cannot silently be omitted from this headless runtime.
+const INPUT = JSON.parse(fs.readFileSync(0, 'utf8'));
 
 const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
   runScripts: 'dangerously',
@@ -57,11 +54,17 @@ W.eval(`
   var BASE_PATH = '';
 `);
 
-// Load the extracted catalog first (defines _ORCH_CONTROLS / _ORCH_ROLES /
-// _ORCH_ICONS that orchestration.js reads at runtime), then the module under
-// test — mirroring the production bundle's file order.
-W.eval(CATALOG);
-W.eval(SRC);
+// Production loads the native owner graph before the remaining classic
+// compatibility domain. The compiled IIFE publishes the same window ports.
+W.eval(INPUT.nativeSource);
+
+// Mirror the exact production bundle order through the Studio entry point.
+INPUT.modules.forEach(function (name) {
+  W.eval(fs.readFileSync(path.join(ROOT, 'static', 'js', name), 'utf8'));
+});
+// Python also passes the REAL backend-generated authoring contract, keeping
+// default params, FieldSpecs and Typed I/O free of duplicated JS fixtures.
+W._orchAuthoring.apply(INPUT.contract);
 
 // ── Tiny assert harness ──
 let _checks = 0;
@@ -326,6 +329,34 @@ assert(afterRev.from === revTo && afterRev.to === revFrom,
 W._orchReverseEdge('io2');
 
 const ioDef = W._orchToDefinition();
+
+// ════════════════════════════════════════════════════════════════
+// Scenario 6 — undo/redo keeps the author inside the active nested canvas
+// and returns the document badge to its persisted fingerprint.
+// ════════════════════════════════════════════════════════════════
+const historyDef = {
+  schema:'tofu.orchestration/v1',name:'HistoryRoot',
+  nodes:[{id:'history-group',type:'subflow',role:'general',name:'HistoryBox',
+    pos:{x:20,y:20},params:{scope:'isolated',definition:W._orchBlankGroupDefinition()}}],
+  edges:[],
+};
+W._orchApplyDefinition(historyDef, 'stored-history-flow');
+W._orchEnterGroup('history-group');
+const historyAgent = byRole(W._orchNodes, 'general')[0];
+const objectiveBefore = historyAgent.params.objective;
+W._orchSetParam('objective', 'UNDO_NESTED_MARKER', false, '', historyAgent.id, true);
+assert(W._orchDocState.dirty === true, 'nested edit marks document dirty');
+assert(W._orchUndo() === true, 'nested edit can be undone');
+assert(W._orchStack.length === 1, 'undo preserves active nested-canvas depth');
+assert(byRole(W._orchNodes, 'general')[0].params.objective === objectiveBefore,
+  'undo restores the prior nested objective');
+assert(W._orchDocState.dirty === false,
+  'undo to persisted fingerprint clears dirty state');
+assert(W._orchRedo() === true, 'nested edit can be redone');
+assert(W._orchStack.length === 1, 'redo preserves active nested-canvas depth');
+assert(byRole(W._orchNodes, 'general')[0].params.objective === 'UNDO_NESTED_MARKER',
+  'redo restores the nested objective edit');
+assert(W._orchDocState.dirty === true, 'redo returns document to unsaved state');
 
 console.log('CHECKS=' + _checks);
 console.log('ALL_OK');

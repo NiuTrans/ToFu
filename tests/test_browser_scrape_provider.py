@@ -6,8 +6,8 @@ to extract STRUCTURED data (search cards) from pages rendered inside the
 user's real, logged-in Chrome. chatui fulfils that seam by composing the
 EXISTING bridge commands — no extension change:
 
-    create_tab (background) → wait_for_element → scroll_page ×N → execute_js
-    → close_tab (always, even on failure)
+    create_tab (background) → wait_for_element → verify final tab URL
+    → scroll_page ×N → execute_js → close_tab (always, even on failure)
 
 Contract pinned here:
 
@@ -33,7 +33,11 @@ CARDS = [{'title': 'note 0', 'url': 'https://www.xiaohongshu.com/explore/a'},
 
 def _make_provider():
     from lib.search_bridge import _ChatuiBrowserProvider
-    return _ChatuiBrowserProvider()
+    # Registered providers are inert templates. tofu-search binds one request's
+    # user/browser before entering worker threads; exercise that production
+    # shape here so a test can never normalize a global-client fallback.
+    return _ChatuiBrowserProvider(
+        user_id='alice', client_id='test-browser', profile='Test', bound=True)
 
 
 def _fake_bridge(monkeypatch, script):
@@ -44,17 +48,24 @@ def _fake_bridge(monkeypatch, script):
     Returns the recorded [(type, params)] call list.
     """
     calls = []
+    opened = {'id': None, 'url': ''}
 
     def fake_connected(client_id=None):
         return True
 
     def fake_send(cmd_type, params=None, timeout=30, client_id=None):
         calls.append((cmd_type, dict(params or {})))
+        if cmd_type == 'list_tabs' and cmd_type not in script:
+            return ([{'id': opened['id'], 'url': opened['url'],
+                      'active': False}], None)
         outcome = script.get(cmd_type, (None, None))
         if isinstance(outcome, Exception):
             raise outcome
         if isinstance(outcome, tuple):
             return outcome
+        if cmd_type == 'create_tab' and isinstance(outcome, dict):
+            opened['id'] = outcome.get('id')
+            opened['url'] = str((params or {}).get('url') or '')
         return outcome, None
 
     monkeypatch.setattr('lib.browser.is_extension_connected', fake_connected)
@@ -79,14 +90,14 @@ def test_happy_path_command_sequence(monkeypatch):
 
     assert out == CARDS
     seq = [c[0] for c in calls]
-    assert seq == ['create_tab', 'wait_for_element',
+    assert seq == ['create_tab', 'wait_for_element', 'list_tabs',
                    'scroll_page', 'scroll_page',
                    'execute_js', 'close_tab'], seq
     assert calls[0][1]['active'] is False, 'scrape must never steal the foreground tab'
     assert calls[1][1]['selector'] == 'section.note-item'
     assert calls[1][1]['tabId'] == 77
-    assert calls[4][1]['code'] == '(()=>[])()'
-    assert calls[5][1]['tabId'] == 77, 'the SAME background tab must be closed'
+    assert calls[5][1]['code'] == '(()=>[])()'
+    assert calls[6][1]['tabId'] == 77, 'the SAME background tab must be closed'
 
 
 def test_scrolls_zero_skips_scroll_commands(monkeypatch):
@@ -99,7 +110,7 @@ def test_scrolls_zero_skips_scroll_commands(monkeypatch):
     out = _make_provider().scrape('https://x.example/', wait_selector='a',
                                   extractor_js='[]', scrolls=0)
     assert out == CARDS
-    assert [c[0] for c in calls] == ['create_tab', 'wait_for_element',
+    assert [c[0] for c in calls] == ['create_tab', 'wait_for_element', 'list_tabs',
                                      'execute_js', 'close_tab']
 
 

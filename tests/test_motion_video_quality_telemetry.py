@@ -340,14 +340,13 @@ def test_author_default_budget_is_not_shadowed_by_call_sites():
     import inspect
 
     from lib.motion_video import engine
-    from lib.motion_video._scene_author import (_DEFAULT_MAX_ROUNDS,
-                                                _DEFAULT_TOKEN_BUDGET,
+    from lib.motion_video._scene_author import (_DEFAULT_TOKEN_BUDGET,
                                                 author_scene)
 
     sig = inspect.signature(author_scene)
     assert sig.parameters['token_budget'].default is None, \
         'author_scene must take None = "no preference", not a literal copy'
-    assert sig.parameters['max_rounds'].default is None
+    assert 'max_rounds' not in sig.parameters
 
     src = inspect.getsource(engine.run_motion_task)
     assert 'or 60000' not in src, \
@@ -361,7 +360,6 @@ def test_author_default_budget_is_not_shadowed_by_call_sites():
             'motion.py'), encoding='utf-8').read()
     assert 'or 60000' not in route_src, \
         'the REST route must not hardcode a stale copy either'
-    assert _DEFAULT_MAX_ROUNDS is not None
 
 
 def test_author_accepts_none_and_resolves_the_module_default(monkeypatch,
@@ -383,9 +381,8 @@ def test_author_accepts_none_and_resolves_the_module_default(monkeypatch,
     monkeypatch.setattr(sa, '_author_once', _fake_once)
     sa.author_scene(_scene(), str(tmp_path), width=1080, height=1440,
                     duration=5.0, scene_index=1, total_scenes=1,
-                    max_rounds=None, token_budget=None)
+                    token_budget=None)
     assert seen['token_budget'] == sa._DEFAULT_TOKEN_BUDGET
-    assert seen['max_rounds'] == sa._DEFAULT_MAX_ROUNDS
 
 
 # ══════════════════════════════════════════════════════════

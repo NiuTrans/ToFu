@@ -7,8 +7,7 @@ lib.tasks_pkg.orchestrator._round_request_prep.build_round_request().
 The cluster runs once per stream round after inbox drain and before
 the streaming-tool accumulator construction:
 
-    1. Gate the tool list for this round
-       (``tool_list if (tool_list and round_num < max_tool_rounds) else None``),
+    1. Reuse the stable tool list on every round,
     2. Cache-aware tool-result ordering: sort consecutive tool results
        by tool_call_id so the prefix is deterministic across rounds
        (automatic prefix caching on OpenAI/Qwen),
@@ -69,7 +68,7 @@ def test_prep_helper_signature():
     params = sig.parameters
     for name in ('task', 'rs', 'messages', 'tool_list'):
         assert name in params, f'{name} must be a parameter'
-    for name in ('round_num', 'tid', 'max_tool_rounds', 'thinking_depth',
+    for name in ('round_num', 'tid', 'thinking_depth',
                  'temperature', 'max_tokens', 'response_format'):
         assert name in params, f'{name} must be a parameter'
         assert params[name].kind == inspect.Parameter.KEYWORD_ONLY, (
@@ -128,11 +127,9 @@ def test_run_py_no_longer_attaches_task_id_inline():
         'slice-28 pointer comment is fine)')
 
 
-def test_run_py_no_longer_gates_tools_inline():
+def test_run_py_has_no_tool_round_gate():
     src = RUN_PY.read_text()
-    assert 'tool_list if (tool_list and round_num < max_tool_rounds)' not in src, (
-        'the _tools_this_round gating expression must live in '
-        '_round_request_prep.py, not _run.py')
+    assert 'max_tool_rounds' not in src
 
 
 # ---------------------------------------------------------------------------
@@ -175,13 +172,11 @@ def test_leaf_attaches_task_id_for_cache_ttl():
         "leaf must attach body['_task_id'] = task['id'] (cache-TTL latch)")
 
 
-def test_leaf_carries_tools_gating_expression():
-    """The tool list is gated to None once round_num >= max_tool_rounds
-    — the model must see an empty tool surface on the forced-final
-    round."""
+def test_leaf_reuses_tools_on_every_round():
+    """The model sees the stable tool surface until natural completion."""
     src = LEAF_PY.read_text()
-    assert 'round_num < max_tool_rounds' in src, (
-        'leaf must gate the tool list on round_num < max_tool_rounds')
+    assert '_tools_this_round = tool_list' in src
+    assert 'max_tool_rounds' not in src
 
 
 def test_leaf_returns_two_tuple():

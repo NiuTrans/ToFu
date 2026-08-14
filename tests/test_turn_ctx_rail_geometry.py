@@ -172,6 +172,10 @@ _PROSE = (
 _PLANT = """() => {
     const inner = document.querySelector('.chat-inner');
     if (!inner) return 'no .chat-inner';
+    const __resolve = (name) => window.TofuModules.resolveAction(name);
+    const renderTurnCtxNote = __resolve('renderTurnCtxNote');
+    const updateContextBar = __resolve('updateContextBar');
+    const buildTurnNav = __resolve('buildTurnNav');
     /* The composer's max-width transition (.4s ease) animates every
      * pane-driven width change, so a sweep that measures 70ms after each
      * viewport change would read MID-ANIMATION values and fail on timing,
@@ -450,8 +454,9 @@ def _sweep(page):
                       theme)
         page.wait_for_timeout(120)
         for drawer in (False, True):
-            page.evaluate("() => { %s }" % (
-                "openRequestInspector()" if drawer else "closeRequestInspector()"))
+            page.evaluate(
+                "(name) => window.TofuModules.resolveAction(name)()",
+                'openRequestInspector' if drawer else 'closeRequestInspector')
             page.wait_for_timeout(200)
             for sb_label, setup in _SIDEBAR_STATES:
                 page.evaluate("() => { const s = document.querySelector('.sidebar');"
@@ -477,7 +482,9 @@ def _sweep(page):
 def test_rail_never_clipped_in_any_pane_state(page):
     """THE INVARIANT + its complement + the height bound, over 72 states."""
     page.wait_for_selector('#userInput', state='visible', timeout=20000)
-    page.wait_for_function("typeof renderTurnCtxNote === 'function'", timeout=20000)
+    page.wait_for_function(
+        "typeof window.TofuModules?.resolveAction('renderTurnCtxNote') === 'function'",
+        timeout=20000)
     planted = page.evaluate(_PLANT)
     assert planted == 'ok', f'could not plant the probe turn: {planted}'
     # The conversation chrome must have been built by its PRODUCTION builders:
@@ -856,7 +863,9 @@ def test_overflow_toggle_bounds_the_chip_count(page):
     rail height would be driven by the number of connected MCP servers.
     """
     page.wait_for_selector('#userInput', state='visible', timeout=20000)
-    page.wait_for_function("typeof renderTurnCtxNote === 'function'", timeout=20000)
+    page.wait_for_function(
+        "typeof window.TofuModules?.resolveAction('renderTurnCtxNote') === 'function'",
+        timeout=20000)
     page.set_viewport_size({'width': 1920, 'height': 900})
     page.evaluate("() => { const s = document.querySelector('.sidebar');"
                   " if (s) s.classList.add('collapsed'); }")
@@ -901,7 +910,9 @@ def test_overflow_toggle_bounds_the_path_count(page):
     the toggle must really reveal the rest.
     """
     page.wait_for_selector('#userInput', state='visible', timeout=20000)
-    page.wait_for_function("typeof renderTurnCtxNote === 'function'", timeout=20000)
+    page.wait_for_function(
+        "typeof window.TofuModules?.resolveAction('renderTurnCtxNote') === 'function'",
+        timeout=20000)
     page.set_viewport_size({'width': 1920, 'height': 900})
     page.evaluate("() => { const s = document.querySelector('.sidebar');"
                   " if (s) s.classList.add('collapsed'); }")

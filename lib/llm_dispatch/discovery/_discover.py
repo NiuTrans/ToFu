@@ -7,13 +7,14 @@ OpenRouter pricing.
 
 import re
 import sys
+import time
 
 import requests
 
 from lib.http_client import http_get as _default_http_get
 from lib.log import get_logger
 
-from ._capabilities import _infer_capabilities, _infer_cost, _infer_rpm
+from ._capabilities import _infer_capabilities, _infer_rpm
 
 logger = get_logger(__name__)
 
@@ -49,6 +50,7 @@ def _fetch_models_json(models_url: str, headers: dict, timeout: int):
             models_url,
             headers=headers,
             timeout=timeout,
+            allow_redirects=False,
         )
     except requests.Timeout:
         logger.warning('[Discovery] Timeout after %ds: %s', timeout, models_url)
@@ -184,15 +186,33 @@ def discover_models(base_url: str, api_key: str,
 
         caps = _infer_capabilities(model_id, model_data)
         rpm = _infer_rpm(model_id, caps)
-        cost = _infer_cost(model_id, caps)
-
         entry = {
             'model_id': model_id,
             'aliases': [],
             'capabilities': sorted(caps),
             'rpm': rpm,
-            'cost': cost,
             'thinking_default': 'thinking' in caps,
+        }
+        # Preserve a supplier-declared profile when present; otherwise the
+        # evidence registry may recognize a documented product hierarchy from
+        # the wire id (for example Sol > Terra > Luna). Unknown names remain
+        # explicitly unknown and are never promoted into swarm routing.
+        from lib.model_profiles import build_model_profile
+        declared_profile = model_data.get('capability_profile')
+        if isinstance(declared_profile, dict):
+            declared_profile = dict(declared_profile)
+            declared_profile['evidence'] = 'provider_catalog'
+        profile = build_model_profile(
+            model_id, model_entry={
+                'capability_profile': declared_profile
+            } if declared_profile is not None else None)
+        entry['capability_profile'] = {
+            'family': profile['family'],
+            'quality': profile['quality'],
+            'roles': profile['roles'],
+            'evidence': profile['evidence'],
+            'confidence': profile['confidence'],
+            'updated_at': int(time.time()),
         }
         # Pass-through self-identification fields so downstream
         # heuristics (e.g. _detect_thinking_format) can branch on the
@@ -233,7 +253,7 @@ def discover_models(base_url: str, api_key: str,
 # ══════════════════════════════════════════════════════
 
 def enrich_models_with_pricing(models: list[dict]) -> list[dict]:
-    """Fetch pricing from OpenRouter and update cost + cheap tags.
+    """Fetch pricing from OpenRouter and update billable prices + tier tags.
 
     Intended to be called in a background thread (or synchronously for
     the Settings UI discover button).  Modifies models in-place.
@@ -242,7 +262,7 @@ def enrich_models_with_pricing(models: list[dict]) -> list[dict]:
         models: List of model dicts (same format as discover_models output).
 
     Returns:
-        The same list with updated cost values and 'cheap' tags.
+        The same list with canonical ``pricing`` rows and updated tier tags.
     """
     try:
         resp = http_get(
@@ -305,16 +325,20 @@ def enrich_models_with_pricing(models: list[dict]) -> list[dict]:
             if match:
                 inp_1m = match['input_1m']
                 out_1m = match['output_1m']
-                blended_1m = (inp_1m + out_1m) / 2.0
-                model['cost'] = round(blended_1m / 1000.0, 4)
-                # Preserve real input/output pricing ($/1M tokens)
-                model['input_price'] = round(inp_1m, 4)
-                model['output_price'] = round(out_1m, 4)
+                model['pricing'] = {
+                    'input': round(inp_1m, 4),
+                    'output': round(out_1m, 4),
+                    'currency': 'USD',
+                    'unit': 'per_million_tokens',
+                }
+                model.pop('cost', None)
+                model.pop('input_price', None)
+                model.pop('output_price', None)
                 updated += 1
 
         # Re-evaluate pricing-tier tags in one pass using the enriched
-        # input_price / output_price / cost fields.  Covers 'cheap' today
-        # and any future tier added to PRICING_TIERS.
+        # canonical pricing fields. Covers 'cheap' today and any future tier
+        # added to PRICING_TIERS.
         reevaluate_pricing_tags(models, log_prefix='openrouter-enrich')
 
         logger.info('[Discovery] Enriched %d/%d models with OpenRouter pricing',

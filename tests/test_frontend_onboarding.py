@@ -29,8 +29,8 @@ Static ratchets:
      (stale-bundle path);
   R2 every onboard.* / settings.egressGetAgent* key used by the two JS
      surfaces exists in i18n.js;
-  R3 onboarding.js is registered in lib/js_bundler.py:_BUNDLE_FILES and has
-     its dev-fallback <script> tag in index.html.
+  R3 onboarding.js is registered in lib/js_bundler.py:_BUNDLE_FILES and is
+     absent from the raw page shell.
 
 NEUTER: cutting the server-config update turns pin 3 red; cutting the
 oauth handoff delegation turns pin 5 red.
@@ -48,13 +48,15 @@ from pathlib import Path
 
 import pytest
 
+from tests._runtime_sections import runtime_section_names, runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parent.parent
-ONBOARD_JS = ROOT / "static" / "js" / "onboarding.js"
-TOOLBAR_JS = ROOT / "static" / "js" / "main" / "main_toolbar_ui.js"
-I18N_JS = ROOT / "static" / "js" / "i18n.js"
-OAUTH_JS = ROOT / "static" / "js" / "settings" / "oauth.js"
+ONBOARD_JS = Path(runtime_section_path('onboarding.js'))
+TOOLBAR_JS = Path(runtime_section_path('main/main_toolbar_ui.js'))
+LOCALE_DIR = ROOT / 'frontend/src/i18n/locales'
+OAUTH_JS = Path(runtime_section_path('settings/oauth.js'))
 INDEX_HTML = ROOT / "index.html"
 
 
@@ -315,27 +317,24 @@ def test_R1_boot_trigger_delegates_to_the_wizard_with_fallback():
 
 
 def test_R2_every_wizard_string_is_translated():
-    i18n = I18N_JS.read_text(encoding="utf-8")
+    locales = [json.loads((LOCALE_DIR / f'{lang}.json').read_text())
+               for lang in ('zh', 'en')]
     keys = set(re.findall(r"onboard\.[A-Za-z]+",
                           ONBOARD_JS.read_text(encoding="utf-8")))
     keys |= {"settings.egressGetAgent", "settings.egressGetAgentTitle",
              "settings.egressUnavailSub"}
     assert len(keys) >= 20, f"suspiciously few keys found: {sorted(keys)}"
     for key in sorted(keys):
-        assert re.search(r"^\s*'%s':" % re.escape(key), i18n, re.M), (
-            f"{key!r} is not defined in i18n.js — it would render as the "
+        assert all(key in locale for locale in locales), (
+            f"{key!r} is not defined in both locales — it would render as the "
             f"literal key")
 
 
-def test_R3_wizard_is_bundled_and_has_its_dev_fallback_tag():
-    from lib.js_bundler import _BUNDLE_FILES
-    assert 'onboarding.js' in _BUNDLE_FILES, (
-        "onboarding.js must be registered in lib/js_bundler.py:_BUNDLE_FILES "
-        "— the production bundle would ship without the wizard")
+def test_R3_wizard_is_bundled_and_not_raw_in_the_shell():
+    assert runtime_section_names().count('onboarding.js') == 1
     html = INDEX_HTML.read_text(encoding="utf-8")
-    assert 'static/js/onboarding.js' in html, (
-        "index.html is missing the onboarding.js dev-fallback <script> tag "
-        "(unbundled dev mode would 404 it)")
+    assert 'static/js/onboarding.js' not in html
+    assert '<!-- TOFU_APP_ASSETS -->' in html
 
 
 # ══════════════════════════════════════════════════════════════════

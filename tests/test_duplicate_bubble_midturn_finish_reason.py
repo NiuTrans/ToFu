@@ -72,7 +72,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 POLL = os.path.join(ROOT, 'routes', 'chat_poll_abort.py')
 FINALIZE = os.path.join(ROOT, 'lib', 'tasks_pkg', 'orchestrator', '_finalize.py')
-CORE_DIR = os.path.join(ROOT, 'static', 'js', 'core')
+from tests._runtime_sections import runtime_section_path
+
+REDUCER = runtime_section_path('core/conv_reducers.js')
 
 _REDUCER_SIG = 'function assistantTailIsPriorTurn('
 
@@ -84,15 +86,8 @@ def _reducer_module() -> str:
     (core/conversations.js → core/conv_reducers.js) and a hardcoded path made
     that relocation look like a behavioural regression.
     """
-    hits = sorted(
-        os.path.join(CORE_DIR, name)
-        for name in os.listdir(CORE_DIR)
-        if name.endswith('.js')
-        and _REDUCER_SIG in open(os.path.join(CORE_DIR, name), encoding='utf-8').read()
-    )
-    assert hits, 'assistantTailIsPriorTurn is not defined in any static/js/core/*.js'
-    assert len(hits) == 1, f'reducer duplicated across {hits}'
-    return hits[0]
+    assert _REDUCER_SIG in open(REDUCER, encoding='utf-8').read()
+    return REDUCER
 
 
 def _reducer_src() -> str:

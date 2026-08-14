@@ -21,6 +21,7 @@ even when *every* pip package is missing (that's the whole point).
 from __future__ import annotations
 
 import http.server
+import ipaddress
 import json
 import os
 import queue
@@ -29,6 +30,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import textwrap
 import threading
 import time
@@ -41,6 +43,14 @@ import urllib.request
 # ══════════════════════════════════════════════════════════
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _legacy_pg_runtime_requested() -> bool:
+    """Compatibility name for the exact PostgreSQL backend selector."""
+    backend = (os.environ.get('TOFU_DB_BACKEND') or 'sqlite').strip().lower()
+    if backend not in {'sqlite', 'postgres'}:
+        raise RuntimeError('TOFU_DB_BACKEND must be exactly sqlite or postgres')
+    return backend == 'postgres'
 
 
 # ══════════════════════════════════════════════════════════
@@ -176,9 +186,13 @@ _BUILTIN_PROVIDER_TEMPLATES = [
     {'key': 'openai', 'brand': 'openai', 'category': 'official',
      'name': 'OpenAI',
      'base_url': 'https://api.openai.com/v1',
+     'protocol': 'responses',
+     'responses_profile': 'openai',
      'models': [
-         {'model_id': 'gpt-5.6',      'capabilities': ['text', 'vision', 'thinking']},
-         {'model_id': 'gpt-5.6-pro',  'capabilities': ['text', 'vision', 'thinking']},
+         {'model_id': 'gpt-5.6',       'capabilities': ['text', 'vision', 'thinking']},
+         {'model_id': 'gpt-5.6-sol',   'capabilities': ['text', 'vision', 'thinking']},
+         {'model_id': 'gpt-5.6-terra', 'capabilities': ['text', 'vision', 'thinking', 'cheap']},
+         {'model_id': 'gpt-5.6-luna',  'capabilities': ['text', 'vision', 'thinking', 'cheap']},
          {'model_id': 'gpt-5.4',      'capabilities': ['text', 'vision', 'thinking']},
          {'model_id': 'o3',           'capabilities': ['text', 'vision', 'thinking']},
          {'model_id': 'o4-mini',      'capabilities': ['text', 'vision', 'thinking', 'cheap']},
@@ -310,6 +324,314 @@ def _load_provider_templates() -> list:
     return out
 
 
+def _bootstrap_infer_capabilities(model_id: str) -> list:
+    """Small stdlib-only fallback for live IDs absent from bundled metadata."""
+    mid = (model_id or '').lower()
+    if any(x in mid for x in ('embedding', 'embed-', 'text-embedding')):
+        return ['embedding']
+    if any(x in mid for x in ('image-gen', 'image_generation', 'gpt-image',
+                              'dall-e', 'imagen')):
+        return ['image_gen']
+    if any(x in mid for x in ('transcribe', 'whisper', 'speech-to-text')):
+        return ['transcription']
+    caps = ['text']
+    if any(x in mid for x in ('vision', '-vl', 'vl-', 'omni', 'gemini',
+                              'claude', 'gpt-4o', 'gpt-4.1', 'gpt-5')):
+        caps.append('vision')
+    if any(x in mid for x in ('thinking', 'reasoner', 'reasoning', 'deepseek-r1',
+                              'qwq', 'o1', 'o3', 'o4', 'gpt-5', 'claude')):
+        caps.append('thinking')
+    if any(x in mid for x in ('mini', 'nano', 'flash', 'lite', 'haiku',
+                              'turbo', 'small')):
+        caps.append('cheap')
+    return caps
+
+
+def _bootstrap_discover_models(base_url: str, api_key: str,
+                               templates: list | None = None,
+                               timeout: int = 10) -> list:
+    """Fetch an authenticated OpenAI-compatible catalogue using stdlib only.
+
+    Bootstrap exists precisely for environments whose third-party packages
+    are broken, so importing the application's normal discovery stack here is
+    not an option. Fail-soft: callers retain the selected template model when
+    this endpoint is unavailable.
+    """
+    if not base_url or not api_key:
+        return []
+    url = base_url.rstrip('/') + '/models'
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+            raise ValueError('model endpoint must be an http(s) URL with a hostname')
+        allow_hosts = {
+            h.strip().lower()
+            for h in os.environ.get('TOFU_BYO_ALLOW_HOSTS', '').split(',')
+            if h.strip()
+        }
+        if parsed.hostname.lower() not in allow_hosts:
+            infos = socket.getaddrinfo(
+                parsed.hostname, parsed.port or None, proto=socket.IPPROTO_TCP)
+            if not infos:
+                raise ValueError('model endpoint DNS returned no addresses')
+            for info in infos:
+                ip = ipaddress.ip_address(info[4][0])
+                ip = getattr(ip, 'ipv4_mapped', None) or ip
+                blocked = (ip.is_link_local or ip.is_multicast
+                           or ip.is_reserved or ip.is_unspecified)
+                block_loopback = os.environ.get(
+                    'TOFU_BYO_BLOCK_LOOPBACK', '').strip().lower() in (
+                        '1', 'true', 'yes', 'on')
+                block_private = os.environ.get(
+                    'TOFU_BYO_BLOCK_PRIVATE', '').strip().lower() in (
+                        '1', 'true', 'yes', 'on')
+                if (blocked or (block_loopback and ip.is_loopback)
+                        or (block_private and ip.is_private
+                            and not ip.is_loopback)):
+                    raise ValueError(
+                        f'model endpoint resolves to blocked address {ip}')
+    except (OSError, ValueError) as e:
+        sys.stderr.write(f'[bootstrap] model discovery blocked for {base_url}: {e}\n')
+        return []
+
+    req = urllib.request.Request(url, headers={
+        'Authorization': 'Bearer ' + api_key,
+        'User-Agent': 'Tofu-Bootstrap/1.0',
+        'Accept': 'application/json',
+    })
+    try:
+        # Do not follow redirects: a public-looking provider URL redirecting
+        # to a link-local metadata service would bypass the check above.
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, request, fp, code, msg, headers, newurl):
+                return None
+
+        opener = urllib.request.build_opener(_NoRedirect)
+        with opener.open(req, timeout=timeout) as resp:
+            if getattr(resp, 'status', 200) >= 400:
+                return []
+            raw = resp.read(4 * 1024 * 1024 + 1)
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+        sys.stderr.write(f'[bootstrap] model discovery failed for {base_url}: {e}\n')
+        return []
+    if len(raw) > 4 * 1024 * 1024:
+        sys.stderr.write('[bootstrap] model discovery response exceeded 4 MiB\n')
+        return []
+    try:
+        data = json.loads(raw.decode('utf-8'))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        sys.stderr.write(f'[bootstrap] invalid model catalogue JSON: {e}\n')
+        return []
+    rows = data.get('data') if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return []
+
+    metadata = {}
+    catalog_templates = (templates if templates is not None
+                         else _load_provider_templates())
+    norm_base = base_url.rstrip('/')
+    matching_templates = [
+        tpl for tpl in catalog_templates
+        if str(tpl.get('base_url') or '').rstrip('/') == norm_base
+    ]
+    for tpl in matching_templates:
+        for model in (tpl.get('models') or []):
+            if isinstance(model, dict) and model.get('model_id'):
+                metadata.setdefault(model['model_id'], model)
+    result = []
+    seen = set()
+    for raw_model in rows:
+        if not isinstance(raw_model, dict):
+            continue
+        model_id = str(raw_model.get('id') or '').strip()
+        if (not model_id or model_id in seen
+                or model_id.startswith(('system-', 'ft:', 'ft-'))):
+            continue
+        seen.add(model_id)
+        known = metadata.get(model_id) or {}
+        caps = list(known.get('capabilities') or
+                    _bootstrap_infer_capabilities(model_id))
+        result.append({
+            'model_id': model_id,
+            'aliases': list(known.get('aliases') or []),
+            'capabilities': caps,
+            'rpm': int(known.get('rpm') or 30),
+            'cost': float(known.get('cost') or 0.01),
+            'thinking_default': 'thinking' in caps,
+            'catalog_managed': True,
+            'catalog_source': 'provider',
+        })
+    result.sort(key=lambda m: m['model_id'].casefold())
+    return result
+
+
+def _bootstrap_choose_model(models: list, requested: str = '') -> str:
+    """Keep a valid selection; otherwise choose a cheap chat model."""
+    chat = [m for m in (models or [])
+            if 'text' in set(m.get('capabilities') or [])]
+    ids = {m.get('model_id') for m in chat}
+    if requested in ids:
+        return requested
+    for model in chat:
+        if 'cheap' in set(model.get('capabilities') or []):
+            return model['model_id']
+    return chat[0]['model_id'] if chat else ''
+
+
+def _bootstrap_template_models(base_url: str, templates: list) -> list:
+    """Convert the matching bundled template into persisted bootstrap rows."""
+    norm = (base_url or '').rstrip('/')
+    template = next((tpl for tpl in (templates or [])
+                     if str(tpl.get('base_url') or '').rstrip('/') == norm), {})
+    result = []
+    for raw in (template.get('models') or []):
+        if not isinstance(raw, dict) or not raw.get('model_id'):
+            continue
+        row = dict(raw)
+        caps = list(row.get('capabilities') or
+                    _bootstrap_infer_capabilities(row['model_id']))
+        row['capabilities'] = caps
+        row.setdefault('aliases', [])
+        row.setdefault('rpm', 30)
+        row.setdefault('cost', 0.01)
+        row.setdefault('thinking_default', 'thinking' in caps)
+        row['catalog_managed'] = True
+        row['catalog_source'] = 'template'
+        result.append(row)
+    return result
+
+
+def _bootstrap_data_root() -> str:
+    """Stdlib twin of lib.runtime_paths.data_root for pre-dependency setup."""
+    explicit = os.environ.get('TOFU_DATA_DIR', '').strip()
+    if explicit:
+        explicit = os.path.abspath(os.path.expanduser(explicit))
+        return (explicit if os.path.basename(explicit) == 'data'
+                else os.path.join(explicit, 'data'))
+
+    def _per_user_data() -> str:
+        if sys.platform.startswith('win'):
+            base = os.environ.get('LOCALAPPDATA') or os.path.expanduser('~')
+            return os.path.join(base, 'Tofu', 'data')
+        if sys.platform == 'darwin':
+            return os.path.join(os.path.expanduser('~'), 'Library',
+                                'Application Support', 'Tofu', 'data')
+        base = os.environ.get('XDG_DATA_HOME') or os.path.join(
+            os.path.expanduser('~'), '.local', 'share')
+        return os.path.join(base, 'Tofu', 'data')
+
+    if getattr(sys, 'frozen', False):
+        exe_base = os.path.dirname(sys.executable)
+        try:
+            os.makedirs(exe_base, exist_ok=True)
+            fd, probe = tempfile.mkstemp(prefix='.tofu-write-probe-', dir=exe_base)
+            os.close(fd)
+            os.unlink(probe)
+            return os.path.join(exe_base, 'data')
+        except OSError:
+            return _per_user_data()
+
+    intree = os.path.join(BASE_DIR, 'data')
+    layout = os.environ.get('TOFU_DATA_LAYOUT', 'auto').strip().lower()
+    if layout not in ('auto', 'intree', 'xdg'):
+        layout = 'auto'
+    try:
+        populated = os.path.isdir(intree) and bool(os.listdir(intree))
+    except OSError:
+        populated = False
+    if layout == 'intree' or (layout == 'auto' and populated):
+        return intree
+    return _per_user_data()
+
+
+def _bootstrap_persist_provider(base_url: str, api_key: str, models: list,
+                                templates: list | None = None,
+                                default_model: str = '') -> None:
+    """Merge the bootstrap catalogue into server_config.json atomically."""
+    if not models:
+        return
+    templates = (templates if templates is not None
+                 else _load_provider_templates())
+    norm = base_url.rstrip('/')
+    template = next((t for t in templates
+                     if str(t.get('base_url') or '').rstrip('/') == norm), {})
+    config_path = os.path.join(_bootstrap_data_root(), 'config',
+                               'server_config.json')
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        if not isinstance(config, dict):
+            config = {}
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        config = {}
+    providers = config.get('providers')
+    if not isinstance(providers, list):
+        providers = config['providers'] = []
+    provider = next((p for p in providers if isinstance(p, dict)
+                     and str(p.get('base_url') or '').rstrip('/') == norm
+                     and p.get('oauth') not in ('claude', 'codex')
+                     and not isinstance(p.get('adapter'), dict)
+                     and not str(p.get('id') or '').startswith('adapter_')),
+                    None)
+    if provider is None:
+        safe_key = re.sub(r'[^a-z0-9_]+', '_',
+                          str(template.get('key') or 'bootstrap').lower())
+        base_id = (safe_key or 'bootstrap') + '_bootstrap'
+        used_ids = {p.get('id') for p in providers if isinstance(p, dict)}
+        provider_id = base_id
+        suffix = 2
+        while provider_id in used_ids:
+            provider_id = f'{base_id}_{suffix}'
+            suffix += 1
+        provider = {'id': provider_id}
+        providers.append(provider)
+    previous_keys = [k for k in (provider.get('api_keys') or [])
+                     if isinstance(k, str) and k]
+    catalog_models = list(models)
+    live_ids = {m.get('model_id') for m in catalog_models if isinstance(m, dict)}
+    for old_model in (provider.get('models') or []):
+        if (isinstance(old_model, dict) and old_model.get('model_id')
+                and old_model.get('catalog_pinned') is True
+                and old_model['model_id'] not in live_ids):
+            catalog_models.append(old_model)
+            live_ids.add(old_model['model_id'])
+    provider.update({
+        'name': template.get('name') or provider.get('name') or 'Bootstrap Provider',
+        'brand': template.get('brand') or provider.get('brand') or 'generic',
+        'base_url': base_url,
+        'api_keys': list(dict.fromkeys([api_key] + previous_keys)),
+        'enabled': True,
+        'models': catalog_models,
+        'model_catalog_sync': {'mode': 'auto'},
+    })
+    for field in ('balance_url', 'protocol', 'responses_profile', 'thinking_format',
+                  'extra_headers', 'faces'):
+        if template.get(field) and not provider.get(field):
+            provider[field] = template[field]
+    if default_model:
+        config.setdefault('presets', {})['opus'] = default_model
+        config.setdefault('models', {})['LLM_MODEL'] = default_model
+        config.setdefault('model_defaults', {})['default_model'] = default_model
+
+    parent = os.path.dirname(config_path)
+    os.makedirs(parent, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix='.bootstrap-config-', suffix='.tmp',
+                                    dir=parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, config_path)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
 def _load_dotenv() -> None:
     """Load .env file (same logic as server.py)."""
     env_path = os.path.join(BASE_DIR, '.env')
@@ -421,19 +743,16 @@ def _call_llm(error_text: str, cfg: dict) -> dict:
         RULES:
         - Return ONLY valid JSON — no markdown fences, no commentary.
         - Package names must be pip-installable names
-          (e.g. "flask-compress" not "flask_compress").
+          (e.g. "python-dateutil" not "dateutil").
         - If a ModuleNotFoundError names a module like "foo.bar",
           the pip package is usually just "foo" — but use your knowledge
           to map correctly (e.g. module "cv2" → pip "opencv-python").
-        - When you see a missing package, also proactively include closely
-          related packages that the same project likely needs.  For example,
-          if "flask" is missing, also suggest "flask-compress" and "requests"
-          since web servers almost always need them.
+        - When you see a missing package, suggest only dependencies actually
+          required by the failing native Quart stack.
         - Never suggest system packages (apt/yum), only pip packages.
-        - EXCEPTION: if the error is about missing PostgreSQL binaries
-          (initdb, pg_ctl, pg_isready), set "unresolvable" to false and
-          put "conda:postgresql>=18" in the packages list.  The installer
-          knows how to handle conda: prefixed packages specially.
+        - SQLite and PostgreSQL are equal Storage Sidecar backends. SQLite is
+          default; suggest PostgreSQL packages only when the exact selector is
+          TOFU_DB_BACKEND=postgres. Never suggest automatic backend fallback.
 
         Respond with this JSON schema:
         {{
@@ -502,9 +821,7 @@ def _call_llm(error_text: str, cfg: dict) -> dict:
 # "GLIBC_2.25 not found" (classic lxml failure mode).
 _CONDA_PYTHON_DEPS = [
     # ── Boot-critical: the server cannot start without these ──
-    # quart + hypercorn are the ASGI stack (server.py); flask is only a
-    # transitive dep of quart, so listing flask alone left the conda repair
-    # path installing a web framework the app doesn't actually run on.
+    # quart + hypercorn are the ASGI stack (server.py).
     'quart>=0.20',
     'hypercorn>=0.17',
     # orjson is REQUIRED (not optional) — the SSE state snapshot in
@@ -514,8 +831,6 @@ _CONDA_PYTHON_DEPS = [
     # chat send, not just an optional feature.
     'orjson>=3.9',
     'sqlalchemy>=2.0',
-    'flask>=3.0',
-    'flask-compress>=1.14',
     'requests>=2.31',
     'psutil>=5.9',
     'trafilatura>=1.6',
@@ -621,7 +936,7 @@ def _try_conda_install_deps() -> bool:
     # Extract bare package names from _CONDA_PYTHON_DEPS (strip version specifiers)
     bare_names = []
     for spec in _CONDA_PYTHON_DEPS:
-        # e.g. "flask-compress>=1.14" → "flask-compress"
+        # e.g. "python-dateutil>=2.9" → "python-dateutil"
         base = re.split(r'[<>=!~\[]', spec, 1)[0].strip()
         bare_names.append(base)
 
@@ -792,11 +1107,12 @@ def _need_pg_install() -> bool:
 
 
 def _try_conda_install_postgresql() -> bool:
-    """Try to install PostgreSQL via conda if PG binaries are missing.
-
-    Returns True if installation succeeded (or PG was already available).
-    Returns False if conda is not available or installation failed.
-    """
+    """Install PostgreSQL only when that equal backend is explicitly selected."""
+    if not _legacy_pg_runtime_requested():
+        _bus.emit('log', 'PostgreSQL install skipped: the selected/default '
+                         'Storage Sidecar backend is SQLite. Set exact '
+                         'TOFU_DB_BACKEND=postgres to provision PostgreSQL.')
+        return False
     if not _need_pg_install():
         return True  # already available
 
@@ -876,17 +1192,21 @@ def _pip_install(packages: list[str]) -> tuple[bool, str]:
     conda_pkgs = [p[6:] for p in packages if p.startswith('conda:')]
     pip_pkgs = [p for p in packages if not p.startswith('conda:')]
 
-    # Install conda packages first (e.g. postgresql)
+    # The only historical conda suggestion is PostgreSQL. Never let an LLM
+    # pull it into the normal SQLite runtime; explicit migration windows retain
+    # the old repair path.
+    conda_ok = True
     if conda_pkgs:
-        _bus.emit('log', f'🐘 Detected conda packages: {conda_pkgs}')
-        _try_conda_install_postgresql()  # currently the only conda package we support
+        _bus.emit('log', f'Detected conda packages: {conda_pkgs}')
+        conda_ok = _try_conda_install_postgresql()
 
     # Filter out blocked packages
     safe_pkgs = [p for p in pip_pkgs if p.lower() not in _INSTALL_BLOCKLIST]
     if not safe_pkgs and not conda_pkgs:
         return False, 'All suggested packages are in the blocklist.'
     if not safe_pkgs:
-        return True, 'Only conda packages were requested (handled separately).'
+        return conda_ok, ('Legacy PostgreSQL package handled.' if conda_ok else
+                          'PostgreSQL repair was not explicitly requested.')
 
     cmd = [sys.executable, '-m', 'pip', 'install', '--no-input'] + safe_pkgs
     _bus.emit('log', f'$ {" ".join(cmd)}')
@@ -1166,8 +1486,9 @@ async function _loadProviderTemplates() {
     // Fallback minimal list (should never be hit — the endpoint has a
     // hardcoded builtin list in the Python side).
     _providerTemplates = [
-      { key: 'openai',   name: 'OpenAI',   base_url: 'https://api.openai.com/v1',
-        models: [{ model_id: 'gpt-5.4-mini' }] },
+      { key: 'openai', name: 'OpenAI', base_url: 'https://api.openai.com/v1',
+        protocol: 'responses', responses_profile: 'openai',
+        models: [{ model_id: 'gpt-5.6-luna' }] },
       { key: 'custom',   name: 'Custom',   base_url: '',
         models: [{ model_id: '' }] },
     ];
@@ -1257,10 +1578,16 @@ function _saveApiConfig() {
   fetch('/bootstrap/save-config', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ api_key: key, base_url: url, model: model })
+    body: JSON.stringify({
+      api_key: key,
+      base_url: url,
+      model: model,
+      custom_model: Boolean(customModel)
+    })
   }).then(r => r.json()).then(d => {
     if (d.ok) {
-      status.textContent = '✅ Saved! Restarting server…';
+      const picked = d.model && d.model !== model ? ' Using ' + d.model + '.' : '';
+      status.textContent = '✅ Saved!' + picked + ' Restarting server…';
       status.className = 'status-msg ok';
       badge.className = 'badge running';
       badge.innerHTML = '<span class="spinner"></span> Restarting…';
@@ -1455,10 +1782,43 @@ class _BootstrapHandler(http.server.BaseHTTPRequestHandler):
             api_key = body.get('api_key', '').strip()
             base_url = body.get('base_url', '').strip()
             model = body.get('model', '').strip()
+            custom_model = bool(body.get('custom_model'))
 
             if not api_key:
                 self._json_response({'ok': False, 'error': 'API key is required'})
                 return
+
+            # A release-bundled template is only a starting point. Prefer the
+            # account's authenticated live catalogue before committing a
+            # default, while keeping an explicitly typed private model pinned.
+            templates = _load_provider_templates()
+            live_models = _bootstrap_discover_models(
+                base_url, api_key, templates=templates)
+            if live_models and not custom_model:
+                model = _bootstrap_choose_model(live_models, model) or model
+
+            persist_models = live_models or _bootstrap_template_models(
+                base_url, templates)
+            persist_ids = {
+                m.get('model_id') for m in persist_models if isinstance(m, dict)}
+            if custom_model and model in persist_ids:
+                for persisted in persist_models:
+                    if persisted.get('model_id') == model:
+                        persisted['catalog_pinned'] = True
+                        persisted['catalog_source'] = 'manual'
+                        break
+            elif model and model not in persist_ids:
+                caps = _bootstrap_infer_capabilities(model)
+                persist_models.append({
+                    'model_id': model,
+                    'aliases': [],
+                    'capabilities': caps,
+                    'rpm': 30,
+                    'cost': 0.01,
+                    'thinking_default': 'thinking' in caps,
+                    'catalog_pinned': True,
+                    'catalog_source': 'manual',
+                })
 
             # Write to .env file
             env_path = os.path.join(BASE_DIR, '.env')
@@ -1503,8 +1863,24 @@ class _BootstrapHandler(http.server.BaseHTTPRequestHandler):
             if model:
                 os.environ['LLM_MODEL'] = model
 
+            if persist_models and base_url:
+                try:
+                    _bootstrap_persist_provider(
+                        base_url, api_key, persist_models,
+                        templates=templates, default_model=model)
+                except Exception as e:
+                    # The .env values above remain a complete usable setup.
+                    # Catalogue persistence is an optimisation, so do not turn
+                    # a successful first-run configuration into an error page.
+                    sys.stderr.write(
+                        f'[bootstrap] Could not persist live model catalogue: {e}\n')
+
             print(f'[bootstrap] 💾 API config saved to {env_path}', file=sys.stderr)
-            self._json_response({'ok': True})
+            self._json_response({
+                'ok': True,
+                'model': model,
+                'catalog_size': len(live_models),
+            })
 
             # Signal the main thread to restart
             _bus.emit('log', '💾 API config saved — restarting server…')
@@ -1653,6 +2029,8 @@ def _try_start_server(first_attempt: bool = False) -> tuple[bool, str, int]:
     """
     env = os.environ.copy()
     env['_TOFU_VIA_BOOTSTRAP'] = '1'      # prevent server.py → bootstrap.py re-delegation loop
+    env['TOFU_SERVER_WORKER'] = '1'        # bootstrap owns/tracks this foreground child
+    env['TOFU_MANAGED_BY'] = 'bootstrap'
     env['BOOTSTRAP_LAUNCHER_PID'] = str(os.getpid())  # sentinel so server.py can tell a real bootstrap child from a leaked guard
     proc = subprocess.Popen(
         [sys.executable, os.path.join(BASE_DIR, 'server.py')],
@@ -2025,11 +2403,6 @@ def main():
     # first.  This is essential for freshly-exported projects where the
     # LLM API hasn't been configured yet.
     if _is_import_or_package_error(stderr_text) and _try_requirements_txt():
-        # ── Also install PostgreSQL via conda if needed ──
-        # After pip deps are installed, server.py may crash because PG
-        # binaries (initdb, pg_ctl) are missing — they're not pip packages.
-        _try_conda_install_postgresql()
-
         _bus.emit('phase', json.dumps({
             'id': 'reqtxt-retry',
             'label': '🔄 Retrying server.py after requirements.txt install…',
@@ -2070,8 +2443,9 @@ def main():
                 'status': 'error',
             }))
             _bus.emit('error_text', stderr_text[-3000:])
-        elif _is_pg_missing_error(stderr_text):
-            # PostgreSQL binaries missing — try conda install
+        elif (_legacy_pg_runtime_requested()
+              and _is_pg_missing_error(stderr_text)):
+            # Explicit PostgreSQL backend selection: required binaries are missing.
             # Reset event bus so new browsers get a clean history
             _bus = EventBus()
             status_server = _start_status_server(host, port)
