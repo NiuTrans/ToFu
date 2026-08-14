@@ -114,8 +114,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Install JS dev-deps
-        run: npm ci || npm install
+      - name: Install JS dev-deps from lockfile
+        run: npm ci
+      - name: Type-check and build TypeScript modules
+        run: npm run check:frontend
+      - name: Enforce compressed frontend budgets
+        run: python3 scripts/frontend_budget.py
       - name: Install package + test extra
         run: |
           python -m pip install --upgrade pip
@@ -132,17 +136,23 @@ jobs:
         # files across workers.
         run: pytest tests/test_frontend_*.py -n auto --dist loadfile --timeout=180 -ra
 
-  # ── End-to-end smoke (real Quart/Hypercorn app + real headless Chromium) ──
+  # ── End-to-end smoke (real app + Chromium, Firefox and WebKit) ──
   # Boots the actual app on an ephemeral port with a STUB LLM (no API key /
   # no network) and drives a real browser to it — asserting the served bundle
   # loaded, streaming rendered, and a tool round rendered. This is the only
   # lane that catches INTEGRATION-class bugs (bundler allowlist, SSE→render)
   # that jsdom unit harnesses structurally cannot. CI runners are root, so
-  # `playwright install --with-deps chromium` installs the GUI libs cleanly;
+  # `playwright install --with-deps <engine>` installs the GUI libs cleanly;
   # the conftest LD_LIBRARY_PATH bootstrap is a no-op there (libs already on
   # the system) and the rootless-conda fallback for shared dev nodes.
   e2e:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    env:
+      TOFU_E2E_BROWSER: ${{ matrix.browser }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -153,7 +163,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[test]"
           pip install playwright
-      - name: Install Chromium + system deps
-        run: python -m playwright install --with-deps chromium
-      - name: Run E2E smoke + critical journeys
+      - name: Install ${{ matrix.browser }} + system deps
+        run: python -m playwright install --with-deps ${{ matrix.browser }}
+      - name: Run E2E smoke + critical journeys (${{ matrix.browser }})
         run: pytest tests/test_e2e_smoke.py tests/test_e2e_journeys.py -m visual -ra
