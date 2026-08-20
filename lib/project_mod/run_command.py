@@ -91,7 +91,8 @@ def _is_sensitive_inherited_env(name):
             or bool(_SENSITIVE_ENV_SUFFIX_RE.search(upper)))
 
 
-def _get_cmd_env(cwd=None, credential_env=None, strip_credential_vars=None):
+def _get_cmd_env(cwd=None, credential_env=None, strip_credential_vars=None,
+                net_overlay=None):
     """Return an env dict for subprocess calls spawned by run_command.
 
     Subprocesses inherit the server's non-sensitive runtime environment
@@ -220,6 +221,16 @@ def _get_cmd_env(cwd=None, credential_env=None, strip_credential_vars=None):
                 env['PYTHONPATH'] = f'{src_dir}:{cwd}'
             else:
                 env['PYTHONPATH'] = cwd
+
+    # ── run_net route injection (TOFU_NETCMD): per-command proxy/mirror
+    #   overlay resolved by the adaptive network layer for THIS command's
+    #   targets. A value of None unsets the var (e.g. force-direct).
+    if net_overlay:
+        for _key, _value in net_overlay.items():
+            if _value is None:
+                env.pop(_key, None)
+            else:
+                env[_key] = _value
 
     # ★ Portable sandbox env-jail (restricted/agent-run principals only):
     #   point HOME/TMPDIR inside the workspace and prepend the rm/mv shim dir
@@ -897,24 +908,56 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
             except Exception as _e:
                 logger.debug('[run_command] cwd_sink raised: %s', _e)
 
+    # ★ Network layer (run_net): detect curl/pip/npm/conda/git commands,
+    #   inject each target host's measured-best route into the child env,
+    #   then feed the outcome back to the scorer and append a
+    #   [network diagnosis] block on network-class failures.
+    #   TOFU_NETCMD=0 disables the whole layer.
+    _net_plan = None
+    _run_net = None
+    _net_overlay = None
+    _net_t0 = time.monotonic()
+    try:
+        from lib.project_mod import run_net as _rn
+        _run_net = _rn
+        _net_plan = _rn.plan(command)
+        _net_overlay = _rn.env_overlay(_net_plan)
+    except Exception as _rn_e:
+        logger.debug('[run_command] net layer planning skipped: %s', _rn_e)
+
+    def _net_finalize(result):
+        if _net_plan is None or _run_net is None:
+            return result
+        try:
+            return _run_net.finalize(
+                _net_plan, command, result,
+                (time.monotonic() - _net_t0) * 1000.0)
+        except Exception as _rn_f_e:
+            logger.debug('[run_command] net finalize skipped: %s', _rn_f_e)
+            return result
+
     # ── Non-interactive fast path (no stdin_callback) ──
     if not stdin_callback:
         try:
-            return _run_command_simple(
+            result = _run_command_simple(
                 command, full_command, timeout, base, task=task,
                 on_chunk=on_chunk, on_spawn=on_spawn,
                 credential_env=credential_env,
-                strip_credential_vars=strip_credential_vars)
+                strip_credential_vars=strip_credential_vars,
+                net_overlay=_net_overlay)
+            return _net_finalize(result)
         finally:
             _flush_cwd_capture()
 
     # ── Interactive path: Popen with stdin pipe + stdin detection ──
     try:
-        return _run_command_interactive(
+        result = _run_command_interactive(
             command, full_command, timeout, base, stdin_callback,
             on_chunk=on_chunk, task=task, on_spawn=on_spawn,
             credential_env=credential_env,
-            strip_credential_vars=strip_credential_vars)
+            strip_credential_vars=strip_credential_vars,
+            net_overlay=_net_overlay)
+        return _net_finalize(result)
     finally:
         _flush_cwd_capture()
 
@@ -1015,7 +1058,7 @@ def _safe_on_chunk(on_chunk, stream, text):
 
 def _run_command_simple(command, full_command, timeout, base, task=None, on_chunk=None,
                         on_spawn=None, credential_env=None,
-                        strip_credential_vars=None):
+                        strip_credential_vars=None, net_overlay=None):
     """Execute command with abort-awareness + incremental output streaming.
 
     Reads stdout/stderr in non-blocking 64 KB chunks using ``safe_select_pipes``
@@ -1038,7 +1081,8 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
             stdin=subprocess.DEVNULL,
             text=False,  # binary mode for non-blocking I/O
             cwd=base,
-            env=_get_cmd_env(base, credential_env, strip_credential_vars),
+            env=_get_cmd_env(base, credential_env, strip_credential_vars,
+                             net_overlay=net_overlay),
             start_new_session=True,  # own process group for clean kill
         )
     except (FileNotFoundError, NotADirectoryError) as e:
@@ -1503,7 +1547,8 @@ def _collect_descendants(parent_pid):
 
 def _run_command_interactive(command, full_command, timeout, base, stdin_callback,
                               on_chunk=None, task=None, on_spawn=None,
-                              credential_env=None, strip_credential_vars=None):
+                              credential_env=None, strip_credential_vars=None,
+                              net_overlay=None):
     """Popen-based execution with stdin detection and interactive input.
 
     When *task* is provided, the subprocess PID/PGID is stored on the task
@@ -1527,7 +1572,8 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=base,
-            env=_get_cmd_env(base, credential_env, strip_credential_vars),
+            env=_get_cmd_env(base, credential_env, strip_credential_vars,
+                             net_overlay=net_overlay),
             text=False,  # binary mode for non-blocking I/O
             start_new_session=True,  # own process group for clean kill
         )
