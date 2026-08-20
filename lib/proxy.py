@@ -61,6 +61,7 @@ __all__ = [
     'first_global_proxy_url',
     'subscription_route_specs', 'subscription_route_candidates',
     'subscription_route_verdict', 'report_subscription_route',
+    'route_choices_for_host', 'proxies_for_route',
 ]
 
 
@@ -193,9 +194,9 @@ def set_proxy_config(http_proxy: str = '', https_proxy: str = ''):
             _proxy_config.get('http_proxy', '') or _ENV_HTTP_PROXY,
             _proxy_config.get('https_proxy', '') or _ENV_HTTPS_PROXY,
         )
-    # A changed proxy address invalidates every proxy-path measurement.
+    # A changed proxy address invalidates every env-route measurement.
     if new_effective != prev_effective:
-        _on_proxy_topology_changed()
+        _on_proxy_topology_changed('env')
 
     logger.info('[Proxy] Config updated: http=%s https=%s',
                 http_proxy.strip() or '(env)', https_proxy.strip() or '(env)')
@@ -272,12 +273,18 @@ def is_subscription_host(host: str) -> bool:
     return (host or '').lower() in SUBSCRIPTION_HOSTS
 
 
-def _on_proxy_topology_changed() -> None:
-    """A proxy topology change invalidates every cached routing verdict:
-    the egress subscription probe cache (2026-08-07 root fix — a stale
+def _on_proxy_topology_changed(scope: str = 'all') -> None:
+    """A proxy topology change invalidates cached routing verdicts: the
+    egress subscription probe cache (2026-08-07 root fix — a stale
     ``geo_blocked`` verdict kept misrouting subscription traffic to desktop
     agents for up to 300s after the proxy changed) and netpath's per-host
-    proxy stats."""
+    proxy stats.
+
+    ``scope`` narrows the netpath wipe so an unrelated change preserves
+    learned measurements: 'env' (environment-proxy address changed) wipes
+    only the env route, 'pool' (pool edited) wipes only pool routes,
+    'all' wipes every proxied route (legacy behaviour).
+    """
     try:
         from lib.desktop import egress as _eg
         _eg.invalidate_probe_cache()
@@ -291,7 +298,8 @@ def _on_proxy_topology_changed() -> None:
     np = _np()
     if np is not None:
         try:
-            np.reset_proxy_stats()
+            np.reset_proxy_stats(
+                routes={'env': ('env',), 'pool': ('pool:',)}.get(scope))
         except Exception as e:
             logger.warning('[Proxy] netpath.reset_proxy_stats failed after '
                            'proxy topology change: %s', e)
@@ -446,7 +454,7 @@ def set_proxy_pool(entries: list) -> int:
         _pool_health.clear()
         _pool_choice.clear()
         _cred_cache.clear()
-    _on_proxy_topology_changed()
+    _on_proxy_topology_changed('pool')
     logger.info('[Proxy] pool updated: %d entries (%s)', len(clean),
                 ', '.join('%s:%s' % (e.get('id') or '?', e.get('scope'))
                           for e in clean) or 'empty')
@@ -700,6 +708,99 @@ def first_global_proxy_url() -> str:
                 if e.get('enabled') and e.get('scope') == _SCOPE_GLOBAL]
     _pick, resolved = _pick_resolved(pool)
     return resolved or ''
+
+
+def route_choices_for_host(host: str) -> list:
+    """Every route eligible for *host*, in failover preference order.
+
+    Returns ``[{'route_id', 'label', 'proxies'}, ...]`` — always a
+    ``direct`` entry first; proxy-pool routes follow in pool order
+    (cooldown-filtered, credentials resolved); the environment proxy
+    closes the list when set and not already represented by a pool row.
+    Explicit bypass rules (always-bypass, registered hosts, bypass
+    domains) reduce the list to direct only.
+
+    This is the single enumeration both netpath's prober and
+    run_command's subprocess env injection use, so app traffic and
+    third-party tools compete on the SAME measured routes.  Resolved
+    URLs may carry vault credentials: never log or display ``proxies``.
+    """
+    host = (host or '').lower()
+    direct = {'route_id': 'direct', 'label': 'direct',
+              'proxies': dict(_NO_PROXY)}
+    if (not host or host in _ALWAYS_BYPASS or host in _registered_hosts
+            or _host_matches_bypass(host, _bypass_domains)):
+        return [direct]
+    choices = [direct]
+    seen_urls = set()
+    now = time.monotonic()
+    entries = _pool_candidates(host)
+    with _pool_lock:
+        health = {k: dict(v) for k, v in _pool_health.items()}
+    pool_entries = []
+    for e in entries:
+        h = health.get(e.get('id'))
+        if (h and h.get('fails', 0) >= _POOL_FAIL_THRESHOLD
+                and now < h.get('cooldown_until', 0.0)):
+            continue
+        pool_entries.append(e)
+    for entry in pool_entries:
+        resolved = _resolve_entry(entry)
+        if not resolved or resolved in seen_urls:
+            continue
+        seen_urls.add(resolved)
+        pid = str(entry.get('id') or '')
+        choices.append({
+            'route_id': 'pool:%s' % pid,
+            'label': 'proxy ' + (str(entry.get('name') or pid) or '?'),
+            'proxies': {'http': resolved, 'https': resolved},
+        })
+    env_proxy = (os.environ.get('https_proxy')
+                 or os.environ.get('HTTPS_PROXY')
+                 or os.environ.get('http_proxy')
+                 or os.environ.get('HTTP_PROXY') or '')
+    if env_proxy and env_proxy not in seen_urls:
+        choices.append({
+            'route_id': 'env',
+            'label': 'environment proxy',
+            'proxies': {'http': env_proxy, 'https': env_proxy},
+        })
+    return choices
+
+
+def proxies_for_route(route_id: str, host: str = '') -> 'dict | None':
+    """Resolve a netpath-pinned route id to a requests proxies dict.
+
+    Returns None when the route is gone or unusable right now (pool
+    entry removed/disabled/cooling, credential unresolvable, env proxy
+    unset) — callers then fall back to the deployment default.  A stale
+    pin must never resurrect a failing proxy.  The resolved dict may
+    carry vault credentials: never log or display it.
+    """
+    if route_id == 'direct':
+        return dict(_NO_PROXY)
+    if route_id == 'env':
+        env_proxy = (os.environ.get('https_proxy')
+                     or os.environ.get('HTTPS_PROXY')
+                     or os.environ.get('http_proxy')
+                     or os.environ.get('HTTP_PROXY') or '')
+        return {'http': env_proxy, 'https': env_proxy} if env_proxy else None
+    if isinstance(route_id, str) and route_id.startswith('pool:'):
+        pid = route_id[5:]
+        with _pool_lock:
+            entry = next((dict(e) for e in _proxy_pool
+                          if e.get('id') == pid and e.get('enabled')), None)
+            health = dict(_pool_health.get(pid) or {})
+        if entry is None:
+            return None
+        if (health.get('fails', 0) >= _POOL_FAIL_THRESHOLD
+                and time.monotonic() < health.get('cooldown_until', 0.0)):
+            return None
+        resolved = _resolve_entry(entry)
+        if not resolved:
+            return None
+        return {'http': resolved, 'https': resolved}
+    return None
 
 
 def _scrub_secret(text: str, *secrets: str) -> str:
@@ -982,15 +1083,28 @@ def proxies_for(url: str) -> dict:
                 else:
                     _pool_choice.pop(host, None)
             return route.requests_proxies()
-    # ── Learned decision (direct vs proxy) from lib.netpath ──
+    # ── Learned route decision from lib.netpath ──
     # Explicit rules above always win; below here the host is registered
-    # for probing and a measured 'direct' pin bypasses the proxy.
+    # for probing and a measured pin applies: 'direct' bypasses the proxy,
+    # a proxied route (env / pool entry) is honoured explicitly.
     np = _np()
     if np is not None:
         try:
             np.note_url(url)
-            if np.decide(host) == 'direct':
+            decision = np.decide(host)
+            if decision == 'direct':
                 return _NO_PROXY
+            if decision:
+                # A pinned proxied route (env or pool entry) beat the others
+                # on measured latency/reliability — honour it exactly.
+                pinned = proxies_for_route(decision, host)
+                if pinned:
+                    with _pool_lock:
+                        if decision.startswith('pool:'):
+                            _pool_choice[host] = decision[5:]
+                        else:
+                            _pool_choice.pop(host, None)
+                    return pinned
         except Exception as e:
             # Hot path (every request). A persistent netpath failure here means
             # every request silently falls back to the proxy — an LLM dispatch
@@ -1138,6 +1252,23 @@ def set_bypass_domains(domains: list):
         logger.debug('[Proxy] Settings bypass domains cleared')
     _on_proxy_topology_changed()
 
+
+# ── Netpath route provider: app traffic, prober and subprocesses all
+# ── compete on the same enumerated routes (2026-08-20, run_command
+# ── network layer).  Registered once at import; a missing netpath
+# ── degrades to the legacy direct+env pair inside lib.netpath itself.
+def _netpath_route_provider(host: str) -> list:
+    return [(c['route_id'], c['proxies'])
+            for c in route_choices_for_host(host)]
+
+
+try:
+    _np_reg = _np()
+    if _np_reg is not None:
+        _np_reg.register_route_provider(_netpath_route_provider)
+except Exception as _np_reg_e:
+    logger.debug('[Proxy] netpath route provider registration skipped: %s',
+                 _np_reg_e)
 
 # ── Initial merge + env sync ──
 _rebuild()
