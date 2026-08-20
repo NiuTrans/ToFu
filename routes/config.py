@@ -562,6 +562,12 @@ def get_server_config():
     except Exception as _e:
         logger.debug('get server config: failed (%s)', _e)
         pass
+    try:
+        from lib.netmirrors import status_summary as _nm_status
+        network_info['netmirrors'] = _nm_status()
+    except Exception as _e:
+        logger.debug('get server config: netmirrors view failed (%s)', _e)
+        pass
 
     # Machine translation provider config
     mt_provider_cfg = getattr(_lib, 'MT_PROVIDER_CONFIG', {})
